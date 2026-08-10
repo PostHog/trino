@@ -333,6 +333,7 @@ jobs:
             !:trino-docs,
             !:trino-druid,
             !:trino-duckdb,
+            !:trino-ducklake,
             !:trino-elasticsearch,
             !:trino-exasol,
             !:trino-faker,
@@ -467,6 +468,7 @@ jobs:
             - { modules: plugin/trino-delta-lake, profile: fte-tests }
             - { modules: plugin/trino-druid }
             - { modules: plugin/trino-duckdb }
+            - { modules: plugin/trino-ducklake }
             - { modules: plugin/trino-elasticsearch }
             - { modules: plugin/trino-exchange-filesystem, profile: cloud-tests }
             - { modules: plugin/trino-exasol }

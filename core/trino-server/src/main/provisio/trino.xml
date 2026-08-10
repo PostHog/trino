@@ -67,6 +67,12 @@
         </artifact>
     </artifactSet>
 
+    <artifactSet to="plugin/ducklake">
+        <artifact id="${project.groupId}:trino-ducklake:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
     <artifactSet to="plugin/elasticsearch">
         <artifact id="${project.groupId}:trino-elasticsearch:zip:${project.version}">
             <unpack />

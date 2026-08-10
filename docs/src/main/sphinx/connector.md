@@ -15,6 +15,7 @@ ClickHouse      <connector/clickhouse>
 Delta Lake      <connector/delta-lake>
 Druid           <connector/druid>
 DuckDB          <connector/duckdb>
+DuckLake        <connector/ducklake>
 Elasticsearch   <connector/elasticsearch>
 Exasol          <connector/exasol>
 Faker           <connector/faker>

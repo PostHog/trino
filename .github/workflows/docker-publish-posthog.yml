@@ -1,0 +1,65 @@
+name: docker-publish-posthog
+
+# Builds the PostHog fork's Trino server image (with the ducklake connector)
+# for linux/arm64 and pushes it to GHCR. The managed-warehouse trino Karpenter
+# node pool is arm64-only, so amd64 is skipped to keep CI fast.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to publish, e.g. 484-ducklake.1"
+        required: true
+        default: "484-ducklake.1"
+  push:
+    tags:
+      - "posthog-*"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/posthog/trino
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: maven
+
+      - name: Build trino-server tarball (skip tests and checks)
+        # Full build: the trino-server provisio assembly resolves every plugin
+        # zip plus trino-server-core from the local repo, so -pl/-am is not
+        # sufficient.
+        run: |
+          ./mvnw clean install \
+            -T 1C -DskipTests -Dmaven.javadoc.skip=true -Dair.check.skip-all=true
+
+      - name: Build arm64 image
+        run: core/docker/build.sh -a arm64 -x
+
+      - name: Resolve image tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME#posthog-}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push image
+        run: |
+          TRINO_VERSION="$(./mvnw --quiet help:evaluate -Dexpression=project.version -DforceStdout --raw-streams)"
+          docker tag "trino:${TRINO_VERSION}-arm64" "${IMAGE}:${{ steps.tag.outputs.tag }}"
+          docker push "${IMAGE}:${{ steps.tag.outputs.tag }}"
