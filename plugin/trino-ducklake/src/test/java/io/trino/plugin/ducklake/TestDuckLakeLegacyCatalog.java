@@ -27,7 +27,8 @@ import static org.junit.jupiter.api.Assumptions.abort;
 
 /**
  * Verifies reads from older DuckLake catalogs that do not have the
- * {@code ducklake_inlined_data_tables} table.
+ * {@code ducklake_inlined_data_tables} table or the {@code ducklake_name_mapping.is_partition}
+ * column.
  */
 final class TestDuckLakeLegacyCatalog
         extends AbstractTestQueryFramework
@@ -38,23 +39,28 @@ final class TestDuckLakeLegacyCatalog
     {
         TestingDuckLakeCatalog catalog = closeAfterClass(new TestingDuckLakeCatalog());
         try {
+            String externalFile = catalog.externalParquetFile("legacy_mapped");
             catalog.executeInDuckDb(
                     "CREATE TABLE legacy_table (id INTEGER, v VARCHAR)",
-                    "INSERT INTO legacy_table VALUES (1, 'one'), (2, 'two')");
+                    "INSERT INTO legacy_table VALUES (1, 'one'), (2, 'two')",
+                    "CREATE TABLE legacy_mapped (id INTEGER, v VARCHAR)",
+                    "COPY (SELECT * FROM (VALUES ('three', 3), ('four', 4)) t(v, id)) TO '%s' (FORMAT parquet)".formatted(externalFile),
+                    "SELECT * FROM ducklake_add_data_files('lake', 'legacy_mapped', '%s', schema => 'main')".formatted(externalFile));
         }
         catch (SQLException e) {
             abort("Failed to create DuckLake fixtures with DuckDB (extension download requires network access): " + e);
         }
-        dropInlinedDataTablesRegistry(catalog);
+        makeCatalogLegacy(catalog);
         return DuckLakeQueryRunner.builder(catalog).build();
     }
 
-    private static void dropInlinedDataTablesRegistry(TestingDuckLakeCatalog catalog)
+    private static void makeCatalogLegacy(TestingDuckLakeCatalog catalog)
             throws SQLException
     {
         try (Connection connection = DriverManager.getConnection(catalog.jdbcUrl(), TestingDuckLakeCatalog.USER, TestingDuckLakeCatalog.PASSWORD);
                 Statement statement = connection.createStatement()) {
             statement.execute("DROP TABLE IF EXISTS public.ducklake_inlined_data_tables");
+            statement.execute("ALTER TABLE public.ducklake_name_mapping DROP COLUMN IF EXISTS is_partition");
         }
     }
 
@@ -64,5 +70,12 @@ final class TestDuckLakeLegacyCatalog
         assertThat(computeActual("SHOW TABLES").getOnlyColumnAsSet()).contains("legacy_table");
         assertQuery("SELECT id, v FROM legacy_table", "VALUES (1, 'one'), (2, 'two')");
         assertQuery("SELECT count(*) FROM legacy_table", "VALUES 2");
+    }
+
+    @Test
+    void testNameMappingWithoutIsPartitionColumn()
+    {
+        assertQuery("SELECT id, v FROM legacy_mapped", "VALUES (3, 'three'), (4, 'four')");
+        assertQuery("SELECT count(*) FROM legacy_mapped WHERE id > 3", "VALUES 1");
     }
 }

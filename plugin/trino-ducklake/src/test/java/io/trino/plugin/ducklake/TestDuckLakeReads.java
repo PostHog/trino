@@ -134,6 +134,57 @@ final class TestDuckLakeReads
                 "INSERT INTO part_date VALUES (DATE '2024-01-01', 1), (DATE '2024-06-30', 2), (DATE 'infinity', 3)",
                 "CREATE TABLE \"Events\" (id INTEGER, name VARCHAR)",
                 "INSERT INTO \"Events\" VALUES (1, 'login'), (2, 'logout')");
+        createNameMappingFixtures(catalog);
+    }
+
+    /**
+     * Creates tables holding Parquet files that were written outside of DuckLake and registered
+     * with {@code ducklake_add_data_files}. Such files do not carry DuckLake field ids, so the
+     * catalog records a name mapping for them.
+     */
+    private static void createNameMappingFixtures(TestingDuckLakeCatalog catalog)
+            throws SQLException
+    {
+        String reorderFile = catalog.externalParquetFile("mapped_reorder");
+        String renamedFile = catalog.externalParquetFile("mapped_renamed");
+        String missingFile = catalog.externalParquetFile("mapped_missing");
+        String nestedFile = catalog.externalParquetFile("mapped_nested");
+        String hiveFile = catalog.externalParquetFile("mapped_hive/part=5");
+
+        catalog.executeInDuckDb(
+                // the Parquet columns are written in a different order than the table columns
+                "CREATE TABLE mapped_reorder (id INTEGER, name VARCHAR, amount BIGINT)",
+                """
+                COPY (SELECT * FROM (VALUES ('x', 100, 1), ('y', 200, 2)) t(name, amount, id))
+                TO '%s' (FORMAT parquet)""".formatted(reorderFile),
+                "SELECT * FROM ducklake_add_data_files('lake', 'mapped_reorder', '%s', schema => 'main')".formatted(reorderFile),
+                // a file written by DuckLake itself, with field ids and no mapping
+                "INSERT INTO mapped_reorder VALUES (3, 'z', 300)",
+
+                // renaming a column after the file was registered leaves the mapping pointing at
+                // the original Parquet column name, so source_name differs from the column name
+                "CREATE TABLE mapped_renamed (a INTEGER, b VARCHAR)",
+                """
+                COPY (SELECT * FROM (VALUES (1, 'one'), (2, 'two')) t(a, b))
+                TO '%s' (FORMAT parquet)""".formatted(renamedFile),
+                "SELECT * FROM ducklake_add_data_files('lake', 'mapped_renamed', '%s', schema => 'main')".formatted(renamedFile),
+                "ALTER TABLE mapped_renamed RENAME COLUMN a TO a_renamed",
+                "INSERT INTO mapped_renamed VALUES (3, 'three')",
+
+                // the file does not contain the 'extra' column, so the mapping has no entry for it
+                "CREATE TABLE mapped_missing (id INTEGER, extra VARCHAR)",
+                "COPY (SELECT * FROM (VALUES (7), (8)) t(id)) TO '%s' (FORMAT parquet)".formatted(missingFile),
+                "SELECT * FROM ducklake_add_data_files('lake', 'mapped_missing', '%s', schema => 'main', allow_missing => true)".formatted(missingFile),
+
+                // the mapping also maps the fields nested inside the struct column
+                "CREATE TABLE mapped_nested (id INTEGER, s STRUCT(x INTEGER, y VARCHAR))",
+                "COPY (SELECT 1::INTEGER AS id, {'x': 10, 'y': 'a'} AS s) TO '%s' (FORMAT parquet)".formatted(nestedFile),
+                "SELECT * FROM ducklake_add_data_files('lake', 'mapped_nested', '%s', schema => 'main')".formatted(nestedFile),
+
+                // the values of the 'part' column are stored in the file path, not in the file
+                "CREATE TABLE mapped_hive (part INTEGER, v VARCHAR)",
+                "COPY (SELECT 'hello' AS v) TO '%s' (FORMAT parquet)".formatted(hiveFile),
+                "SELECT * FROM ducklake_add_data_files('lake', 'mapped_hive', '%s', schema => 'main', hive_partitioning => true)".formatted(hiveFile));
     }
 
     @Test
@@ -450,6 +501,87 @@ final class TestDuckLakeReads
                 .filter(row -> row.getField(0) == null)
                 .collect(onlyElement());
         assertThat((Double) summary.getField(4)).isEqualTo(12.0);
+    }
+
+    @Test
+    void testNameMappingWithReorderedColumns()
+            throws SQLException
+    {
+        // the registered file stores the columns in a different order than the table
+        assertQuery("SELECT id, name, amount FROM mapped_reorder", "VALUES (1, 'x', 100), (2, 'y', 200), (3, 'z', 300)");
+        assertQuery("SELECT amount, id FROM mapped_reorder WHERE name = 'y'", "VALUES (200, 2)");
+
+        // results match DuckDB
+        assertThat((long) computeScalar("SELECT sum(amount) FROM mapped_reorder"))
+                .isEqualTo(Long.parseLong(duckDbScalar("SELECT sum(amount)::VARCHAR FROM mapped_reorder")));
+        assertThat((long) computeScalar("SELECT count(*) FROM mapped_reorder"))
+                .isEqualTo(Long.parseLong(duckDbScalar("SELECT count(*) FROM mapped_reorder")));
+    }
+
+    @Test
+    void testNameMappingWithRenamedColumn()
+            throws SQLException
+    {
+        // the column was renamed after the file was registered, so the mapping resolves the
+        // column to the Parquet column 'a', which no longer matches the column name
+        assertQuery("SELECT a_renamed, b FROM mapped_renamed", "VALUES (1, 'one'), (2, 'two'), (3, 'three')");
+        assertQuery("SELECT b FROM mapped_renamed WHERE a_renamed = 2", "VALUES 'two'");
+
+        // results match DuckDB
+        assertThat((long) computeScalar("SELECT sum(a_renamed) FROM mapped_renamed"))
+                .isEqualTo(Long.parseLong(duckDbScalar("SELECT sum(a_renamed)::VARCHAR FROM mapped_renamed")));
+        assertThat((String) computeScalar("SELECT b FROM mapped_renamed WHERE a_renamed = 1"))
+                .isEqualTo(duckDbScalar("SELECT b FROM mapped_renamed WHERE a_renamed = 1"));
+    }
+
+    @Test
+    void testNameMappingPredicatePushdown()
+            throws SQLException
+    {
+        // the predicate is pushed to the Parquet reader under the mapped column name; with the
+        // catalog pruning disabled the pushed-down predicate is the only file-level filter
+        Session session = withFileStatisticsPruning(false);
+        assertQuery(session, "SELECT b FROM mapped_renamed WHERE a_renamed >= 2", "VALUES 'two', 'three'");
+        assertQuery(session, "SELECT count(*) FROM mapped_renamed WHERE a_renamed > 100", "VALUES 0");
+        assertQuery(session, "SELECT id FROM mapped_reorder WHERE amount BETWEEN 150 AND 250", "VALUES 2");
+
+        // results match DuckDB
+        assertThat((long) computeScalar(session, "SELECT count(*) FROM mapped_renamed WHERE a_renamed >= 2"))
+                .isEqualTo(Long.parseLong(duckDbScalar("SELECT count(*) FROM mapped_renamed WHERE a_renamed >= 2")));
+    }
+
+    @Test
+    void testNameMappingWithMissingColumn()
+            throws SQLException
+    {
+        // the file does not contain the 'extra' column and the mapping has no entry for it, so
+        // the column reads as NULL instead of falling back to a Parquet column of the same name
+        assertQuery("SELECT id, extra FROM mapped_missing", "VALUES (7, NULL), (8, NULL)");
+        assertQuery("SELECT count(*) FROM mapped_missing WHERE extra IS NULL", "VALUES 2");
+
+        // results match DuckDB
+        assertThat((long) computeScalar("SELECT count(extra) FROM mapped_missing"))
+                .isEqualTo(Long.parseLong(duckDbScalar("SELECT count(extra) FROM mapped_missing")));
+    }
+
+    @Test
+    void testNameMappingOfNestedFieldsUnsupported()
+    {
+        // the mapping maps the fields nested inside the struct column, which is not supported
+        assertQueryFails("SELECT s FROM mapped_nested", "Column 's' has a name mapping for its nested fields, which is not supported");
+        // other columns of the table are readable
+        assertQuery("SELECT id FROM mapped_nested", "VALUES 1");
+        assertQuery("SELECT count(*) FROM mapped_nested", "VALUES 1");
+    }
+
+    @Test
+    void testNameMappingOfHivePartitionUnsupported()
+    {
+        // the values of the partition column are stored in the file path, which is not supported
+        assertQueryFails("SELECT part FROM mapped_hive", "Column 'part' is stored as a Hive partition value in the file path, which is not supported");
+        // other columns of the table are readable
+        assertQuery("SELECT v FROM mapped_hive", "VALUES 'hello'");
+        assertQuery("SELECT count(*) FROM mapped_hive", "VALUES 1");
     }
 
     private Session withFileStatisticsPruning(boolean enabled)

@@ -25,6 +25,8 @@ import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.memory.context.LocalMemoryContext;
 import io.trino.parquet.ParquetReaderOptions;
 import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
+import io.trino.plugin.ducklake.metastore.DuckLakeNameMapping;
+import io.trino.plugin.ducklake.metastore.DuckLakeNameMappingEntry;
 import io.trino.plugin.ducklake.util.DuckLakeTypes;
 import io.trino.plugin.hive.HiveColumnHandle;
 import io.trino.plugin.hive.TransformConnectorPageSource;
@@ -95,6 +97,11 @@ public class DuckLakePageSourceProvider
         implements ConnectorPageSourceProvider
 {
     private static final int DOMAIN_COMPACTION_THRESHOLD = 100;
+    /**
+     * Prefix of the synthetic Parquet column name used for a column that a name mapping does not
+     * map to any column of the file. No Parquet column can match it, so the column reads as NULL.
+     */
+    private static final String MISSING_COLUMN_NAME_PREFIX = "$ducklake_missing_column$";
     private static final int LONG_OPEN_HASH_SET_INSTANCE_SIZE = instanceSize(LongOpenHashSet.class);
 
     private final TrinoFileSystemFactory fileSystemFactory;
@@ -140,13 +147,14 @@ public class DuckLakePageSourceProvider
         if (effectivePredicate.isNone()) {
             return new EmptyPageSource();
         }
-        TupleDomain<HiveColumnHandle> parquetPredicate = toParquetPredicate(effectivePredicate.simplify(DOMAIN_COMPACTION_THRESHOLD));
+        Optional<DuckLakeNameMapping> nameMapping = duckLakeSplit.nameMapping();
+        TupleDomain<HiveColumnHandle> parquetPredicate = toParquetPredicate(effectivePredicate.simplify(DOMAIN_COMPACTION_THRESHOLD), nameMapping);
 
         Optional<DuckLakeDeleteFileHandle> deleteFile = duckLakeSplit.deleteFile();
 
         ImmutableList.Builder<HiveColumnHandle> hiveColumnsBuilder = ImmutableList.builderWithExpectedSize(duckLakeColumns.size() + 1);
         duckLakeColumns.stream()
-                .map(DuckLakeColumnHandle::toHiveColumnHandle)
+                .map(column -> toHiveColumnHandle(column, nameMapping))
                 .forEach(hiveColumnsBuilder::add);
         if (deleteFile.isPresent()) {
             hiveColumnsBuilder.add(PARQUET_ROW_INDEX_COLUMN);
@@ -211,20 +219,54 @@ public class DuckLakePageSourceProvider
     /**
      * Converts the predicate to the Hive column handles used for reading Parquet files,
      * keeping only top-level primitive columns whose raw Parquet values are directly
-     * comparable with the engine values.
+     * comparable with the engine values. Columns of a file that uses a name mapping are
+     * pushed down under their mapped Parquet name; columns the mapping does not resolve to
+     * a Parquet column of the file are not pushed down, which is safe because the predicate
+     * is not enforced by the reader.
      */
-    private static TupleDomain<HiveColumnHandle> toParquetPredicate(TupleDomain<DuckLakeColumnHandle> effectivePredicate)
+    private static TupleDomain<HiveColumnHandle> toParquetPredicate(TupleDomain<DuckLakeColumnHandle> effectivePredicate, Optional<DuckLakeNameMapping> nameMapping)
     {
         if (effectivePredicate.isNone()) {
             return TupleDomain.none();
         }
         ImmutableMap.Builder<HiveColumnHandle, Domain> domains = ImmutableMap.builder();
         effectivePredicate.getDomains().orElseThrow().forEach((column, domain) -> {
-            if (isParquetPushableColumn(column)) {
-                domains.put(column.toHiveColumnHandle(), domain);
+            if (!isParquetPushableColumn(column)) {
+                return;
             }
+            if (nameMapping.isEmpty()) {
+                domains.put(column.toHiveColumnHandle(), domain);
+                return;
+            }
+            nameMapping.get().entry(column.columnId())
+                    .filter(entry -> !entry.hivePartition() && !entry.hasNestedFields())
+                    .ifPresent(entry -> domains.put(column.toHiveColumnHandle(entry.sourceName()), domain));
         });
         return TupleDomain.withColumnDomains(domains.buildOrThrow());
+    }
+
+    /**
+     * Returns the Hive column handle used to read the column from the data file. Columns of a
+     * file that uses a name mapping are read under the Parquet name the mapping assigns to the
+     * DuckLake field; columns the mapping does not cover are not stored in the file and are read
+     * as NULL, like columns added after the file was written.
+     */
+    private static HiveColumnHandle toHiveColumnHandle(DuckLakeColumnHandle column, Optional<DuckLakeNameMapping> nameMapping)
+    {
+        if (nameMapping.isEmpty()) {
+            return column.toHiveColumnHandle();
+        }
+        Optional<DuckLakeNameMappingEntry> entry = nameMapping.get().entry(column.columnId());
+        if (entry.isEmpty()) {
+            return column.toHiveColumnHandle(MISSING_COLUMN_NAME_PREFIX + column.columnId());
+        }
+        if (entry.get().hivePartition()) {
+            throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Column '%s' is stored as a Hive partition value in the file path, which is not supported".formatted(column.name()));
+        }
+        if (entry.get().hasNestedFields()) {
+            throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Column '%s' has a name mapping for its nested fields, which is not supported".formatted(column.name()));
+        }
+        return column.toHiveColumnHandle(entry.get().sourceName());
     }
 
     private static boolean isParquetPushableColumn(DuckLakeColumnHandle column)

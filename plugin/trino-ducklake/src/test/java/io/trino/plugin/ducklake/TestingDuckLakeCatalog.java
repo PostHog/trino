@@ -63,6 +63,23 @@ public final class TestingDuckLakeCatalog
         return dataPath;
     }
 
+    /**
+     * Returns the path of a Parquet file to write into the data directory of the given table of
+     * the {@code main} schema, creating the directory. Files written there can be registered into
+     * the table with the DuckDB {@code ducklake_add_data_files} function.
+     */
+    public String externalParquetFile(String tableDirectory)
+    {
+        Path directory = dataPath.resolve("main").resolve(tableDirectory);
+        try {
+            Files.createDirectories(directory);
+        }
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return directory.resolve("external.parquet").toString();
+    }
+
     public String jdbcUrl()
     {
         return format(

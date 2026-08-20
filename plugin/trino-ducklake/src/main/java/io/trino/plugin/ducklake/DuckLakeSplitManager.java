@@ -20,6 +20,7 @@ import com.google.inject.Inject;
 import io.trino.plugin.ducklake.metastore.DuckLakeDataFileEntry;
 import io.trino.plugin.ducklake.metastore.DuckLakeDeleteFileEntry;
 import io.trino.plugin.ducklake.metastore.DuckLakeFileColumnStats;
+import io.trino.plugin.ducklake.metastore.DuckLakeNameMapping;
 import io.trino.plugin.ducklake.metastore.DuckLakePartitionColumn;
 import io.trino.plugin.ducklake.metastore.DuckLakePartitionInfo;
 import io.trino.plugin.ducklake.metastore.JdbcDuckLakeMetastore;
@@ -47,6 +48,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -112,6 +114,7 @@ public class DuckLakeSplitManager
         }
 
         List<DuckLakeDataFileEntry> dataFiles = metastore.dataFiles(handle.snapshotId(), handle.tableId());
+        Map<Long, DuckLakeNameMapping> nameMappings = nameMappings(dataFiles);
         ImmutableList.Builder<DuckLakeSplit> splits = ImmutableList.builderWithExpectedSize(dataFiles.size());
         for (DuckLakeDataFileEntry dataFile : dataFiles) {
             validateDataFile(handle, dataFile);
@@ -128,6 +131,15 @@ public class DuckLakeSplitManager
                             entry.deleteCount()));
             long recordCount = dataFile.recordCount() - deleteFile.map(DuckLakeDeleteFileHandle::deleteCount).orElse(0L);
             String path = PathResolver.resolve(handle.tableLocation(), dataFile.path(), dataFile.pathIsRelative());
+            Optional<DuckLakeNameMapping> nameMapping = Optional.empty();
+            if (dataFile.mappingId().isPresent()) {
+                long mappingId = dataFile.mappingId().orElseThrow();
+                DuckLakeNameMapping mapping = nameMappings.get(mappingId);
+                if (mapping == null) {
+                    throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Name mapping %s of data file %s of table %s is not present in the catalog".formatted(mappingId, dataFile.path(), handle.schemaTableName()));
+                }
+                nameMapping = Optional.of(mapping);
+            }
             splits.add(new DuckLakeSplit(
                     path,
                     dataFile.fileSizeBytes(),
@@ -136,9 +148,23 @@ public class DuckLakeSplitManager
                     dataFile.rowIdStart(),
                     deleteFile,
                     dataFile.partitionValues(),
+                    nameMapping,
                     SplitWeight.standard()));
         }
         return new FixedSplitSource(splits.build());
+    }
+
+    /**
+     * Loads the name mappings referenced by the data files of the table with a single query.
+     */
+    private Map<Long, DuckLakeNameMapping> nameMappings(List<DuckLakeDataFileEntry> dataFiles)
+    {
+        Set<Long> mappingIds = dataFiles.stream()
+                .map(DuckLakeDataFileEntry::mappingId)
+                .filter(OptionalLong::isPresent)
+                .map(OptionalLong::getAsLong)
+                .collect(toImmutableSet());
+        return metastore.nameMappings(mappingIds);
     }
 
     private Map<Long, DuckLakeDeleteFileEntry> deleteFilesByDataFileId(DuckLakeTableHandle handle)
@@ -265,9 +291,6 @@ public class DuckLakeSplitManager
         }
         if (dataFile.encryptionKey().isPresent()) {
             throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Data file %s of table %s is encrypted, which is not supported".formatted(dataFile.path(), handle.schemaTableName()));
-        }
-        if (dataFile.mappingId().isPresent()) {
-            throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Data file %s of table %s uses column name mapping, which is not supported".formatted(dataFile.path(), handle.schemaTableName()));
         }
         if (dataFile.partialMax().isPresent()) {
             throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Data file %s of table %s is a partial file, which is not supported".formatted(dataFile.path(), handle.schemaTableName()));

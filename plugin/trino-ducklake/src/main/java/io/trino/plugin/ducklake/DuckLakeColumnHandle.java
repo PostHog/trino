@@ -68,6 +68,15 @@ public record DuckLakeColumnHandle(
      */
     public HiveColumnHandle toHiveColumnHandle()
     {
+        return toHiveColumnHandle(name);
+    }
+
+    /**
+     * Converts to a {@link HiveColumnHandle} that reads the Parquet column with the given name,
+     * used for data files whose columns are resolved through a DuckLake name mapping.
+     */
+    public HiveColumnHandle toHiveColumnHandle(String parquetColumnName)
+    {
         Type readType = type;
         if (isUnsignedInteger()) {
             readType = INTEGER;
@@ -79,7 +88,7 @@ public record DuckLakeColumnHandle(
             readType = DOUBLE;
         }
         return new HiveColumnHandle(
-                name,
+                parquetColumnName,
                 0, // fake index; columns are resolved by name
                 DuckLakeTypes.toHiveType(readType),
                 readType,

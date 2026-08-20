@@ -14,6 +14,7 @@
 package io.trino.plugin.ducklake.metastore;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import io.trino.plugin.ducklake.DuckLakeConfig;
 import io.trino.spi.TrinoException;
@@ -23,6 +24,8 @@ import org.jdbi.v3.core.JdbiException;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -31,6 +34,7 @@ import java.util.OptionalLong;
 import java.util.Set;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_METASTORE_ERROR;
 import static java.util.Locale.ENGLISH;
@@ -49,6 +53,8 @@ public class JdbcDuckLakeMetastore
 
     private volatile Boolean dataFileHasPartialMax;
     private volatile Boolean inlinedDataTablesRegistryExists;
+    private volatile Boolean nameMappingTableExists;
+    private volatile Boolean nameMappingHasIsPartition;
 
     @Inject
     public JdbcDuckLakeMetastore(org.jdbi.v3.core.ConnectionFactory connectionFactory, DuckLakeConfig config)
@@ -322,6 +328,72 @@ public class JdbcDuckLakeMetastore
     }
 
     /**
+     * Returns the name mappings with the given ids, keyed by mapping id. A data file referencing
+     * a mapping stores its columns under the Parquet names given by the mapping instead of
+     * carrying DuckLake field ids. Mappings that are not present in the catalog are omitted from
+     * the result.
+     */
+    public Map<Long, DuckLakeNameMapping> nameMappings(Set<Long> mappingIds)
+    {
+        if (mappingIds.isEmpty() || !nameMappingTableExists()) {
+            return ImmutableMap.of();
+        }
+
+        // catalogs written before the is_partition column was added cannot map Hive partition values
+        String isPartitionColumn = nameMappingHasIsPartition() ? "is_partition" : "false AS is_partition";
+
+        record NameMappingRow(long mappingId, long columnId, String sourceName, long targetFieldId, OptionalLong parentColumn, boolean isPartition) {}
+
+        List<NameMappingRow> rows;
+        try (Handle handle = jdbi.open()) {
+            rows = handle.createQuery(
+                            """
+                            SELECT mapping_id, column_id, source_name, target_field_id, parent_column, %s
+                            FROM %s
+                            WHERE mapping_id IN (<mappingIds>)
+                            ORDER BY mapping_id, column_id""".formatted(isPartitionColumn, table("ducklake_name_mapping")))
+                    .bindList("mappingIds", ImmutableList.copyOf(mappingIds))
+                    .map((rs, _) -> new NameMappingRow(
+                            rs.getLong("mapping_id"),
+                            rs.getLong("column_id"),
+                            rs.getString("source_name"),
+                            rs.getLong("target_field_id"),
+                            optionalLong(rs, "parent_column"),
+                            rs.getBoolean("is_partition")))
+                    .list();
+        }
+        catch (JdbiException e) {
+            throw metastoreError(e);
+        }
+
+        // a mapping entry for a nested field references the entry of its enclosing column
+        Map<Long, Set<Long>> columnIdsWithChildren = new HashMap<>();
+        for (NameMappingRow row : rows) {
+            row.parentColumn().ifPresent(parentColumn -> columnIdsWithChildren
+                    .computeIfAbsent(row.mappingId(), _ -> new HashSet<>())
+                    .add(parentColumn));
+        }
+
+        Map<Long, Map<Long, DuckLakeNameMappingEntry>> entriesByMappingId = new LinkedHashMap<>();
+        for (NameMappingRow row : rows) {
+            if (row.parentColumn().isPresent()) {
+                // nested entries are only reachable through their top-level column
+                continue;
+            }
+            boolean hasNestedFields = columnIdsWithChildren.getOrDefault(row.mappingId(), Set.of()).contains(row.columnId());
+            DuckLakeNameMappingEntry entry = new DuckLakeNameMappingEntry(row.sourceName(), row.isPartition(), hasNestedFields);
+            DuckLakeNameMappingEntry existing = entriesByMappingId
+                    .computeIfAbsent(row.mappingId(), _ -> new LinkedHashMap<>())
+                    .putIfAbsent(row.targetFieldId(), entry);
+            if (existing != null) {
+                throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Name mapping %s maps field %s more than once".formatted(row.mappingId(), row.targetFieldId()));
+            }
+        }
+        return entriesByMappingId.entrySet().stream()
+                .collect(toImmutableMap(Map.Entry::getKey, entry -> new DuckLakeNameMapping(entry.getValue())));
+    }
+
+    /**
      * Returns the partitioning scheme of the table visible at the snapshot, if any.
      */
     public Optional<DuckLakePartitionInfo> partitionInfo(long snapshotId, long tableId)
@@ -510,42 +582,75 @@ public class JdbcDuckLakeMetastore
     {
         Boolean registryExists = inlinedDataTablesRegistryExists;
         if (registryExists == null) {
-            try (Handle handle = jdbi.open()) {
-                registryExists = handle.createQuery(
-                                """
-                                SELECT count(*) FROM information_schema.tables
-                                WHERE table_schema = :schema AND table_name = 'ducklake_inlined_data_tables'""")
-                        .bind("schema", metadataSchema)
-                        .mapTo(Long.class)
-                        .one() > 0;
-            }
-            catch (JdbiException e) {
-                throw metastoreError(e);
-            }
+            registryExists = tableExists("ducklake_inlined_data_tables");
             inlinedDataTablesRegistryExists = registryExists;
         }
         return registryExists;
+    }
+
+    private boolean nameMappingTableExists()
+    {
+        Boolean tableExists = nameMappingTableExists;
+        if (tableExists == null) {
+            tableExists = tableExists("ducklake_name_mapping");
+            nameMappingTableExists = tableExists;
+        }
+        return tableExists;
+    }
+
+    private boolean nameMappingHasIsPartition()
+    {
+        Boolean hasIsPartition = nameMappingHasIsPartition;
+        if (hasIsPartition == null) {
+            hasIsPartition = columnExists("ducklake_name_mapping", "is_partition");
+            nameMappingHasIsPartition = hasIsPartition;
+        }
+        return hasIsPartition;
     }
 
     private boolean dataFileHasPartialMax()
     {
         Boolean hasPartialMax = dataFileHasPartialMax;
         if (hasPartialMax == null) {
-            try (Handle handle = jdbi.open()) {
-                hasPartialMax = handle.createQuery(
-                                """
-                                SELECT count(*) FROM information_schema.columns
-                                WHERE table_schema = :schema AND table_name = 'ducklake_data_file' AND column_name = 'partial_max'""")
-                        .bind("schema", metadataSchema)
-                        .mapTo(Long.class)
-                        .one() > 0;
-            }
-            catch (JdbiException e) {
-                throw metastoreError(e);
-            }
+            hasPartialMax = columnExists("ducklake_data_file", "partial_max");
             dataFileHasPartialMax = hasPartialMax;
         }
         return hasPartialMax;
+    }
+
+    private boolean tableExists(String tableName)
+    {
+        try (Handle handle = jdbi.open()) {
+            return handle.createQuery(
+                            """
+                            SELECT count(*) FROM information_schema.tables
+                            WHERE table_schema = :schema AND table_name = :tableName""")
+                    .bind("schema", metadataSchema)
+                    .bind("tableName", tableName)
+                    .mapTo(Long.class)
+                    .one() > 0;
+        }
+        catch (JdbiException e) {
+            throw metastoreError(e);
+        }
+    }
+
+    private boolean columnExists(String tableName, String columnName)
+    {
+        try (Handle handle = jdbi.open()) {
+            return handle.createQuery(
+                            """
+                            SELECT count(*) FROM information_schema.columns
+                            WHERE table_schema = :schema AND table_name = :tableName AND column_name = :columnName""")
+                    .bind("schema", metadataSchema)
+                    .bind("tableName", tableName)
+                    .bind("columnName", columnName)
+                    .mapTo(Long.class)
+                    .one() > 0;
+        }
+        catch (JdbiException e) {
+            throw metastoreError(e);
+        }
     }
 
     private static DuckLakeTableEntry tableEntry(ResultSet resultSet, org.jdbi.v3.core.statement.StatementContext context)

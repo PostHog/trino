@@ -125,6 +125,17 @@ The connector maps DuckLake column types to Trino types as follows:
 Queries on columns of the unsupported types `uint128`, `timetz`, and
 `interval` fail.
 
+## Name mapping
+
+Data files that were written outside of DuckLake, for example files registered
+with the DuckDB `ducklake_add_data_files` function, do not carry DuckLake field
+identifiers in their Parquet metadata. For such files the catalog records a name
+mapping in `ducklake_name_mapping` that assigns a Parquet column name to each
+DuckLake column, and the connector reads the columns of these files under the
+mapped names. A column that the mapping does not cover is not stored in the file
+and reads as `NULL`. Predicates are pushed into the Parquet reader under the
+mapped names, so file and row group pruning remain correct.
+
 ## Performance
 
 The connector skips data files that cannot match query predicates:
@@ -148,6 +159,7 @@ optimizer](/optimizer/cost-based-optimizations).
   statements are not supported.
 - Each query reads at the latest catalog snapshot committed when the query
   starts; time travel with `FOR VERSION AS OF` is not yet supported.
-- Column mappings (`ducklake_name_mapping`) created by column renames are not
-  applied; Parquet columns are resolved by name.
+- Queries on a column whose name mapping reads the values from a Hive partition
+  in the file path (`ducklake_name_mapping.is_partition`), or maps the fields
+  nested inside the column, fail. Other columns of such a table can be read.
 - Encrypted data files and inlined data are not supported.

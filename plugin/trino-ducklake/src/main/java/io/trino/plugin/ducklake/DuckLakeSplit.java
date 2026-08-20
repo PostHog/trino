@@ -15,6 +15,7 @@ package io.trino.plugin.ducklake;
 
 import com.google.common.collect.ImmutableMap;
 import io.airlift.slice.SizeOf;
+import io.trino.plugin.ducklake.metastore.DuckLakeNameMapping;
 import io.trino.spi.SplitWeight;
 import io.trino.spi.connector.ConnectorSplit;
 
@@ -37,6 +38,7 @@ public record DuckLakeSplit(
         OptionalLong rowIdStart,
         Optional<DuckLakeDeleteFileHandle> deleteFile,
         Map<Integer, Optional<String>> partitionValues,
+        Optional<DuckLakeNameMapping> nameMapping,
         SplitWeight splitWeight)
         implements ConnectorSplit
 {
@@ -49,6 +51,7 @@ public record DuckLakeSplit(
         requireNonNull(rowIdStart, "rowIdStart is null");
         requireNonNull(deleteFile, "deleteFile is null");
         partitionValues = ImmutableMap.copyOf(partitionValues);
+        requireNonNull(nameMapping, "nameMapping is null");
         requireNonNull(splitWeight, "splitWeight is null");
     }
 
@@ -67,6 +70,7 @@ public record DuckLakeSplit(
                 + sizeOf(rowIdStart)
                 + sizeOf(deleteFile, DuckLakeDeleteFileHandle::retainedSizeInBytes)
                 + estimatedSizeOf(partitionValues, SizeOf::sizeOf, value -> sizeOf(value, SizeOf::estimatedSizeOf))
+                + sizeOf(nameMapping, DuckLakeNameMapping::retainedSizeInBytes)
                 + splitWeight.getRetainedSizeInBytes();
     }
 
