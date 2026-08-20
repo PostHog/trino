@@ -292,8 +292,12 @@ public class DuckLakeSplitManager
         if (dataFile.encryptionKey().isPresent()) {
             throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Data file %s of table %s is encrypted, which is not supported".formatted(dataFile.path(), handle.schemaTableName()));
         }
-        if (dataFile.partialMax().isPresent()) {
-            throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Data file %s of table %s is a partial file, which is not supported".formatted(dataFile.path(), handle.schemaTableName()));
+        // A partial file holds rows written across several snapshots, each row tagged with an
+        // embedded snapshot id. Rows newer than the snapshot being read have to be filtered out
+        // by that column, but only when the file holds any: partialMax is the newest snapshot in
+        // the file, so when it is at or below the snapshot being read the whole file is visible.
+        if (dataFile.partialMax().isPresent() && dataFile.partialMax().orElseThrow() > handle.snapshotId()) {
+            throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Data file %s of table %s holds rows newer than snapshot %s, which is not supported".formatted(dataFile.path(), handle.schemaTableName(), handle.snapshotId()));
         }
     }
 

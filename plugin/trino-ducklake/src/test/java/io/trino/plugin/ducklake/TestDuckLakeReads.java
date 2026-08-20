@@ -133,7 +133,20 @@ final class TestDuckLakeReads
                 "ALTER TABLE part_date SET PARTITIONED BY (d)",
                 "INSERT INTO part_date VALUES (DATE '2024-01-01', 1), (DATE '2024-06-30', 2), (DATE 'infinity', 3)",
                 "CREATE TABLE \"Events\" (id INTEGER, name VARCHAR)",
-                "INSERT INTO \"Events\" VALUES (1, 'login'), (2, 'logout')");
+                "INSERT INTO \"Events\" VALUES (1, 'login'), (2, 'logout')",
+
+                // Rows inserted while data inlining is on are written to the catalog database and
+                // later flushed into Parquet. A flushed file holds the rows of every snapshot it
+                // was flushed from, tagged with an embedded snapshot id, and records the newest of
+                // them as partial_max.
+                "CALL lake.set_option('data_inlining_row_limit', 100)",
+                "CREATE TABLE partial_files (id INTEGER, v VARCHAR)",
+                "INSERT INTO partial_files VALUES (1, 'one'), (2, 'two')",
+                "INSERT INTO partial_files VALUES (3, 'three')",
+                "CALL ducklake_flush_inlined_data('lake')",
+                "INSERT INTO partial_files VALUES (4, 'four')",
+                "CALL ducklake_flush_inlined_data('lake')",
+                "CALL lake.set_option('data_inlining_row_limit', 0)");
         createNameMappingFixtures(catalog);
     }
 
@@ -532,6 +545,20 @@ final class TestDuckLakeReads
                 .isEqualTo(Long.parseLong(duckDbScalar("SELECT sum(a_renamed)::VARCHAR FROM mapped_renamed")));
         assertThat((String) computeScalar("SELECT b FROM mapped_renamed WHERE a_renamed = 1"))
                 .isEqualTo(duckDbScalar("SELECT b FROM mapped_renamed WHERE a_renamed = 1"));
+    }
+
+    @Test
+    void testPartialFiles()
+            throws SQLException
+    {
+        // every row of the flushed files is at or below the snapshot being read, so the files are
+        // read whole
+        assertQuery("SELECT id, v FROM partial_files", "VALUES (1, 'one'), (2, 'two'), (3, 'three'), (4, 'four')");
+        assertQuery("SELECT count(*) FROM partial_files", "VALUES 4");
+
+        // results match DuckDB
+        assertThat((long) computeScalar("SELECT sum(id) FROM partial_files"))
+                .isEqualTo(Long.parseLong(duckDbScalar("SELECT sum(id)::VARCHAR FROM partial_files")));
     }
 
     @Test
