@@ -73,6 +73,11 @@ The following configuration properties are available:
   - Prune data files using the per-file column statistics recorded in the
     catalog.
   - `true`
+* - `ducklake.max-split-size`
+  - Target size of a split. A data file larger than this is read as several
+    byte ranges in parallel. Also configurable per query with the
+    `max_split_size` [catalog session property](/sql/set-session).
+  - `64MB`
 :::
 
 The connector supports reading from S3, Azure Storage, Google Cloud Storage,
@@ -148,6 +153,13 @@ The connector skips data files that cannot match query predicates:
   `ducklake.file-statistics-pruning.enabled` catalog property or the
   `file_statistics_pruning_enabled` [catalog session
   property](/sql/set-session) disable this behavior.
+
+A data file larger than `ducklake.max-split-size` is divided into splits that
+each cover a byte range of the file, so the row groups of a single large file
+are read by many workers in parallel instead of by a single thread. Lower the
+value with the `ducklake.max-split-size` catalog property or the
+`max_split_size` [catalog session property](/sql/set-session) to increase the
+parallelism of queries over few, large files.
 
 The connector also derives table statistics (row count, null fractions, and
 value ranges) from the catalog for use by the [cost-based

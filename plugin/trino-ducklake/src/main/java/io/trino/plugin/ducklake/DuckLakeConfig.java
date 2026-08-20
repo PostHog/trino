@@ -16,10 +16,14 @@ package io.trino.plugin.ducklake;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.ConfigSecuritySensitive;
+import io.airlift.units.DataSize;
+import io.airlift.units.MinDataSize;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 
 import java.util.Optional;
+
+import static io.airlift.units.DataSize.Unit.MEGABYTE;
 
 public class DuckLakeConfig
 {
@@ -29,6 +33,7 @@ public class DuckLakeConfig
     private String metadataSchema = "public";
     private String dataPath;
     private boolean fileStatisticsPruningEnabled = true;
+    private DataSize maxSplitSize = DataSize.of(64, MEGABYTE);
 
     @NotNull
     public String getConnectionUrl()
@@ -112,6 +117,21 @@ public class DuckLakeConfig
     public DuckLakeConfig setFileStatisticsPruningEnabled(boolean fileStatisticsPruningEnabled)
     {
         this.fileStatisticsPruningEnabled = fileStatisticsPruningEnabled;
+        return this;
+    }
+
+    @NotNull
+    @MinDataSize("1kB")
+    public DataSize getMaxSplitSize()
+    {
+        return maxSplitSize;
+    }
+
+    @Config("ducklake.max-split-size")
+    @ConfigDescription("Target size of a split; larger data files are read as several byte ranges in parallel")
+    public DuckLakeConfig setMaxSplitSize(DataSize maxSplitSize)
+    {
+        this.maxSplitSize = maxSplitSize;
         return this;
     }
 }

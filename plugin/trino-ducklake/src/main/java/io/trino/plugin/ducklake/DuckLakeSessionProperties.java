@@ -23,14 +23,19 @@ import io.trino.spi.session.PropertyMetadata;
 
 import java.util.List;
 
+import static io.airlift.units.DataSize.Unit.KILOBYTE;
 import static io.trino.plugin.base.session.PropertyMetadataUtil.dataSizeProperty;
+import static io.trino.plugin.base.session.PropertyMetadataUtil.validateMinDataSize;
 import static io.trino.spi.session.PropertyMetadata.booleanProperty;
 import static io.trino.spi.session.PropertyMetadata.integerProperty;
 
 public class DuckLakeSessionProperties
         implements SessionPropertiesProvider
 {
+    private static final DataSize MINIMUM_MAX_SPLIT_SIZE = DataSize.of(1, KILOBYTE);
+
     private static final String FILE_STATISTICS_PRUNING_ENABLED = "file_statistics_pruning_enabled";
+    private static final String MAX_SPLIT_SIZE = "max_split_size";
     private static final String PARQUET_MAX_READ_BLOCK_SIZE = "parquet_max_read_block_size";
     private static final String PARQUET_MAX_READ_BLOCK_ROW_COUNT = "parquet_max_read_block_row_count";
     private static final String PARQUET_USE_COLUMN_INDEX = "parquet_use_column_index";
@@ -46,6 +51,12 @@ public class DuckLakeSessionProperties
                         FILE_STATISTICS_PRUNING_ENABLED,
                         "Prune data files using per-file column statistics from the DuckLake catalog",
                         duckLakeConfig.isFileStatisticsPruningEnabled(),
+                        false),
+                dataSizeProperty(
+                        MAX_SPLIT_SIZE,
+                        "Target size of a split; larger data files are read as several byte ranges in parallel",
+                        duckLakeConfig.getMaxSplitSize(),
+                        value -> validateMinDataSize(MAX_SPLIT_SIZE, value, MINIMUM_MAX_SPLIT_SIZE),
                         false),
                 dataSizeProperty(
                         PARQUET_MAX_READ_BLOCK_SIZE,
@@ -78,6 +89,11 @@ public class DuckLakeSessionProperties
     public static boolean isFileStatisticsPruningEnabled(ConnectorSession session)
     {
         return session.getProperty(FILE_STATISTICS_PRUNING_ENABLED, Boolean.class);
+    }
+
+    public static DataSize getMaxSplitSize(ConnectorSession session)
+    {
+        return session.getProperty(MAX_SPLIT_SIZE, DataSize.class);
     }
 
     public static DataSize getParquetMaxReadBlockSize(ConnectorSession session)

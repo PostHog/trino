@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.ducklake;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ListMultimap;
@@ -52,17 +53,29 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_FEATURE;
+import static io.trino.plugin.ducklake.DuckLakeSessionProperties.getMaxSplitSize;
 import static io.trino.plugin.ducklake.DuckLakeSessionProperties.isFileStatisticsPruningEnabled;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.RealType.REAL;
+import static java.lang.Math.clamp;
+import static java.lang.Math.max;
+import static java.lang.Math.min;
+import static java.lang.Math.round;
 import static java.util.Objects.requireNonNull;
 
 public class DuckLakeSplitManager
         implements ConnectorSplitManager
 {
+    /**
+     * Weight floor for the splits of a file much smaller than the target split size, so that a
+     * query over many tiny files still schedules a bounded number of splits per node.
+     */
+    private static final double MINIMUM_ASSIGNED_SPLIT_WEIGHT = 0.05;
+
     private final JdbcDuckLakeMetastore metastore;
 
     @Inject
@@ -113,9 +126,11 @@ public class DuckLakeSplitManager
                             Collectors.toMap(DuckLakeFileColumnStats::columnId, stats -> stats)));
         }
 
+        long maxSplitSize = getMaxSplitSize(session).toBytes();
         List<DuckLakeDataFileEntry> dataFiles = metastore.dataFiles(handle.snapshotId(), handle.tableId());
         Map<Long, DuckLakeNameMapping> nameMappings = nameMappings(dataFiles);
-        ImmutableList.Builder<DuckLakeSplit> splits = ImmutableList.builderWithExpectedSize(dataFiles.size());
+        // a data file larger than the target split size contributes several splits
+        ImmutableList.Builder<DuckLakeSplit> splits = ImmutableList.builder();
         for (DuckLakeDataFileEntry dataFile : dataFiles) {
             validateDataFile(handle, dataFile);
             if (prunedByPartitionValues(handle, dataFile, partitionInfo, transformsByColumnId, domains, enforcedColumns)) {
@@ -140,18 +155,76 @@ public class DuckLakeSplitManager
                 }
                 nameMapping = Optional.of(mapping);
             }
-            splits.add(new DuckLakeSplit(
-                    path,
-                    dataFile.fileSizeBytes(),
-                    dataFile.footerSize(),
-                    recordCount,
-                    dataFile.rowIdStart(),
-                    deleteFile,
-                    dataFile.partitionValues(),
-                    nameMapping,
-                    SplitWeight.standard()));
+            // Every split of a file loads that file's delete positions on its own, which re-reads
+            // the delete file once per split. That is correct because the Parquet row index is
+            // absolute within the file, independent of the byte range the split reads.
+            for (ByteRange range : byteRanges(dataFile.fileSizeBytes(), maxSplitSize)) {
+                splits.add(new DuckLakeSplit(
+                        path,
+                        range.start(),
+                        range.length(),
+                        dataFile.fileSizeBytes(),
+                        dataFile.footerSize(),
+                        apportionedRecordCount(recordCount, range.length(), dataFile.fileSizeBytes()),
+                        dataFile.rowIdStart(),
+                        deleteFile,
+                        dataFile.partitionValues(),
+                        nameMapping,
+                        splitWeight(range.length(), maxSplitSize)));
+            }
         }
         return new FixedSplitSource(splits.build());
+    }
+
+    /**
+     * Splits a data file of the given size into the byte ranges read by its splits. The ranges are
+     * contiguous, do not overlap, and cover the whole file, so every row group of the file is read
+     * by exactly one split; a file at or below the target size is read by a single split.
+     */
+    @VisibleForTesting
+    static List<ByteRange> byteRanges(long fileSizeBytes, long maxSplitSize)
+    {
+        checkArgument(fileSizeBytes >= 0, "fileSizeBytes is negative: %s", fileSizeBytes);
+        checkArgument(maxSplitSize > 0, "maxSplitSize is not positive: %s", maxSplitSize);
+        if (fileSizeBytes <= maxSplitSize) {
+            return ImmutableList.of(new ByteRange(0, fileSizeBytes));
+        }
+        ImmutableList.Builder<ByteRange> ranges = ImmutableList.builder();
+        for (long start = 0; start < fileSizeBytes; start += maxSplitSize) {
+            // the last range ends at the end of the file, so it may be shorter than the target size
+            ranges.add(new ByteRange(start, min(maxSplitSize, fileSizeBytes - start)));
+        }
+        return ranges.build();
+    }
+
+    /**
+     * A byte range {@code [start, start + length)} of a data file.
+     */
+    record ByteRange(long start, long length)
+    {
+        ByteRange
+        {
+            checkArgument(start >= 0, "start is negative: %s", start);
+            checkArgument(length >= 0, "length is negative: %s", length);
+        }
+    }
+
+    /**
+     * Returns the share of the record count of a file that falls on a byte range of it. The
+     * estimate is only used for scheduling, so a non-empty file never apportions zero rows to a
+     * split, which would make the split look free.
+     */
+    private static long apportionedRecordCount(long recordCount, long length, long fileSizeBytes)
+    {
+        if (recordCount == 0 || length == fileSizeBytes) {
+            return recordCount;
+        }
+        return max(1, round(recordCount * ((double) length / fileSizeBytes)));
+    }
+
+    private static SplitWeight splitWeight(long length, long maxSplitSize)
+    {
+        return SplitWeight.fromProportion(clamp((double) length / maxSplitSize, MINIMUM_ASSIGNED_SPLIT_WEIGHT, 1.0));
     }
 
     /**

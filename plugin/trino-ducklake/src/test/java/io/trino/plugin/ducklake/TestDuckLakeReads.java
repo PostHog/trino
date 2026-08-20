@@ -25,8 +25,10 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.google.common.collect.MoreCollectors.onlyElement;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -35,6 +37,20 @@ import static org.junit.jupiter.api.Assumptions.abort;
 final class TestDuckLakeReads
         extends AbstractTestQueryFramework
 {
+    /**
+     * Small enough to split the multi-row-group fixture files into many byte ranges.
+     */
+    private static final String TINY_SPLIT_SIZE = "4kB";
+    /**
+     * Larger than any fixture file, so every file is read by a single split.
+     */
+    private static final String WHOLE_FILE_SPLIT_SIZE = "1GB";
+    /**
+     * Target split sizes that divide the multi-row-group fixture files at different offsets, so
+     * that the splits fall between row groups in many different ways.
+     */
+    private static final List<String> SPLIT_SIZES = List.of("1kB", "4kB", "17kB", "64kB", "128kB");
+
     private TestingDuckLakeCatalog catalog;
 
     @Override
@@ -148,6 +164,25 @@ final class TestDuckLakeReads
                 "CALL ducklake_flush_inlined_data('lake')",
                 "CALL lake.set_option('data_inlining_row_limit', 0)");
         createNameMappingFixtures(catalog);
+        createRowGroupFixtures(catalog);
+    }
+
+    /**
+     * Creates tables whose data files hold many small row groups, so that a small
+     * {@code max_split_size} splits a file into byte ranges that each read a few of them. The
+     * row group size stays set for the rest of the session, so these fixtures are created last.
+     */
+    private static void createRowGroupFixtures(TestingDuckLakeCatalog catalog)
+            throws SQLException
+    {
+        catalog.executeInDuckDb(
+                "CALL lake.set_option('parquet_row_group_size', 2048)",
+                "CREATE TABLE row_groups (id BIGINT, v VARCHAR)",
+                "INSERT INTO row_groups SELECT range, 'v' || range FROM range(0, 50000)",
+                "CREATE TABLE row_groups_deletes (id BIGINT, v VARCHAR)",
+                "INSERT INTO row_groups_deletes SELECT range, 'v' || range FROM range(0, 50000)",
+                // deleted positions spread over the whole file, so every split has to apply them
+                "DELETE FROM row_groups_deletes WHERE id % 7 = 0");
     }
 
     /**
@@ -609,6 +644,113 @@ final class TestDuckLakeReads
         // other columns of the table are readable
         assertQuery("SELECT v FROM mapped_hive", "VALUES 'hello'");
         assertQuery("SELECT count(*) FROM mapped_hive", "VALUES 1");
+    }
+
+    @Test
+    void testMultipleRowGroupsPerFile()
+            throws SQLException
+    {
+        // the fixture only exercises splitting when its file really holds many row groups
+        assertThat(Long.parseLong(duckDbScalar("SELECT sum(num_row_groups)::VARCHAR FROM parquet_file_metadata('%s/main/row_groups/*.parquet')".formatted(catalog.dataPath()))))
+                .isGreaterThan(10);
+        assertThat(Long.parseLong(duckDbScalar("SELECT sum(num_row_groups)::VARCHAR FROM parquet_file_metadata('%s/main/row_groups_deletes/*.parquet')".formatted(catalog.dataPath()))))
+                .isGreaterThan(10);
+    }
+
+    @Test
+    void testByteRangeSplitsReadEveryRowExactlyOnce()
+            throws SQLException
+    {
+        // reading a file as several byte ranges must neither drop rows (a gap between splits) nor
+        // duplicate them (an overlap): the count, the distinct count, the sum, and the extremes of
+        // the row ids pin that down, whatever byte ranges the splits cover
+        String aggregates = "SELECT count(*), count(DISTINCT id), sum(id), min(id), max(id) FROM row_groups";
+        MaterializedResult singleSplitResult = computeActual(withMaxSplitSize(WHOLE_FILE_SPLIT_SIZE), aggregates);
+        for (String maxSplitSize : SPLIT_SIZES) {
+            assertThat(computeActual(withMaxSplitSize(maxSplitSize), aggregates))
+                    .as("max_split_size %s", maxSplitSize)
+                    .isEqualTo(singleSplitResult);
+        }
+        assertQuery(withMaxSplitSize(TINY_SPLIT_SIZE), aggregates, "VALUES (50000, 50000, 1249975000, 0, 49999)");
+
+        // results match DuckDB
+        assertThat((long) computeScalar(withMaxSplitSize(TINY_SPLIT_SIZE), "SELECT count(*) FROM row_groups"))
+                .isEqualTo(Long.parseLong(duckDbScalar("SELECT count(*)::VARCHAR FROM row_groups")));
+        assertThat((long) computeScalar(withMaxSplitSize(TINY_SPLIT_SIZE), "SELECT sum(id) FROM row_groups"))
+                .isEqualTo(Long.parseLong(duckDbScalar("SELECT sum(id)::VARCHAR FROM row_groups")));
+    }
+
+    @Test
+    void testByteRangeSplitsProduceMoreSplits()
+    {
+        // the small target split size really does turn the single file into many splits
+        AtomicInteger singleSplitDrivers = new AtomicInteger();
+        assertQueryStats(
+                withMaxSplitSize(WHOLE_FILE_SPLIT_SIZE),
+                "SELECT count(*) FROM row_groups",
+                stats -> singleSplitDrivers.set(stats.getTotalDrivers()),
+                results -> assertThat(results.getOnlyValue()).isEqualTo(50000L));
+        assertQueryStats(
+                withMaxSplitSize(TINY_SPLIT_SIZE),
+                "SELECT count(*) FROM row_groups",
+                stats -> assertThat(stats.getTotalDrivers()).isGreaterThan(singleSplitDrivers.get()),
+                results -> assertThat(results.getOnlyValue()).isEqualTo(50000L));
+    }
+
+    @Test
+    void testByteRangeSplitsWithPositionalDeletes()
+            throws SQLException
+    {
+        Session manySplits = withMaxSplitSize(TINY_SPLIT_SIZE);
+
+        // the delete positions are absolute within the file, so every split must apply exactly the
+        // deletes falling into the rows it reads, independent of where the split starts
+        String aggregates = "SELECT count(*), count(DISTINCT id), sum(id), min(id), max(id) FROM row_groups_deletes";
+        MaterializedResult singleSplitResult = computeActual(withMaxSplitSize(WHOLE_FILE_SPLIT_SIZE), aggregates);
+        for (String maxSplitSize : SPLIT_SIZES) {
+            assertThat(computeActual(withMaxSplitSize(maxSplitSize), aggregates))
+                    .as("max_split_size %s", maxSplitSize)
+                    .isEqualTo(singleSplitResult);
+        }
+        assertQuery(manySplits, "SELECT count(*) FROM row_groups_deletes WHERE id % 7 = 0", "VALUES 0");
+
+        // results match DuckDB
+        assertThat((long) computeScalar(manySplits, "SELECT count(*) FROM row_groups_deletes"))
+                .isEqualTo(Long.parseLong(duckDbScalar("SELECT count(*)::VARCHAR FROM row_groups_deletes")));
+        assertThat((long) computeScalar(manySplits, "SELECT sum(id) FROM row_groups_deletes"))
+                .isEqualTo(Long.parseLong(duckDbScalar("SELECT sum(id)::VARCHAR FROM row_groups_deletes")));
+    }
+
+    @Test
+    void testByteRangeSplitsWithPredicate()
+            throws SQLException
+    {
+        Session manySplits = withMaxSplitSize(TINY_SPLIT_SIZE);
+        Session singleSplit = withMaxSplitSize(WHOLE_FILE_SPLIT_SIZE);
+
+        // a predicate prunes row groups inside a split; the rows returned must not depend on how
+        // the file is divided into splits
+        String query = "SELECT id, v FROM row_groups WHERE id BETWEEN 4000 AND 12345 AND id % 1000 = 3 ORDER BY id";
+        assertThat(computeActual(manySplits, query)).isEqualTo(computeActual(singleSplit, query));
+        assertQuery(manySplits, query, "VALUES (4003, 'v4003'), (5003, 'v5003'), (6003, 'v6003'), (7003, 'v7003'), (8003, 'v8003'), (9003, 'v9003'), (10003, 'v10003'), (11003, 'v11003'), (12003, 'v12003')");
+        // the rows at the very end of the file are only read when the last split reaches the end of it
+        assertQuery(manySplits, "SELECT count(*), max(id) FROM row_groups WHERE id > 49000", "VALUES (999, 49999)");
+
+        String deletesQuery = "SELECT id, v FROM row_groups_deletes WHERE id BETWEEN 30000 AND 30020 ORDER BY id";
+        assertThat(computeActual(manySplits, deletesQuery)).isEqualTo(computeActual(singleSplit, deletesQuery));
+
+        // results match DuckDB
+        assertThat((long) computeScalar(manySplits, "SELECT sum(id) FROM row_groups WHERE id > 25000"))
+                .isEqualTo(Long.parseLong(duckDbScalar("SELECT sum(id)::VARCHAR FROM row_groups WHERE id > 25000")));
+        assertThat((long) computeScalar(manySplits, "SELECT count(*) FROM row_groups_deletes WHERE id BETWEEN 30000 AND 30020"))
+                .isEqualTo(Long.parseLong(duckDbScalar("SELECT count(*)::VARCHAR FROM row_groups_deletes WHERE id BETWEEN 30000 AND 30020")));
+    }
+
+    private Session withMaxSplitSize(String maxSplitSize)
+    {
+        return Session.builder(getSession())
+                .setCatalogSessionProperty("ducklake", "max_split_size", maxSplitSize)
+                .build();
     }
 
     private Session withFileStatisticsPruning(boolean enabled)

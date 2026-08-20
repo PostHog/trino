@@ -24,14 +24,25 @@ import java.util.Optional;
 import java.util.OptionalLong;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.slice.SizeOf.estimatedSizeOf;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
+/**
+ * A byte range {@code [start, start + length)} of a data file. The Parquet reader restricts
+ * itself to the row groups that begin inside the range, so the splits of a file must cover it
+ * without gaps or overlaps for the file to be read exactly once.
+ *
+ * @param fileSizeBytes size of the whole file, not of the byte range
+ * @param recordCount number of visible rows of the byte range, apportioned by its share of the file
+ */
 public record DuckLakeSplit(
         String path,
+        long start,
+        long length,
         long fileSizeBytes,
         OptionalLong footerSize,
         long recordCount,
@@ -47,6 +58,9 @@ public record DuckLakeSplit(
     public DuckLakeSplit
     {
         requireNonNull(path, "path is null");
+        checkArgument(start >= 0, "start is negative: %s", start);
+        checkArgument(length >= 0, "length is negative: %s", length);
+        checkArgument(start + length <= fileSizeBytes, "byte range [%s, %s) exceeds the file size %s", start, start + length, fileSizeBytes);
         requireNonNull(footerSize, "footerSize is null");
         requireNonNull(rowIdStart, "rowIdStart is null");
         requireNonNull(deleteFile, "deleteFile is null");
@@ -79,6 +93,8 @@ public record DuckLakeSplit(
     {
         return toStringHelper(this)
                 .addValue(path)
+                .addValue(start)
+                .addValue(length)
                 .addValue(fileSizeBytes)
                 .toString();
     }

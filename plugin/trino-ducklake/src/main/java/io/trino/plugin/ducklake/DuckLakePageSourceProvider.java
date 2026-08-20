@@ -178,6 +178,9 @@ public class DuckLakePageSourceProvider
             LocalMemoryContext dataFileMemoryContext = splitMemoryContext.newLocalMemoryContext(DuckLakePageSourceProvider.class.getSimpleName());
             ConnectorPageSource pageSource = createParquetPageSource(inputFile, duckLakeSplit, hiveColumns, parquetPredicate, options, dataFileMemoryContext::setBytes);
             LocalMemoryContext deletedPositionsMemoryContext = splitMemoryContext.newLocalMemoryContext("deletedPositions");
+            // Every split of the data file loads the whole delete file, so a file split into
+            // several byte ranges re-reads its delete file once per split. The positions are
+            // file-absolute, so each split simply ignores the ones outside the rows it reads.
             Supplier<LongOpenHashSet> deletedPositions = Suppliers.memoize(() -> readDeletedPositions(fileSystem, deleteFile.get(), splitMemoryContext, deletedPositionsMemoryContext));
             int rowIndexChannel = duckLakeColumns.size();
             int[] retainedChannels = IntStream.range(0, duckLakeColumns.size()).toArray();
@@ -199,10 +202,12 @@ public class DuckLakePageSourceProvider
             ParquetReaderOptions options,
             MemoryContext memoryContext)
     {
+        // the reader only returns the row groups starting inside the byte range of the split, so
+        // the splits of a file read every row group of it exactly once
         return ParquetPageSourceFactory.createPageSource(
                 inputFile,
-                0,
-                split.fileSizeBytes(),
+                split.start(),
+                split.length(),
                 hiveColumns,
                 ImmutableList.of(parquetPredicate),
                 true, // resolve columns by name

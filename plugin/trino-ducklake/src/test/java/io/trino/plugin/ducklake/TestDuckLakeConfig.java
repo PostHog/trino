@@ -14,6 +14,7 @@
 package io.trino.plugin.ducklake;
 
 import com.google.common.collect.ImmutableMap;
+import io.airlift.units.DataSize;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -21,6 +22,7 @@ import java.util.Map;
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
+import static io.airlift.units.DataSize.Unit.MEGABYTE;
 
 final class TestDuckLakeConfig
 {
@@ -33,7 +35,8 @@ final class TestDuckLakeConfig
                 .setConnectionPassword(null)
                 .setMetadataSchema("public")
                 .setDataPath(null)
-                .setFileStatisticsPruningEnabled(true));
+                .setFileStatisticsPruningEnabled(true)
+                .setMaxSplitSize(DataSize.of(64, MEGABYTE)));
     }
 
     @Test
@@ -46,6 +49,7 @@ final class TestDuckLakeConfig
                 .put("ducklake.metadata.schema", "ducklake")
                 .put("ducklake.data-path", "s3://bucket/prefix/")
                 .put("ducklake.file-statistics-pruning.enabled", "false")
+                .put("ducklake.max-split-size", "32MB")
                 .buildOrThrow();
 
         DuckLakeConfig expected = new DuckLakeConfig()
@@ -54,7 +58,8 @@ final class TestDuckLakeConfig
                 .setConnectionPassword("secret")
                 .setMetadataSchema("ducklake")
                 .setDataPath("s3://bucket/prefix/")
-                .setFileStatisticsPruningEnabled(false);
+                .setFileStatisticsPruningEnabled(false)
+                .setMaxSplitSize(DataSize.of(32, MEGABYTE));
 
         assertFullMapping(properties, expected);
     }
