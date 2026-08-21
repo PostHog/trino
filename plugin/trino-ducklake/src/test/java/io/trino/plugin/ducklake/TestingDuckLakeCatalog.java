@@ -23,9 +23,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 
+import static com.google.common.base.Verify.verify;
+import static io.trino.plugin.ducklake.metastore.DuckLakeMetastoreConnectionFactory.APPLICATION_NAME;
 import static java.lang.String.format;
 import static org.testcontainers.postgresql.PostgreSQLContainer.POSTGRESQL_PORT;
 
@@ -119,6 +122,28 @@ public final class TestingDuckLakeCatalog
             throw e;
         }
         return connection;
+    }
+
+    /**
+     * Number of connections the DuckLake connector currently holds to the catalog database,
+     * counted on the server. Connections opened by the connector are recognized by the
+     * {@code application_name} it reports.
+     */
+    public long connectorConnectionCount()
+    {
+        String sql = format(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = '%s' AND application_name = '%s'",
+                DATABASE,
+                APPLICATION_NAME);
+        try (Connection connection = DriverManager.getConnection(jdbcUrl(), USER, PASSWORD);
+                Statement statement = connection.createStatement();
+                ResultSet resultSet = statement.executeQuery(sql)) {
+            verify(resultSet.next(), "no result returned by %s", sql);
+            return resultSet.getLong(1);
+        }
+        catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     public void executeInDuckDb(@Language("SQL") String... statements)

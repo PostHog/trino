@@ -21,7 +21,9 @@ import com.google.inject.Singleton;
 import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.plugin.ducklake.metastore.DuckLakeMetastoreConnectionFactory;
+import io.trino.plugin.ducklake.metastore.ForDuckLakeMetastoreDriver;
 import io.trino.plugin.ducklake.metastore.JdbcDuckLakeMetastore;
+import io.trino.plugin.ducklake.metastore.PooledDuckLakeConnectionFactory;
 import io.trino.plugin.hive.HiveNodePartitioningProvider;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
 import io.trino.plugin.hive.parquet.ParquetWriterConfig;
@@ -57,6 +59,9 @@ public class DuckLakeModule
         configBinder(binder).bindConfig(ParquetReaderConfig.class);
         configBinder(binder).bindConfig(ParquetWriterConfig.class);
 
+        binder.bind(PooledDuckLakeConnectionFactory.class).in(Scopes.SINGLETON);
+        binder.bind(ConnectionFactory.class).to(PooledDuckLakeConnectionFactory.class).in(Scopes.SINGLETON);
+
         binder.bind(JdbcDuckLakeMetastore.class).in(Scopes.SINGLETON);
         binder.bind(DuckLakeMetadataFactory.class).in(Scopes.SINGLETON);
 
@@ -66,6 +71,7 @@ public class DuckLakeModule
 
     @Provides
     @Singleton
+    @ForDuckLakeMetastoreDriver
     public static ConnectionFactory createConnectionFactory(DuckLakeConfig config)
     {
         Driver driver;
@@ -79,6 +85,7 @@ public class DuckLakeModule
                 driver,
                 config.getConnectionUrl(),
                 config.getConnectionUser(),
-                config.getConnectionPassword());
+                config.getConnectionPassword(),
+                config.getConnectionPasswordFile());
     }
 }

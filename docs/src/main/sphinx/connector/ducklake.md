@@ -61,6 +61,26 @@ The following configuration properties are available:
 * - `ducklake.metadata.connection-password`
   - Password for the catalog database.
   -
+* - `ducklake.metadata.connection-password-file`
+  - Path to a file holding the password for the catalog database. The file is read again for
+    every connection, so a rotated password takes effect without restarting Trino. Cannot be
+    combined with `ducklake.metadata.connection-password`. Prefer this property for a catalog
+    created with [](/sql/create-catalog), because the password then does not appear in the
+    statement that Trino records in the query log and shows in the Web UI.
+  -
+* - `ducklake.metadata.connection-pool.max-size`
+  - Maximum number of connections the catalog keeps open to the catalog database. Keep this
+    small when a cluster hosts many DuckLake catalogs, because the limit applies per catalog.
+  - `10`
+* - `ducklake.metadata.connection-pool.idle-timeout`
+  - Close pooled connections that have been idle for longer than this. The pool keeps no
+    minimum number of idle connections, so a catalog that is not queried ends up holding no
+    connection to the catalog database.
+  - `1m`
+* - `ducklake.metadata.connection-pool.acquisition-timeout`
+  - Fail a query that waits longer than this for a connection from the pool, instead of letting
+    it wait indefinitely.
+  - `30s`
 * - `ducklake.metadata.schema`
   - Schema in the catalog database holding the `ducklake_*` metadata tables.
   - `public`

@@ -58,6 +58,13 @@ public final class DuckLakeQueryRunner
             return this;
         }
 
+        @CanIgnoreReturnValue
+        public Builder removeConnectorProperty(String key)
+        {
+            connectorProperties.remove(requireNonNull(key, "key is null"));
+            return this;
+        }
+
         @Override
         public DistributedQueryRunner build()
                 throws Exception

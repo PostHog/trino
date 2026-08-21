@@ -16,20 +16,32 @@ package io.trino.plugin.ducklake;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.ConfigSecuritySensitive;
+import io.airlift.configuration.validation.FileExists;
 import io.airlift.units.DataSize;
+import io.airlift.units.Duration;
 import io.airlift.units.MinDataSize;
+import io.airlift.units.MinDuration;
+import jakarta.validation.constraints.AssertTrue;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 
+import java.io.File;
 import java.util.Optional;
 
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
+import static java.util.concurrent.TimeUnit.MINUTES;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 public class DuckLakeConfig
 {
     private String connectionUrl;
     private String connectionUser;
     private String connectionPassword;
+    private File connectionPasswordFile;
+    private int connectionPoolMaxSize = 10;
+    private Duration connectionPoolIdleTimeout = new Duration(1, MINUTES);
+    private Duration connectionPoolAcquisitionTimeout = new Duration(30, SECONDS);
     private String metadataSchema = "public";
     private String dataPath;
     private boolean fileStatisticsPruningEnabled = true;
@@ -76,6 +88,69 @@ public class DuckLakeConfig
     public DuckLakeConfig setConnectionPassword(String connectionPassword)
     {
         this.connectionPassword = connectionPassword;
+        return this;
+    }
+
+    public Optional<@FileExists File> getConnectionPasswordFile()
+    {
+        return Optional.ofNullable(connectionPasswordFile);
+    }
+
+    @Config("ducklake.metadata.connection-password-file")
+    @ConfigDescription("File holding the password for the DuckLake catalog database, re-read on every connection")
+    public DuckLakeConfig setConnectionPasswordFile(File connectionPasswordFile)
+    {
+        this.connectionPasswordFile = connectionPasswordFile;
+        return this;
+    }
+
+    @AssertTrue(message = "ducklake.metadata.connection-password and ducklake.metadata.connection-password-file cannot both be set")
+    public boolean isConnectionPasswordConfigurationValid()
+    {
+        return connectionPassword == null || connectionPasswordFile == null;
+    }
+
+    @Min(1)
+    public int getConnectionPoolMaxSize()
+    {
+        return connectionPoolMaxSize;
+    }
+
+    @Config("ducklake.metadata.connection-pool.max-size")
+    @ConfigDescription("Maximum number of connections this catalog keeps open to the DuckLake catalog database")
+    public DuckLakeConfig setConnectionPoolMaxSize(int connectionPoolMaxSize)
+    {
+        this.connectionPoolMaxSize = connectionPoolMaxSize;
+        return this;
+    }
+
+    @NotNull
+    @MinDuration("1ms")
+    public Duration getConnectionPoolIdleTimeout()
+    {
+        return connectionPoolIdleTimeout;
+    }
+
+    @Config("ducklake.metadata.connection-pool.idle-timeout")
+    @ConfigDescription("Close pooled connections idle for longer than this, so that an unused catalog holds no connections")
+    public DuckLakeConfig setConnectionPoolIdleTimeout(Duration connectionPoolIdleTimeout)
+    {
+        this.connectionPoolIdleTimeout = connectionPoolIdleTimeout;
+        return this;
+    }
+
+    @NotNull
+    @MinDuration("1ms")
+    public Duration getConnectionPoolAcquisitionTimeout()
+    {
+        return connectionPoolAcquisitionTimeout;
+    }
+
+    @Config("ducklake.metadata.connection-pool.acquisition-timeout")
+    @ConfigDescription("Fail a query that waits longer than this for a connection from the pool")
+    public DuckLakeConfig setConnectionPoolAcquisitionTimeout(Duration connectionPoolAcquisitionTimeout)
+    {
+        this.connectionPoolAcquisitionTimeout = connectionPoolAcquisitionTimeout;
         return this;
     }
 
