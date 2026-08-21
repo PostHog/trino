@@ -107,6 +107,7 @@
         <module>plugin/trino-password-authenticators</module>
         <module>plugin/trino-pinot</module>
         <module>plugin/trino-postgresql</module>
+        <module>plugin/trino-posthog-catalogstore</module>
         <module>plugin/trino-prometheus</module>
         <module>plugin/trino-ranger</module>
         <module>plugin/trino-redis</module>
@@ -979,6 +980,12 @@
 
             <dependency>
                 <groupId>io.trino</groupId>
+                <artifactId>trino-ducklake</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>io.trino</groupId>
                 <artifactId>trino-elasticsearch</artifactId>
                 <version>${project.version}</version>
             </dependency>
@@ -1111,12 +1118,6 @@
             <dependency>
                 <groupId>io.trino</groupId>
                 <artifactId>trino-hive-formats</artifactId>
-                <version>${project.version}</version>
-            </dependency>
-
-            <dependency>
-                <groupId>io.trino</groupId>
-                <artifactId>trino-ducklake</artifactId>
                 <version>${project.version}</version>
             </dependency>
 
@@ -1313,6 +1314,12 @@
                 <artifactId>trino-postgresql</artifactId>
                 <version>${project.version}</version>
                 <type>test-jar</type>
+            </dependency>
+
+            <dependency>
+                <groupId>io.trino</groupId>
+                <artifactId>trino-posthog-catalogstore</artifactId>
+                <version>${project.version}</version>
             </dependency>
 
             <dependency>

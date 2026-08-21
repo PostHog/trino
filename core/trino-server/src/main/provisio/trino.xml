@@ -253,6 +253,12 @@
         </artifact>
     </artifactSet>
 
+    <artifactSet to="plugin/posthog-catalogstore">
+        <artifact id="${project.groupId}:trino-posthog-catalogstore:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
     <artifactSet to="plugin/prometheus">
         <artifact id="${project.groupId}:trino-prometheus:zip:${project.version}">
             <unpack />
