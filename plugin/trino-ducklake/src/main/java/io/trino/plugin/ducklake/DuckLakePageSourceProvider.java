@@ -37,6 +37,7 @@ import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.RowBlock;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
@@ -74,7 +75,6 @@ import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import java.util.stream.IntStream;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -150,11 +150,15 @@ public class DuckLakePageSourceProvider
         }
         DuckLakeSplit duckLakeSplit = (DuckLakeSplit) split;
         DuckLakeTableHandle tableHandle = (DuckLakeTableHandle) table;
-        List<DuckLakeColumnHandle> duckLakeColumns = columns.stream()
+        List<DuckLakeColumnHandle> requestedColumns = columns.stream()
                 .map(DuckLakeColumnHandle.class::cast)
                 .collect(toImmutableList());
+        List<DuckLakeColumnHandle> dataColumns = requestedColumns.stream()
+                .filter(column -> !DuckLakeMergeRowId.isRowIdColumn(column))
+                .collect(toImmutableList());
+        boolean rowIdRequested = dataColumns.size() != requestedColumns.size();
 
-        for (DuckLakeColumnHandle column : duckLakeColumns) {
+        for (DuckLakeColumnHandle column : dataColumns) {
             if (column.initialDefault().isPresent()) {
                 throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Column '%s' has a non-NULL initial default value, which is not yet supported".formatted(column.name()));
             }
@@ -165,7 +169,7 @@ public class DuckLakePageSourceProvider
         if (effectivePredicate.isNone()) {
             return new EmptyPageSource();
         }
-        if (isRowCountOnly(duckLakeColumns, effectivePredicate, duckLakeSplit)) {
+        if (isRowCountOnly(requestedColumns, effectivePredicate, duckLakeSplit)) {
             return new DuckLakeCountPageSource(rowCountPages(duckLakeSplit.recordCount()));
         }
         Optional<DuckLakeNameMapping> nameMapping = duckLakeSplit.nameMapping();
@@ -173,14 +177,17 @@ public class DuckLakePageSourceProvider
 
         Optional<DuckLakeDeleteFileHandle> deleteFile = duckLakeSplit.deleteFile();
 
-        ImmutableList.Builder<HiveColumnHandle> hiveColumnsBuilder = ImmutableList.builderWithExpectedSize(duckLakeColumns.size() + 1);
-        duckLakeColumns.stream()
+        ImmutableList.Builder<HiveColumnHandle> hiveColumnsBuilder = ImmutableList.builderWithExpectedSize(dataColumns.size() + 1);
+        dataColumns.stream()
                 .map(column -> toHiveColumnHandle(column, nameMapping))
                 .forEach(hiveColumnsBuilder::add);
-        if (deleteFile.isPresent()) {
+        // the row index is read to apply positional deletes and to identify rows a merge changes
+        if (deleteFile.isPresent() || rowIdRequested) {
             hiveColumnsBuilder.add(PARQUET_ROW_INDEX_COLUMN);
         }
         List<HiveColumnHandle> hiveColumns = hiveColumnsBuilder.build();
+        int rowIndexChannel = dataColumns.size();
+        boolean hasRowIndexChannel = hiveColumns.size() > dataColumns.size();
 
         TrinoFileSystem fileSystem = fileSystemFactory.create(session);
         TrinoInputFile inputFile = fileSystem.newInputFile(Location.of(duckLakeSplit.path()), duckLakeSplit.fileSizeBytes());
@@ -190,7 +197,7 @@ public class DuckLakePageSourceProvider
                 .withMaxReadBlockRowCount(getParquetMaxReadBlockRowCount(session))
                 // row skipping via the column index would break the row-index alignment needed to apply positional
                 // deletes; row-group pruning remains safe because the row-index column is absolute within the file
-                .withUseColumnIndex(deleteFile.isEmpty() && isParquetUseColumnIndex(session))
+                .withUseColumnIndex(deleteFile.isEmpty() && !rowIdRequested && isParquetUseColumnIndex(session))
                 .withIgnoreStatistics(isParquetIgnoreStatistics(session))
                 .build();
 
@@ -203,16 +210,75 @@ public class DuckLakePageSourceProvider
             // several byte ranges re-reads its delete file once per split. The positions are
             // file-absolute, so each split simply ignores the ones outside the rows it reads.
             Supplier<LongOpenHashSet> deletedPositions = Suppliers.memoize(() -> readDeletedPositions(fileSystem, deleteFile.get(), splitMemoryContext, deletedPositionsMemoryContext));
-            int rowIndexChannel = duckLakeColumns.size();
-            int[] retainedChannels = IntStream.range(0, duckLakeColumns.size()).toArray();
             pageSource = TransformConnectorPageSource.create(
                     pageSource,
-                    page -> SourcePage.create(filterDeletedRows(page, deletedPositions.get(), rowIndexChannel).getColumns(retainedChannels)));
-            return new MemoryContextClosingPageSource(transformWideIntegerColumns(duckLakeColumns, pageSource), splitMemoryContext);
+                    page -> filterDeletedRows(page, deletedPositions.get(), rowIndexChannel));
+            return new MemoryContextClosingPageSource(
+                    projectRequestedColumns(requestedColumns, rowIndexChannel, hasRowIndexChannel, duckLakeSplit.dataFileId(), pageSource),
+                    splitMemoryContext);
         }
 
         ConnectorPageSource pageSource = createParquetPageSource(inputFile, duckLakeSplit, hiveColumns, parquetPredicate, options, memoryContext);
-        return transformWideIntegerColumns(duckLakeColumns, pageSource);
+        return projectRequestedColumns(requestedColumns, rowIndexChannel, hasRowIndexChannel, duckLakeSplit.dataFileId(), pageSource);
+    }
+
+    /**
+     * Produces the columns the engine asked for from the columns read out of the data file: the
+     * wider engine types of DuckLake's unsigned and 128 bit integers, and the synthetic row
+     * identifier a merge deletes rows by.
+     */
+    private static ConnectorPageSource projectRequestedColumns(
+            List<DuckLakeColumnHandle> requestedColumns,
+            int rowIndexChannel,
+            boolean hasRowIndexChannel,
+            long dataFileId,
+            ConnectorPageSource pageSource)
+    {
+        boolean needsTransform = requestedColumns.stream()
+                .anyMatch(column -> column.isUnsignedInteger() || column.isUnsignedBigint() || column.isInt128());
+        // the row index is read to apply deletes and to build row identifiers, and is projected
+        // away again unless the engine asked for the identifier itself
+        if (!hasRowIndexChannel && !needsTransform) {
+            return pageSource;
+        }
+        TransformConnectorPageSource.Builder transform = TransformConnectorPageSource.builder();
+        if (hasRowIndexChannel) {
+            // the projection is needed even when it selects the leading channels unchanged,
+            // because it is what drops the row index the reader added
+            transform.forceTransforms();
+        }
+        int dataChannel = 0;
+        for (DuckLakeColumnHandle column : requestedColumns) {
+            if (DuckLakeMergeRowId.isRowIdColumn(column)) {
+                transform.transform(page -> rowIdBlock(dataFileId, page.getBlock(rowIndexChannel)));
+                continue;
+            }
+            int channel = dataChannel;
+            dataChannel++;
+            if (column.isUnsignedInteger()) {
+                transform.transform(channel, new UnsignedIntegerToBigint());
+            }
+            else if (column.isUnsignedBigint()) {
+                transform.transform(channel, new UnsignedBigintToDecimal());
+            }
+            else if (column.isInt128()) {
+                transform.transform(channel, new DoubleToInt128Decimal());
+            }
+            else {
+                transform.column(channel);
+            }
+        }
+        return transform.build(pageSource);
+    }
+
+    private static Block rowIdBlock(long dataFileId, Block rowIndexBlock)
+    {
+        int positionCount = rowIndexBlock.getPositionCount();
+        BlockBuilder dataFileIds = BIGINT.createFixedSizeBlockBuilder(positionCount);
+        for (int position = 0; position < positionCount; position++) {
+            BIGINT.writeLong(dataFileIds, dataFileId);
+        }
+        return RowBlock.fromFieldBlocks(positionCount, new Block[] {dataFileIds.build(), rowIndexBlock});
     }
 
     /**
@@ -549,30 +615,6 @@ public class DuckLakePageSourceProvider
                 memoryContext.close();
             }
         }
-    }
-
-    private static ConnectorPageSource transformWideIntegerColumns(List<DuckLakeColumnHandle> columns, ConnectorPageSource pageSource)
-    {
-        if (columns.stream().noneMatch(column -> column.isUnsignedInteger() || column.isUnsignedBigint() || column.isInt128())) {
-            return pageSource;
-        }
-        TransformConnectorPageSource.Builder transform = TransformConnectorPageSource.builder();
-        for (int channel = 0; channel < columns.size(); channel++) {
-            DuckLakeColumnHandle column = columns.get(channel);
-            if (column.isUnsignedInteger()) {
-                transform.transform(channel, new UnsignedIntegerToBigint());
-            }
-            else if (column.isUnsignedBigint()) {
-                transform.transform(channel, new UnsignedBigintToDecimal());
-            }
-            else if (column.isInt128()) {
-                transform.transform(channel, new DoubleToInt128Decimal());
-            }
-            else {
-                transform.column(channel);
-            }
-        }
-        return transform.build(pageSource);
     }
 
     /**

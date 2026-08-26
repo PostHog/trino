@@ -149,6 +149,93 @@ public final class DuckLakeTypes
         }
     }
 
+    /**
+     * The DuckLake type a Trino type is stored as, as written to {@code ducklake_column.column_type}.
+     * Nested types yield the name of the container; their element types are stored on the child
+     * columns.
+     * <p>
+     * Types whose values DuckLake can hold exactly but whose declared precision it cannot express
+     * are stored at the next precision that holds them, so a {@code TIMESTAMP(1)} column becomes a
+     * millisecond timestamp. Types DuckLake cannot represent at all, such as bounded
+     * {@code VARCHAR}, are rejected rather than silently stored as something else.
+     */
+    public static String toDuckLakeType(Type type)
+    {
+        if (BOOLEAN.equals(type)) {
+            return "boolean";
+        }
+        if (TINYINT.equals(type)) {
+            return "int8";
+        }
+        if (SMALLINT.equals(type)) {
+            return "int16";
+        }
+        if (INTEGER.equals(type)) {
+            return "int32";
+        }
+        if (BIGINT.equals(type)) {
+            return "int64";
+        }
+        if (REAL.equals(type)) {
+            return "float32";
+        }
+        if (DOUBLE.equals(type)) {
+            return "float64";
+        }
+        if (type instanceof DecimalType decimalType) {
+            return "decimal(%s,%s)".formatted(decimalType.getPrecision(), decimalType.getScale());
+        }
+        if (type instanceof VarcharType) {
+            // DuckLake, like DuckDB, has one string type and no maximum length, so a bounded
+            // VARCHAR is stored unbounded and reads back that way
+            return "varchar";
+        }
+        if (VARBINARY.equals(type)) {
+            return "blob";
+        }
+        if (UUID.equals(type)) {
+            return "uuid";
+        }
+        if (DATE.equals(type)) {
+            return "date";
+        }
+        if (type instanceof TimeType timeType) {
+            if (timeType.getPrecision() > 6) {
+                throw new TrinoException(DUCKLAKE_UNSUPPORTED_TYPE, "DuckLake stores times with microsecond precision; " + type + " is not supported");
+            }
+            return "time";
+        }
+        if (type instanceof TimestampType timestampType) {
+            int precision = timestampType.getPrecision();
+            if (precision == 0) {
+                return "timestamp_s";
+            }
+            if (precision <= 3) {
+                return "timestamp_ms";
+            }
+            if (precision <= 6) {
+                return "timestamp";
+            }
+            return "timestamp_ns";
+        }
+        if (type instanceof TimestampWithTimeZoneType timestampWithTimeZoneType) {
+            if (timestampWithTimeZoneType.getPrecision() > 6) {
+                throw new TrinoException(DUCKLAKE_UNSUPPORTED_TYPE, "DuckLake stores times with time zone with microsecond precision; " + type + " is not supported");
+            }
+            return "timestamptz";
+        }
+        if (type instanceof ArrayType) {
+            return "list";
+        }
+        if (type instanceof MapType) {
+            return "map";
+        }
+        if (type instanceof RowType) {
+            return "struct";
+        }
+        throw new TrinoException(DUCKLAKE_UNSUPPORTED_TYPE, "DuckLake does not support columns of type " + type);
+    }
+
     public static boolean isUnsignedBigint(String duckLakeType)
     {
         String type = duckLakeType.trim().toLowerCase(Locale.ENGLISH);

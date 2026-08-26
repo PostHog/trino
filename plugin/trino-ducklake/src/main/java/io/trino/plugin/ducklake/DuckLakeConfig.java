@@ -46,6 +46,8 @@ public class DuckLakeConfig
     private String dataPath;
     private boolean fileStatisticsPruningEnabled = true;
     private DataSize maxSplitSize = DataSize.of(64, MEGABYTE);
+    private DataSize targetMaxFileSize = DataSize.of(128, MEGABYTE);
+    private int maxOpenPartitions = 100;
 
     @NotNull
     public String getConnectionUrl()
@@ -207,6 +209,35 @@ public class DuckLakeConfig
     public DuckLakeConfig setMaxSplitSize(DataSize maxSplitSize)
     {
         this.maxSplitSize = maxSplitSize;
+        return this;
+    }
+
+    @NotNull
+    @MinDataSize("1kB")
+    public DataSize getTargetMaxFileSize()
+    {
+        return targetMaxFileSize;
+    }
+
+    @Config("ducklake.target-max-file-size")
+    @ConfigDescription("Roll over to a new data file once the current one reaches this size")
+    public DuckLakeConfig setTargetMaxFileSize(DataSize targetMaxFileSize)
+    {
+        this.targetMaxFileSize = targetMaxFileSize;
+        return this;
+    }
+
+    @Min(1)
+    public int getMaxOpenPartitions()
+    {
+        return maxOpenPartitions;
+    }
+
+    @Config("ducklake.max-open-partitions")
+    @ConfigDescription("Maximum number of partitions a single writer keeps open while writing")
+    public DuckLakeConfig setMaxOpenPartitions(int maxOpenPartitions)
+    {
+        this.maxOpenPartitions = maxOpenPartitions;
         return this;
     }
 }

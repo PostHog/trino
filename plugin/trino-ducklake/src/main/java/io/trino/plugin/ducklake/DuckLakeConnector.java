@@ -23,6 +23,7 @@ import io.trino.spi.classloader.ThreadContextClassLoader;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorNodePartitioningProvider;
+import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
@@ -46,8 +47,10 @@ public class DuckLakeConnector
     private final DuckLakeTransactionManager transactionManager;
     private final ConnectorSplitManager splitManager;
     private final ConnectorPageSourceProvider pageSourceProvider;
+    private final ConnectorPageSinkProvider pageSinkProvider;
     private final ConnectorNodePartitioningProvider nodePartitioningProvider;
     private final List<PropertyMetadata<?>> sessionProperties;
+    private final List<PropertyMetadata<?>> tableProperties;
 
     public DuckLakeConnector(
             Injector injector,
@@ -55,18 +58,22 @@ public class DuckLakeConnector
             DuckLakeTransactionManager transactionManager,
             ConnectorSplitManager splitManager,
             ConnectorPageSourceProvider pageSourceProvider,
+            ConnectorPageSinkProvider pageSinkProvider,
             ConnectorNodePartitioningProvider nodePartitioningProvider,
-            Set<SessionPropertiesProvider> sessionPropertiesProviders)
+            Set<SessionPropertiesProvider> sessionPropertiesProviders,
+            DuckLakeTableProperties tableProperties)
     {
         this.injector = requireNonNull(injector, "injector is null");
         this.lifeCycleManager = requireNonNull(lifeCycleManager, "lifeCycleManager is null");
         this.transactionManager = requireNonNull(transactionManager, "transactionManager is null");
         this.splitManager = requireNonNull(splitManager, "splitManager is null");
         this.pageSourceProvider = requireNonNull(pageSourceProvider, "pageSourceProvider is null");
+        this.pageSinkProvider = requireNonNull(pageSinkProvider, "pageSinkProvider is null");
         this.nodePartitioningProvider = requireNonNull(nodePartitioningProvider, "nodePartitioningProvider is null");
         this.sessionProperties = requireNonNull(sessionPropertiesProviders, "sessionPropertiesProviders is null").stream()
                 .flatMap(sessionPropertiesProvider -> sessionPropertiesProvider.getSessionProperties().stream())
                 .collect(toImmutableList());
+        this.tableProperties = requireNonNull(tableProperties, "tableProperties is null").getTableProperties();
     }
 
     @Override
@@ -89,6 +96,12 @@ public class DuckLakeConnector
     }
 
     @Override
+    public ConnectorPageSinkProvider getPageSinkProvider()
+    {
+        return pageSinkProvider;
+    }
+
+    @Override
     public ConnectorNodePartitioningProvider getNodePartitioningProvider()
     {
         return nodePartitioningProvider;
@@ -98,6 +111,12 @@ public class DuckLakeConnector
     public List<PropertyMetadata<?>> getSessionProperties()
     {
         return sessionProperties;
+    }
+
+    @Override
+    public List<PropertyMetadata<?>> getTableProperties()
+    {
+        return tableProperties;
     }
 
     @Override

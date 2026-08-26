@@ -36,10 +36,12 @@ import static java.util.Objects.requireNonNull;
  * itself to the row groups that begin inside the range, so the splits of a file must cover it
  * without gaps or overlaps for the file to be read exactly once.
  *
+ * @param dataFileId identifier of the data file, used to address it when rows of it are deleted
  * @param fileSizeBytes size of the whole file, not of the byte range
  * @param recordCount number of visible rows of the byte range, apportioned by its share of the file
  */
 public record DuckLakeSplit(
+        long dataFileId,
         String path,
         long start,
         long length,

@@ -258,6 +258,16 @@ public class ParquetWriter
         return requireNonNull(fileMetaData, "fileMetaData is null");
     }
 
+    /**
+     * Size of the serialized footer, excluding the length and the magic bytes that follow it.
+     * This is the value the Parquet format stores in the last four bytes of the file.
+     */
+    public int getFooterSize()
+    {
+        checkState(closed, "footer size is available only after writer is closed");
+        return footerReadSize.orElseThrow() - SIZE_OF_INT - MAGIC.length();
+    }
+
     private ParquetReader createParquetReader(ParquetDataSource input, ParquetMetadata parquetMetadata, ParquetWriteValidation writeValidation)
             throws IOException
     {

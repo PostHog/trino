@@ -21,6 +21,7 @@ import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.UuidType;
 import io.trino.spi.type.VarcharType;
 
 import java.math.BigDecimal;
@@ -170,7 +171,7 @@ public final class StatsValueParser
             LocalTime time = LocalTime.parse(value, DateTimeFormatter.ISO_LOCAL_TIME);
             return time.toNanoOfDay() * PICOSECONDS_PER_NANOSECOND;
         }
-        if (io.trino.spi.type.UuidType.UUID.equals(type)) {
+        if (UuidType.UUID.equals(type)) {
             return javaUuidToTrinoUuid(UUID.fromString(value));
         }
         return null;
