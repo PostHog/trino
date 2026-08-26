@@ -57,7 +57,9 @@ final class TestDuckLakeConfig
                 .setMetadataSchema("public")
                 .setDataPath(null)
                 .setFileStatisticsPruningEnabled(true)
-                .setMaxSplitSize(DataSize.of(64, MEGABYTE)));
+                .setMaxSplitSize(DataSize.of(64, MEGABYTE))
+                .setTargetMaxFileSize(DataSize.of(128, MEGABYTE))
+                .setMaxOpenPartitions(100));
     }
 
     /**
@@ -109,6 +111,8 @@ final class TestDuckLakeConfig
                 .put("ducklake.data-path", "s3://bucket/prefix/")
                 .put("ducklake.file-statistics-pruning.enabled", "false")
                 .put("ducklake.max-split-size", "32MB")
+                .put("ducklake.target-max-file-size", "48MB")
+                .put("ducklake.max-open-partitions", "7")
                 .buildOrThrow();
     }
 
@@ -123,6 +127,8 @@ final class TestDuckLakeConfig
         assertThat(config.getDataPath()).isEqualTo("s3://bucket/prefix/");
         assertThat(config.isFileStatisticsPruningEnabled()).isFalse();
         assertThat(config.getMaxSplitSize()).isEqualTo(DataSize.of(32, MEGABYTE));
+        assertThat(config.getTargetMaxFileSize()).isEqualTo(DataSize.of(48, MEGABYTE));
+        assertThat(config.getMaxOpenPartitions()).isEqualTo(7);
     }
 
     @Test
