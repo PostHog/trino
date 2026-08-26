@@ -62,7 +62,7 @@ def main():
 
 
 def build(matrix_file, impacted_file, output_file):
-    matrix = yaml.load(matrix_file, Loader=yaml.Loader)
+    matrix = yaml.safe_load(matrix_file)
     impacted = list(filter(None, [line.strip() for line in impacted_file.readlines()]))
     logging.info("Read matrix: %s", matrix)
     logging.info("Read impacted: %s", impacted)

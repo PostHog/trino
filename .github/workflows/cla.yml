@@ -1,6 +1,12 @@
 name: CLA
 
 on:
+  # nosemgrep: github-actions-pull-request-target
+  # Needs the base repository's token to post CLA status on pull requests from
+  # forks, which is what this trigger exists for. It checks out
+  # github.workflow_sha rather than the pull request head, so no attacker
+  # controlled code runs, and persist-credentials is off. The job is also gated
+  # to trinodb/trino, so it never runs in this fork at all.
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review]
   issue_comment:
