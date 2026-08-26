@@ -75,6 +75,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -397,10 +398,13 @@ public class DuckLakePageSourceProvider
 
     /**
      * Renames the columns to read to the names this file gives them, matching the column
-     * identifier of each against the Parquet field ids the file records. A column the file does
-     * not record keeps the name the catalog gives it, so a file written before the column was
-     * added still reads it as NULL. The row index column the reader appends carries no identifier
-     * and is left alone.
+     * identifier of each against the Parquet field ids the file records.
+     * <p>
+     * A column the file does not record is read as NULL, under a name no column of the file
+     * carries. Letting it keep the name the catalog gives it would not do: renaming a column frees
+     * its old name for a new one, and the file still stores the renamed column under that name, so
+     * the new column would be handed the old column's values. The row index column the reader
+     * appends carries no identifier and is left alone.
      */
     private static List<HiveColumnHandle> columnsByFieldId(MessageType fileSchema, List<DuckLakeColumnHandle> dataColumns, List<HiveColumnHandle> columns)
     {
@@ -408,6 +412,7 @@ public class DuckLakePageSourceProvider
         if (namesByFieldId.isEmpty()) {
             return columns;
         }
+        Set<String> fileColumnNames = DuckLakeFieldIds.columnNames(fileSchema);
         ImmutableList.Builder<HiveColumnHandle> resolved = ImmutableList.builderWithExpectedSize(columns.size());
         for (int i = 0; i < columns.size(); i++) {
             if (i >= dataColumns.size()) {
@@ -415,8 +420,9 @@ public class DuckLakePageSourceProvider
                 continue;
             }
             DuckLakeColumnHandle column = dataColumns.get(i);
-            Optional<String> fileName = DuckLakeFieldIds.columnName(namesByFieldId, column.columnId());
-            resolved.add(fileName.isPresent() ? column.toHiveColumnHandle(fileName.get()) : columns.get(i));
+            String name = DuckLakeFieldIds.columnName(namesByFieldId, column.columnId())
+                    .orElseGet(() -> DuckLakeFieldIds.absentColumnName(fileColumnNames, column.columnId()));
+            resolved.add(column.toHiveColumnHandle(name));
         }
         return resolved.build();
     }

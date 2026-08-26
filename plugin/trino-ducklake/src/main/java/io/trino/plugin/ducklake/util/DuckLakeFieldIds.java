@@ -19,6 +19,9 @@ import org.apache.parquet.schema.Type;
 
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 
 /**
  * The names a DuckLake data file gives the columns it stores.
@@ -66,5 +69,32 @@ public final class DuckLakeFieldIds
             return Optional.empty();
         }
         return Optional.ofNullable(namesByFieldId.get((int) columnId));
+    }
+
+    /**
+     * A name no column of the file carries, for a column the file does not store.
+     * <p>
+     * Such a column has to be read as NULL, which the reader does by finding nothing under the
+     * name it is given. The name it is given cannot be the one the catalog uses: a column renamed
+     * out of the way frees its old name for a new column, and the file still stores the renamed
+     * one under it, so a new column asking for its own name would be handed the values of the old.
+     */
+    public static String absentColumnName(Set<String> fileColumnNames, long columnId)
+    {
+        String name = "$ducklake_absent_" + columnId;
+        while (fileColumnNames.contains(name)) {
+            name = "_" + name;
+        }
+        return name;
+    }
+
+    /**
+     * The names of the top-level columns the file stores.
+     */
+    public static Set<String> columnNames(MessageType fileSchema)
+    {
+        return fileSchema.getFields().stream()
+                .map(Type::getName)
+                .collect(toImmutableSet());
     }
 }

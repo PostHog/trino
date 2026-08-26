@@ -494,6 +494,29 @@ final class TestDuckLakeWrites
     }
 
     @Test
+    void testANewColumnMayTakeTheNameARenamedColumnGaveUp()
+    {
+        String table = "reused_name_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + table + " (a INTEGER, x VARCHAR)");
+        try {
+            assertUpdate("INSERT INTO " + table + " VALUES (1, 'first')", 1);
+            // the file written above stores the column now called x_old under the name x, which
+            // the column added next takes for itself
+            assertUpdate("ALTER TABLE " + table + " RENAME COLUMN x TO x_old");
+            assertUpdate("ALTER TABLE " + table + " ADD COLUMN x VARCHAR");
+            assertUpdate("INSERT INTO " + table + " VALUES (2, 'second', 'brand new')", 1);
+
+            // the first row predates the new column, so it holds nothing for it
+            assertQuery("SELECT a, x_old, x FROM " + table + " ORDER BY a",
+                    "VALUES (1, 'first', NULL), (2, 'second', 'brand new')");
+            assertQuery("SELECT count(*) FROM " + table + " WHERE x IS NULL", "VALUES 1");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
     void testColumnRenamedByDuckDbIsReadByTrino()
             throws SQLException
     {
