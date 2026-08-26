@@ -157,13 +157,13 @@ jobs:
       - name: Clean Maven Output
         run: $MAVEN clean -pl '!:trino-server,!:trino-cli'
       - name: Set up QEMU
+        # Registering QEMU emulators writes to the host's binfmt_misc, which is
+        # what --privileged is for below, and the only way to build the arm64
+        # image on an amd64 runner. The container runs one command and exits.
+        # nosemgrep: trailofbits.generic.container-privileged.container-privileged
         run: |
           BINFMT_IMAGE=docker.io/tonistiigi/binfmt:latest
           .github/bin/retry docker pull "${BINFMT_IMAGE}"
-          # Registering QEMU emulators writes to the host's binfmt_misc, which
-          # is what --privileged is for and the only way to build the arm64
-          # image on an amd64 runner. The container runs one command and exits.
-          # nosemgrep: trailofbits.generic.container-privileged.container-privileged
           docker run --rm --privileged "${BINFMT_IMAGE}" --install arm64
       - name: Build and Test Docker Image
         run: core/docker/build.sh
