@@ -2,11 +2,11 @@ name: cleanup
 
 on:
   # Triggered on every PR merge or close (but with the code and workflow as present in the base of the merge instead of the merge commmit)
-  # nosemgrep: github-actions-pull-request-target
   # Cancels the runs of a pull request that has closed, which needs a token the
   # pull_request trigger does not carry for forks. Nothing is checked out and no
   # code from the pull request is executed; permissions are scoped to actions
   # alone.
+  # nosemgrep: github-actions-pull-request-target
   pull_request_target:
     types:
       - closed
