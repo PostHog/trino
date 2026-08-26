@@ -13,9 +13,11 @@
  */
 package io.trino.plugin.ducklake;
 
+import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.ListMultimap;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.airlift.json.JsonCodec;
 import io.airlift.slice.Slice;
@@ -40,6 +42,7 @@ import io.trino.plugin.ducklake.metastore.DuckLakeTableEntry;
 import io.trino.plugin.ducklake.metastore.JdbcDuckLakeMetastore;
 import io.trino.plugin.ducklake.util.DuckLakeColumns;
 import io.trino.plugin.ducklake.util.DuckLakeTypes;
+import io.trino.plugin.ducklake.util.PartitionTransforms;
 import io.trino.plugin.ducklake.util.PathResolver;
 import io.trino.plugin.ducklake.util.StatsValueParser;
 import io.trino.spi.TrinoException;
@@ -638,6 +641,49 @@ public class DuckLakeMetadata
     }
 
     @Override
+    public Optional<ConnectorTableLayout> getInsertLayout(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        return partitioningOf(handle).flatMap(DuckLakeMetadata::preferredWriteLayout);
+    }
+
+    @Override
+    public Optional<ConnectorTableLayout> getNewTableLayout(ConnectorSession session, ConnectorTableMetadata tableMetadata)
+    {
+        List<String> identityColumns = DuckLakeTableProperties.getPartitioning(tableMetadata.getProperties()).stream()
+                .map(DuckLakeTableProperties::parsePartitionKey)
+                .map(DuckLakeTableProperties.PartitionKey::asColumnName)
+                .flatMap(Optional::stream)
+                .collect(toImmutableList());
+        return toWriteLayout(identityColumns);
+    }
+
+    /**
+     * Asks the engine to send the rows of a partition to the same writers.
+     * <p>
+     * Without it every writer sees rows of every partition and has to keep a file open for each,
+     * which both fragments the table into small files and bounds how many partitions a single
+     * statement can write. Only the keys that file rows by the column value itself are used: a
+     * transformed key would have the engine group by the underlying column, which spreads the rows
+     * of one partition rather than gathering them.
+     */
+    private static Optional<ConnectorTableLayout> preferredWriteLayout(DuckLakePartitioning partitioning)
+    {
+        return toWriteLayout(partitioning.fields().stream()
+                .filter(field -> field.transform().equalsIgnoreCase(DuckLakeWritePartitioner.IDENTITY_TRANSFORM))
+                .map(DuckLakePartitioning.Field::columnName)
+                .collect(toImmutableList()));
+    }
+
+    private static Optional<ConnectorTableLayout> toWriteLayout(List<String> partitionColumns)
+    {
+        if (partitionColumns.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(new ConnectorTableLayout(partitionColumns));
+    }
+
+    @Override
     public ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, Optional<ConnectorTableLayout> layout, RetryMode retryMode, boolean replace)
     {
         if (replace) {
@@ -1011,9 +1057,12 @@ public class DuckLakeMetadata
     public Optional<ConnectorTableHandle> applyDelete(ConnectorSession session, ConnectorTableHandle handle)
     {
         DuckLakeTableHandle tableHandle = (DuckLakeTableHandle) handle;
-        // only a delete of every row can be answered by dropping files; anything narrower needs
-        // the positions of the rows that go, which the engine produces through a merge
-        if (tableHandle.enforcedConstraint().isAll() && tableHandle.unenforcedConstraint().isAll()) {
+        // anything the connector cannot decide from the catalog alone needs the positions of the
+        // rows that go, which the engine produces through a merge
+        if (!tableHandle.unenforcedConstraint().isAll()) {
+            return Optional.empty();
+        }
+        if (tableHandle.enforcedConstraint().isAll() || fullyMatchingDataFiles(tableHandle).isPresent()) {
             return Optional.of(tableHandle);
         }
         return Optional.empty();
@@ -1023,11 +1072,111 @@ public class DuckLakeMetadata
     public OptionalLong executeDelete(ConnectorSession session, ConnectorTableHandle handle)
     {
         DuckLakeTableHandle tableHandle = (DuckLakeTableHandle) handle;
+        if (tableHandle.enforcedConstraint().isAll()) {
+            return OptionalLong.of(commit(commit -> {
+                long removed = removeAllRows(commit, tableHandle.tableId());
+                commit.recordDelete(tableHandle.tableId());
+                return removed;
+            }));
+        }
+        List<Long> dataFileIds = fullyMatchingDataFiles(tableHandle)
+                .orElseThrow(() -> new TrinoException(DUCKLAKE_INVALID_METADATA, "The rows to delete are no longer decidable from the catalog"));
         return OptionalLong.of(commit(commit -> {
-            long removed = removeAllRows(commit, tableHandle.tableId());
+            commit.verifyDataFilesUnchanged(tableHandle.tableId(), ImmutableSet.copyOf(dataFileIds));
+            long removed = removeDataFiles(commit, tableHandle.tableId(), dataFileIds);
             commit.recordDelete(tableHandle.tableId());
             return removed;
         }));
+    }
+
+    /**
+     * The data files a delete can drop whole, or {@link Optional#empty()} when the predicate
+     * cannot be decided from the catalog.
+     * <p>
+     * A predicate reaches this point only if {@link #applyFilter} enforced all of it, which it
+     * does only for partition keys that file rows by the column value itself and only while every
+     * visible file carries such a value. Each file therefore holds one value of the column, and
+     * either every row of it matches or none does.
+     */
+    private Optional<List<Long>> fullyMatchingDataFiles(DuckLakeTableHandle handle)
+    {
+        Map<DuckLakeColumnHandle, Domain> domains = handle.enforcedConstraint().getDomains().orElse(null);
+        if (domains == null || domains.isEmpty()) {
+            return Optional.empty();
+        }
+        Optional<DuckLakePartitionInfo> partitionInfo = metastore.partitionInfo(handle.snapshotId(), handle.tableId());
+        if (partitionInfo.isEmpty()) {
+            return Optional.empty();
+        }
+        ListMultimap<Long, DuckLakePartitionColumn> transformsByColumnId = ArrayListMultimap.create();
+        partitionInfo.get().columns().forEach(column -> transformsByColumnId.put(column.columnId(), column));
+
+        ImmutableList.Builder<Long> matching = ImmutableList.builder();
+        for (DuckLakeDataFileEntry dataFile : metastore.dataFiles(handle.snapshotId(), handle.tableId())) {
+            Boolean matches = fileMatches(domains, transformsByColumnId, dataFile);
+            if (matches == null) {
+                return Optional.empty();
+            }
+            if (matches) {
+                matching.add(dataFile.dataFileId());
+            }
+        }
+        return Optional.of(matching.build());
+    }
+
+    /**
+     * Whether every row of the file matches the predicate, or {@code null} when the file's
+     * partition values do not decide it.
+     */
+    @Nullable
+    private static Boolean fileMatches(
+            Map<DuckLakeColumnHandle, Domain> domains,
+            ListMultimap<Long, DuckLakePartitionColumn> transformsByColumnId,
+            DuckLakeDataFileEntry dataFile)
+    {
+        for (Map.Entry<DuckLakeColumnHandle, Domain> entry : domains.entrySet()) {
+            Optional<Domain> fileDomain = PartitionTransforms.partitionDomain(
+                    entry.getKey(),
+                    transformsByColumnId.get(entry.getKey().columnId()),
+                    dataFile.partitionValues());
+            if (fileDomain.isEmpty() || (!fileDomain.get().isSingleValue() && !fileDomain.get().isOnlyNull())) {
+                return null;
+            }
+            if (fileDomain.get().intersect(entry.getValue()).isNone()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Ends the given data files, removing every row of them.
+     */
+    private static long removeDataFiles(DuckLakeCommit commit, long tableId, List<Long> dataFileIds)
+    {
+        if (dataFileIds.isEmpty()) {
+            return 0;
+        }
+        Map<Long, DuckLakeCommit.VisibleDataFile> visible = commit.visibleDataFiles(tableId).stream()
+                .collect(toImmutableMap(DuckLakeCommit.VisibleDataFile::dataFileId, file -> file, (first, _) -> first));
+        long removedRecords = 0;
+        long removedBytes = 0;
+        for (long dataFileId : dataFileIds) {
+            DuckLakeCommit.VisibleDataFile file = visible.get(dataFileId);
+            if (file == null) {
+                throw new DuckLakeCommit.ConcurrentModificationFailure("data file %s of table %s was removed by another transaction".formatted(dataFileId, tableId));
+            }
+            removedRecords += file.visibleRecordCount();
+            removedBytes += file.fileSizeBytes();
+        }
+        commit.endDataFiles(tableId, dataFileIds);
+        commit.endDeleteFilesFor(tableId, dataFileIds);
+        DuckLakeCommit.TableStatsRow stats = commit.tableStats(tableId).orElseGet(() -> new DuckLakeCommit.TableStatsRow(0, 0, 0));
+        commit.writeTableStats(tableId, new DuckLakeCommit.TableStatsRow(
+                Math.max(0, stats.recordCount() - removedRecords),
+                stats.nextRowId(),
+                Math.max(0, stats.fileSizeBytes() - removedBytes)));
+        return removedRecords;
     }
 
     @Override

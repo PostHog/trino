@@ -312,18 +312,49 @@ final class TestDuckLakeWrites
             assertThat(duckDbScalar("SELECT count(*) FROM " + table)).isEqualTo("4");
 
             // rows of one partition share a file, and the catalog records the value each holds
-            assertThat(duckDbScalar("SELECT count(DISTINCT data_file_id) FROM __ducklake_metadata_lake.ducklake_file_partition_value"))
+            assertThat(duckDbScalar("SELECT count(DISTINCT v.data_file_id) FROM __ducklake_metadata_lake.ducklake_file_partition_value v "
+                    + "JOIN __ducklake_metadata_lake.ducklake_table t USING (table_id) WHERE t.table_name = '" + table + "'"))
                     .isEqualTo("3");
             assertThat(duckDbRows(
                     """
                     SELECT partition_value FROM __ducklake_metadata_lake.ducklake_file_partition_value v
                     JOIN __ducklake_metadata_lake.ducklake_data_file f USING (data_file_id)
-                    WHERE f.path LIKE 'region=us%' ORDER BY partition_key_index"""))
+                    JOIN __ducklake_metadata_lake.ducklake_table t ON t.table_id = f.table_id
+                    WHERE t.table_name = '%s' AND f.path LIKE 'region=us%%'
+                    ORDER BY partition_key_index""".formatted(table)))
                     .isEqualTo(List.of("us", "2024", "1"));
 
             // the property describes the table well enough to recreate it
             assertThat((String) computeScalar("SHOW CREATE TABLE " + table))
                     .contains("partitioning = ARRAY['region','year(ts)','month(ts)']");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testDeletingWholePartitionsDropsTheirFiles()
+    {
+        String table = "partition_delete_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + table + " (id BIGINT, region VARCHAR) WITH (partitioning = ARRAY['region'])");
+        try {
+            assertUpdate("INSERT INTO %s VALUES (1, 'us'), (2, 'eu'), (3, 'us'), (4, 'ap'), (5, NULL)".formatted(table), 5);
+
+            // a predicate the partitioning decides for whole files needs no delete file at all
+            assertUpdate("DELETE FROM " + table + " WHERE region = 'us'", 2);
+            assertUpdate("DELETE FROM " + table + " WHERE region IS NULL", 1);
+            assertQuery("SELECT id FROM " + table + " ORDER BY id", "VALUES 2, 4");
+            assertThat(duckDbScalar("SELECT count(*) FROM __ducklake_metadata_lake.ducklake_delete_file d "
+                    + "JOIN __ducklake_metadata_lake.ducklake_table t USING (table_id) WHERE t.table_name = '" + table + "'"))
+                    .isEqualTo("0");
+            assertThat(duckDbRows("SELECT id::VARCHAR FROM " + table + " ORDER BY id")).isEqualTo(List.of("2", "4"));
+
+            // a predicate that reaches beyond the partitioning is answered row by row instead
+            assertUpdate("DELETE FROM " + table + " WHERE region = 'eu' AND id > 99", 0);
+            assertQuery("SELECT id FROM " + table + " ORDER BY id", "VALUES 2, 4");
+            assertUpdate("DELETE FROM " + table + " WHERE region = 'eu' AND id = 2", 1);
+            assertQuery("SELECT id FROM " + table, "VALUES 4");
         }
         finally {
             assertUpdate("DROP TABLE " + table);
