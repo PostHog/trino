@@ -25,6 +25,7 @@ import org.apache.parquet.schema.GroupType;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.PrimitiveType;
+import org.apache.parquet.schema.Type.Repetition;
 import org.apache.parquet.schema.Types;
 
 import java.util.List;
@@ -182,7 +183,7 @@ public final class DuckLakeParquetSchema
     private static org.apache.parquet.schema.Type convert(
             DuckLakeWriteColumn column,
             List<String> parentPath,
-            org.apache.parquet.schema.Type.Repetition repetition,
+            Repetition repetition,
             ImmutableMap.Builder<List<String>, Type> primitiveTypes,
             ImmutableMap.Builder<String, LeafField> leafFields)
     {
@@ -402,7 +403,7 @@ public final class DuckLakeParquetSchema
             ParquetTypeFactory parquetTypeFactory,
             Optional<UnaryOperator<Block>> blockTransform)
     {
-        org.apache.parquet.schema.Type parquetType(String name, org.apache.parquet.schema.Type.Repetition repetition, int id)
+        org.apache.parquet.schema.Type parquetType(String name, Repetition repetition, int id)
         {
             return parquetTypeFactory.create(name, repetition, id);
         }
@@ -416,7 +417,7 @@ public final class DuckLakeParquetSchema
     @FunctionalInterface
     private interface ParquetTypeFactory
     {
-        org.apache.parquet.schema.Type create(String name, org.apache.parquet.schema.Type.Repetition repetition, int id);
+        org.apache.parquet.schema.Type create(String name, Repetition repetition, int id);
     }
 
     /**

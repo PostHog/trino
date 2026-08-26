@@ -324,7 +324,7 @@ public final class DuckLakeCommit
                 .bind("initialDefault", column.initialDefault().orElse(null))
                 .bind("defaultValue", column.defaultValue().orElse(null))
                 .bind("nullsAllowed", column.nullsAllowed())
-                .bind("parentColumn", column.parentColumn().isPresent() ? column.parentColumn().getAsLong() : null)
+                .bind("parentColumn", column.parentColumn().isPresent() ? column.parentColumn().orElseThrow() : null)
                 .execute();
     }
 
@@ -524,7 +524,7 @@ public final class DuckLakeCommit
                 .bind("fileSizeBytes", file.fileSizeBytes())
                 .bind("footerSize", file.footerSize())
                 .bind("rowIdStart", file.rowIdStart())
-                .bind("partitionId", file.partitionId().isPresent() ? file.partitionId().getAsLong() : null)
+                .bind("partitionId", file.partitionId().isPresent() ? file.partitionId().orElseThrow() : null)
                 .execute();
     }
 
@@ -551,9 +551,9 @@ public final class DuckLakeCommit
                 .bind("dataFileId", dataFileId)
                 .bind("tableId", tableId)
                 .bind("columnId", stats.columnId())
-                .bind("columnSizeBytes", stats.columnSizeBytes().isPresent() ? stats.columnSizeBytes().getAsLong() : null)
-                .bind("valueCount", stats.valueCount().isPresent() ? stats.valueCount().getAsLong() : null)
-                .bind("nullCount", stats.nullCount().isPresent() ? stats.nullCount().getAsLong() : null)
+                .bind("columnSizeBytes", stats.columnSizeBytes().isPresent() ? stats.columnSizeBytes().orElseThrow() : null)
+                .bind("valueCount", stats.valueCount().isPresent() ? stats.valueCount().orElseThrow() : null)
+                .bind("nullCount", stats.nullCount().isPresent() ? stats.nullCount().orElseThrow() : null)
                 .bind("minValue", stats.minValue().orElse(null))
                 .bind("maxValue", stats.maxValue().orElse(null))
                 .bind("containsNan", stats.containsNan().orElse(null))

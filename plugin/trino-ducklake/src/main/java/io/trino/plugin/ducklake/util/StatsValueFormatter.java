@@ -18,6 +18,7 @@ import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.UuidType;
 import io.trino.spi.type.VarcharType;
 import org.apache.parquet.io.api.Binary;
 
@@ -115,7 +116,7 @@ public final class StatsValueFormatter
         if (VARBINARY.equals(writerType)) {
             return HexFormat.of().formatHex(((Binary) value).getBytes());
         }
-        if (io.trino.spi.type.UuidType.UUID.equals(writerType)) {
+        if (UuidType.UUID.equals(writerType)) {
             ByteBuffer buffer = ByteBuffer.wrap(((Binary) value).getBytes());
             return new UUID(buffer.getLong(), buffer.getLong()).toString();
         }

@@ -98,6 +98,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.UnaryOperator;
 
@@ -627,7 +628,7 @@ public class DuckLakeMetadata
     {
         commit.endColumn(tableId, columnId);
         for (DuckLakeColumnRow row : columns) {
-            if (row.parentColumn().isPresent() && row.parentColumn().getAsLong() == columnId) {
+            if (row.parentColumn().isPresent() && row.parentColumn().orElseThrow() == columnId) {
                 endColumnTree(commit, tableId, columns, row.columnId());
             }
         }
@@ -1428,7 +1429,7 @@ public class DuckLakeMetadata
     private static String directoryName(String name)
     {
         if (name.isEmpty() || name.equals(".") || name.equals("..") || name.contains("/") || name.contains("\\")) {
-            return java.util.UUID.randomUUID() + "/";
+            return UUID.randomUUID() + "/";
         }
         return name + "/";
     }

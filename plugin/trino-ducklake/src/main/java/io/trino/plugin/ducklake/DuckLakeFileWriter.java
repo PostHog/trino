@@ -26,6 +26,7 @@ import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.type.Type;
+import org.apache.parquet.column.statistics.Statistics;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -252,13 +253,13 @@ public class DuckLakeFileWriter
         private long compressedSize;
         private long nullCount;
         private boolean nullCountKnown = true;
-        private final List<org.apache.parquet.column.statistics.Statistics<?>> statistics = new ArrayList<>();
+        private final List<Statistics<?>> statistics = new ArrayList<>();
 
         private void add(ColumnChunkMetadata chunk)
         {
             valueCount += chunk.getValueCount();
             compressedSize += chunk.getTotalSize();
-            org.apache.parquet.column.statistics.Statistics<?> chunkStatistics = chunk.getStatistics();
+            Statistics<?> chunkStatistics = chunk.getStatistics();
             if (chunkStatistics == null || !chunkStatistics.isNumNullsSet()) {
                 nullCountKnown = false;
             }
@@ -277,7 +278,7 @@ public class DuckLakeFileWriter
             if (field.statisticsSupported() && !containsNan.orElse(false)) {
                 Comparable<Object> min = null;
                 Comparable<Object> max = null;
-                for (org.apache.parquet.column.statistics.Statistics<?> chunkStatistics : statistics) {
+                for (Statistics<?> chunkStatistics : statistics) {
                     if (!chunkStatistics.hasNonNullValue()) {
                         continue;
                     }

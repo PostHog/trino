@@ -16,6 +16,7 @@ package io.trino.plugin.ducklake.util;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Int128;
 import io.trino.spi.type.LongTimestampWithTimeZone;
+import io.trino.spi.type.UuidType;
 import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
@@ -113,7 +114,7 @@ final class TestStatsValueParser
     @Test
     void testUuid()
     {
-        assertThat(StatsValueParser.parse(io.trino.spi.type.UuidType.UUID, "11111111-2222-3333-4444-555555555555"))
+        assertThat(StatsValueParser.parse(UuidType.UUID, "11111111-2222-3333-4444-555555555555"))
                 .contains(javaUuidToTrinoUuid(UUID.fromString("11111111-2222-3333-4444-555555555555")));
     }
 }

@@ -14,6 +14,7 @@
 package io.trino.plugin.ducklake;
 
 import com.google.common.collect.ImmutableList;
+import io.trino.Session;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
 import org.intellij.lang.annotations.Language;
@@ -663,7 +664,7 @@ final class TestDuckLakeWrites
         assertUpdate("CREATE TABLE " + table + " (id BIGINT, padding VARCHAR)");
         try {
             assertUpdate(
-                    io.trino.Session.builder(getSession())
+                    Session.builder(getSession())
                             .setCatalogSessionProperty("ducklake", "target_max_file_size", "16kB")
                             .build(),
                     "INSERT INTO " + table + " SELECT id, lpad('', 512, 'x') FROM UNNEST(sequence(1, 2000)) AS t(id)",

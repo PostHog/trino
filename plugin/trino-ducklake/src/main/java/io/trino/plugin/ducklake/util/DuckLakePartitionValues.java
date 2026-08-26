@@ -24,6 +24,7 @@ import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.UuidType;
 import io.trino.spi.type.VarcharType;
 
 import java.math.BigDecimal;
@@ -114,7 +115,7 @@ public final class DuckLakePartitionValues
         if (VARBINARY.equals(type)) {
             return HexFormat.of().formatHex(VARBINARY.getSlice(block, position).getBytes());
         }
-        if (io.trino.spi.type.UuidType.UUID.equals(type)) {
+        if (UuidType.UUID.equals(type)) {
             Slice slice = type.getSlice(block, position);
             return trinoUuidToJavaUuid(slice).toString();
         }
@@ -160,7 +161,7 @@ public final class DuckLakePartitionValues
                 || DOUBLE.equals(type)
                 || DATE.equals(type)
                 || VARBINARY.equals(type)
-                || io.trino.spi.type.UuidType.UUID.equals(type)
+                || UuidType.UUID.equals(type)
                 || type instanceof DecimalType
                 || type instanceof VarcharType
                 || type instanceof TimeType

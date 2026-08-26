@@ -18,9 +18,11 @@ import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import io.trino.plugin.ducklake.DuckLakeConfig;
 import io.trino.spi.TrinoException;
+import org.jdbi.v3.core.ConnectionFactory;
 import org.jdbi.v3.core.Handle;
 import org.jdbi.v3.core.Jdbi;
 import org.jdbi.v3.core.JdbiException;
+import org.jdbi.v3.core.statement.StatementContext;
 import org.jdbi.v3.core.transaction.TransactionIsolationLevel;
 
 import java.sql.ResultSet;
@@ -66,7 +68,7 @@ public class JdbcDuckLakeMetastore
     private volatile Boolean nameMappingHasIsPartition;
 
     @Inject
-    public JdbcDuckLakeMetastore(org.jdbi.v3.core.ConnectionFactory connectionFactory, DuckLakeConfig config)
+    public JdbcDuckLakeMetastore(ConnectionFactory connectionFactory, DuckLakeConfig config)
     {
         this.jdbi = Jdbi.create(requireNonNull(connectionFactory, "connectionFactory is null"));
         this.metadataSchema = config.getMetadataSchema();
@@ -943,7 +945,7 @@ public class JdbcDuckLakeMetastore
         }
     }
 
-    private static DuckLakeTableEntry tableEntry(ResultSet resultSet, org.jdbi.v3.core.statement.StatementContext context)
+    private static DuckLakeTableEntry tableEntry(ResultSet resultSet, StatementContext context)
             throws SQLException
     {
         return new DuckLakeTableEntry(
