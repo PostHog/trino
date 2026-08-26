@@ -39,6 +39,7 @@ import io.trino.plugin.ducklake.metastore.DuckLakeSchemaEntry;
 import io.trino.plugin.ducklake.metastore.DuckLakeTableColumnStats;
 import io.trino.plugin.ducklake.metastore.DuckLakeTableColumnsEntry;
 import io.trino.plugin.ducklake.metastore.DuckLakeTableEntry;
+import io.trino.plugin.ducklake.metastore.DuckLakeViewEntry;
 import io.trino.plugin.ducklake.metastore.JdbcDuckLakeMetastore;
 import io.trino.plugin.ducklake.util.DuckLakeColumns;
 import io.trino.plugin.ducklake.util.DuckLakeTypes;
@@ -62,6 +63,7 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableLayout;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTableVersion;
+import io.trino.spi.connector.ConnectorViewDefinition;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.RelationColumnsMetadata;
@@ -71,6 +73,7 @@ import io.trino.spi.connector.SaveMode;
 import io.trino.spi.connector.SchemaNotFoundException;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.TableNotFoundException;
+import io.trino.spi.connector.ViewNotFoundException;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
@@ -108,6 +111,7 @@ import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADA
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_FEATURE;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_FORMAT_VERSION;
 import static io.trino.plugin.ducklake.util.PartitionTransforms.IDENTITY_TRANSFORM;
+import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.COLUMN_ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -124,17 +128,21 @@ import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.joining;
 
 public class DuckLakeMetadata
         implements ConnectorMetadata
 {
     private static final String COMMENT_TAG_KEY = "comment";
+    private static final String VIEW_DEFINITION_TAG_KEY = "trino_view_definition";
+    private static final String TRINO_VIEW_DIALECT = "trino";
 
     private final JdbcDuckLakeMetastore metastore;
     private final String dataPath;
     private final Map<Long, DuckLakeRowCount> rowCounts = new ConcurrentHashMap<>();
     private final JsonCodec<DuckLakeDataFile> dataFileCodec;
     private final JsonCodec<DuckLakeMergeFragment> mergeFragmentCodec;
+    private final JsonCodec<ConnectorViewDefinition> viewDefinitionCodec;
     private final TrinoFileSystemFactory fileSystemFactory;
     private final DuckLakeWriterFactory writerFactory;
     private final FileFormatDataSourceStats fileFormatDataSourceStats;
@@ -148,6 +156,7 @@ public class DuckLakeMetadata
             String dataPath,
             JsonCodec<DuckLakeDataFile> dataFileCodec,
             JsonCodec<DuckLakeMergeFragment> mergeFragmentCodec,
+            JsonCodec<ConnectorViewDefinition> viewDefinitionCodec,
             TrinoFileSystemFactory fileSystemFactory,
             DuckLakeWriterFactory writerFactory,
             FileFormatDataSourceStats fileFormatDataSourceStats,
@@ -157,6 +166,7 @@ public class DuckLakeMetadata
         this.dataPath = requireNonNull(dataPath, "dataPath is null");
         this.dataFileCodec = requireNonNull(dataFileCodec, "dataFileCodec is null");
         this.mergeFragmentCodec = requireNonNull(mergeFragmentCodec, "mergeFragmentCodec is null");
+        this.viewDefinitionCodec = requireNonNull(viewDefinitionCodec, "viewDefinitionCodec is null");
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.writerFactory = requireNonNull(writerFactory, "writerFactory is null");
         this.fileFormatDataSourceStats = requireNonNull(fileFormatDataSourceStats, "fileFormatDataSourceStats is null");
@@ -341,6 +351,10 @@ public class DuckLakeMetadata
                 throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Ambiguous table name '%s': multiple tables differ only in case".formatted(tableName));
             }
         }
+        // views share the namespace with tables and are listed alongside them
+        for (DuckLakeViewEntry view : metastore.listViews(snapshotId(), schemaName)) {
+            tableNames.add(new SchemaTableName(view.schemaName(), view.viewName()));
+        }
         return ImmutableList.copyOf(tableNames);
     }
 
@@ -400,6 +414,9 @@ public class DuckLakeMetadata
     {
         DuckLakeCommit.SchemaIdentity schema = commit.findSchema(tableName.getSchemaName())
                 .orElseThrow(() -> new SchemaNotFoundException(tableName.getSchemaName()));
+        if (commit.findView(tableName.getSchemaName(), tableName.getTableName()).isPresent()) {
+            throw new TrinoException(ALREADY_EXISTS, "View already exists: " + tableName);
+        }
         Optional<DuckLakeCommit.TableIdentity> existing = commit.findTable(tableName.getSchemaName(), tableName.getTableName());
         if (existing.isPresent()) {
             switch (saveMode) {
@@ -1246,6 +1263,161 @@ public class DuckLakeMetadata
             fields.add(new DuckLakePartitioning.Field(channel, column.columnId(), column.name(), partitionColumn.transform()));
         }
         return Optional.of(new DuckLakePartitioning(partitionInfo.get().partitionId(), fields.build()));
+    }
+
+    @Override
+    public void createView(ConnectorSession session, SchemaTableName viewName, ConnectorViewDefinition definition, Map<String, Object> viewProperties, boolean replace)
+    {
+        if (!viewProperties.isEmpty()) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support view properties");
+        }
+        requireViewSupport();
+        commit(commit -> {
+            DuckLakeCommit.SchemaIdentity schema = commit.findSchema(viewName.getSchemaName())
+                    .orElseThrow(() -> new SchemaNotFoundException(viewName.getSchemaName()));
+            if (commit.findTable(viewName.getSchemaName(), viewName.getTableName()).isPresent()) {
+                throw new TrinoException(TABLE_ALREADY_EXISTS, "Table already exists: " + viewName);
+            }
+            Optional<DuckLakeCommit.ViewIdentity> existing = commit.findView(viewName.getSchemaName(), viewName.getTableName());
+            if (existing.isPresent()) {
+                if (!replace) {
+                    throw new TrinoException(ALREADY_EXISTS, "View already exists: " + viewName);
+                }
+                commit.endView(existing.get().viewId());
+                commit.setTableTag(existing.get().viewId(), VIEW_DEFINITION_TAG_KEY, Optional.empty());
+            }
+
+            long viewId = commit.allocateCatalogId();
+            // The row is a DuckLake view like any other, so another engine lists it and can read
+            // it when the query happens to parse in its own dialect. What Trino needs beyond the
+            // query text — the column types, the owner and how the view runs — has no column of
+            // its own, so it is kept as a tag beside the view.
+            commit.insertViewRow(
+                    viewId,
+                    schema.schemaId(),
+                    viewName.getTableName(),
+                    TRINO_VIEW_DIALECT,
+                    definition.getOriginalSql(),
+                    formatColumnAliases(definition));
+            commit.setTableTag(viewId, VIEW_DEFINITION_TAG_KEY, Optional.of(viewDefinitionCodec.toJson(definition)));
+            commit.recordCreatedView(viewName.getSchemaName(), viewName.getTableName());
+            return null;
+        });
+    }
+
+    @Override
+    public void dropView(ConnectorSession session, SchemaTableName viewName)
+    {
+        requireViewSupport();
+        commit(commit -> {
+            DuckLakeCommit.ViewIdentity view = commit.findView(viewName.getSchemaName(), viewName.getTableName())
+                    .orElseThrow(() -> new ViewNotFoundException(viewName));
+            commit.endView(view.viewId());
+            commit.setTableTag(view.viewId(), VIEW_DEFINITION_TAG_KEY, Optional.empty());
+            commit.recordDroppedView(view.viewId());
+            return null;
+        });
+    }
+
+    @Override
+    public void renameView(ConnectorSession session, SchemaTableName source, SchemaTableName target)
+    {
+        requireViewSupport();
+        commit(commit -> {
+            DuckLakeViewEntry view = metastore.findView(commit.baseSnapshotId(), source.getSchemaName(), source.getTableName())
+                    .orElseThrow(() -> new ViewNotFoundException(source));
+            DuckLakeCommit.SchemaIdentity targetSchema = commit.findSchema(target.getSchemaName())
+                    .orElseThrow(() -> new SchemaNotFoundException(target.getSchemaName()));
+            if (commit.findView(target.getSchemaName(), target.getTableName()).isPresent()) {
+                throw new TrinoException(ALREADY_EXISTS, "View already exists: " + target);
+            }
+            commit.endView(view.viewId());
+            commit.insertViewRow(view.viewId(), targetSchema.schemaId(), target.getTableName(), view.dialect(), view.sql(), view.columnAliases());
+            commit.recordCreatedView(target.getSchemaName(), target.getTableName());
+            return null;
+        });
+    }
+
+    @Override
+    public List<SchemaTableName> listViews(ConnectorSession session, Optional<String> schemaName)
+    {
+        return metastore.listViews(snapshotId(), schemaName).stream()
+                .map(view -> new SchemaTableName(view.schemaName(), view.viewName()))
+                .distinct()
+                .collect(toImmutableList());
+    }
+
+    @Override
+    public Optional<ConnectorViewDefinition> getView(ConnectorSession session, SchemaTableName viewName)
+    {
+        return metastore.findView(snapshotId(), viewName.getSchemaName(), viewName.getTableName())
+                .flatMap(this::toViewDefinition);
+    }
+
+    @Override
+    public Map<SchemaTableName, ConnectorViewDefinition> getViews(ConnectorSession session, Optional<String> schemaName)
+    {
+        ImmutableMap.Builder<SchemaTableName, ConnectorViewDefinition> views = ImmutableMap.builder();
+        for (DuckLakeViewEntry view : metastore.listViews(snapshotId(), schemaName)) {
+            toViewDefinition(view).ifPresent(definition -> views.put(new SchemaTableName(view.schemaName(), view.viewName()), definition));
+        }
+        return views.buildKeepingLast();
+    }
+
+    @Override
+    public void setViewComment(ConnectorSession session, SchemaTableName viewName, Optional<String> comment)
+    {
+        requireViewSupport();
+        DuckLakeViewEntry view = metastore.findView(snapshotId(), viewName.getSchemaName(), viewName.getTableName())
+                .orElseThrow(() -> new ViewNotFoundException(viewName));
+        ConnectorViewDefinition definition = toViewDefinition(view)
+                .orElseThrow(() -> new ViewNotFoundException(viewName));
+        ConnectorViewDefinition updated = new ConnectorViewDefinition(
+                definition.getOriginalSql(),
+                definition.getCatalog(),
+                definition.getSchema(),
+                definition.getColumns(),
+                comment,
+                definition.getOwner(),
+                definition.isRunAsInvoker(),
+                definition.getPath());
+        commit(commit -> {
+            commit.setTableTag(view.viewId(), VIEW_DEFINITION_TAG_KEY, Optional.of(viewDefinitionCodec.toJson(updated)));
+            commit.recordTableMetadataChange(view.viewId());
+            return null;
+        });
+    }
+
+    /**
+     * Reads back the definition Trino stored beside the view. A view another engine defined has no
+     * such definition, and is left out rather than guessed at: its query is written in a dialect
+     * this connector cannot resolve the columns of.
+     */
+    private Optional<ConnectorViewDefinition> toViewDefinition(DuckLakeViewEntry view)
+    {
+        if (!view.dialect().equalsIgnoreCase(TRINO_VIEW_DIALECT)) {
+            return Optional.empty();
+        }
+        return metastore.tag(snapshotId(), view.viewId(), VIEW_DEFINITION_TAG_KEY)
+                .map(viewDefinitionCodec::fromJson);
+    }
+
+    private void requireViewSupport()
+    {
+        if (!metastore.viewsSupported()) {
+            throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "This DuckLake catalog was created before views were added to the format");
+        }
+    }
+
+    /**
+     * The view's column names in the form DuckLake stores them, each quoted and separated by
+     * commas, which is what another engine reads to name the view's columns.
+     */
+    private static String formatColumnAliases(ConnectorViewDefinition definition)
+    {
+        return definition.getColumns().stream()
+                .map(column -> "\"" + column.getName().replace("\"", "\"\"") + "\"")
+                .collect(joining(","));
     }
 
     /**

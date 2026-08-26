@@ -450,11 +450,11 @@ public final class DuckLakeCommit
         endRows("ducklake_view", "view_id = :objectId", viewId);
     }
 
-    public Optional<Long> findView(String schemaName, String viewName)
+    public Optional<ViewIdentity> findView(String schemaName, String viewName)
     {
         return handle.createQuery(
                         """
-                        SELECT v.view_id
+                        SELECT v.view_id, v.dialect
                         FROM %s v
                         JOIN %s s ON v.schema_id = s.schema_id
                         WHERE %s AND %s AND lower(s.schema_name) = :schemaName AND lower(v.view_name) = :viewName""".formatted(
@@ -465,7 +465,7 @@ public final class DuckLakeCommit
                 .bind("snapshot", baseSnapshotId)
                 .bind("schemaName", schemaName.toLowerCase(ENGLISH))
                 .bind("viewName", viewName.toLowerCase(ENGLISH))
-                .mapTo(Long.class)
+                .map((rs, _) -> new ViewIdentity(rs.getLong("view_id"), Optional.ofNullable(rs.getString("dialect")).orElse("")))
                 .findFirst();
     }
 
@@ -885,6 +885,8 @@ public final class DuckLakeCommit
     public record TableIdentity(long tableId, long schemaId, String tableName, String path, Optional<String> tableUuid) {}
 
     public record SchemaIdentity(long schemaId, String schemaName, String path) {}
+
+    public record ViewIdentity(long viewId, String dialect) {}
 
     public record TableStatsRow(long recordCount, long nextRowId, long fileSizeBytes) {}
 

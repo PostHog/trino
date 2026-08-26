@@ -498,6 +498,87 @@ final class TestDuckLakeWrites
     }
 
     @Test
+    void testViewLifecycle()
+    {
+        String table = "view_over_" + randomNameSuffix();
+        String view = "view_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + table + " AS SELECT id, id % 2 AS parity FROM UNNEST(sequence(1, 6)) AS t(id)", 6);
+        try {
+            assertUpdate("CREATE VIEW %s AS SELECT id FROM %s WHERE parity = 0".formatted(view, table));
+            assertQuery("SELECT id FROM " + view + " ORDER BY id", "VALUES 2, 4, 6");
+            assertThat(computeActual("SHOW TABLES").getOnlyColumnAsSet()).contains(view);
+            assertThat((String) computeScalar("SHOW CREATE VIEW " + view)).contains("CREATE VIEW", table);
+
+            // replacing a view swaps what it selects without changing its name
+            assertUpdate("CREATE OR REPLACE VIEW %s AS SELECT id FROM %s WHERE parity = 1".formatted(view, table));
+            assertQuery("SELECT id FROM " + view + " ORDER BY id", "VALUES 1, 3, 5");
+
+            assertUpdate("COMMENT ON VIEW %s IS 'odd ids'".formatted(view));
+            assertThat((String) computeScalar("SHOW CREATE VIEW " + view)).contains("odd ids");
+
+            String renamed = "view_renamed_" + randomNameSuffix();
+            assertUpdate("ALTER VIEW %s RENAME TO %s".formatted(view, renamed));
+            assertQuery("SELECT count(*) FROM " + renamed, "VALUES 3");
+            assertUpdate("DROP VIEW " + renamed);
+            assertThat(computeActual("SHOW TABLES").getOnlyColumnAsSet()).doesNotContain(view, renamed);
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testViewIsStoredAsADuckLakeViewAndLeavesDuckDbWorking()
+            throws SQLException
+    {
+        String table = "view_source_" + randomNameSuffix();
+        String view = "stored_view_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + table + " AS SELECT 1 AS a, 'x' AS b", 1);
+        try {
+            assertUpdate("CREATE VIEW %s AS SELECT a AS renamed FROM %s".formatted(view, table));
+
+            // the row is a DuckLake view like any other, naming the dialect its query is written in
+            assertThat(duckDbRows("SELECT dialect, column_aliases FROM __ducklake_metadata_lake.ducklake_view "
+                    + "WHERE view_name = '" + view + "' AND end_snapshot IS NULL"))
+                    .isEqualTo(List.of("trino", "\"renamed\""));
+
+            // DuckDB keeps working alongside it: it reads the tables and can still write to them
+            assertThat(duckDbScalar("SELECT count(*) FROM " + table)).isEqualTo("1");
+            catalog.executeInDuckDb("INSERT INTO %s VALUES (2, 'y')".formatted(table));
+            assertThat(duckDbScalar("SELECT count(*) FROM " + table)).isEqualTo("2");
+            assertQuery("SELECT renamed FROM " + view + " ORDER BY renamed", "VALUES 1, 2");
+        }
+        finally {
+            assertUpdate("DROP VIEW " + view);
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testAViewAndATableCannotShareAName()
+    {
+        String name = "clash_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + name + " (a INTEGER)");
+        try {
+            assertThatThrownBy(() -> assertUpdate("CREATE VIEW %s AS SELECT 1 AS a".formatted(name)))
+                    .hasMessageContaining("already exists");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + name);
+        }
+
+        String viewName = "clash_view_" + randomNameSuffix();
+        assertUpdate("CREATE VIEW %s AS SELECT 1 AS a".formatted(viewName));
+        try {
+            assertThatThrownBy(() -> assertUpdate("CREATE TABLE %s (a INTEGER)".formatted(viewName)))
+                    .hasMessageContaining("already exists");
+        }
+        finally {
+            assertUpdate("DROP VIEW " + viewName);
+        }
+    }
+
+    @Test
     void testSchemaLifecycle()
     {
         String schema = "schema_" + randomNameSuffix();

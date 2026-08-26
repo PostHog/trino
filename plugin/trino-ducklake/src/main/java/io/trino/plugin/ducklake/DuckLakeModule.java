@@ -32,6 +32,7 @@ import io.trino.spi.connector.ConnectorNodePartitioningProvider;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSplitManager;
+import io.trino.spi.connector.ConnectorViewDefinition;
 import org.jdbi.v3.core.ConnectionFactory;
 
 import java.sql.Driver;
@@ -62,6 +63,7 @@ public class DuckLakeModule
         binder.bind(DuckLakeTableProperties.class).in(Scopes.SINGLETON);
         jsonCodecBinder(binder).bindJsonCodec(DuckLakeDataFile.class);
         jsonCodecBinder(binder).bindJsonCodec(DuckLakeMergeFragment.class);
+        jsonCodecBinder(binder).bindJsonCodec(ConnectorViewDefinition.class);
 
         configBinder(binder).bindConfig(ParquetReaderConfig.class);
         configBinder(binder).bindConfig(ParquetWriterConfig.class);

@@ -185,10 +185,9 @@ public final class DuckLakeTypes
         if (type instanceof DecimalType decimalType) {
             return "decimal(%s,%s)".formatted(decimalType.getPrecision(), decimalType.getScale());
         }
-        if (type instanceof VarcharType varcharType) {
-            if (!varcharType.isUnbounded()) {
-                throw new TrinoException(DUCKLAKE_UNSUPPORTED_TYPE, "DuckLake does not support a maximum length on VARCHAR columns; use unbounded VARCHAR instead of " + type);
-            }
+        if (type instanceof VarcharType) {
+            // DuckLake, like DuckDB, has one string type and no maximum length, so a bounded
+            // VARCHAR is stored unbounded and reads back that way
             return "varchar";
         }
         if (VARBINARY.equals(type)) {

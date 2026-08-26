@@ -20,6 +20,7 @@ import io.trino.parquet.ParquetReaderOptions;
 import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.ducklake.metastore.JdbcDuckLakeMetastore;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
+import io.trino.spi.connector.ConnectorViewDefinition;
 import io.trino.spi.security.ConnectorIdentity;
 
 import static java.util.Objects.requireNonNull;
@@ -30,6 +31,7 @@ public class DuckLakeMetadataFactory
     private final String dataPath;
     private final JsonCodec<DuckLakeDataFile> dataFileCodec;
     private final JsonCodec<DuckLakeMergeFragment> mergeFragmentCodec;
+    private final JsonCodec<ConnectorViewDefinition> viewDefinitionCodec;
     private final TrinoFileSystemFactory fileSystemFactory;
     private final DuckLakeWriterFactory writerFactory;
     private final FileFormatDataSourceStats fileFormatDataSourceStats;
@@ -41,6 +43,7 @@ public class DuckLakeMetadataFactory
             DuckLakeConfig config,
             JsonCodec<DuckLakeDataFile> dataFileCodec,
             JsonCodec<DuckLakeMergeFragment> mergeFragmentCodec,
+            JsonCodec<ConnectorViewDefinition> viewDefinitionCodec,
             TrinoFileSystemFactory fileSystemFactory,
             DuckLakeWriterFactory writerFactory,
             FileFormatDataSourceStats fileFormatDataSourceStats,
@@ -50,6 +53,7 @@ public class DuckLakeMetadataFactory
         this.dataPath = config.getDataPath();
         this.dataFileCodec = requireNonNull(dataFileCodec, "dataFileCodec is null");
         this.mergeFragmentCodec = requireNonNull(mergeFragmentCodec, "mergeFragmentCodec is null");
+        this.viewDefinitionCodec = requireNonNull(viewDefinitionCodec, "viewDefinitionCodec is null");
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.writerFactory = requireNonNull(writerFactory, "writerFactory is null");
         this.fileFormatDataSourceStats = requireNonNull(fileFormatDataSourceStats, "fileFormatDataSourceStats is null");
@@ -63,6 +67,7 @@ public class DuckLakeMetadataFactory
                 dataPath,
                 dataFileCodec,
                 mergeFragmentCodec,
+                viewDefinitionCodec,
                 fileSystemFactory,
                 writerFactory,
                 fileFormatDataSourceStats,

@@ -62,6 +62,7 @@ public class JdbcDuckLakeMetastore
     private volatile Boolean dataFileHasPartialMax;
     private volatile Boolean inlinedDataTablesRegistryExists;
     private volatile Boolean nameMappingTableExists;
+    private volatile Boolean viewTableExists;
     private volatile Boolean nameMappingHasIsPartition;
 
     @Inject
@@ -650,6 +651,82 @@ public class JdbcDuckLakeMetastore
     }
 
     /**
+     * The views visible at the snapshot, optionally restricted to one schema given by its Trino
+     * (lowercase) name.
+     */
+    public List<DuckLakeViewEntry> listViews(long snapshotId, Optional<String> schemaName)
+    {
+        if (!viewTableExists()) {
+            // catalogs written before DuckLake had views have no table to read
+            return ImmutableList.of();
+        }
+        try (Handle handle = jdbi.open()) {
+            String sql =
+                    """
+                    SELECT v.view_id, v.schema_id, s.schema_name, v.view_name, v.dialect, v.sql, v.column_aliases
+                    FROM %s v
+                    JOIN %s s ON v.schema_id = s.schema_id
+                    WHERE %s AND %s
+                    """.formatted(table("ducklake_view"), table("ducklake_schema"), visible("v"), visible("s"));
+            if (schemaName.isPresent()) {
+                sql += " AND lower(s.schema_name) = :schemaName";
+            }
+            sql += " ORDER BY s.schema_name, v.view_name";
+            var query = handle.createQuery(sql).bind("snapshot", snapshotId);
+            schemaName.ifPresent(name -> query.bind("schemaName", name.toLowerCase(ENGLISH)));
+            return query.map((rs, _) -> new DuckLakeViewEntry(
+                            rs.getLong("view_id"),
+                            rs.getLong("schema_id"),
+                            rs.getString("schema_name"),
+                            rs.getString("view_name"),
+                            stringOrEmpty(rs, "dialect"),
+                            stringOrEmpty(rs, "sql"),
+                            stringOrEmpty(rs, "column_aliases")))
+                    .list();
+        }
+        catch (JdbiException e) {
+            throw metastoreError(e);
+        }
+    }
+
+    /**
+     * Finds the view matching the given Trino (lowercase) schema and view name.
+     */
+    public Optional<DuckLakeViewEntry> findView(long snapshotId, String schemaName, String viewName)
+    {
+        return listViews(snapshotId, Optional.of(schemaName)).stream()
+                .filter(view -> view.viewName().equalsIgnoreCase(viewName))
+                .findFirst();
+    }
+
+    public boolean viewsSupported()
+    {
+        return viewTableExists();
+    }
+
+    /**
+     * The value of one tag of an object, which is how DuckLake records a comment and anything else
+     * an engine wants to keep beside a schema, table or view.
+     */
+    public Optional<String> tag(long snapshotId, long objectId, String key)
+    {
+        try (Handle handle = jdbi.open()) {
+            return handle.createQuery(
+                            """
+                            SELECT value FROM %s
+                            WHERE object_id = :objectId AND key = :key AND %s""".formatted(table("ducklake_tag"), VISIBLE))
+                    .bind("snapshot", snapshotId)
+                    .bind("objectId", objectId)
+                    .bind("key", key)
+                    .mapTo(String.class)
+                    .findFirst();
+        }
+        catch (JdbiException e) {
+            throw metastoreError(e);
+        }
+    }
+
+    /**
      * The comments recorded for a table and for its columns. DuckLake keeps them as tags keyed by
      * {@code comment}, versioned by snapshot like every other row.
      */
@@ -789,6 +866,16 @@ public class JdbcDuckLakeMetastore
             inlinedDataTablesRegistryExists = registryExists;
         }
         return registryExists;
+    }
+
+    private boolean viewTableExists()
+    {
+        Boolean tableExists = viewTableExists;
+        if (tableExists == null) {
+            tableExists = tableExists("ducklake_view");
+            viewTableExists = tableExists;
+        }
+        return tableExists;
     }
 
     private boolean nameMappingTableExists()
