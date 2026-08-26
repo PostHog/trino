@@ -93,6 +93,11 @@ public class DuckLakeSplitManager
             Constraint constraint)
     {
         DuckLakeTableHandle handle = (DuckLakeTableHandle) table;
+        if (handle.rowCount().isPresent()) {
+            // The count was read from the catalog when the aggregation was pushed down, so the
+            // scan has no file to read and produces the single row holding it.
+            return new FixedSplitSource(new DuckLakeRowCountSplit(handle.rowCount().orElseThrow()));
+        }
 
         TupleDomain<DuckLakeColumnHandle> effectivePredicate = handle.enforcedConstraint()
                 .intersect(handle.unenforcedConstraint())

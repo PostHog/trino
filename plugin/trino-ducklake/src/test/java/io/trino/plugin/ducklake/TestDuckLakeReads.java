@@ -683,18 +683,20 @@ final class TestDuckLakeReads
     @Test
     void testByteRangeSplitsProduceMoreSplits()
     {
-        // the small target split size really does turn the single file into many splits
+        // the small target split size really does turn the single file into many splits. The probe
+        // sums a column rather than counting rows, because a count is answered from the catalog
+        // without splitting the file at all.
         AtomicInteger singleSplitDrivers = new AtomicInteger();
         assertQueryStats(
                 withMaxSplitSize(WHOLE_FILE_SPLIT_SIZE),
-                "SELECT count(*) FROM row_groups",
+                "SELECT sum(id) FROM row_groups",
                 stats -> singleSplitDrivers.set(stats.getTotalDrivers()),
-                results -> assertThat(results.getOnlyValue()).isEqualTo(50000L));
+                results -> assertThat(results.getOnlyValue()).isEqualTo(1249975000L));
         assertQueryStats(
                 withMaxSplitSize(TINY_SPLIT_SIZE),
-                "SELECT count(*) FROM row_groups",
+                "SELECT sum(id) FROM row_groups",
                 stats -> assertThat(stats.getTotalDrivers()).isGreaterThan(singleSplitDrivers.get()),
-                results -> assertThat(results.getOnlyValue()).isEqualTo(50000L));
+                results -> assertThat(results.getOnlyValue()).isEqualTo(1249975000L));
     }
 
     @Test

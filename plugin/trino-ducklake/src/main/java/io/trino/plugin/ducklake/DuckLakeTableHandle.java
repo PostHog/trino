@@ -18,8 +18,15 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.predicate.TupleDomain;
 
+import java.util.OptionalLong;
+
 import static java.util.Objects.requireNonNull;
 
+/**
+ * @param rowCount the number of rows of the table in the snapshot, present once a {@code count(*)}
+ *         over the table has been pushed into the catalog. The scan then reads no file and produces a
+ *         single row holding this count under {@link DuckLakeColumnHandle#ROW_COUNT_COLUMN}.
+ */
 public record DuckLakeTableHandle(
         String schemaName,
         String tableName,
@@ -27,7 +34,8 @@ public record DuckLakeTableHandle(
         long snapshotId,
         String tableLocation,
         TupleDomain<DuckLakeColumnHandle> enforcedConstraint,
-        TupleDomain<DuckLakeColumnHandle> unenforcedConstraint)
+        TupleDomain<DuckLakeColumnHandle> unenforcedConstraint,
+        OptionalLong rowCount)
         implements ConnectorTableHandle
 {
     public DuckLakeTableHandle
@@ -37,6 +45,20 @@ public record DuckLakeTableHandle(
         requireNonNull(tableLocation, "tableLocation is null");
         requireNonNull(enforcedConstraint, "enforcedConstraint is null");
         requireNonNull(unenforcedConstraint, "unenforcedConstraint is null");
+        requireNonNull(rowCount, "rowCount is null");
+    }
+
+    public DuckLakeTableHandle withRowCount(long rowCount)
+    {
+        return new DuckLakeTableHandle(
+                schemaName,
+                tableName,
+                tableId,
+                snapshotId,
+                tableLocation,
+                enforcedConstraint,
+                unenforcedConstraint,
+                OptionalLong.of(rowCount));
     }
 
     @JsonIgnore
@@ -48,6 +70,9 @@ public record DuckLakeTableHandle(
     @Override
     public String toString()
     {
+        if (rowCount.isPresent()) {
+            return schemaName + "." + tableName + "@" + snapshotId + " rows=" + rowCount.orElseThrow();
+        }
         return schemaName + "." + tableName + "@" + snapshotId;
     }
 }

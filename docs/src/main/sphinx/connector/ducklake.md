@@ -181,6 +181,13 @@ value with the `ducklake.max-split-size` catalog property or the
 `max_split_size` [catalog session property](/sql/set-session) to increase the
 parallelism of queries over few, large files.
 
+`SELECT count(*)` over a whole table is answered from the record counts in the
+catalog, without listing the data files of the table or reading any of them. A
+count that the catalog cannot answer on its own, such as one restricted by a
+predicate on a partition column, still lists the files but reads none of them,
+because a scan that reads no column is served from the record count of each
+file.
+
 The connector also derives table statistics (row count, null fractions, and
 value ranges) from the catalog for use by the [cost-based
 optimizer](/optimizer/cost-based-optimizations).

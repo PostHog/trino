@@ -35,6 +35,13 @@ public record DuckLakeColumnHandle(
         Optional<String> initialDefault)
         implements ColumnHandle
 {
+    /**
+     * The column a scan produces once a {@code count(*)} over the table has been pushed into the
+     * catalog: a single row holding the row count. It is the only column such a scan reads, so it
+     * never appears beside a column of the table; the negative id keeps it distinguishable anyway.
+     */
+    public static final DuckLakeColumnHandle ROW_COUNT_COLUMN = new DuckLakeColumnHandle(-1, "$row_count", "BIGINT", BIGINT, false, Optional.empty());
+
     public DuckLakeColumnHandle
     {
         requireNonNull(name, "name is null");

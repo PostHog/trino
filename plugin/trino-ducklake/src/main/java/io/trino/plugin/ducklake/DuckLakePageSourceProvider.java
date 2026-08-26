@@ -32,6 +32,7 @@ import io.trino.plugin.hive.HiveColumnHandle;
 import io.trino.plugin.hive.TransformConnectorPageSource;
 import io.trino.plugin.hive.parquet.ParquetPageSourceFactory;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
+import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
@@ -74,10 +75,12 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.IntStream;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOfLongArray;
 import static io.trino.memory.context.AggregatedMemoryContext.newAggregatedMemoryContext;
+import static io.trino.plugin.ducklake.DuckLakeColumnHandle.ROW_COUNT_COLUMN;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_BAD_DATA;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_FILESYSTEM_ERROR;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
@@ -90,6 +93,7 @@ import static io.trino.plugin.hive.parquet.ParquetPageSourceFactory.PARQUET_ROW_
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
+import static java.lang.Math.min;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
@@ -103,6 +107,11 @@ public class DuckLakePageSourceProvider
      */
     private static final String MISSING_COLUMN_NAME_PREFIX = "$ducklake_missing_column$";
     private static final int LONG_OPEN_HASH_SET_INSTANCE_SIZE = instanceSize(LongOpenHashSet.class);
+    /**
+     * Positions of a page produced for a scan that reads row counts only. A page of no columns
+     * holds no data, so this only bounds the position count to an {@code int}.
+     */
+    private static final long MAX_ROW_COUNT_PAGE_POSITIONS = 1024 * 1024;
 
     private final TrinoFileSystemFactory fileSystemFactory;
     private final FileFormatDataSourceStats fileFormatDataSourceStats;
@@ -130,6 +139,9 @@ public class DuckLakePageSourceProvider
             DynamicFilter dynamicFilter,
             MemoryContext memoryContext)
     {
+        if (split instanceof DuckLakeRowCountSplit rowCountSplit) {
+            return rowCountPageSource(rowCountSplit, columns);
+        }
         DuckLakeSplit duckLakeSplit = (DuckLakeSplit) split;
         DuckLakeTableHandle tableHandle = (DuckLakeTableHandle) table;
         List<DuckLakeColumnHandle> duckLakeColumns = columns.stream()
@@ -146,6 +158,9 @@ public class DuckLakePageSourceProvider
                 .intersect(dynamicFilter.getCurrentPredicate().transformKeys(DuckLakeColumnHandle.class::cast));
         if (effectivePredicate.isNone()) {
             return new EmptyPageSource();
+        }
+        if (isRowCountOnly(duckLakeColumns, effectivePredicate, duckLakeSplit)) {
+            return new DuckLakeCountPageSource(rowCountPages(duckLakeSplit.recordCount()));
         }
         Optional<DuckLakeNameMapping> nameMapping = duckLakeSplit.nameMapping();
         TupleDomain<HiveColumnHandle> parquetPredicate = toParquetPredicate(effectivePredicate.simplify(DOMAIN_COMPACTION_THRESHOLD), nameMapping);
@@ -192,6 +207,54 @@ public class DuckLakePageSourceProvider
 
         ConnectorPageSource pageSource = createParquetPageSource(inputFile, duckLakeSplit, hiveColumns, parquetPredicate, options, memoryContext);
         return transformWideIntegerColumns(duckLakeColumns, pageSource);
+    }
+
+    /**
+     * The single row holding the row count of a table whose {@code count(*)} was pushed into the
+     * catalog. Only {@link DuckLakeColumnHandle#ROW_COUNT_COLUMN} can be read from such a scan.
+     */
+    private static ConnectorPageSource rowCountPageSource(DuckLakeRowCountSplit split, List<ColumnHandle> columns)
+    {
+        checkArgument(columns.equals(ImmutableList.of(ROW_COUNT_COLUMN)), "Unexpected columns for a row count split: %s", columns);
+        BlockBuilder rowCount = BIGINT.createFixedSizeBlockBuilder(1);
+        BIGINT.writeLong(rowCount, split.rowCount());
+        return new DuckLakeCountPageSource(ImmutableList.of(new Page(1, rowCount.build())));
+    }
+
+    /**
+     * Whether the split can be answered from its record count alone, without opening the data file.
+     * That needs three things to hold:
+     * <ul>
+     * <li>the scan projects no column, so the only thing the engine reads is the number of rows,
+     * as it does for {@code count(*)};
+     * <li>no predicate is left for the reader, so every row of the split is counted. Predicates the
+     * connector enforces are already applied by pruning files in the split manager, and a predicate
+     * it does not enforce is applied by the engine, which would then have to project the column it
+     * reads;
+     * <li>the split covers the whole data file, because only then is its record count the exact
+     * number of visible rows rather than a share of the file apportioned to a byte range.
+     * </ul>
+     */
+    private static boolean isRowCountOnly(List<DuckLakeColumnHandle> columns, TupleDomain<DuckLakeColumnHandle> effectivePredicate, DuckLakeSplit split)
+    {
+        return columns.isEmpty()
+                && effectivePredicate.isAll()
+                && split.start() == 0
+                && split.length() == split.fileSizeBytes();
+    }
+
+    /**
+     * Splits a row count into pages of no columns, which carry only their position count. Such a
+     * page holds no data, so the only reason to produce more than one is that a page counts its
+     * positions in an {@code int}.
+     */
+    private static List<Page> rowCountPages(long rowCount)
+    {
+        ImmutableList.Builder<Page> pages = ImmutableList.builder();
+        for (long remaining = rowCount; remaining > 0; remaining -= MAX_ROW_COUNT_PAGE_POSITIONS) {
+            pages.add(new Page(toIntExact(min(remaining, MAX_ROW_COUNT_PAGE_POSITIONS))));
+        }
+        return pages.build();
     }
 
     private ConnectorPageSource createParquetPageSource(

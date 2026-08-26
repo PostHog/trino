@@ -119,7 +119,7 @@ public class JdbcDuckLakeMetastore
                         s.path AS schema_path, s.path_is_relative AS schema_path_is_relative
                     FROM %s t
                     JOIN %s s ON t.schema_id = s.schema_id
-                    WHERE t.%s AND s.%s
+                    WHERE %s AND %s
                     """.formatted(table("ducklake_table"), table("ducklake_schema"), visible("t"), visible("s"));
             if (schemaName.isPresent()) {
                 sql += " AND lower(s.schema_name) = :schemaName";
@@ -149,7 +149,7 @@ public class JdbcDuckLakeMetastore
                                 s.path AS schema_path, s.path_is_relative AS schema_path_is_relative
                             FROM %s t
                             JOIN %s s ON t.schema_id = s.schema_id
-                            WHERE t.%s AND s.%s AND lower(s.schema_name) = :schemaName AND lower(t.table_name) = :tableName
+                            WHERE %s AND %s AND lower(s.schema_name) = :schemaName AND lower(t.table_name) = :tableName
                             """.formatted(table("ducklake_table"), table("ducklake_schema"), visible("t"), visible("s")))
                     .bind("snapshot", snapshotId)
                     .bind("schemaName", schemaName.toLowerCase(ENGLISH))
@@ -211,7 +211,7 @@ public class JdbcDuckLakeMetastore
                     FROM %s c
                     JOIN %s t ON c.table_id = t.table_id
                     JOIN %s s ON t.schema_id = s.schema_id
-                    WHERE c.%s AND t.%s AND s.%s
+                    WHERE %s AND %s AND %s
                     """.formatted(table("ducklake_column"), table("ducklake_table"), table("ducklake_schema"), visible("c"), visible("t"), visible("s"));
             if (schemaName.isPresent()) {
                 sql += " AND lower(s.schema_name) = :schemaName";
@@ -270,7 +270,7 @@ public class JdbcDuckLakeMetastore
                                 v.partition_key_index, v.partition_value
                             FROM %s f
                             LEFT JOIN %s v ON f.data_file_id = v.data_file_id AND f.table_id = v.table_id
-                            WHERE f.table_id = :tableId AND f.%s
+                            WHERE f.table_id = :tableId AND %s
                             ORDER BY f.data_file_id, v.partition_key_index""".formatted(
                                     partialMaxColumn,
                                     table("ducklake_data_file"),
@@ -293,6 +293,81 @@ public class JdbcDuckLakeMetastore
             return filesById.values().stream()
                     .map(file -> withPartitionValues(file, partitionValuesByFileId.getOrDefault(file.dataFileId(), Map.of())))
                     .collect(toImmutableList());
+        }
+        catch (JdbiException e) {
+            throw metastoreError(e);
+        }
+    }
+
+    /**
+     * Returns the number of rows of a table in a snapshot, computed from the catalog alone. The
+     * result also says whether that number is exactly what a scan of the table would return, which
+     * is what lets a {@code count(*)} be answered from it. It is not exact when the table holds a
+     * file the connector refuses to read, or a data file only partly visible in the snapshot; both
+     * are conditions the split manager checks per file, and reporting them here keeps a
+     * {@code count(*)} failing wherever a scan would fail.
+     */
+    public DuckLakeRowCount rowCount(long snapshotId, long tableId)
+    {
+        // Files the split manager rejects are counted rather than located, because the count only
+        // decides whether to answer from the catalog at all; the scan that runs instead reports
+        // which file it was.
+        //
+        // 1 = 0 rather than the false literal, which not every catalog database spells the same way
+        String partiallyVisibleCondition = "1 = 0";
+        if (dataFileHasPartialMax()) {
+            partiallyVisibleCondition = "(f.partial_max IS NOT NULL AND f.partial_max > :snapshot)";
+        }
+        try (Handle handle = jdbi.open()) {
+            DuckLakeRowCount dataFiles = handle.createQuery(
+                            """
+                            SELECT
+                                coalesce(sum(f.record_count), 0) AS record_count,
+                                coalesce(sum(CASE WHEN lower(f.file_format) <> 'parquet'
+                                        OR f.encryption_key IS NOT NULL
+                                        OR %s THEN 1 ELSE 0 END), 0) AS unreadable_count
+                            FROM %s f
+                            WHERE f.table_id = :tableId AND %s""".formatted(
+                                    partiallyVisibleCondition,
+                                    table("ducklake_data_file"),
+                                    visible("f")))
+                    .bind("snapshot", snapshotId)
+                    .bind("tableId", tableId)
+                    .map((rs, _) -> new DuckLakeRowCount(rs.getLong("record_count"), rs.getLong("unreadable_count") == 0))
+                    .one();
+
+            // The rows to subtract come from the delete files joined to their data file, so that one
+            // left behind for a data file that is no longer visible does not remove rows that were
+            // never counted. The files to reject are looked for without that join, because the
+            // split manager checks every visible delete file whether or not it applies to one.
+            // Several visible delete files for one data file is such a rejection, and the count
+            // could not be trusted there either because they may delete the same row twice.
+            DuckLakeRowCount deleteFiles = handle.createQuery(
+                            """
+                            SELECT
+                                (SELECT coalesce(sum(j.delete_count), 0)
+                                    FROM %s j
+                                    JOIN %s f ON f.table_id = j.table_id AND f.data_file_id = j.data_file_id
+                                    WHERE j.table_id = :tableId AND %s AND %s) AS delete_count,
+                                coalesce(sum(CASE WHEN lower(d.format) <> 'parquet'
+                                        OR d.encryption_key IS NOT NULL THEN 1 ELSE 0 END), 0)
+                                    + (count(*) - count(DISTINCT d.data_file_id)) AS unreadable_count
+                            FROM %s d
+                            WHERE d.table_id = :tableId AND %s""".formatted(
+                                    table("ducklake_delete_file"),
+                                    table("ducklake_data_file"),
+                                    visible("j"),
+                                    visible("f"),
+                                    table("ducklake_delete_file"),
+                                    visible("d")))
+                    .bind("snapshot", snapshotId)
+                    .bind("tableId", tableId)
+                    .map((rs, _) -> new DuckLakeRowCount(rs.getLong("delete_count"), rs.getLong("unreadable_count") == 0))
+                    .one();
+
+            return new DuckLakeRowCount(
+                    dataFiles.rowCount() - deleteFiles.rowCount(),
+                    dataFiles.exact() && deleteFiles.exact());
         }
         catch (JdbiException e) {
             throw metastoreError(e);
@@ -405,7 +480,7 @@ public class JdbcDuckLakeMetastore
                             SELECT i.partition_id, c.partition_key_index, c.column_id, c.transform
                             FROM %s i
                             JOIN %s c ON i.partition_id = c.partition_id AND i.table_id = c.table_id
-                            WHERE i.table_id = :tableId AND i.%s
+                            WHERE i.table_id = :tableId AND %s
                             ORDER BY c.partition_key_index""".formatted(table("ducklake_partition_info"), table("ducklake_partition_column"), visible("i")))
                     .bind("snapshot", snapshotId)
                     .bind("tableId", tableId)
@@ -445,7 +520,7 @@ public class JdbcDuckLakeMetastore
                             """
                             SELECT count(*)
                             FROM %s f
-                            WHERE f.table_id = :tableId AND f.%s
+                            WHERE f.table_id = :tableId AND %s
                                 AND (f.partition_id IS NULL OR f.partition_id <> :partitionId)""".formatted(table("ducklake_data_file"), visible("f")))
                     .bind("snapshot", snapshotId)
                     .bind("tableId", tableId)
@@ -715,7 +790,7 @@ public class JdbcDuckLakeMetastore
 
     private static String visible(String alias)
     {
-        return "begin_snapshot <= :snapshot AND (" + alias + ".end_snapshot IS NULL OR " + alias + ".end_snapshot > :snapshot)";
+        return "%s.begin_snapshot <= :snapshot AND (%s.end_snapshot IS NULL OR %s.end_snapshot > :snapshot)".formatted(alias, alias, alias);
     }
 
     private static String stringOrEmpty(ResultSet resultSet, String columnName)

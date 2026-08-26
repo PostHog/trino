@@ -18,10 +18,9 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.trino.plugin.ducklake.metastore.DuckLakeColumnEntry;
-import io.trino.plugin.ducklake.metastore.DuckLakeDataFileEntry;
-import io.trino.plugin.ducklake.metastore.DuckLakeDeleteFileEntry;
 import io.trino.plugin.ducklake.metastore.DuckLakePartitionColumn;
 import io.trino.plugin.ducklake.metastore.DuckLakePartitionInfo;
+import io.trino.plugin.ducklake.metastore.DuckLakeRowCount;
 import io.trino.plugin.ducklake.metastore.DuckLakeSchemaEntry;
 import io.trino.plugin.ducklake.metastore.DuckLakeTableColumnStats;
 import io.trino.plugin.ducklake.metastore.DuckLakeTableColumnsEntry;
@@ -31,6 +30,9 @@ import io.trino.plugin.ducklake.util.DuckLakeTypes;
 import io.trino.plugin.ducklake.util.PathResolver;
 import io.trino.plugin.ducklake.util.StatsValueParser;
 import io.trino.spi.TrinoException;
+import io.trino.spi.connector.AggregateFunction;
+import io.trino.spi.connector.AggregationApplicationResult;
+import io.trino.spi.connector.Assignment;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorMetadata;
@@ -42,6 +44,7 @@ import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.RelationColumnsMetadata;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.statistics.ColumnStatistics;
@@ -58,13 +61,17 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.UnaryOperator;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.collect.Multimaps.index;
+import static io.trino.plugin.ducklake.DuckLakeColumnHandle.ROW_COUNT_COLUMN;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_FEATURE;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_FORMAT_VERSION;
@@ -85,6 +92,7 @@ public class DuckLakeMetadata
 {
     private final JdbcDuckLakeMetastore metastore;
     private final String dataPath;
+    private final Map<Long, DuckLakeRowCount> rowCounts = new ConcurrentHashMap<>();
 
     @GuardedBy("this")
     private Long snapshotId;
@@ -150,7 +158,8 @@ public class DuckLakeMetadata
                 snapshot,
                 PathResolver.tableLocation(dataPath, tableEntry),
                 TupleDomain.all(),
-                TupleDomain.all());
+                TupleDomain.all(),
+                OptionalLong.empty());
     }
 
     @Override
@@ -217,7 +226,8 @@ public class DuckLakeMetadata
     {
         DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
         TupleDomain<DuckLakeColumnHandle> predicate = constraint.getSummary().transformKeys(DuckLakeColumnHandle.class::cast);
-        if (predicate.isAll()) {
+        if (predicate.isAll() || handle.rowCount().isPresent()) {
+            // A scan reduced to the row count of the table has no column left to filter on
             return Optional.empty();
         }
 
@@ -253,7 +263,8 @@ public class DuckLakeMetadata
                 // Do not simplify the enforced constraint, the connector guarantees it is applied as is.
                 // The unenforced constraint is still checked by the engine.
                 handle.enforcedConstraint().intersect(newEnforcedConstraint),
-                handle.unenforcedConstraint().intersect(newUnenforcedConstraint));
+                handle.unenforcedConstraint().intersect(newUnenforcedConstraint),
+                handle.rowCount());
 
         if (handle.equals(newHandle)) {
             return Optional.empty();
@@ -304,18 +315,80 @@ public class DuckLakeMetadata
                 || type instanceof VarcharType varcharType && varcharType.isUnbounded();
     }
 
+    /**
+     * Answers a global {@code count(*)} from the catalog, which counts the rows of the table
+     * without listing its files, let alone reading them.
+     * <p>
+     * Only a {@code count(*)} over the whole table is pushed down. Grouping needs the grouped
+     * values to be read, and any other aggregate function needs the aggregated column. A predicate
+     * the connector enforces would have to be applied to the counted files, which the catalog
+     * query does not do; such a scan keeps listing its files, and reads none of them because a
+     * split that projects no column is answered from its record count.
+     */
+    @Override
+    public Optional<AggregationApplicationResult<ConnectorTableHandle>> applyAggregation(
+            ConnectorSession session,
+            ConnectorTableHandle tableHandle,
+            List<AggregateFunction> aggregates,
+            Map<String, ColumnHandle> assignments,
+            List<List<ColumnHandle>> groupingSets)
+    {
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        if (handle.rowCount().isPresent()) {
+            return Optional.empty();
+        }
+        if (!handle.enforcedConstraint().isAll() || !handle.unenforcedConstraint().isAll()) {
+            return Optional.empty();
+        }
+        if (groupingSets.size() != 1 || !getOnlyElement(groupingSets).isEmpty()) {
+            return Optional.empty();
+        }
+        if (aggregates.size() != 1 || !isCountStar(getOnlyElement(aggregates))) {
+            return Optional.empty();
+        }
+        DuckLakeRowCount rowCount = rowCount(handle);
+        if (!rowCount.exact()) {
+            return Optional.empty();
+        }
+        return Optional.of(new AggregationApplicationResult<>(
+                handle.withRowCount(rowCount.rowCount()),
+                ImmutableList.of(new Variable(ROW_COUNT_COLUMN.name(), BIGINT)),
+                ImmutableList.of(new Assignment(ROW_COUNT_COLUMN.name(), ROW_COUNT_COLUMN, BIGINT)),
+                ImmutableMap.of(),
+                false));
+    }
+
+    private static boolean isCountStar(AggregateFunction aggregate)
+    {
+        return aggregate.getFunctionName().equals("count")
+                && aggregate.getArguments().isEmpty()
+                && aggregate.getOutputType().equals(BIGINT)
+                && !aggregate.isDistinct()
+                && aggregate.getFilter().isEmpty()
+                && aggregate.getSortItems().isEmpty();
+    }
+
+    /**
+     * The row count of a table in this transaction's snapshot. The count is read once per table
+     * because the snapshot is fixed for the transaction, and because the optimizer may ask for the
+     * same aggregation pushdown several times while it explores a plan.
+     */
+    private DuckLakeRowCount rowCount(DuckLakeTableHandle handle)
+    {
+        return rowCounts.computeIfAbsent(handle.tableId(), tableId -> metastore.rowCount(handle.snapshotId(), tableId));
+    }
+
     @Override
     public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
-        long rowCount = metastore.dataFiles(handle.snapshotId(), handle.tableId()).stream()
-                .mapToLong(DuckLakeDataFileEntry::recordCount)
-                .sum();
-        rowCount -= metastore.deleteFiles(handle.snapshotId(), handle.tableId()).stream()
-                .mapToLong(DuckLakeDeleteFileEntry::deleteCount)
-                .sum();
+        if (handle.rowCount().isPresent()) {
+            return TableStatistics.builder()
+                    .setRowCount(Estimate.of(1))
+                    .build();
+        }
         TableStatistics.Builder tableStatistics = TableStatistics.builder()
-                .setRowCount(Estimate.of(rowCount));
+                .setRowCount(Estimate.of(rowCount(handle).rowCount()));
 
         Map<Long, DuckLakeTableColumnStats> columnStats = metastore.tableColumnStatistics(handle.tableId()).stream()
                 .collect(toImmutableMap(DuckLakeTableColumnStats::columnId, stats -> stats));
