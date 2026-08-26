@@ -51,7 +51,7 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -89,7 +89,7 @@ jobs:
           - { java-version: 27-ea, cache: 'restore', cleanup-node: true }
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # checkout all commits, as the build result depends on `git describe` equivalent
           ref: |
@@ -127,7 +127,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # checkout all commits, as the build result depends on `git describe` equivalent
           ref: |
@@ -170,7 +170,7 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # checkout all commits to be able to determine merge base
       - name: Block illegal commits
@@ -203,7 +203,7 @@ jobs:
       fail-fast: ${{ github.event_name == 'merge_group' }}
       matrix: ${{ fromJson(needs.check-commits-dispatcher.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: matrix.commit != ''
         with:
           fetch-depth: 0 # checkout all commits to be able to determine merge base
@@ -223,7 +223,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # checkout all commits to be able to determine merge base for GIB
           ref: |
@@ -258,7 +258,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # checkout tags so version in Manifest is set properly
           ref: |
@@ -305,7 +305,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # checkout all commits to be able to determine merge base for GIB
           ref: |
@@ -401,7 +401,7 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # checkout all commits to be able to determine merge base for GIB
           ref: |
@@ -528,7 +528,7 @@ jobs:
       matrix: ${{ fromJson(needs.build-test-matrix.outputs.matrix) }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # checkout all commits to be able to determine merge base for GIB
           ref: |
@@ -855,7 +855,7 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # checkout all commits, as the build result depends on `git describe` equivalent
           ref: |
@@ -889,7 +889,7 @@ jobs:
           version=$(../../mvnw -f ../../pom.xml --quiet help:evaluate -Dexpression=project.version -DforceStdout --raw-streams)
           docker save "product-tests-trino:${version}-amd64" | gzip > ../../product-tests-trino-image.tar.gz
       - name: Product tests artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: product tests and server tarball
           path: |
@@ -898,7 +898,7 @@ jobs:
             product-tests-trino-image.tar.gz
           retention-days: 1
       - name: Product tests Maven artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: product tests m2 io.trino
           path: ~/.m2/repository/io/trino
@@ -937,7 +937,7 @@ jobs:
     timeout-minutes: 130
     needs: build-pt
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # checkout all commits, as the build result depends on `git describe` equivalent
           ref: |
@@ -949,11 +949,11 @@ jobs:
         with:
           cache: 'false'
       - name: Product tests artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: product tests and server tarball
       - name: Product tests Maven artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: product tests m2 io.trino
           path: ~/.m2/repository/io/trino
@@ -1157,7 +1157,7 @@ jobs:
           fi
       - name: Upload JUnit suite logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: pt (${{ matrix.bucket }})
           path: logs/
