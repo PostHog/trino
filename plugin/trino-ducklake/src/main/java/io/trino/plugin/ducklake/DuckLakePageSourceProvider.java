@@ -28,6 +28,7 @@ import io.trino.parquet.ParquetReaderOptions;
 import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.ducklake.metastore.DuckLakeNameMapping;
 import io.trino.plugin.ducklake.metastore.DuckLakeNameMappingEntry;
+import io.trino.plugin.ducklake.util.DuckLakeFieldIds;
 import io.trino.plugin.ducklake.util.DuckLakeTypes;
 import io.trino.plugin.hive.HiveColumnHandle;
 import io.trino.plugin.hive.TransformConnectorPageSource;
@@ -63,6 +64,7 @@ import io.trino.spi.type.UuidType;
 import it.unimi.dsi.fastutil.Hash;
 import it.unimi.dsi.fastutil.HashCommon;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
+import org.apache.parquet.schema.MessageType;
 import org.joda.time.DateTimeZone;
 
 import java.io.IOException;
@@ -70,8 +72,10 @@ import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -204,7 +208,7 @@ public class DuckLakePageSourceProvider
         if (deleteFile.isPresent()) {
             AggregatedMemoryContext splitMemoryContext = newAggregatedMemoryContext(memoryContext);
             LocalMemoryContext dataFileMemoryContext = splitMemoryContext.newLocalMemoryContext(DuckLakePageSourceProvider.class.getSimpleName());
-            ConnectorPageSource pageSource = createParquetPageSource(inputFile, duckLakeSplit, hiveColumns, parquetPredicate, options, dataFileMemoryContext::setBytes);
+            ConnectorPageSource pageSource = createParquetPageSource(inputFile, duckLakeSplit, dataColumns, hiveColumns, parquetPredicate, options, dataFileMemoryContext::setBytes);
             LocalMemoryContext deletedPositionsMemoryContext = splitMemoryContext.newLocalMemoryContext("deletedPositions");
             // Every split of the data file loads the whole delete file, so a file split into
             // several byte ranges re-reads its delete file once per split. The positions are
@@ -218,7 +222,7 @@ public class DuckLakePageSourceProvider
                     splitMemoryContext);
         }
 
-        ConnectorPageSource pageSource = createParquetPageSource(inputFile, duckLakeSplit, hiveColumns, parquetPredicate, options, memoryContext);
+        ConnectorPageSource pageSource = createParquetPageSource(inputFile, duckLakeSplit, dataColumns, hiveColumns, parquetPredicate, options, memoryContext);
         return projectRequestedColumns(requestedColumns, rowIndexChannel, hasRowIndexChannel, duckLakeSplit.dataFileId(), pageSource);
     }
 
@@ -360,11 +364,18 @@ public class DuckLakePageSourceProvider
     private ConnectorPageSource createParquetPageSource(
             TrinoInputFile inputFile,
             DuckLakeSplit split,
+            List<DuckLakeColumnHandle> dataColumns,
             List<HiveColumnHandle> hiveColumns,
             TupleDomain<HiveColumnHandle> parquetPredicate,
             ParquetReaderOptions options,
             MemoryContext memoryContext)
     {
+        // A file resolved through a name mapping carries no identifiers of its own, and one is
+        // only reached here when the catalog has no mapping for it, so its identifiers are what
+        // name its columns.
+        ParquetPageSourceFactory.ColumnsForFile columnsForFile = split.nameMapping().isPresent()
+                ? (_, columns) -> columns
+                : (fileSchema, columns) -> columnsByFieldId(fileSchema, dataColumns, columns);
         // the reader only returns the row groups starting inside the byte range of the split, so
         // the splits of a file read every row group of it exactly once
         return ParquetPageSourceFactory.createPageSource(
@@ -373,7 +384,7 @@ public class DuckLakePageSourceProvider
                 split.length(),
                 hiveColumns,
                 ImmutableList.of(parquetPredicate),
-                true, // resolve columns by name
+                true, // resolve columns by name, after the identifiers have chosen which name
                 DateTimeZone.UTC,
                 fileFormatDataSourceStats,
                 withCatalogFooterSize(options, split.footerSize(), split.fileSizeBytes()),
@@ -381,7 +392,39 @@ public class DuckLakePageSourceProvider
                 Optional.empty(),
                 DOMAIN_COMPACTION_THRESHOLD,
                 OptionalLong.of(split.fileSizeBytes()),
-                memoryContext);
+                memoryContext,
+                columnsForFile);
+    }
+
+    /**
+     * Renames the columns to read to the names this file gives them, matching the column
+     * identifier of each against the Parquet field ids the file records.
+     * <p>
+     * A column the file does not record is read as NULL, under a name no column of the file
+     * carries. Letting it keep the name the catalog gives it would not do: renaming a column frees
+     * its old name for a new one, and the file still stores the renamed column under that name, so
+     * the new column would be handed the old column's values. The row index column the reader
+     * appends carries no identifier and is left alone.
+     */
+    private static List<HiveColumnHandle> columnsByFieldId(MessageType fileSchema, List<DuckLakeColumnHandle> dataColumns, List<HiveColumnHandle> columns)
+    {
+        Map<Integer, String> namesByFieldId = DuckLakeFieldIds.columnNamesByFieldId(fileSchema);
+        if (namesByFieldId.isEmpty()) {
+            return columns;
+        }
+        Set<String> fileColumnNames = DuckLakeFieldIds.columnNames(fileSchema);
+        ImmutableList.Builder<HiveColumnHandle> resolved = ImmutableList.builderWithExpectedSize(columns.size());
+        for (int i = 0; i < columns.size(); i++) {
+            if (i >= dataColumns.size()) {
+                resolved.add(columns.get(i));
+                continue;
+            }
+            DuckLakeColumnHandle column = dataColumns.get(i);
+            String name = DuckLakeFieldIds.columnName(namesByFieldId, column.columnId())
+                    .orElseGet(() -> DuckLakeFieldIds.absentColumnName(fileColumnNames, column.columnId()));
+            resolved.add(column.toHiveColumnHandle(name));
+        }
+        return resolved.build();
     }
 
     /**

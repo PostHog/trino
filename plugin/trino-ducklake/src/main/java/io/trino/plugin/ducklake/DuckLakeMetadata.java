@@ -560,14 +560,10 @@ public class DuckLakeMetadata
         DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
         DuckLakeColumnHandle column = (DuckLakeColumnHandle) columnHandle;
         commit(commit -> {
-            // Data files store the name the column had when they were written, and this connector
-            // resolves a file's columns by name rather than by the DuckLake identifier they also
-            // carry. Renaming a column of a table that already holds data would therefore make the
-            // rows written so far read as NULL, so it is refused until the reader matches on the
-            // identifier.
-            if (!commit.visibleDataFiles(handle.tableId()).isEmpty()) {
-                throw new TrinoException(NOT_SUPPORTED, "Renaming a column of a table that already contains data is not supported");
-            }
+            // Data files keep the name the column had when they were written, and are not
+            // rewritten. They are read by the column identifier they also carry, which a rename
+            // does not change, so the rows written so far keep reading correctly under the new
+            // name.
             DuckLakeColumnRow current = currentColumn(commit, handle, column.columnId());
             commit.endColumn(handle.tableId(), column.columnId());
             commit.insertColumn(handle.tableId(), current.withName(target));

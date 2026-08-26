@@ -463,18 +463,73 @@ final class TestDuckLakeWrites
     }
 
     @Test
-    void testRenamingAColumnOfATableWithDataIsRejected()
+    void testRenamedColumnStillReadsRowsWrittenUnderTheOldName()
+            throws SQLException
     {
         String table = "renamed_" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + table + " (a INTEGER, b VARCHAR)");
         try {
-            // a rename before any row is written cannot lose anything
+            assertUpdate("INSERT INTO " + table + " VALUES (1, 'before')", 1);
             assertUpdate("ALTER TABLE " + table + " RENAME COLUMN b TO b2");
-            assertUpdate("INSERT INTO " + table + " VALUES (1, 'x')", 1);
-            assertQuery("SELECT b2 FROM " + table, "VALUES 'x'");
 
-            assertThatThrownBy(() -> assertUpdate("ALTER TABLE " + table + " RENAME COLUMN b2 TO b3"))
-                    .hasMessageContaining("Renaming a column of a table that already contains data is not supported");
+            // the file still stores the column as 'b', and is read by its identifier
+            assertQuery("SELECT b2 FROM " + table, "VALUES 'before'");
+
+            // rows written after the rename sit in a file that stores it as 'b2', so a query
+            // spanning both files reads one column out of two files that disagree on its name
+            assertUpdate("INSERT INTO " + table + " VALUES (2, 'after')", 1);
+            assertQuery("SELECT b2 FROM " + table + " ORDER BY a", "VALUES 'before', 'after'");
+            assertQuery("SELECT a FROM " + table + " WHERE b2 = 'before'", "VALUES 1");
+
+            // and DuckDB, which resolves the same way, agrees
+            assertThat(duckDbRows("SELECT b2 FROM " + table + " ORDER BY a")).isEqualTo(List.of("before", "after"));
+
+            // renaming twice keeps working, and the original file is now two names behind
+            assertUpdate("ALTER TABLE " + table + " RENAME COLUMN b2 TO b3");
+            assertQuery("SELECT b3 FROM " + table + " ORDER BY a", "VALUES 'before', 'after'");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testANewColumnMayTakeTheNameARenamedColumnGaveUp()
+    {
+        String table = "reused_name_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + table + " (a INTEGER, x VARCHAR)");
+        try {
+            assertUpdate("INSERT INTO " + table + " VALUES (1, 'first')", 1);
+            // the file written above stores the column now called x_old under the name x, which
+            // the column added next takes for itself
+            assertUpdate("ALTER TABLE " + table + " RENAME COLUMN x TO x_old");
+            assertUpdate("ALTER TABLE " + table + " ADD COLUMN x VARCHAR");
+            assertUpdate("INSERT INTO " + table + " VALUES (2, 'second', 'brand new')", 1);
+
+            // the first row predates the new column, so it holds nothing for it
+            assertQuery("SELECT a, x_old, x FROM " + table + " ORDER BY a",
+                    "VALUES (1, 'first', NULL), (2, 'second', 'brand new')");
+            assertQuery("SELECT count(*) FROM " + table + " WHERE x IS NULL", "VALUES 1");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testColumnRenamedByDuckDbIsReadByTrino()
+            throws SQLException
+    {
+        String table = "duckdb_renamed_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + table + " (a INTEGER, b VARCHAR)");
+        try {
+            assertUpdate("INSERT INTO " + table + " VALUES (1, 'x')", 1);
+            catalog.executeInDuckDb("ALTER TABLE %s RENAME COLUMN b TO renamed".formatted(table));
+
+            assertQuery(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name = '" + table + "' ORDER BY ordinal_position",
+                    "VALUES 'a', 'renamed'");
+            assertQuery("SELECT renamed FROM " + table, "VALUES 'x'");
         }
         finally {
             assertUpdate("DROP TABLE " + table);
