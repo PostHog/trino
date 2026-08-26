@@ -188,6 +188,11 @@ predicate on a partition column, still lists the files but reads none of them,
 because a scan that reads no column is served from the record count of each
 file.
 
+The connector reads the Parquet footer of a data file in a single request, using
+the footer size recorded in the catalog. Files written with many columns or many
+row groups have footers larger than the length a reader guesses at, and every
+split of such a file would otherwise pay for a second request.
+
 The connector also derives table statistics (row count, null fractions, and
 value ranges) from the catalog for use by the [cost-based
 optimizer](/optimizer/cost-based-optimizations).

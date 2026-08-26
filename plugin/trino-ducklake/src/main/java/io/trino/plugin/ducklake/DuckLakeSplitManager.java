@@ -148,6 +148,7 @@ public class DuckLakeSplitManager
                     .map(entry -> new DuckLakeDeleteFileHandle(
                             PathResolver.resolve(handle.tableLocation(), entry.path(), entry.pathIsRelative()),
                             entry.fileSizeBytes(),
+                            entry.footerSize(),
                             entry.deleteCount()));
             long recordCount = dataFile.recordCount() - deleteFile.map(DuckLakeDeleteFileHandle::deleteCount).orElse(0L);
             String path = PathResolver.resolve(handle.tableLocation(), dataFile.path(), dataFile.pathIsRelative());

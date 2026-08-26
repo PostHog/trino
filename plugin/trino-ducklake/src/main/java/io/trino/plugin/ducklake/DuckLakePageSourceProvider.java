@@ -17,6 +17,7 @@ import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
+import io.airlift.units.DataSize;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
@@ -112,6 +113,11 @@ public class DuckLakePageSourceProvider
      * holds no data, so this only bounds the position count to an {@code int}.
      */
     private static final long MAX_ROW_COUNT_PAGE_POSITIONS = 1024 * 1024;
+    /**
+     * Bytes a Parquet file ends with: the length of the footer preceding them, followed by the
+     * file magic. The catalog records the length of the footer without them.
+     */
+    private static final int PARQUET_POST_SCRIPT_SIZE = Integer.BYTES + 4;
 
     private final TrinoFileSystemFactory fileSystemFactory;
     private final FileFormatDataSourceStats fileFormatDataSourceStats;
@@ -257,6 +263,34 @@ public class DuckLakePageSourceProvider
         return pages.build();
     }
 
+    /**
+     * Applies the footer size the catalog records for a file, so that the reader fetches the
+     * footer in one request instead of reading a fixed length guess and reading again when the
+     * footer turns out to be longer. Files written with many columns or many row groups carry a
+     * footer well past the default guess, and every split of such a file pays for the second
+     * request.
+     * <p>
+     * The size is only a hint. A missing or stale one costs no more than the request it was meant
+     * to save, because the reader reads the footer again whenever the bytes it holds do not cover
+     * it, and it locates the footer from the file itself either way.
+     */
+    private static ParquetReaderOptions withCatalogFooterSize(ParquetReaderOptions options, OptionalLong footerSize, long fileSizeBytes)
+    {
+        if (footerSize.isEmpty()) {
+            return options;
+        }
+        long footerLength = footerSize.orElseThrow();
+        if (footerLength < 0 || footerLength + PARQUET_POST_SCRIPT_SIZE > fileSizeBytes) {
+            // the catalog disagrees with the file, so let the reader find the footer on its own
+            return options;
+        }
+        // Reading beyond the configured maximum is wasted, because a footer that long is rejected.
+        long footerReadSize = min(footerLength + PARQUET_POST_SCRIPT_SIZE, options.getMaxFooterReadSize().toBytes());
+        return ParquetReaderOptions.builder(options)
+                .withFooterReadSize(DataSize.ofBytes(footerReadSize))
+                .build();
+    }
+
     private ConnectorPageSource createParquetPageSource(
             TrinoInputFile inputFile,
             DuckLakeSplit split,
@@ -276,7 +310,7 @@ public class DuckLakePageSourceProvider
                 true, // resolve columns by name
                 DateTimeZone.UTC,
                 fileFormatDataSourceStats,
-                options,
+                withCatalogFooterSize(options, split.footerSize(), split.fileSizeBytes()),
                 Optional.empty(),
                 Optional.empty(),
                 DOMAIN_COMPACTION_THRESHOLD,
@@ -404,7 +438,7 @@ public class DuckLakePageSourceProvider
                 true, // resolve columns by name
                 DateTimeZone.UTC,
                 fileFormatDataSourceStats,
-                parquetReaderOptions,
+                withCatalogFooterSize(parquetReaderOptions, deleteFile.footerSize(), deleteFile.fileSizeBytes()),
                 Optional.empty(),
                 Optional.empty(),
                 DOMAIN_COMPACTION_THRESHOLD,
