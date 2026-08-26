@@ -36,6 +36,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.function.UnaryOperator;
 
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_WRITER_ERROR;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -100,8 +101,35 @@ public class DuckLakeFileWriter
     public void appendRows(Page page)
     {
         recordNanValues(page);
-        writer.appendRows(page);
+        writer.appendRows(toPhysicalValues(page));
         recordCount += page.getPositionCount();
+    }
+
+    /**
+     * Narrows the columns whose engine type is wider than the one the file stores, which is the
+     * case for DuckLake's unsigned and 128-bit integers.
+     */
+    private Page toPhysicalValues(Page page)
+    {
+        List<Optional<UnaryOperator<Block>>> transforms = schema.columnTransforms();
+        Block[] blocks = null;
+        for (int channel = 0; channel < transforms.size(); channel++) {
+            Optional<UnaryOperator<Block>> transform = transforms.get(channel);
+            if (transform.isEmpty()) {
+                continue;
+            }
+            if (blocks == null) {
+                blocks = new Block[page.getChannelCount()];
+                for (int index = 0; index < blocks.length; index++) {
+                    blocks[index] = page.getBlock(index);
+                }
+            }
+            blocks[channel] = transform.get().apply(blocks[channel]);
+        }
+        if (blocks == null) {
+            return page;
+        }
+        return new Page(page.getPositionCount(), blocks);
     }
 
     public long recordCount()

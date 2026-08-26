@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.plugin.ducklake.DuckLakeWriteColumn;
 import io.trino.spi.TrinoException;
+import io.trino.spi.block.Block;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
@@ -30,6 +31,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.UnaryOperator;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_TYPE;
@@ -96,19 +98,31 @@ public final class DuckLakeParquetSchema
     private final List<Type> fileColumnTypes;
     private final List<String> fileColumnNames;
     private final Map<String, LeafField> leafFieldsByPath;
+    private final List<Optional<UnaryOperator<Block>>> columnTransforms;
 
     private DuckLakeParquetSchema(
             MessageType messageType,
             Map<List<String>, Type> primitiveTypes,
             List<Type> fileColumnTypes,
             List<String> fileColumnNames,
-            Map<String, LeafField> leafFieldsByPath)
+            Map<String, LeafField> leafFieldsByPath,
+            List<Optional<UnaryOperator<Block>>> columnTransforms)
     {
         this.messageType = messageType;
         this.primitiveTypes = primitiveTypes;
         this.fileColumnTypes = fileColumnTypes;
         this.fileColumnNames = fileColumnNames;
         this.leafFieldsByPath = leafFieldsByPath;
+        this.columnTransforms = columnTransforms;
+    }
+
+    /**
+     * The conversion each top-level column's values need before they are written, for the columns
+     * whose engine type is wider than the one the file stores.
+     */
+    public List<Optional<UnaryOperator<Block>>> columnTransforms()
+    {
+        return columnTransforms;
     }
 
     public static DuckLakeParquetSchema create(List<DuckLakeWriteColumn> columns)
@@ -127,7 +141,8 @@ public final class DuckLakeParquetSchema
                 // it uses for each value lives on the leaf entries of the primitive type map
                 columns.stream().map(DuckLakeWriteColumn::type).collect(toImmutableList()),
                 columns.stream().map(DuckLakeWriteColumn::name).collect(toImmutableList()),
-                leafFields.buildOrThrow());
+                leafFields.buildOrThrow(),
+                columns.stream().map(DuckLakeParquetSchema::blockTransform).collect(toImmutableList()));
     }
 
     public MessageType messageType()
@@ -211,6 +226,11 @@ public final class DuckLakeParquetSchema
             }
             default -> {
                 WriterType writerType = writerType(column);
+                if (!parentPath.isEmpty() && writerType.blockTransform().isPresent()) {
+                    throw new TrinoException(
+                            DUCKLAKE_UNSUPPORTED_TYPE,
+                            "Writing a column of DuckLake type '%s' nested inside another type is not supported".formatted(column.duckLakeType()));
+                }
                 primitiveTypes.put(path, writerType.type());
                 leafFields.put(join(".", path), new LeafField(column.columnId(), writerType.type(), writerType.statisticsSupported()));
                 yield writerType.parquetType(column.name(), repetition, toIntId(column));
@@ -236,6 +256,19 @@ public final class DuckLakeParquetSchema
     }
 
     /**
+     * The conversion a top-level column's values need before they are written. A column holding a
+     * nested type needs none: the values of its fields are written as they are, and a field that
+     * would need one is rejected when the schema is built.
+     */
+    private static Optional<UnaryOperator<Block>> blockTransform(DuckLakeWriteColumn column)
+    {
+        return switch (normalize(column.duckLakeType())) {
+            case "list", "map", "struct" -> Optional.empty();
+            default -> writerType(column).blockTransform();
+        };
+    }
+
+    /**
      * The physical encoding of a leaf column: the Parquet type it is written as and the Trino type
      * the Parquet writer interprets the block with.
      */
@@ -252,8 +285,17 @@ public final class DuckLakeParquetSchema
             // Unsigned columns are only ever created by DuckDB. Trino reads them as the next wider
             // signed type, and the writer stores that value back into the narrower physical type,
             // which is exact for every value the unsigned column can hold.
-            case "uint8", "utinyint" -> primitive(INT32, LogicalTypeAnnotation.intType(8, false), SMALLINT, false);
-            case "uint16", "usmallint" -> primitive(INT32, LogicalTypeAnnotation.intType(16, false), INTEGER, false);
+            case "uint8", "utinyint" -> primitive(INT32, LogicalTypeAnnotation.intType(8, false), SMALLINT, false)
+                    .withTransform(DuckLakeWideIntegers.checkUnsignedRange(SMALLINT, 1 << Byte.SIZE, "uint8"));
+            case "uint16", "usmallint" -> primitive(INT32, LogicalTypeAnnotation.intType(16, false), INTEGER, false)
+                    .withTransform(DuckLakeWideIntegers.checkUnsignedRange(INTEGER, 1 << Short.SIZE, "uint16"));
+            case "uint32", "uinteger" -> primitive(INT32, LogicalTypeAnnotation.intType(32, false), INTEGER, false)
+                    .withTransform(DuckLakeWideIntegers::toUnsignedInteger);
+            case "uint64", "ubigint" -> primitive(INT64, LogicalTypeAnnotation.intType(64, false), BIGINT, false)
+                    .withTransform(DuckLakeWideIntegers::toUnsignedBigint);
+            // DuckDB stores 128 bit integers as doubles, and records no bounds for them
+            case "int128", "hugeint" -> primitive(DOUBLE_PRIMITIVE, null, DOUBLE, false)
+                    .withTransform(DuckLakeWideIntegers::toInt128Double);
             case "float32", "float", "real" -> primitive(FLOAT, null, REAL);
             case "float64", "double" -> primitive(DOUBLE_PRIMITIVE, null, DOUBLE);
             case "varchar", "text", "string", "json" -> primitive(BINARY, LogicalTypeAnnotation.stringType(), type);
@@ -322,16 +364,20 @@ public final class DuckLakeParquetSchema
                 builder = builder.as(annotation);
             }
             return builder.id(id).named(name);
-        });
+        }, Optional.empty());
     }
 
     private static WriterType fixedLength(int length, LogicalTypeAnnotation annotation, Type type)
     {
-        return new WriterType(type, true, (name, repetition, id) -> Types.primitive(FIXED_LEN_BYTE_ARRAY, repetition)
-                .length(length)
-                .as(annotation)
-                .id(id)
-                .named(name));
+        return new WriterType(
+                type,
+                true,
+                (name, repetition, id) -> Types.primitive(FIXED_LEN_BYTE_ARRAY, repetition)
+                        .length(length)
+                        .as(annotation)
+                        .id(id)
+                        .named(name),
+                Optional.empty());
     }
 
     private static String normalize(String duckLakeType)
@@ -350,11 +396,20 @@ public final class DuckLakeParquetSchema
         }
     }
 
-    private record WriterType(Type type, boolean statisticsSupported, ParquetTypeFactory parquetTypeFactory)
+    private record WriterType(
+            Type type,
+            boolean statisticsSupported,
+            ParquetTypeFactory parquetTypeFactory,
+            Optional<UnaryOperator<Block>> blockTransform)
     {
         org.apache.parquet.schema.Type parquetType(String name, org.apache.parquet.schema.Type.Repetition repetition, int id)
         {
             return parquetTypeFactory.create(name, repetition, id);
+        }
+
+        WriterType withTransform(UnaryOperator<Block> transform)
+        {
+            return new WriterType(type, statisticsSupported, parquetTypeFactory, Optional.of(transform));
         }
     }
 
@@ -410,6 +465,7 @@ public final class DuckLakeParquetSchema
                         ImmutableList.of(DELETE_FILE_POSITION_COLUMN), BIGINT),
                 ImmutableList.of(VARCHAR, BIGINT),
                 ImmutableList.of(DELETE_FILE_PATH_COLUMN, DELETE_FILE_POSITION_COLUMN),
-                ImmutableMap.of());
+                ImmutableMap.of(),
+                ImmutableList.of(Optional.empty(), Optional.empty()));
     }
 }

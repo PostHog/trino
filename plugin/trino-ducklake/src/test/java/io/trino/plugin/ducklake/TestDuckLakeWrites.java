@@ -206,6 +206,53 @@ final class TestDuckLakeWrites
     }
 
     @Test
+    void testInsertIntoUnsignedColumnsDuckDbCreated()
+            throws SQLException
+    {
+        String table = "unsigned_" + randomNameSuffix();
+        catalog.executeInDuckDb(
+                "CREATE TABLE %s (u8 UTINYINT, u16 USMALLINT, u32 UINTEGER, u64 UBIGINT, h HUGEINT)".formatted(table),
+                "INSERT INTO %s VALUES (200, 60000, 4000000000, 18446744073709551615, 123456789)".formatted(table));
+        try {
+            // Trino reads each unsigned type as the next type wide enough to hold it, and writes
+            // the values back into the narrower one the file stores
+            assertUpdate(
+                    """
+                    INSERT INTO %s VALUES (
+                        SMALLINT '255', 65535, BIGINT '4294967295',
+                        DECIMAL '18446744073709551615', DECIMAL '987654321')""".formatted(table),
+                    1);
+
+            assertThat(query("SELECT u8, u16, u32, u64 FROM " + table + " ORDER BY u8"))
+                    .matches(
+                            """
+                            VALUES
+                                (SMALLINT '200', 60000, BIGINT '4000000000', DECIMAL '18446744073709551615'),
+                                (SMALLINT '255', 65535, BIGINT '4294967295', DECIMAL '18446744073709551615')""");
+            assertThat(duckDbRows("SELECT u8::VARCHAR, u16::VARCHAR, u32::VARCHAR, u64::VARCHAR, h::VARCHAR FROM " + table + " ORDER BY u8"))
+                    .isEqualTo(List.of(
+                            "200",
+                            "60000",
+                            "4000000000",
+                            "18446744073709551615",
+                            "123456789",
+                            "255",
+                            "65535",
+                            "4294967295",
+                            "18446744073709551615",
+                            "987654321"));
+
+            // a value the unsigned column cannot hold is rejected rather than wrapped around
+            assertThatThrownBy(() -> assertUpdate(
+                    "INSERT INTO %s VALUES (SMALLINT '-1', 1, BIGINT '1', DECIMAL '1', DECIMAL '1')".formatted(table), 1))
+                    .hasMessageContaining("Value out of range for a DuckLake uint8 column: -1");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
     void testDeleteLeavesTheRemainingRowsReadableByBothEngines()
     {
         String table = "deletes_" + randomNameSuffix();
