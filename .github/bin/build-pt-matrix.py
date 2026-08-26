@@ -11,6 +11,13 @@ from pathlib import Path
 SUITE_DIR = Path("testing/trino-product-tests/src/test/java/io/trino/tests/product/suite")
 SUITE_HELPERS = {"SuiteRunner", "SuiteTag"}
 
+# Suites this fork does not run. SuiteHdfsImpersonation stands up seven Kerberos
+# and HDFS impersonation environments, each a multi-container Hadoop stack, and
+# times out waiting for one of them often enough to fail its bucket on its own.
+# Nothing this fork ships reaches that code. Suites named here are left out of
+# the matrix instead of being reported as unwired.
+EXCLUDED_SUITES = {"SuiteHdfsImpersonation"}
+
 BUCKETS = [
     ("jdbc-core", [
         "SuiteMysql",
@@ -48,7 +55,6 @@ BUCKETS = [
         "SuiteSqlCancel",
     ]),
     ("hive-kerberos", [
-        "SuiteHdfsImpersonation",
         "SuiteTwoHives",
         "SuiteHive4",
         "SuiteHudi",
@@ -113,7 +119,6 @@ HIVE_SUITES = DATABRICKS_SUITES | {
     "SuiteCompatibility",
     "SuiteDeltaLakeOss",
     "SuiteGcs",
-    "SuiteHdfsImpersonation",
     "SuiteHive4",
     "SuiteHiveAlluxioCaching",
     "SuiteHiveBasic",
@@ -303,7 +308,7 @@ def validate_configuration(suite_dir=SUITE_DIR):
     if duplicate_suites:
         raise ValueError(f"Suites declared more than once: {', '.join(duplicate_suites)}")
 
-    actual_suites = {path.stem for path in suite_dir.glob("Suite*.java")} - SUITE_HELPERS
+    actual_suites = {path.stem for path in suite_dir.glob("Suite*.java")} - SUITE_HELPERS - EXCLUDED_SUITES
     missing_suites = sorted(set(declared_suites) - actual_suites)
     if missing_suites:
         raise ValueError(f"Declared product test suites are missing: {', '.join(missing_suites)}")
