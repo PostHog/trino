@@ -19,6 +19,8 @@ import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.plugin.ducklake.util.DuckLakeParquetSchema;
 import io.trino.spi.PageIndexerFactory;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
+import io.trino.spi.connector.ConnectorMergeSink;
+import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.connector.ConnectorPageSinkId;
@@ -39,6 +41,7 @@ public class DuckLakePageSinkProvider
     private final DuckLakeWriterFactory writerFactory;
     private final PageIndexerFactory pageIndexerFactory;
     private final JsonCodec<DuckLakeDataFile> dataFileCodec;
+    private final JsonCodec<DuckLakeMergeFragment> mergeFragmentCodec;
     private final int maxOpenPartitions;
 
     @Inject
@@ -47,12 +50,14 @@ public class DuckLakePageSinkProvider
             DuckLakeWriterFactory writerFactory,
             PageIndexerFactory pageIndexerFactory,
             JsonCodec<DuckLakeDataFile> dataFileCodec,
+            JsonCodec<DuckLakeMergeFragment> mergeFragmentCodec,
             DuckLakeConfig config)
     {
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.writerFactory = requireNonNull(writerFactory, "writerFactory is null");
         this.pageIndexerFactory = requireNonNull(pageIndexerFactory, "pageIndexerFactory is null");
         this.dataFileCodec = requireNonNull(dataFileCodec, "dataFileCodec is null");
+        this.mergeFragmentCodec = requireNonNull(mergeFragmentCodec, "mergeFragmentCodec is null");
         this.maxOpenPartitions = config.getMaxOpenPartitions();
     }
 
@@ -76,6 +81,22 @@ public class DuckLakePageSinkProvider
             ConnectorPageSinkId pageSinkId)
     {
         return createPageSink(session, (DuckLakeWriteTarget) tableHandle);
+    }
+
+    @Override
+    public ConnectorMergeSink createMergeSink(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
+            ConnectorMergeTableHandle mergeHandle,
+            Optional<ConnectorTableCredentials> tableCredentials,
+            ConnectorPageSinkId pageSinkId)
+    {
+        DuckLakeWriteTarget target = ((DuckLakeMergeTableHandle) mergeHandle).writeTarget();
+        return new DuckLakeMergeSink(
+                createPageSink(session, target),
+                target.columns().size(),
+                dataFileCodec,
+                mergeFragmentCodec);
     }
 
     private ConnectorPageSink createPageSink(ConnectorSession session, DuckLakeWriteTarget target)

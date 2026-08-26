@@ -166,6 +166,7 @@ public class DuckLakeSplitManager
             // absolute within the file, independent of the byte range the split reads.
             for (ByteRange range : byteRanges(dataFile.fileSizeBytes(), maxSplitSize)) {
                 splits.add(new DuckLakeSplit(
+                        dataFile.dataFileId(),
                         path,
                         range.start(),
                         range.length(),

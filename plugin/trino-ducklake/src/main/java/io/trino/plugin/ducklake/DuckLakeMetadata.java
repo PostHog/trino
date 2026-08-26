@@ -19,10 +19,16 @@ import com.google.common.collect.ImmutableSet;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.airlift.json.JsonCodec;
 import io.airlift.slice.Slice;
+import io.trino.filesystem.TrinoFileSystem;
+import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.parquet.ParquetReaderOptions;
+import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.ducklake.metastore.DuckLakeColumnEntry;
 import io.trino.plugin.ducklake.metastore.DuckLakeColumnRow;
 import io.trino.plugin.ducklake.metastore.DuckLakeCommit;
 import io.trino.plugin.ducklake.metastore.DuckLakeCommitAction;
+import io.trino.plugin.ducklake.metastore.DuckLakeDataFileEntry;
+import io.trino.plugin.ducklake.metastore.DuckLakeDeleteFileEntry;
 import io.trino.plugin.ducklake.metastore.DuckLakeFileColumnStatsRow;
 import io.trino.plugin.ducklake.metastore.DuckLakePartitionColumn;
 import io.trino.plugin.ducklake.metastore.DuckLakePartitionInfo;
@@ -43,6 +49,7 @@ import io.trino.spi.connector.Assignment;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
+import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorOutputMetadata;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
@@ -55,6 +62,7 @@ import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.RelationColumnsMetadata;
 import io.trino.spi.connector.RetryMode;
+import io.trino.spi.connector.RowChangeParadigm;
 import io.trino.spi.connector.SaveMode;
 import io.trino.spi.connector.SchemaNotFoundException;
 import io.trino.spi.connector.SchemaTableName;
@@ -70,8 +78,10 @@ import io.trino.spi.statistics.Estimate;
 import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import jakarta.annotation.Nullable;
 
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -98,6 +108,7 @@ import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.SCHEMA_ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_EMPTY;
 import static io.trino.spi.StandardErrorCode.TABLE_ALREADY_EXISTS;
+import static io.trino.spi.connector.RowChangeParadigm.DELETE_ROW_AND_INSERT_ROW;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -117,15 +128,33 @@ public class DuckLakeMetadata
     private final String dataPath;
     private final Map<Long, DuckLakeRowCount> rowCounts = new ConcurrentHashMap<>();
     private final JsonCodec<DuckLakeDataFile> dataFileCodec;
+    private final JsonCodec<DuckLakeMergeFragment> mergeFragmentCodec;
+    private final TrinoFileSystemFactory fileSystemFactory;
+    private final DuckLakeWriterFactory writerFactory;
+    private final FileFormatDataSourceStats fileFormatDataSourceStats;
+    private final ParquetReaderOptions parquetReaderOptions;
 
     @GuardedBy("this")
     private Long snapshotId;
 
-    public DuckLakeMetadata(JdbcDuckLakeMetastore metastore, String dataPath, JsonCodec<DuckLakeDataFile> dataFileCodec)
+    public DuckLakeMetadata(
+            JdbcDuckLakeMetastore metastore,
+            String dataPath,
+            JsonCodec<DuckLakeDataFile> dataFileCodec,
+            JsonCodec<DuckLakeMergeFragment> mergeFragmentCodec,
+            TrinoFileSystemFactory fileSystemFactory,
+            DuckLakeWriterFactory writerFactory,
+            FileFormatDataSourceStats fileFormatDataSourceStats,
+            ParquetReaderOptions parquetReaderOptions)
     {
         this.metastore = requireNonNull(metastore, "metastore is null");
         this.dataPath = requireNonNull(dataPath, "dataPath is null");
         this.dataFileCodec = requireNonNull(dataFileCodec, "dataFileCodec is null");
+        this.mergeFragmentCodec = requireNonNull(mergeFragmentCodec, "mergeFragmentCodec is null");
+        this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
+        this.writerFactory = requireNonNull(writerFactory, "writerFactory is null");
+        this.fileFormatDataSourceStats = requireNonNull(fileFormatDataSourceStats, "fileFormatDataSourceStats is null");
+        this.parquetReaderOptions = requireNonNull(parquetReaderOptions, "parquetReaderOptions is null");
     }
 
     /**
@@ -624,6 +653,243 @@ public class DuckLakeMetadata
             return Optional.empty();
         }
     }
+
+    @Override
+    public RowChangeParadigm getRowChangeParadigm(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        // DuckLake has no in-place update: a changed row is removed from the file it lives in and
+        // written again elsewhere
+        return DELETE_ROW_AND_INSERT_ROW;
+    }
+
+    @Override
+    public ColumnHandle getMergeRowIdColumnHandle(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        return DuckLakeMergeRowId.columnHandle();
+    }
+
+    @Override
+    public ConnectorMergeTableHandle beginMerge(ConnectorSession session, ConnectorTableHandle tableHandle, Map<Integer, Collection<ColumnHandle>> updateCaseColumns, RetryMode retryMode)
+    {
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        List<DuckLakeWriteColumn> writeColumns = DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId()));
+        return new DuckLakeMergeTableHandle(
+                handle,
+                new DuckLakeWriteTarget(
+                        handle.schemaTableName(),
+                        handle.tableId(),
+                        handle.tableLocation(),
+                        writeColumns,
+                        partitioningOf(handle)));
+    }
+
+    @Override
+    public void finishMerge(
+            ConnectorSession session,
+            ConnectorMergeTableHandle mergeTableHandle,
+            List<ConnectorTableHandle> sourceTableHandles,
+            Collection<Slice> fragments,
+            Collection<ComputedStatistics> computedStatistics)
+    {
+        DuckLakeMergeTableHandle handle = (DuckLakeMergeTableHandle) mergeTableHandle;
+        DuckLakeWriteTarget target = handle.writeTarget();
+
+        ImmutableList.Builder<DuckLakeDataFile> insertedFiles = ImmutableList.builder();
+        Map<Long, LongOpenHashSet> removedPositionsByDataFile = new LinkedHashMap<>();
+        for (Slice fragment : fragments) {
+            DuckLakeMergeFragment parsed = mergeFragmentCodec.fromJson(fragment.getBytes());
+            parsed.insertedFile().ifPresent(insertedFiles::add);
+            parsed.deletedRows().ifPresent(deleted -> {
+                LongOpenHashSet positions = removedPositionsByDataFile.computeIfAbsent(deleted.dataFileId(), _ -> new LongOpenHashSet());
+                for (long position : deleted.unpack()) {
+                    positions.add(position);
+                }
+            });
+        }
+        List<DuckLakeDataFile> dataFiles = insertedFiles.build();
+        if (dataFiles.isEmpty() && removedPositionsByDataFile.isEmpty()) {
+            return;
+        }
+
+        List<RewrittenDeletes> rewrittenDeletes = rewriteDeleteFiles(session, target, removedPositionsByDataFile);
+        commit(commit -> {
+            commit.verifyDataFilesUnchanged(target.tableId(), removedPositionsByDataFile.keySet());
+            commit.verifyDeleteFilesUnchanged(
+                    target.tableId(),
+                    removedPositionsByDataFile.keySet(),
+                    rewrittenDeletes.stream()
+                            .filter(rewritten -> rewritten.replacedDeleteFileId().isPresent())
+                            .map(rewritten -> rewritten.replacedDeleteFileId().orElseThrow())
+                            .collect(toImmutableSet()));
+            applyDeletes(commit, target, rewrittenDeletes);
+            if (!dataFiles.isEmpty()) {
+                addDataFiles(commit, target, dataFiles);
+                commit.recordInsert(target.tableId());
+            }
+            if (!rewrittenDeletes.isEmpty()) {
+                commit.recordDelete(target.tableId());
+            }
+            return null;
+        });
+    }
+
+    /**
+     * Writes the delete files a row-level change needs, before the commit that registers them.
+     * Because a data file has at most one delete file, each one covers both the positions already
+     * recorded and the ones the statement removed; a file with nothing left is not given a delete
+     * file at all and is dropped instead.
+     */
+    private List<RewrittenDeletes> rewriteDeleteFiles(ConnectorSession session, DuckLakeWriteTarget target, Map<Long, LongOpenHashSet> removedPositionsByDataFile)
+    {
+        if (removedPositionsByDataFile.isEmpty()) {
+            return ImmutableList.of();
+        }
+        Map<Long, DuckLakeDataFileEntry> dataFiles = metastore.dataFiles(snapshotId(), target.tableId()).stream()
+                .collect(toImmutableMap(DuckLakeDataFileEntry::dataFileId, file -> file, (first, _) -> first));
+        Map<Long, DuckLakeDeleteFileEntry> deleteFiles = metastore.deleteFiles(snapshotId(), target.tableId()).stream()
+                .collect(toImmutableMap(DuckLakeDeleteFileEntry::dataFileId, file -> file, (first, _) -> first));
+        TrinoFileSystem fileSystem = fileSystemFactory.create(session);
+
+        ImmutableList.Builder<RewrittenDeletes> rewritten = ImmutableList.builder();
+        for (Map.Entry<Long, LongOpenHashSet> entry : removedPositionsByDataFile.entrySet()) {
+            long dataFileId = entry.getKey();
+            DuckLakeDataFileEntry dataFile = dataFiles.get(dataFileId);
+            if (dataFile == null) {
+                throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Data file %s of table %s is no longer visible".formatted(dataFileId, target.tableName()));
+            }
+            LongOpenHashSet positions = entry.getValue();
+            DuckLakeDeleteFileEntry existing = deleteFiles.get(dataFileId);
+            if (existing != null) {
+                positions.addAll(DuckLakeDeleteFiles.readPositions(
+                        fileSystem,
+                        fileFormatDataSourceStats,
+                        parquetReaderOptions,
+                        PathResolver.resolve(target.tableLocation(), existing.path(), existing.pathIsRelative()),
+                        existing.fileSizeBytes(),
+                        existing.deleteCount()));
+            }
+            Optional<Long> replacedDeleteFileId = Optional.ofNullable(existing).map(DuckLakeDeleteFileEntry::deleteFileId);
+            long removedNow = positions.size() - (existing == null ? 0 : existing.deleteCount());
+
+            if (positions.size() >= dataFile.recordCount()) {
+                // nothing of the file is left, so it is dropped rather than fully covered by deletes
+                rewritten.add(new RewrittenDeletes(dataFileId, replacedDeleteFileId, Optional.empty(), removedNow, dataFile.fileSizeBytes()));
+                continue;
+            }
+            long[] sorted = positions.toLongArray();
+            Arrays.sort(sorted);
+            String relativePath = DuckLakeWriterFactory.newDeleteFileName();
+            DuckLakeDeleteFiles.WrittenFile written = DuckLakeDeleteFiles.write(
+                    session,
+                    fileSystem,
+                    writerFactory,
+                    PathResolver.resolve(target.tableLocation(), relativePath, true),
+                    PathResolver.resolve(target.tableLocation(), dataFile.path(), dataFile.pathIsRelative()),
+                    sorted);
+            rewritten.add(new RewrittenDeletes(
+                    dataFileId,
+                    replacedDeleteFileId,
+                    Optional.of(new NewDeleteFile(relativePath, sorted.length, written.fileSizeBytes(), written.footerSize())),
+                    removedNow,
+                    0));
+        }
+        return rewritten.build();
+    }
+
+    private static void applyDeletes(DuckLakeCommit commit, DuckLakeWriteTarget target, List<RewrittenDeletes> rewrittenDeletes)
+    {
+        if (rewrittenDeletes.isEmpty()) {
+            return;
+        }
+        long removedRecords = 0;
+        long removedFileBytes = 0;
+        for (RewrittenDeletes rewritten : rewrittenDeletes) {
+            commit.endDeleteFilesFor(target.tableId(), ImmutableList.of(rewritten.dataFileId()));
+            removedRecords += rewritten.removedRecordCount();
+            if (rewritten.newDeleteFile().isEmpty()) {
+                commit.endDataFiles(target.tableId(), ImmutableList.of(rewritten.dataFileId()));
+                removedFileBytes += rewritten.removedFileSizeBytes();
+                continue;
+            }
+            NewDeleteFile deleteFile = rewritten.newDeleteFile().orElseThrow();
+            commit.insertDeleteFile(
+                    target.tableId(),
+                    commit.allocateFileId(),
+                    rewritten.dataFileId(),
+                    deleteFile.path(),
+                    deleteFile.deleteCount(),
+                    deleteFile.fileSizeBytes(),
+                    deleteFile.footerSize());
+        }
+        DuckLakeCommit.TableStatsRow stats = commit.tableStats(target.tableId())
+                .orElseGet(() -> new DuckLakeCommit.TableStatsRow(0, 0, 0));
+        commit.writeTableStats(target.tableId(), new DuckLakeCommit.TableStatsRow(
+                Math.max(0, stats.recordCount() - removedRecords),
+                stats.nextRowId(),
+                Math.max(0, stats.fileSizeBytes() - removedFileBytes)));
+    }
+
+    @Override
+    public Optional<ConnectorTableHandle> applyDelete(ConnectorSession session, ConnectorTableHandle handle)
+    {
+        DuckLakeTableHandle tableHandle = (DuckLakeTableHandle) handle;
+        // only a delete of every row can be answered by dropping files; anything narrower needs
+        // the positions of the rows that go, which the engine produces through a merge
+        if (tableHandle.enforcedConstraint().isAll() && tableHandle.unenforcedConstraint().isAll()) {
+            return Optional.of(tableHandle);
+        }
+        return Optional.empty();
+    }
+
+    @Override
+    public OptionalLong executeDelete(ConnectorSession session, ConnectorTableHandle handle)
+    {
+        DuckLakeTableHandle tableHandle = (DuckLakeTableHandle) handle;
+        return OptionalLong.of(commit(commit -> {
+            long removed = removeAllRows(commit, tableHandle.tableId());
+            commit.recordDelete(tableHandle.tableId());
+            return removed;
+        }));
+    }
+
+    @Override
+    public void truncateTable(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        commit(commit -> {
+            removeAllRows(commit, handle.tableId());
+            commit.recordDelete(handle.tableId());
+            return null;
+        });
+    }
+
+    /**
+     * Ends every data file of the table, which removes all of its rows while leaving them visible
+     * to readers of earlier snapshots. Row identifiers keep counting from where they were, so a
+     * row written later never reuses one.
+     */
+    private static long removeAllRows(DuckLakeCommit commit, long tableId)
+    {
+        List<DuckLakeCommit.VisibleDataFile> dataFiles = commit.visibleDataFiles(tableId);
+        List<Long> dataFileIds = dataFiles.stream()
+                .map(DuckLakeCommit.VisibleDataFile::dataFileId)
+                .collect(toImmutableList());
+        commit.endDataFiles(tableId, dataFileIds);
+        commit.endDeleteFilesFor(tableId, dataFileIds);
+        long removed = dataFiles.stream().mapToLong(DuckLakeCommit.VisibleDataFile::visibleRecordCount).sum();
+        DuckLakeCommit.TableStatsRow stats = commit.tableStats(tableId).orElseGet(() -> new DuckLakeCommit.TableStatsRow(0, 0, 0));
+        commit.writeTableStats(tableId, new DuckLakeCommit.TableStatsRow(0, stats.nextRowId(), 0));
+        return removed;
+    }
+
+    private record RewrittenDeletes(
+            long dataFileId,
+            Optional<Long> replacedDeleteFileId,
+            Optional<NewDeleteFile> newDeleteFile,
+            long removedRecordCount,
+            long removedFileSizeBytes) {}
+
+    private record NewDeleteFile(String path, long deleteCount, long fileSizeBytes, long footerSize) {}
 
     /**
      * The partitioning to write a table with, taken from the scheme recorded in the catalog.

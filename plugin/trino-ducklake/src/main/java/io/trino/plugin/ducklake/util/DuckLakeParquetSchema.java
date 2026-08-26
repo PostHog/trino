@@ -50,6 +50,7 @@ import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_NANOS;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.UuidType.UUID;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
+import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.lang.String.join;
 import static java.util.Objects.requireNonNull;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MICROS;
@@ -85,6 +86,10 @@ public final class DuckLakeParquetSchema
     private static final String MAP_GROUP_NAME = "key_value";
     private static final String MAP_KEY_NAME = "key";
     private static final String MAP_VALUE_NAME = "value";
+    private static final String DELETE_FILE_PATH_COLUMN = "file_path";
+    private static final String DELETE_FILE_POSITION_COLUMN = "pos";
+    private static final int DELETE_FILE_PATH_FIELD_ID = Integer.MAX_VALUE - 1;
+    private static final int DELETE_FILE_POSITION_FIELD_ID = Integer.MAX_VALUE - 2;
 
     private final MessageType messageType;
     private final Map<List<String>, Type> primitiveTypes;
@@ -376,5 +381,35 @@ public final class DuckLakeParquetSchema
     public static String mapValueName()
     {
         return MAP_VALUE_NAME;
+    }
+
+    public static String deleteFilePositionColumnName()
+    {
+        return DELETE_FILE_POSITION_COLUMN;
+    }
+
+    /**
+     * The schema of a delete file: the data file a removed row belonged to and its position in
+     * that file. The field ids are the reserved ones DuckDB writes, at the top of the range, so
+     * that they cannot collide with the columns of any table.
+     */
+    public static DuckLakeParquetSchema forDeleteFile()
+    {
+        org.apache.parquet.schema.Type filePath = Types.primitive(BINARY, OPTIONAL)
+                .as(LogicalTypeAnnotation.stringType())
+                .id(DELETE_FILE_PATH_FIELD_ID)
+                .named(DELETE_FILE_PATH_COLUMN);
+        org.apache.parquet.schema.Type position = Types.primitive(INT64, OPTIONAL)
+                .as(LogicalTypeAnnotation.intType(64, true))
+                .id(DELETE_FILE_POSITION_FIELD_ID)
+                .named(DELETE_FILE_POSITION_COLUMN);
+        return new DuckLakeParquetSchema(
+                Types.buildMessage().addField(filePath).addField(position).named(MESSAGE_NAME),
+                ImmutableMap.of(
+                        ImmutableList.of(DELETE_FILE_PATH_COLUMN), VARCHAR,
+                        ImmutableList.of(DELETE_FILE_POSITION_COLUMN), BIGINT),
+                ImmutableList.of(VARCHAR, BIGINT),
+                ImmutableList.of(DELETE_FILE_PATH_COLUMN, DELETE_FILE_POSITION_COLUMN),
+                ImmutableMap.of());
     }
 }
