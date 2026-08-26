@@ -92,10 +92,19 @@ jobs:
           docker tag "trino:${TRINO_VERSION}-arm64" "${IMAGE}:${GITHUB_SHA}"
           docker push "${IMAGE}:${GITHUB_SHA}"
 
-          # RepoDigests is populated by the push above. Take the entry for this
-          # repository, so a stale digest from another tag cannot be picked.
-          digest="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${IMAGE}:${GITHUB_SHA}" \
-            | grep "^${IMAGE}@" | head -n 1 | cut -d@ -f2)"
+          # RepoDigests is populated by the push above. Read the entry for this
+          # repository, so a digest another tag left behind cannot be picked.
+          #
+          # No pipeline here. `grep | head` under `set -o pipefail` fails the
+          # step when head closes the pipe first, which is a real failure mode
+          # in this org (see the same warning in charts state-update.yml).
+          digests="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${IMAGE}:${GITHUB_SHA}")"
+          digest=""
+          while IFS= read -r entry; do
+            case "${entry}" in
+              "${IMAGE}@"*) digest="${entry#*@}"; break ;;
+            esac
+          done <<< "${digests}"
           if [ -z "${digest}" ]; then
             echo "::error::could not read the digest of ${IMAGE}:${GITHUB_SHA}"
             exit 1
@@ -116,7 +125,7 @@ jobs:
       github.repository == 'PostHog/trino'
       && github.event_name == 'push'
       && github.ref == 'refs/heads/ducklake-connector'
-    runs-on: depot-ubuntu-24.04-small
+    runs-on: ubuntu-latest
     steps:
       - name: Get deployer token
         id: deployer
