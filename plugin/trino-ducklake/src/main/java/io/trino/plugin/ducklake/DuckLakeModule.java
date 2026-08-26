@@ -29,6 +29,7 @@ import io.trino.plugin.hive.parquet.ParquetReaderConfig;
 import io.trino.plugin.hive.parquet.ParquetWriterConfig;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorNodePartitioningProvider;
+import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSplitManager;
 import org.jdbi.v3.core.ConnectionFactory;
@@ -37,6 +38,7 @@ import java.sql.Driver;
 
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static io.airlift.configuration.ConfigBinder.configBinder;
+import static io.airlift.json.JsonCodecBinder.jsonCodecBinder;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_METASTORE_ERROR;
 import static org.weakref.jmx.guice.ExportBinder.newExporter;
 
@@ -55,6 +57,9 @@ public class DuckLakeModule
         binder.bind(ConnectorSplitManager.class).to(DuckLakeSplitManager.class).in(Scopes.SINGLETON);
         binder.bind(ConnectorPageSourceProvider.class).to(DuckLakePageSourceProvider.class).in(Scopes.SINGLETON);
         binder.bind(ConnectorNodePartitioningProvider.class).to(HiveNodePartitioningProvider.class).in(Scopes.SINGLETON);
+        binder.bind(ConnectorPageSinkProvider.class).to(DuckLakePageSinkProvider.class).in(Scopes.SINGLETON);
+        binder.bind(DuckLakeWriterFactory.class).in(Scopes.SINGLETON);
+        jsonCodecBinder(binder).bindJsonCodec(DuckLakeDataFile.class);
 
         configBinder(binder).bindConfig(ParquetReaderConfig.class);
         configBinder(binder).bindConfig(ParquetWriterConfig.class);

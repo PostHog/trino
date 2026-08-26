@@ -1,0 +1,95 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.trino.plugin.ducklake;
+
+import com.google.inject.Inject;
+import io.airlift.json.JsonCodec;
+import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.plugin.ducklake.util.DuckLakeParquetSchema;
+import io.trino.spi.PageIndexerFactory;
+import io.trino.spi.connector.ConnectorInsertTableHandle;
+import io.trino.spi.connector.ConnectorOutputTableHandle;
+import io.trino.spi.connector.ConnectorPageSink;
+import io.trino.spi.connector.ConnectorPageSinkId;
+import io.trino.spi.connector.ConnectorPageSinkProvider;
+import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorTableCredentials;
+import io.trino.spi.connector.ConnectorTransactionHandle;
+
+import java.util.Optional;
+
+import static io.trino.plugin.ducklake.DuckLakeSessionProperties.getTargetMaxFileSize;
+import static java.util.Objects.requireNonNull;
+
+public class DuckLakePageSinkProvider
+        implements ConnectorPageSinkProvider
+{
+    private final TrinoFileSystemFactory fileSystemFactory;
+    private final DuckLakeWriterFactory writerFactory;
+    private final PageIndexerFactory pageIndexerFactory;
+    private final JsonCodec<DuckLakeDataFile> dataFileCodec;
+    private final int maxOpenPartitions;
+
+    @Inject
+    public DuckLakePageSinkProvider(
+            TrinoFileSystemFactory fileSystemFactory,
+            DuckLakeWriterFactory writerFactory,
+            PageIndexerFactory pageIndexerFactory,
+            JsonCodec<DuckLakeDataFile> dataFileCodec,
+            DuckLakeConfig config)
+    {
+        this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
+        this.writerFactory = requireNonNull(writerFactory, "writerFactory is null");
+        this.pageIndexerFactory = requireNonNull(pageIndexerFactory, "pageIndexerFactory is null");
+        this.dataFileCodec = requireNonNull(dataFileCodec, "dataFileCodec is null");
+        this.maxOpenPartitions = config.getMaxOpenPartitions();
+    }
+
+    @Override
+    public ConnectorPageSink createPageSink(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
+            ConnectorOutputTableHandle tableHandle,
+            Optional<ConnectorTableCredentials> tableCredentials,
+            ConnectorPageSinkId pageSinkId)
+    {
+        return createPageSink(session, (DuckLakeWriteTarget) tableHandle);
+    }
+
+    @Override
+    public ConnectorPageSink createPageSink(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
+            ConnectorInsertTableHandle tableHandle,
+            Optional<ConnectorTableCredentials> tableCredentials,
+            ConnectorPageSinkId pageSinkId)
+    {
+        return createPageSink(session, (DuckLakeWriteTarget) tableHandle);
+    }
+
+    private ConnectorPageSink createPageSink(ConnectorSession session, DuckLakeWriteTarget target)
+    {
+        return new DuckLakePageSink(
+                session,
+                fileSystemFactory.create(session),
+                writerFactory,
+                pageIndexerFactory,
+                DuckLakeParquetSchema.create(target.columns()),
+                target.partitioning().map(partitioning -> new DuckLakeWritePartitioner(partitioning, target.columns())),
+                target.tableLocation(),
+                getTargetMaxFileSize(session).toBytes(),
+                maxOpenPartitions,
+                dataFileCodec);
+    }
+}

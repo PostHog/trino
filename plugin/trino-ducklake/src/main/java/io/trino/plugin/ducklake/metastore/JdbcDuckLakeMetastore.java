@@ -21,6 +21,7 @@ import io.trino.spi.TrinoException;
 import org.jdbi.v3.core.Handle;
 import org.jdbi.v3.core.Jdbi;
 import org.jdbi.v3.core.JdbiException;
+import org.jdbi.v3.core.transaction.TransactionIsolationLevel;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -35,6 +36,7 @@ import java.util.Set;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_COMMIT_FAILED;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_METASTORE_ERROR;
 import static java.util.Locale.ENGLISH;
@@ -47,6 +49,12 @@ public class JdbcDuckLakeMetastore
 {
     private static final String VISIBLE = "begin_snapshot <= :snapshot AND (end_snapshot IS NULL OR end_snapshot > :snapshot)";
     private static final String UNDEFINED_TABLE_SQL_STATE = "42P01";
+    private static final String SERIALIZATION_FAILURE_SQL_STATE = "40001";
+    private static final String DEADLOCK_DETECTED_SQL_STATE = "40P01";
+    private static final String UNIQUE_VIOLATION_SQL_STATE = "23505";
+    private static final int MAX_COMMIT_ATTEMPTS = 10;
+    private static final long COMMIT_RETRY_BASE_DELAY_MILLIS = 20;
+    private static final long MAX_COMMIT_RETRY_DELAY_MILLIS = 1000;
 
     private final Jdbi jdbi;
     private final String metadataSchema;
@@ -73,6 +81,86 @@ public class JdbcDuckLakeMetastore
         }
         catch (JdbiException e) {
             throw metastoreError(e);
+        }
+    }
+
+    /**
+     * Runs the action against a new snapshot and commits it atomically.
+     * <p>
+     * DuckLake orders all changes to a catalog on a single snapshot chain, so a commit conflicts
+     * with any other commit that started from the same snapshot. Conflicts are detected by the
+     * database rather than avoided by locking: the transaction runs at {@code SERIALIZABLE}, and
+     * the snapshot table's primary key rejects a second commit claiming the same snapshot
+     * identifier. Either way the action is discarded and replayed against the newer state, which
+     * is safe because it only reads catalog rows and writes them through this commit — the data
+     * files it registers were written before the commit began and are unaffected by a replay.
+     */
+    public <T> T commit(DuckLakeCommitAction<T> action)
+    {
+        RuntimeException conflict = null;
+        for (int attempt = 0; attempt < MAX_COMMIT_ATTEMPTS; attempt++) {
+            try {
+                return jdbi.inTransaction(TransactionIsolationLevel.SERIALIZABLE, handle -> {
+                    DuckLakeCommit commit = new DuckLakeCommit(handle, metadataSchema, snapshotState(handle));
+                    T result = action.run(commit);
+                    commit.writeSnapshot();
+                    return result;
+                });
+            }
+            catch (JdbiException e) {
+                if (!isRetriableConflict(e)) {
+                    throw metastoreError(e);
+                }
+                conflict = e;
+            }
+            catch (DuckLakeCommit.ConcurrentModificationFailure e) {
+                throw e;
+            }
+            sleepBeforeRetry(attempt);
+        }
+        throw new TrinoException(DUCKLAKE_COMMIT_FAILED, "Failed to commit to the DuckLake catalog after %s attempts because of concurrent updates".formatted(MAX_COMMIT_ATTEMPTS), conflict);
+    }
+
+    private DuckLakeCommit.SnapshotState snapshotState(Handle handle)
+    {
+        return handle.createQuery(
+                        """
+                        SELECT snapshot_id, schema_version, next_catalog_id, next_file_id
+                        FROM %s ORDER BY snapshot_id DESC LIMIT 1""".formatted(table("ducklake_snapshot")))
+                .map((rs, _) -> new DuckLakeCommit.SnapshotState(
+                        rs.getLong("snapshot_id"),
+                        rs.getLong("schema_version"),
+                        rs.getLong("next_catalog_id"),
+                        rs.getLong("next_file_id")))
+                .findOne()
+                .orElseThrow(() -> new TrinoException(DUCKLAKE_INVALID_METADATA, "No snapshots found in DuckLake catalog"));
+    }
+
+    /**
+     * Recognizes the two ways a concurrent commit surfaces: a serialization failure raised by the
+     * database, and a unique violation from two commits claiming the same snapshot identifier.
+     */
+    private static boolean isRetriableConflict(Throwable throwable)
+    {
+        for (Throwable cause = throwable; cause != null; cause = cause.getCause()) {
+            if (cause instanceof SQLException sqlException) {
+                String state = sqlException.getSQLState();
+                if (SERIALIZATION_FAILURE_SQL_STATE.equals(state) || DEADLOCK_DETECTED_SQL_STATE.equals(state) || UNIQUE_VIOLATION_SQL_STATE.equals(state)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static void sleepBeforeRetry(int attempt)
+    {
+        try {
+            Thread.sleep(Math.min(COMMIT_RETRY_BASE_DELAY_MILLIS << attempt, MAX_COMMIT_RETRY_DELAY_MILLIS));
+        }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new TrinoException(DUCKLAKE_COMMIT_FAILED, "Interrupted while retrying a DuckLake commit", e);
         }
     }
 
@@ -803,7 +891,7 @@ public class JdbcDuckLakeMetastore
         return value;
     }
 
-    private static OptionalLong optionalLong(ResultSet resultSet, String columnName)
+    static OptionalLong optionalLong(ResultSet resultSet, String columnName)
             throws SQLException
     {
         long value = resultSet.getLong(columnName);
@@ -813,7 +901,7 @@ public class JdbcDuckLakeMetastore
         return OptionalLong.of(value);
     }
 
-    private static Optional<Boolean> optionalBoolean(ResultSet resultSet, String columnName)
+    static Optional<Boolean> optionalBoolean(ResultSet resultSet, String columnName)
             throws SQLException
     {
         boolean value = resultSet.getBoolean(columnName);

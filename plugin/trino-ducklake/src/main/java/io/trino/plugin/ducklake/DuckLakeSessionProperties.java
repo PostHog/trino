@@ -18,6 +18,7 @@ import com.google.inject.Inject;
 import io.airlift.units.DataSize;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
+import io.trino.plugin.hive.parquet.ParquetWriterConfig;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.session.PropertyMetadata;
 
@@ -33,6 +34,7 @@ public class DuckLakeSessionProperties
         implements SessionPropertiesProvider
 {
     private static final DataSize MINIMUM_MAX_SPLIT_SIZE = DataSize.of(1, KILOBYTE);
+    private static final DataSize MINIMUM_TARGET_MAX_FILE_SIZE = DataSize.of(1, KILOBYTE);
 
     private static final String FILE_STATISTICS_PRUNING_ENABLED = "file_statistics_pruning_enabled";
     private static final String MAX_SPLIT_SIZE = "max_split_size";
@@ -40,11 +42,16 @@ public class DuckLakeSessionProperties
     private static final String PARQUET_MAX_READ_BLOCK_ROW_COUNT = "parquet_max_read_block_row_count";
     private static final String PARQUET_USE_COLUMN_INDEX = "parquet_use_column_index";
     private static final String PARQUET_IGNORE_STATISTICS = "parquet_ignore_statistics";
+    private static final String PARQUET_WRITER_ROW_GROUP_SIZE = "parquet_writer_row_group_size";
+    private static final String PARQUET_WRITER_PAGE_SIZE = "parquet_writer_page_size";
+    private static final String PARQUET_WRITER_PAGE_VALUE_COUNT = "parquet_writer_page_value_count";
+    private static final String PARQUET_WRITER_BATCH_SIZE = "parquet_writer_batch_size";
+    private static final String TARGET_MAX_FILE_SIZE = "target_max_file_size";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
     @Inject
-    public DuckLakeSessionProperties(DuckLakeConfig duckLakeConfig, ParquetReaderConfig parquetReaderConfig)
+    public DuckLakeSessionProperties(DuckLakeConfig duckLakeConfig, ParquetReaderConfig parquetReaderConfig, ParquetWriterConfig parquetWriterConfig)
     {
         sessionProperties = ImmutableList.of(
                 booleanProperty(
@@ -77,6 +84,32 @@ public class DuckLakeSessionProperties
                         PARQUET_IGNORE_STATISTICS,
                         "Ignore statistics from Parquet to allow querying files with corrupted or incorrect statistics",
                         parquetReaderConfig.isIgnoreStatistics(),
+                        false),
+                dataSizeProperty(
+                        PARQUET_WRITER_ROW_GROUP_SIZE,
+                        "Parquet: Target size of a row group written to a data file",
+                        parquetWriterConfig.getRowGroupSize(),
+                        false),
+                dataSizeProperty(
+                        PARQUET_WRITER_PAGE_SIZE,
+                        "Parquet: Target size of a page written to a data file",
+                        parquetWriterConfig.getPageSize(),
+                        false),
+                integerProperty(
+                        PARQUET_WRITER_PAGE_VALUE_COUNT,
+                        "Parquet: Maximum number of values in a page written to a data file",
+                        parquetWriterConfig.getPageValueCount(),
+                        false),
+                integerProperty(
+                        PARQUET_WRITER_BATCH_SIZE,
+                        "Parquet: Maximum number of rows passed to the writer at a time",
+                        parquetWriterConfig.getBatchSize(),
+                        false),
+                dataSizeProperty(
+                        TARGET_MAX_FILE_SIZE,
+                        "Roll over to a new data file once the current one reaches this size",
+                        duckLakeConfig.getTargetMaxFileSize(),
+                        value -> validateMinDataSize(TARGET_MAX_FILE_SIZE, value, MINIMUM_TARGET_MAX_FILE_SIZE),
                         false));
     }
 
@@ -114,5 +147,30 @@ public class DuckLakeSessionProperties
     public static boolean isParquetIgnoreStatistics(ConnectorSession session)
     {
         return session.getProperty(PARQUET_IGNORE_STATISTICS, Boolean.class);
+    }
+
+    public static DataSize getParquetWriterBlockSize(ConnectorSession session)
+    {
+        return session.getProperty(PARQUET_WRITER_ROW_GROUP_SIZE, DataSize.class);
+    }
+
+    public static DataSize getParquetWriterPageSize(ConnectorSession session)
+    {
+        return session.getProperty(PARQUET_WRITER_PAGE_SIZE, DataSize.class);
+    }
+
+    public static int getParquetWriterPageValueCount(ConnectorSession session)
+    {
+        return session.getProperty(PARQUET_WRITER_PAGE_VALUE_COUNT, Integer.class);
+    }
+
+    public static int getParquetWriterBatchSize(ConnectorSession session)
+    {
+        return session.getProperty(PARQUET_WRITER_BATCH_SIZE, Integer.class);
+    }
+
+    public static DataSize getTargetMaxFileSize(ConnectorSession session)
+    {
+        return session.getProperty(TARGET_MAX_FILE_SIZE, DataSize.class);
     }
 }

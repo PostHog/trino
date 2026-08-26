@@ -17,7 +17,13 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
+import io.airlift.json.JsonCodec;
+import io.airlift.slice.Slice;
 import io.trino.plugin.ducklake.metastore.DuckLakeColumnEntry;
+import io.trino.plugin.ducklake.metastore.DuckLakeColumnRow;
+import io.trino.plugin.ducklake.metastore.DuckLakeCommit;
+import io.trino.plugin.ducklake.metastore.DuckLakeCommitAction;
+import io.trino.plugin.ducklake.metastore.DuckLakeFileColumnStatsRow;
 import io.trino.plugin.ducklake.metastore.DuckLakePartitionColumn;
 import io.trino.plugin.ducklake.metastore.DuckLakePartitionInfo;
 import io.trino.plugin.ducklake.metastore.DuckLakeRowCount;
@@ -26,6 +32,7 @@ import io.trino.plugin.ducklake.metastore.DuckLakeTableColumnStats;
 import io.trino.plugin.ducklake.metastore.DuckLakeTableColumnsEntry;
 import io.trino.plugin.ducklake.metastore.DuckLakeTableEntry;
 import io.trino.plugin.ducklake.metastore.JdbcDuckLakeMetastore;
+import io.trino.plugin.ducklake.util.DuckLakeColumns;
 import io.trino.plugin.ducklake.util.DuckLakeTypes;
 import io.trino.plugin.ducklake.util.PathResolver;
 import io.trino.plugin.ducklake.util.StatsValueParser;
@@ -35,19 +42,29 @@ import io.trino.spi.connector.AggregationApplicationResult;
 import io.trino.spi.connector.Assignment;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
+import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMetadata;
+import io.trino.spi.connector.ConnectorOutputMetadata;
+import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
+import io.trino.spi.connector.ConnectorTableLayout;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.RelationColumnsMetadata;
+import io.trino.spi.connector.RetryMode;
+import io.trino.spi.connector.SaveMode;
+import io.trino.spi.connector.SchemaNotFoundException;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.statistics.ColumnStatistics;
+import io.trino.spi.statistics.ComputedStatistics;
 import io.trino.spi.statistics.DoubleRange;
 import io.trino.spi.statistics.Estimate;
 import io.trino.spi.statistics.TableStatistics;
@@ -55,6 +72,7 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 import jakarta.annotation.Nullable;
 
+import java.util.Collection;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -77,6 +95,9 @@ import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_FE
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_FORMAT_VERSION;
 import static io.trino.plugin.ducklake.util.PartitionTransforms.IDENTITY_TRANSFORM;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.StandardErrorCode.SCHEMA_ALREADY_EXISTS;
+import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_EMPTY;
+import static io.trino.spi.StandardErrorCode.TABLE_ALREADY_EXISTS;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -90,17 +111,21 @@ import static java.util.Objects.requireNonNull;
 public class DuckLakeMetadata
         implements ConnectorMetadata
 {
+    private static final String COMMENT_TAG_KEY = "comment";
+
     private final JdbcDuckLakeMetastore metastore;
     private final String dataPath;
     private final Map<Long, DuckLakeRowCount> rowCounts = new ConcurrentHashMap<>();
+    private final JsonCodec<DuckLakeDataFile> dataFileCodec;
 
     @GuardedBy("this")
     private Long snapshotId;
 
-    public DuckLakeMetadata(JdbcDuckLakeMetastore metastore, String dataPath)
+    public DuckLakeMetadata(JdbcDuckLakeMetastore metastore, String dataPath, JsonCodec<DuckLakeDataFile> dataFileCodec)
     {
         this.metastore = requireNonNull(metastore, "metastore is null");
         this.dataPath = requireNonNull(dataPath, "dataPath is null");
+        this.dataFileCodec = requireNonNull(dataFileCodec, "dataFileCodec is null");
     }
 
     /**
@@ -116,6 +141,81 @@ public class DuckLakeMetadata
             snapshotId = metastore.currentSnapshotId();
         }
         return snapshotId;
+    }
+
+    /**
+     * Runs a statement's catalog changes as one DuckLake snapshot and moves this transaction onto
+     * it, so that everything read afterwards sees the change.
+     */
+    private <T> T commit(DuckLakeCommitAction<T> action)
+    {
+        // pin the transaction to a snapshot first, which also verifies the catalog format version
+        snapshotId();
+
+        class Result
+        {
+            T value;
+            long snapshot;
+        }
+
+        Result result = metastore.commit(commit -> {
+            Result committed = new Result();
+            committed.value = action.run(commit);
+            committed.snapshot = commit.effectiveSnapshotId();
+            return committed;
+        });
+        synchronized (this) {
+            snapshotId = result.snapshot;
+        }
+        return result.value;
+    }
+
+    @Override
+    public void createSchema(ConnectorSession session, String schemaName, Map<String, Object> properties, TrinoPrincipal owner)
+    {
+        commit(commit -> {
+            if (commit.findSchema(schemaName).isPresent()) {
+                throw new TrinoException(SCHEMA_ALREADY_EXISTS, "Schema already exists: " + schemaName);
+            }
+            commit.insertSchema(schemaName, directoryName(schemaName));
+            commit.recordCreatedSchema(schemaName);
+            return null;
+        });
+    }
+
+    @Override
+    public void dropSchema(ConnectorSession session, String schemaName, boolean cascade)
+    {
+        commit(commit -> {
+            DuckLakeCommit.SchemaIdentity schema = commit.findSchema(schemaName)
+                    .orElseThrow(() -> new SchemaNotFoundException(schemaName));
+            if (commit.schemaHasRelations(schema.schemaId())) {
+                if (!cascade) {
+                    throw new TrinoException(SCHEMA_NOT_EMPTY, "Cannot drop non-empty schema '%s'".formatted(schemaName));
+                }
+                throw new TrinoException(NOT_SUPPORTED, "Dropping a schema with tables is not supported; drop the tables first");
+            }
+            commit.endSchema(schema.schemaId());
+            commit.recordDroppedSchema(schema.schemaId());
+            return null;
+        });
+    }
+
+    @Override
+    public void renameSchema(ConnectorSession session, String source, String target)
+    {
+        commit(commit -> {
+            DuckLakeCommit.SchemaIdentity schema = commit.findSchema(source)
+                    .orElseThrow(() -> new SchemaNotFoundException(source));
+            if (commit.findSchema(target).isPresent()) {
+                throw new TrinoException(SCHEMA_ALREADY_EXISTS, "Schema already exists: " + target);
+            }
+            commit.endSchema(schema.schemaId());
+            // the location keeps the original name, matching how DuckDB renames a schema
+            commit.insertSchemaRow(schema.schemaId(), target, schema.path());
+            commit.recordCreatedSchema(target);
+            return null;
+        });
     }
 
     @Override
@@ -220,6 +320,355 @@ public class DuckLakeMetadata
     {
         return ((DuckLakeColumnHandle) columnHandle).columnMetadata();
     }
+
+    @Override
+    public void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, SaveMode saveMode)
+    {
+        SchemaTableName tableName = tableMetadata.getTable();
+        commit(commit -> {
+            NewTable table = createTable(commit, tableName, tableMetadata.getColumns(), saveMode);
+            if (table != null) {
+                tableMetadata.getComment().ifPresent(comment -> commit.setTableTag(table.tableId(), COMMENT_TAG_KEY, Optional.of(comment)));
+            }
+            return null;
+        });
+    }
+
+    /**
+     * Creates the catalog rows of a new table and returns its identifier and location. Shared by
+     * {@code CREATE TABLE} and {@code CREATE TABLE AS}, which then writes data into it.
+     */
+    private NewTable createTable(DuckLakeCommit commit, SchemaTableName tableName, List<ColumnMetadata> columns, SaveMode saveMode)
+    {
+        DuckLakeCommit.SchemaIdentity schema = commit.findSchema(tableName.getSchemaName())
+                .orElseThrow(() -> new SchemaNotFoundException(tableName.getSchemaName()));
+        Optional<DuckLakeCommit.TableIdentity> existing = commit.findTable(tableName.getSchemaName(), tableName.getTableName());
+        if (existing.isPresent()) {
+            switch (saveMode) {
+                case FAIL -> throw new TrinoException(TABLE_ALREADY_EXISTS, "Table already exists: " + tableName);
+                case IGNORE -> {
+                    return null;
+                }
+                case REPLACE -> throw new TrinoException(NOT_SUPPORTED, "This connector does not support replacing tables");
+            }
+        }
+
+        long tableId = commit.allocateCatalogId();
+        String tablePath = directoryName(tableName.getTableName());
+        commit.insertTableRow(tableId, schema.schemaId(), tableName.getTableName(), tablePath, Optional.empty());
+
+        List<DuckLakeWriteColumn> writeColumns = DuckLakeColumns.assignColumnIds(columns);
+        for (DuckLakeColumnRow row : DuckLakeColumns.toColumnRows(writeColumns)) {
+            commit.insertColumn(tableId, row);
+        }
+        for (int i = 0; i < columns.size(); i++) {
+            Optional<String> comment = columns.get(i).getComment();
+            if (comment.isPresent()) {
+                commit.setColumnTag(tableId, writeColumns.get(i).columnId(), COMMENT_TAG_KEY, comment);
+            }
+        }
+        commit.recordCreatedTable(tableName.getSchemaName(), tableName.getTableName(), tableId);
+
+        String schemaLocation = PathResolver.resolve(dataPath, schema.path(), true);
+        return new NewTable(tableId, writeColumns, PathResolver.resolve(schemaLocation, tablePath, true));
+    }
+
+    @Override
+    public void dropTable(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        commit(commit -> {
+            // the data files stay in place, still visible to readers of the snapshots they belonged to
+            commit.endTable(handle.tableId());
+            commit.endTableContents(handle.tableId());
+            commit.deleteTableStats(handle.tableId());
+            commit.recordDroppedTable(handle.tableId());
+            return null;
+        });
+    }
+
+    @Override
+    public void renameTable(ConnectorSession session, ConnectorTableHandle tableHandle, SchemaTableName newTableName)
+    {
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        commit(commit -> {
+            DuckLakeCommit.TableIdentity table = commit.findTable(handle.schemaName(), handle.tableName())
+                    .orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
+            DuckLakeCommit.SchemaIdentity targetSchema = commit.findSchema(newTableName.getSchemaName())
+                    .orElseThrow(() -> new SchemaNotFoundException(newTableName.getSchemaName()));
+            if (commit.findTable(newTableName.getSchemaName(), newTableName.getTableName()).isPresent()) {
+                throw new TrinoException(TABLE_ALREADY_EXISTS, "Table already exists: " + newTableName);
+            }
+            commit.endTable(table.tableId());
+            // the location keeps the original name, so already written data files stay reachable
+            commit.insertTableRow(table.tableId(), targetSchema.schemaId(), newTableName.getTableName(), table.path(), table.tableUuid());
+            commit.recordCreatedTable(newTableName.getSchemaName(), newTableName.getTableName(), table.tableId());
+            return null;
+        });
+    }
+
+    @Override
+    public void setTableComment(ConnectorSession session, ConnectorTableHandle tableHandle, Optional<String> comment)
+    {
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        commit(commit -> {
+            commit.setTableTag(handle.tableId(), COMMENT_TAG_KEY, comment);
+            commit.recordTableMetadataChange(handle.tableId());
+            return null;
+        });
+    }
+
+    @Override
+    public void setColumnComment(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column, Optional<String> comment)
+    {
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        DuckLakeColumnHandle columnHandle = (DuckLakeColumnHandle) column;
+        commit(commit -> {
+            commit.setColumnTag(handle.tableId(), columnHandle.columnId(), COMMENT_TAG_KEY, comment);
+            commit.recordTableMetadataChange(handle.tableId());
+            return null;
+        });
+    }
+
+    @Override
+    public ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, Optional<ConnectorTableLayout> layout, RetryMode retryMode, boolean replace)
+    {
+        if (replace) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support replacing tables");
+        }
+        SchemaTableName tableName = tableMetadata.getTable();
+        // the table is created in its own snapshot, so that the rows written afterwards land in a
+        // table that already exists, exactly as an insert into an existing table would
+        return commit(commit -> {
+            NewTable table = createTable(commit, tableName, tableMetadata.getColumns(), SaveMode.FAIL);
+            tableMetadata.getComment().ifPresent(comment -> commit.setTableTag(table.tableId(), COMMENT_TAG_KEY, Optional.of(comment)));
+            return new DuckLakeWriteTarget(tableName, table.tableId(), table.location(), table.columns(), Optional.empty());
+        });
+    }
+
+    @Override
+    public Optional<ConnectorOutputMetadata> finishCreateTable(
+            ConnectorSession session,
+            ConnectorOutputTableHandle tableHandle,
+            Collection<Slice> fragments,
+            Collection<ComputedStatistics> computedStatistics)
+    {
+        return finishWrite((DuckLakeWriteTarget) tableHandle, fragments);
+    }
+
+    @Override
+    public ConnectorInsertTableHandle beginInsert(ConnectorSession session, ConnectorTableHandle tableHandle, List<ColumnHandle> columns, RetryMode retryMode)
+    {
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        List<DuckLakeWriteColumn> writeColumns = DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId()));
+        Set<Long> insertedColumnIds = columns.stream()
+                .map(DuckLakeColumnHandle.class::cast)
+                .map(DuckLakeColumnHandle::columnId)
+                .collect(toImmutableSet());
+        List<DuckLakeWriteColumn> missingColumns = writeColumns.stream()
+                .filter(column -> !insertedColumnIds.contains(column.columnId()))
+                .collect(toImmutableList());
+        if (!missingColumns.isEmpty()) {
+            // every column of the table is written to every data file, so a partial insert would
+            // leave the omitted columns undefined rather than null
+            throw new TrinoException(NOT_SUPPORTED, "Inserting into a subset of the columns is not supported; column '%s' is missing".formatted(missingColumns.getFirst().name()));
+        }
+        return new DuckLakeWriteTarget(
+                handle.schemaTableName(),
+                handle.tableId(),
+                handle.tableLocation(),
+                writeColumns,
+                partitioningOf(handle));
+    }
+
+    @Override
+    public Optional<ConnectorOutputMetadata> finishInsert(
+            ConnectorSession session,
+            ConnectorInsertTableHandle insertHandle,
+            List<ConnectorTableHandle> sourceTableHandles,
+            Collection<Slice> fragments,
+            Collection<ComputedStatistics> computedStatistics)
+    {
+        return finishWrite((DuckLakeWriteTarget) insertHandle, fragments);
+    }
+
+    /**
+     * Registers the data files the workers wrote, assigns them row identifiers, and folds their
+     * statistics into the table's.
+     */
+    private Optional<ConnectorOutputMetadata> finishWrite(DuckLakeWriteTarget target, Collection<Slice> fragments)
+    {
+        List<DuckLakeDataFile> dataFiles = fragments.stream()
+                .map(fragment -> dataFileCodec.fromJson(fragment.getBytes()))
+                .collect(toImmutableList());
+        if (dataFiles.isEmpty()) {
+            return Optional.empty();
+        }
+        commit(commit -> {
+            addDataFiles(commit, target, dataFiles);
+            commit.recordInsert(target.tableId());
+            return null;
+        });
+        return Optional.empty();
+    }
+
+    /**
+     * Adds data files to a table, numbering their rows from the table's next row identifier and
+     * updating the statistics the catalog keeps for the whole table.
+     */
+    private void addDataFiles(DuckLakeCommit commit, DuckLakeWriteTarget target, List<DuckLakeDataFile> dataFiles)
+    {
+        DuckLakeCommit.TableStatsRow stats = commit.tableStats(target.tableId())
+                .orElseGet(() -> new DuckLakeCommit.TableStatsRow(0, 0, 0));
+        long nextRowId = stats.nextRowId();
+        long recordCount = stats.recordCount();
+        long fileSizeBytes = stats.fileSizeBytes();
+
+        Map<Long, DuckLakeTableColumnStats> columnStats = commit.tableColumnStats(target.tableId()).stream()
+                .collect(toImmutableMap(DuckLakeTableColumnStats::columnId, stats1 -> stats1, (first, _) -> first));
+        Map<Long, DuckLakeWriteColumn> columnsById = DuckLakeWriteColumn.flatten(target.columns()).stream()
+                .collect(toImmutableMap(DuckLakeWriteColumn::columnId, column -> column, (first, _) -> first));
+        Map<Long, DuckLakeTableColumnStats> mergedStats = new LinkedHashMap<>(columnStats);
+
+        for (DuckLakeDataFile dataFile : dataFiles) {
+            long dataFileId = commit.allocateFileId();
+            commit.insertDataFile(target.tableId(), dataFileId, new DuckLakeCommit.DataFileRow(
+                    dataFile.path(),
+                    dataFile.recordCount(),
+                    dataFile.fileSizeBytes(),
+                    dataFile.footerSize(),
+                    nextRowId,
+                    target.partitioning().map(DuckLakePartitioning::partitionId).map(OptionalLong::of).orElse(OptionalLong.empty())));
+            nextRowId += dataFile.recordCount();
+            recordCount += dataFile.recordCount();
+            fileSizeBytes += dataFile.fileSizeBytes();
+
+            for (int index = 0; index < dataFile.partitionValues().size(); index++) {
+                commit.insertFilePartitionValue(target.tableId(), dataFileId, index, dataFile.partitionValues().get(index));
+            }
+            for (DuckLakeFileColumnStatsRow fileStats : dataFile.columnStatistics()) {
+                commit.insertFileColumnStats(target.tableId(), dataFileId, fileStats);
+                DuckLakeWriteColumn column = columnsById.get(fileStats.columnId());
+                if (column != null) {
+                    mergedStats.merge(
+                            fileStats.columnId(),
+                            toTableColumnStats(column, fileStats),
+                            (existing, added) -> mergeColumnStats(column.type(), existing, added));
+                }
+            }
+        }
+
+        commit.writeTableStats(target.tableId(), new DuckLakeCommit.TableStatsRow(recordCount, nextRowId, fileSizeBytes));
+        for (DuckLakeTableColumnStats stats2 : mergedStats.values()) {
+            commit.writeTableColumnStats(target.tableId(), stats2);
+        }
+    }
+
+    private static DuckLakeTableColumnStats toTableColumnStats(DuckLakeWriteColumn column, DuckLakeFileColumnStatsRow fileStats)
+    {
+        Optional<Boolean> containsNull = Optional.empty();
+        if (fileStats.nullCount().isPresent()) {
+            containsNull = Optional.of(fileStats.nullCount().orElseThrow() > 0);
+        }
+        return new DuckLakeTableColumnStats(
+                column.columnId(),
+                containsNull,
+                fileStats.containsNan(),
+                fileStats.minValue(),
+                fileStats.maxValue());
+    }
+
+    /**
+     * Widens a column's table-wide statistics to also cover a newly written file. Anything the new
+     * file leaves unknown makes the combined statistic unknown, so a reader never sees bounds that
+     * exclude rows the table holds.
+     */
+    private static DuckLakeTableColumnStats mergeColumnStats(Type type, DuckLakeTableColumnStats existing, DuckLakeTableColumnStats added)
+    {
+        return new DuckLakeTableColumnStats(
+                existing.columnId(),
+                mergeFlag(existing.containsNull(), added.containsNull()),
+                mergeFlag(existing.containsNan(), added.containsNan()),
+                mergeBound(type, existing.minValue(), added.minValue(), true),
+                mergeBound(type, existing.maxValue(), added.maxValue(), false));
+    }
+
+    private static Optional<Boolean> mergeFlag(Optional<Boolean> existing, Optional<Boolean> added)
+    {
+        if (existing.isEmpty() || added.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(existing.get() || added.get());
+    }
+
+    private static Optional<String> mergeBound(Type type, Optional<String> existing, Optional<String> added, boolean minimum)
+    {
+        if (existing.isEmpty() || added.isEmpty()) {
+            return Optional.empty();
+        }
+        Optional<Object> existingValue = StatsValueParser.parse(type, existing.get());
+        Optional<Object> addedValue = StatsValueParser.parse(type, added.get());
+        if (existingValue.isEmpty() || addedValue.isEmpty()) {
+            return Optional.empty();
+        }
+        try {
+            @SuppressWarnings("unchecked")
+            Comparable<Object> left = (Comparable<Object>) existingValue.get();
+            int comparison = left.compareTo(addedValue.get());
+            if (minimum) {
+                return comparison <= 0 ? existing : added;
+            }
+            return comparison >= 0 ? existing : added;
+        }
+        catch (RuntimeException _) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * The partitioning to write a table with, taken from the scheme recorded in the catalog.
+     */
+    private Optional<DuckLakePartitioning> partitioningOf(DuckLakeTableHandle handle)
+    {
+        Optional<DuckLakePartitionInfo> partitionInfo = metastore.partitionInfo(handle.snapshotId(), handle.tableId());
+        if (partitionInfo.isEmpty()) {
+            return Optional.empty();
+        }
+        List<DuckLakeWriteColumn> columns = DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId()));
+        ImmutableList.Builder<DuckLakePartitioning.Field> fields = ImmutableList.builder();
+        for (DuckLakePartitionColumn partitionColumn : partitionInfo.get().columns()) {
+            int channel = -1;
+            for (int index = 0; index < columns.size(); index++) {
+                if (columns.get(index).columnId() == partitionColumn.columnId()) {
+                    channel = index;
+                    break;
+                }
+            }
+            if (channel < 0) {
+                throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Partition key of table %s refers to column %s, which the table does not have"
+                        .formatted(handle.schemaTableName(), partitionColumn.columnId()));
+            }
+            DuckLakeWriteColumn column = columns.get(channel);
+            DuckLakeWritePartitioner.validateTransform(partitionColumn.transform(), column.name(), column.type());
+            fields.add(new DuckLakePartitioning.Field(channel, column.columnId(), column.name(), partitionColumn.transform()));
+        }
+        return Optional.of(new DuckLakePartitioning(partitionInfo.get().partitionId(), fields.build()));
+    }
+
+    /**
+     * The directory a schema or table stores its files in. DuckDB names it after the object, which
+     * keeps the layout readable; names that cannot be a single path segment fall back to a
+     * generated one.
+     */
+    private static String directoryName(String name)
+    {
+        if (name.isEmpty() || name.equals(".") || name.equals("..") || name.contains("/") || name.contains("\\")) {
+            return java.util.UUID.randomUUID() + "/";
+        }
+        return name + "/";
+    }
+
+    private record NewTable(long tableId, List<DuckLakeWriteColumn> columns, String location) {}
 
     @Override
     public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(ConnectorSession session, ConnectorTableHandle tableHandle, Constraint constraint)

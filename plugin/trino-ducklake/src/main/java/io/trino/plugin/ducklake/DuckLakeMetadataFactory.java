@@ -14,6 +14,7 @@
 package io.trino.plugin.ducklake;
 
 import com.google.inject.Inject;
+import io.airlift.json.JsonCodec;
 import io.trino.plugin.ducklake.metastore.JdbcDuckLakeMetastore;
 import io.trino.spi.security.ConnectorIdentity;
 
@@ -23,16 +24,18 @@ public class DuckLakeMetadataFactory
 {
     private final JdbcDuckLakeMetastore metastore;
     private final String dataPath;
+    private final JsonCodec<DuckLakeDataFile> dataFileCodec;
 
     @Inject
-    public DuckLakeMetadataFactory(JdbcDuckLakeMetastore metastore, DuckLakeConfig config)
+    public DuckLakeMetadataFactory(JdbcDuckLakeMetastore metastore, DuckLakeConfig config, JsonCodec<DuckLakeDataFile> dataFileCodec)
     {
         this.metastore = requireNonNull(metastore, "metastore is null");
         this.dataPath = config.getDataPath();
+        this.dataFileCodec = requireNonNull(dataFileCodec, "dataFileCodec is null");
     }
 
     public DuckLakeMetadata create(ConnectorIdentity ignoredIdentity)
     {
-        return new DuckLakeMetadata(metastore, dataPath);
+        return new DuckLakeMetadata(metastore, dataPath, dataFileCodec);
     }
 }

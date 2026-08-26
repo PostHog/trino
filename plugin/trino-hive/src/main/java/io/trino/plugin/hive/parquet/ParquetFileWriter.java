@@ -211,4 +211,9 @@ public final class ParquetFileWriter
     {
         return parquetWriter.getFileMetaData();
     }
+
+    public int getFooterSize()
+    {
+        return parquetWriter.getFooterSize();
+    }
 }
