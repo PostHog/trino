@@ -237,6 +237,57 @@ public class ParquetPageSourceFactory
             OptionalLong estimatedFileSize,
             MemoryContext externalMemoryContext)
     {
+        return createPageSource(
+                inputFile,
+                start,
+                length,
+                columns,
+                disjunctTupleDomains,
+                useColumnNames,
+                timeZone,
+                stats,
+                options,
+                parquetWriteValidation,
+                fileDecryptionProperties,
+                domainCompactionThreshold,
+                estimatedFileSize,
+                externalMemoryContext,
+                (_, fileColumns) -> fileColumns);
+    }
+
+    /**
+     * Reads columns that a file names differently from the way the caller does.
+     * <p>
+     * A format that identifies its columns by something other than their name -- a field id
+     * written into the Parquet schema, say -- cannot say which columns it wants until the file
+     * schema has been read. {@code columnsForFile} is handed that schema once it is known and
+     * returns the columns to read, named the way this file names them.
+     */
+    public interface ColumnsForFile
+    {
+        List<HiveColumnHandle> apply(MessageType fileSchema, List<HiveColumnHandle> columns);
+    }
+
+    /**
+     * This method is available for other callers to use directly.
+     */
+    public static ConnectorPageSource createPageSource(
+            TrinoInputFile inputFile,
+            long start,
+            long length,
+            List<HiveColumnHandle> columns,
+            List<TupleDomain<HiveColumnHandle>> disjunctTupleDomains,
+            boolean useColumnNames,
+            DateTimeZone timeZone,
+            FileFormatDataSourceStats stats,
+            ParquetReaderOptions options,
+            Optional<ParquetWriteValidation> parquetWriteValidation,
+            Optional<FileDecryptionProperties> fileDecryptionProperties,
+            int domainCompactionThreshold,
+            OptionalLong estimatedFileSize,
+            MemoryContext externalMemoryContext,
+            ColumnsForFile columnsForFile)
+    {
         MessageType fileSchema;
         MessageType requestedSchema;
         MessageColumnIO messageColumn;
@@ -249,7 +300,23 @@ public class ParquetPageSourceFactory
             FileMetadata fileMetaData = parquetMetadata.getFileMetaData();
             fileSchema = fileMetaData.getSchema();
 
-            Optional<MessageType> message = getParquetMessageType(columns, useColumnNames, fileSchema);
+            // A caller that identifies its columns by something the name does not carry only now
+            // knows what this file calls them, so the columns and the predicate over them are
+            // renamed together before either is used.
+            List<HiveColumnHandle> fileColumns = columnsForFile.apply(fileSchema, columns);
+            List<TupleDomain<HiveColumnHandle>> fileTupleDomains = disjunctTupleDomains;
+            if (!fileColumns.equals(columns)) {
+                checkArgument(fileColumns.size() == columns.size(), "columnsForFile returned %s columns, expected %s", fileColumns.size(), columns.size());
+                Map<HiveColumnHandle, HiveColumnHandle> renamed = new HashMap<>();
+                for (int i = 0; i < columns.size(); i++) {
+                    renamed.put(columns.get(i), fileColumns.get(i));
+                }
+                fileTupleDomains = disjunctTupleDomains.stream()
+                        .map(tupleDomain -> tupleDomain.transformKeys(column -> renamed.getOrDefault(column, column)))
+                        .collect(toImmutableList());
+            }
+
+            Optional<MessageType> message = getParquetMessageType(fileColumns, useColumnNames, fileSchema);
 
             requestedSchema = message.orElse(new MessageType(fileSchema.getName(), ImmutableList.of()));
             messageColumn = getColumnIO(fileSchema, requestedSchema);
@@ -262,9 +329,9 @@ public class ParquetPageSourceFactory
                 parquetPredicates = ImmutableList.of(buildPredicate(requestedSchema, TupleDomain.all(), descriptorsByPath, timeZone));
             }
             else {
-                ImmutableList.Builder<TupleDomain<ColumnDescriptor>> parquetTupleDomainsBuilder = ImmutableList.builderWithExpectedSize(disjunctTupleDomains.size());
-                ImmutableList.Builder<TupleDomainParquetPredicate> parquetPredicatesBuilder = ImmutableList.builderWithExpectedSize(disjunctTupleDomains.size());
-                for (TupleDomain<HiveColumnHandle> tupleDomain : disjunctTupleDomains) {
+                ImmutableList.Builder<TupleDomain<ColumnDescriptor>> parquetTupleDomainsBuilder = ImmutableList.builderWithExpectedSize(fileTupleDomains.size());
+                ImmutableList.Builder<TupleDomainParquetPredicate> parquetPredicatesBuilder = ImmutableList.builderWithExpectedSize(fileTupleDomains.size());
+                for (TupleDomain<HiveColumnHandle> tupleDomain : fileTupleDomains) {
                     TupleDomain<ColumnDescriptor> parquetTupleDomain = getParquetTupleDomain(descriptorsByPath, tupleDomain, fileSchema, useColumnNames);
                     parquetTupleDomainsBuilder.add(parquetTupleDomain);
                     parquetPredicatesBuilder.add(buildPredicate(requestedSchema, parquetTupleDomain, descriptorsByPath, timeZone));
@@ -302,7 +369,7 @@ public class ParquetPageSourceFactory
                     parquetPredicates.size() == 1 ? Optional.of(parquetPredicates.getFirst()) : Optional.empty(),
                     parquetWriteValidation,
                     parquetMetadata.getDecryptionContext());
-            return createParquetPageSource(columns, fileSchema, messageColumn, useColumnNames, parquetReaderProvider);
+            return createParquetPageSource(fileColumns, fileSchema, messageColumn, useColumnNames, parquetReaderProvider);
         }
         catch (Exception e) {
             try {
