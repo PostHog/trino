@@ -25,6 +25,17 @@ When available, Claude should prefer these over shell equivalents:
 
 ## Building
 
+**Set `JAVA_HOME` first.** The default `java` on `PATH` is JDK 8, but the build needs the
+version in `air.java.version` (currently 25). IntelliJ's JDK is the one installed here:
+
+```bash
+export JAVA_HOME=~/.jdks/jdk-25.0.4+7
+```
+
+Without it Maven cannot load the `trino-maven-plugin` build extension, and every plugin module
+fails with `Unknown packaging: trino-plugin` — an error that points nowhere near the real cause.
+An interactive shell may already set this; a non-interactive one (a script, an agent) does not.
+
 Fastest full build and install:
 
 ```bash

@@ -138,6 +138,16 @@ final class TestDuckLakeReads
                 "INSERT INTO deletes_table SELECT range, 'v' || range FROM range(10, 20)",
                 "DELETE FROM deletes_table WHERE id % 3 = 0",
                 "DELETE FROM deletes_table WHERE id = 1",
+                // DuckLake allows a temporal transform on a column that carries a time zone.
+                // This connector will not WRITE such a partitioning, because the value it files a
+                // row under depends on the zone the value is read in. Reading is unaffected.
+                "CREATE TABLE part_tstz (ts TIMESTAMPTZ, val INTEGER)",
+                "ALTER TABLE part_tstz SET PARTITIONED BY (year(ts))",
+                """
+                INSERT INTO part_tstz VALUES
+                    (TIMESTAMPTZ '2024-01-15 01:02:03+00', 1),
+                    (TIMESTAMPTZ '2025-03-10 07:08:09+00', 2)
+                """,
                 "CREATE TABLE part_ident (id INTEGER, v VARCHAR)",
                 "ALTER TABLE part_ident SET PARTITIONED BY (id)",
                 "INSERT INTO part_ident VALUES (1, 'a'), (2, 'b'), (3, 'c')",
@@ -246,6 +256,27 @@ final class TestDuckLakeReads
     {
         assertThat(computeActual("SHOW TABLES FROM main").getOnlyColumnAsSet())
                 .contains("types_scalar", "types_nested", "snapshots_table", "evolution", "part_events");
+    }
+
+    @Test
+    void testReadTablePartitionedByTemporalTransformOnTimeZonedColumn()
+    {
+        // A write-time rule once ran on the read path. getTableMetadata resolves the table
+        // properties, which resolved the partitioning, which rejected a temporal transform over a
+        // column carrying a time zone. Every read of such a table failed, including SHOW COLUMNS,
+        // so a table another engine had written was unusable rather than merely unwritable.
+        assertQuery("SELECT val FROM part_tstz ORDER BY val", "VALUES 1, 2");
+        assertQuery(
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = 'main' AND table_name = 'part_tstz' ORDER BY column_name",
+                "VALUES 'ts', 'val'");
+        assertThat((String) computeScalar("SHOW CREATE TABLE part_tstz"))
+                .contains("year(ts)");
+        // The rule still holds where it belongs. A write has to file the row under a partition
+        // value, and the value of a temporal transform over a zoned column depends on the zone it
+        // is read in, so it would disagree with the value another engine computes for that row.
+        assertQueryFails(
+                "INSERT INTO part_tstz VALUES (TIMESTAMP '2026-05-04 00:00:00 UTC', 3)",
+                "Partition transform year requires a DATE or TIMESTAMP column; column 'ts' is timestamp\\(6\\) with time zone");
     }
 
     @Test

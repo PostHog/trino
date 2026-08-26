@@ -662,7 +662,7 @@ public class DuckLakeMetadata
     public Optional<ConnectorTableLayout> getInsertLayout(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
-        return partitioningOf(handle).flatMap(DuckLakeMetadata::preferredWriteLayout);
+        return writePartitioningOf(handle).flatMap(DuckLakeMetadata::preferredWriteLayout);
     }
 
     @Override
@@ -749,7 +749,7 @@ public class DuckLakeMetadata
                 handle.tableId(),
                 handle.tableLocation(),
                 writeColumns,
-                partitioningOf(handle));
+                writePartitioningOf(handle));
     }
 
     @Override
@@ -922,7 +922,7 @@ public class DuckLakeMetadata
                         handle.tableId(),
                         handle.tableLocation(),
                         writeColumns,
-                        partitioningOf(handle)));
+                        writePartitioningOf(handle)));
     }
 
     @Override
@@ -1237,7 +1237,11 @@ public class DuckLakeMetadata
     private record NewDeleteFile(String path, long deleteCount, long fileSizeBytes, long footerSize) {}
 
     /**
-     * The partitioning to write a table with, taken from the scheme recorded in the catalog.
+     * The partitioning recorded in the catalog, as the table is described.
+     * <p>
+     * This does not check that the connector could write those transforms. A table that another
+     * engine partitioned in a way this connector cannot write must still be readable, and
+     * {@code getTableMetadata} runs on every read.
      */
     private Optional<DuckLakePartitioning> partitioningOf(DuckLakeTableHandle handle)
     {
@@ -1260,10 +1264,29 @@ public class DuckLakeMetadata
                         .formatted(handle.schemaTableName(), partitionColumn.columnId()));
             }
             DuckLakeWriteColumn column = columns.get(channel);
-            DuckLakeWritePartitioner.validateTransform(partitionColumn.transform(), column.name(), column.type());
             fields.add(new DuckLakePartitioning.Field(channel, column.columnId(), column.name(), partitionColumn.transform()));
         }
         return Optional.of(new DuckLakePartitioning(partitionInfo.get().partitionId(), fields.build()));
+    }
+
+    /**
+     * The partitioning to write a table with, taken from the scheme recorded in the catalog.
+     * <p>
+     * A transform this connector cannot apply is rejected here, where the write begins, rather
+     * than on the read path. Writing it would file rows under a partition value that disagrees
+     * with the one another engine computes for the same row.
+     */
+    private Optional<DuckLakePartitioning> writePartitioningOf(DuckLakeTableHandle handle)
+    {
+        Optional<DuckLakePartitioning> partitioning = partitioningOf(handle);
+        if (partitioning.isPresent()) {
+            List<DuckLakeWriteColumn> columns = DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId()));
+            for (DuckLakePartitioning.Field field : partitioning.get().fields()) {
+                DuckLakeWriteColumn column = columns.get(field.sourceChannel());
+                DuckLakeWritePartitioner.validateTransform(field.transform(), column.name(), column.type());
+            }
+        }
+        return partitioning;
     }
 
     @Override
