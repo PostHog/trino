@@ -13,13 +13,21 @@
  */
 package io.trino.plugin.ducklake;
 
+import java.util.OptionalLong;
+
 import static io.airlift.slice.SizeOf.estimatedSizeOf;
 import static io.airlift.slice.SizeOf.instanceSize;
+import static io.airlift.slice.SizeOf.sizeOf;
 import static java.util.Objects.requireNonNull;
 
+/**
+ * @param footerSize length of the Parquet footer of the file as the catalog records it, excluding
+ *         the postscript that follows it
+ */
 public record DuckLakeDeleteFileHandle(
         String path,
         long fileSizeBytes,
+        OptionalLong footerSize,
         long deleteCount)
 {
     private static final int INSTANCE_SIZE = (int) instanceSize(DuckLakeDeleteFileHandle.class);
@@ -27,10 +35,11 @@ public record DuckLakeDeleteFileHandle(
     public DuckLakeDeleteFileHandle
     {
         requireNonNull(path, "path is null");
+        requireNonNull(footerSize, "footerSize is null");
     }
 
     public long retainedSizeInBytes()
     {
-        return INSTANCE_SIZE + estimatedSizeOf(path);
+        return INSTANCE_SIZE + estimatedSizeOf(path) + sizeOf(footerSize);
     }
 }
