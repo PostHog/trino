@@ -1,5 +1,10 @@
 name: cleanup
 
+# Cancels the runs of a pull request that has closed, which needs a token the
+# pull_request trigger does not carry for forks. Nothing is checked out and no
+# code from the pull request is executed; permissions are scoped to actions
+# alone.
+# nosemgrep: dotgithub-repo..semgrep.rules.github-actions-pull-request-target
 on:
   # Triggered on every PR merge or close (but with the code and workflow as present in the base of the merge instead of the merge commmit)
   pull_request_target:
@@ -7,6 +12,12 @@ on:
       - closed
 
 # NOTE: Do not check out/execute code from the PR since a read-write token is present due to pull_request_target
+
+# Cancelling a run is all this needs; without an explicit block it would take
+# the repository default, which is broader.
+permissions:
+  actions: write
+
 jobs:
   cancel:
     runs-on: ubuntu-latest
