@@ -3,17 +3,27 @@ name: docker-publish-posthog
 # Builds the PostHog fork's Trino server image (with the ducklake connector)
 # for linux/arm64 and pushes it to GHCR. The managed-warehouse trino Karpenter
 # node pool is arm64-only, so amd64 is skipped to keep CI fast.
+#
+# Every run also tells PostHog/charts what it built. Charts records the image
+# in state/trino.yaml and rolls the dev cell; the prod cell moves only when
+# somebody runs promote-to-prod, which the prod-promote-managed-warehouse
+# environment gates. See the deploy job at the end of this file.
 
 on:
+  # A merge to the deployment branch builds and reaches the dev cell on its
+  # own. Named releases and one-off rebuilds keep working through the other
+  # two triggers.
+  push:
+    branches:
+      - ducklake-connector
+    tags:
+      - "posthog-*"
   workflow_dispatch:
     inputs:
       tag:
         description: "Image tag to publish, e.g. 484-ducklake.1"
         required: true
         default: "484-ducklake.1"
-  push:
-    tags:
-      - "posthog-*"
 
 permissions:
   contents: read
@@ -26,6 +36,8 @@ jobs:
   build-and-push:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 150
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -48,18 +60,89 @@ jobs:
 
       - name: Resolve image tag
         id: tag
+        # A branch push has no name to take a tag from, so it is published
+        # under its commit alone. The other two triggers keep their readable
+        # tag, and every run publishes the commit tag as well, because that is
+        # what the deploy job records.
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF_NAME#posthog-}" >> "$GITHUB_OUTPUT"
-          fi
+          case "${{ github.event_name }}" in
+            workflow_dispatch) tag='${{ inputs.tag }}' ;;
+            *) if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+                 tag="${GITHUB_REF_NAME#posthog-}"
+               else
+                 tag="${GITHUB_SHA}"
+               fi ;;
+          esac
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Push image
+        id: push
+        # Two tags for one image: the readable one a person asked for, and the
+        # commit, which the deploy job pins by digest. A run triggered by a
+        # branch push resolves both to the commit, and the second tag and push
+        # are then a no-op on the same reference.
         run: |
+          set -euo pipefail
           TRINO_VERSION="$(./mvnw --quiet help:evaluate -Dexpression=project.version -DforceStdout --raw-streams)"
           docker tag "trino:${TRINO_VERSION}-arm64" "${IMAGE}:${{ steps.tag.outputs.tag }}"
           docker push "${IMAGE}:${{ steps.tag.outputs.tag }}"
+          docker tag "trino:${TRINO_VERSION}-arm64" "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:${GITHUB_SHA}"
+
+          # RepoDigests is populated by the push above. Take the entry for this
+          # repository, so a stale digest from another tag cannot be picked.
+          digest="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${IMAGE}:${GITHUB_SHA}" \
+            | grep "^${IMAGE}@" | head -n 1 | cut -d@ -f2)"
+          if [ -z "${digest}" ]; then
+            echo "::error::could not read the digest of ${IMAGE}:${GITHUB_SHA}"
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    # Tells charts what to run. Charts writes state/trino.yaml and rolls the
+    # dev cell; the prod cell waits for promote-to-prod, which the
+    # prod-promote-managed-warehouse environment gates.
+    #
+    # A fork must not deploy PostHog's cells, and a build of some other branch
+    # is not what dev should follow. Only a push carries head_commit, which the
+    # payload below reads; a manual run of this same branch would send a null
+    # commit and charts would record a deploy it cannot attribute.
+    needs: build-and-push
+    if: >-
+      github.repository == 'PostHog/trino'
+      && github.event_name == 'push'
+      && github.ref == 'refs/heads/ducklake-connector'
+    runs-on: depot-ubuntu-24.04-small
+    steps:
+      - name: Get deployer token
+        id: deployer
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          app-id: ${{ secrets.GH_APP_CHARTS_DEPLOYER_APP_ID }}
+          private-key: ${{ secrets.GH_APP_CHARTS_DEPLOYER_PRIVATE_KEY }}
+          owner: PostHog
+          repositories: charts
+
+      - name: Record the build in charts
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
+        with:
+          token: ${{ steps.deployer.outputs.token }}
+          repository: PostHog/charts
+          event-type: commit_state_update
+          client-payload: |
+            {
+              "values": {
+                "image": {
+                  "sha": "${{ github.sha }}@${{ needs.build-and-push.outputs.digest }}"
+                }
+              },
+              "release": "trino",
+              "commit": ${{ toJson(github.event.head_commit) }},
+              "repository": ${{ toJson(github.repository) }},
+              "labels": [],
+              "timestamp": "${{ github.event.head_commit.timestamp }}"
+            }
