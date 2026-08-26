@@ -91,6 +91,7 @@ public class DuckLakeConnectorFactory
             ConnectorPageSinkProvider pageSinkProvider = injector.getInstance(ConnectorPageSinkProvider.class);
             ConnectorNodePartitioningProvider nodePartitioningProvider = injector.getInstance(ConnectorNodePartitioningProvider.class);
             Set<SessionPropertiesProvider> sessionPropertiesProviders = injector.getInstance(new Key<>() {});
+            DuckLakeTableProperties tableProperties = injector.getInstance(DuckLakeTableProperties.class);
 
             return new DuckLakeConnector(
                     injector,
@@ -100,7 +101,8 @@ public class DuckLakeConnectorFactory
                     new ClassLoaderSafeConnectorPageSourceProvider(pageSourceProvider, classLoader),
                     new ClassLoaderSafeConnectorPageSinkProvider(pageSinkProvider, classLoader),
                     new ClassLoaderSafeNodePartitioningProvider(nodePartitioningProvider, classLoader),
-                    sessionPropertiesProviders);
+                    sessionPropertiesProviders,
+                    tableProperties);
         }
     }
 }

@@ -649,6 +649,46 @@ public class JdbcDuckLakeMetastore
         }
     }
 
+    /**
+     * The comments recorded for a table and for its columns. DuckLake keeps them as tags keyed by
+     * {@code comment}, versioned by snapshot like every other row.
+     */
+    public Optional<String> tableComment(long snapshotId, long tableId)
+    {
+        try (Handle handle = jdbi.open()) {
+            return handle.createQuery(
+                            """
+                            SELECT value FROM %s
+                            WHERE object_id = :tableId AND key = 'comment' AND %s""".formatted(table("ducklake_tag"), VISIBLE))
+                    .bind("snapshot", snapshotId)
+                    .bind("tableId", tableId)
+                    .mapTo(String.class)
+                    .findFirst();
+        }
+        catch (JdbiException e) {
+            throw metastoreError(e);
+        }
+    }
+
+    public Map<Long, String> columnComments(long snapshotId, long tableId)
+    {
+        try (Handle handle = jdbi.open()) {
+            Map<Long, String> comments = new LinkedHashMap<>();
+            handle.createQuery(
+                            """
+                            SELECT column_id, value FROM %s
+                            WHERE table_id = :tableId AND key = 'comment' AND %s""".formatted(table("ducklake_column_tag"), VISIBLE))
+                    .bind("snapshot", snapshotId)
+                    .bind("tableId", tableId)
+                    .map((rs, _) -> comments.put(rs.getLong("column_id"), rs.getString("value")))
+                    .list();
+            return ImmutableMap.copyOf(comments);
+        }
+        catch (JdbiException e) {
+            throw metastoreError(e);
+        }
+    }
+
     public Optional<DuckLakeTableStats> tableStatistics(long tableId)
     {
         try (Handle handle = jdbi.open()) {

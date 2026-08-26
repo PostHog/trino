@@ -48,6 +48,7 @@ import io.trino.spi.connector.AggregationApplicationResult;
 import io.trino.spi.connector.Assignment;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
+import io.trino.spi.connector.ColumnPosition;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorMetadata;
@@ -104,6 +105,8 @@ import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADA
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_FEATURE;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_FORMAT_VERSION;
 import static io.trino.plugin.ducklake.util.PartitionTransforms.IDENTITY_TRANSFORM;
+import static io.trino.spi.StandardErrorCode.COLUMN_ALREADY_EXISTS;
+import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.SCHEMA_ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_EMPTY;
@@ -295,10 +298,33 @@ public class DuckLakeMetadata
     public ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle table)
     {
         DuckLakeTableHandle handle = (DuckLakeTableHandle) table;
+        Map<Long, String> columnComments = metastore.columnComments(handle.snapshotId(), handle.tableId());
         List<ColumnMetadata> columns = columnHandles(handle).stream()
-                .map(DuckLakeColumnHandle::columnMetadata)
+                .map(column -> ColumnMetadata.builderFrom(column.columnMetadata())
+                        .setComment(Optional.ofNullable(columnComments.get(column.columnId())))
+                        .build())
                 .collect(toImmutableList());
-        return new ConnectorTableMetadata(handle.schemaTableName(), columns);
+        return new ConnectorTableMetadata(
+                handle.schemaTableName(),
+                columns,
+                tableProperties(handle),
+                metastore.tableComment(handle.snapshotId(), handle.tableId()));
+    }
+
+    /**
+     * The properties that describe how the table is laid out, so that a table created here can be
+     * recreated from the definition the engine prints.
+     */
+    private Map<String, Object> tableProperties(DuckLakeTableHandle handle)
+    {
+        Optional<DuckLakePartitioning> partitioning = partitioningOf(handle);
+        if (partitioning.isEmpty()) {
+            return ImmutableMap.of();
+        }
+        return ImmutableMap.of(
+                DuckLakeTableProperties.PARTITIONING_PROPERTY, partitioning.get().fields().stream()
+                        .map(field -> DuckLakeTableProperties.formatPartitionKey(field.columnName(), field.transform()))
+                        .collect(toImmutableList()));
     }
 
     @Override
@@ -355,7 +381,7 @@ public class DuckLakeMetadata
     {
         SchemaTableName tableName = tableMetadata.getTable();
         commit(commit -> {
-            NewTable table = createTable(commit, tableName, tableMetadata.getColumns(), saveMode);
+            NewTable table = createTable(commit, tableName, tableMetadata.getColumns(), DuckLakeTableProperties.getPartitioning(tableMetadata.getProperties()), saveMode);
             if (table != null) {
                 tableMetadata.getComment().ifPresent(comment -> commit.setTableTag(table.tableId(), COMMENT_TAG_KEY, Optional.of(comment)));
             }
@@ -367,7 +393,7 @@ public class DuckLakeMetadata
      * Creates the catalog rows of a new table and returns its identifier and location. Shared by
      * {@code CREATE TABLE} and {@code CREATE TABLE AS}, which then writes data into it.
      */
-    private NewTable createTable(DuckLakeCommit commit, SchemaTableName tableName, List<ColumnMetadata> columns, SaveMode saveMode)
+    private NewTable createTable(DuckLakeCommit commit, SchemaTableName tableName, List<ColumnMetadata> columns, List<String> partitionKeys, SaveMode saveMode)
     {
         DuckLakeCommit.SchemaIdentity schema = commit.findSchema(tableName.getSchemaName())
                 .orElseThrow(() -> new SchemaNotFoundException(tableName.getSchemaName()));
@@ -396,10 +422,11 @@ public class DuckLakeMetadata
                 commit.setColumnTag(tableId, writeColumns.get(i).columnId(), COMMENT_TAG_KEY, comment);
             }
         }
+        Optional<DuckLakePartitioning> partitioning = createPartitioning(commit, tableId, writeColumns, partitionKeys);
         commit.recordCreatedTable(tableName.getSchemaName(), tableName.getTableName(), tableId);
 
         String schemaLocation = PathResolver.resolve(dataPath, schema.path(), true);
-        return new NewTable(tableId, writeColumns, PathResolver.resolve(schemaLocation, tablePath, true));
+        return new NewTable(tableId, writeColumns, PathResolver.resolve(schemaLocation, tablePath, true), partitioning);
     }
 
     @Override
@@ -460,6 +487,157 @@ public class DuckLakeMetadata
     }
 
     @Override
+    public void addColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnMetadata column, ColumnPosition position)
+    {
+        if (!(position instanceof ColumnPosition.Last)) {
+            // a column's position is its identifier, which orders it after every column the table
+            // has ever had; placing it elsewhere would renumber the ones that follow
+            throw new TrinoException(NOT_SUPPORTED, "This connector only supports adding columns at the end of a table");
+        }
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        commit(commit -> {
+            List<DuckLakeColumnRow> existing = commit.columns(handle.tableId());
+            existing.stream()
+                    .filter(row -> row.parentColumn().isEmpty() && row.columnName().equalsIgnoreCase(column.getName()))
+                    .findAny()
+                    .ifPresent(_ -> {
+                        throw new TrinoException(COLUMN_ALREADY_EXISTS, "Column already exists: " + column.getName());
+                    });
+            // identifiers are never reused, because data files written while a dropped column
+            // existed still refer to it
+            DuckLakeWriteColumn added = DuckLakeColumns.assignColumnIds(column, commit.maxColumnId(handle.tableId()));
+            for (DuckLakeColumnRow row : DuckLakeColumns.toColumnRows(added)) {
+                commit.insertColumn(handle.tableId(), row);
+            }
+            column.getComment().ifPresent(comment -> commit.setColumnTag(handle.tableId(), added.columnId(), COMMENT_TAG_KEY, Optional.of(comment)));
+            commit.recordAlteredTable(handle.tableId());
+            return null;
+        });
+    }
+
+    @Override
+    public void dropColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle columnHandle)
+    {
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        DuckLakeColumnHandle column = (DuckLakeColumnHandle) columnHandle;
+        commit(commit -> {
+            List<DuckLakeColumnRow> columns = commit.columns(handle.tableId());
+            if (columns.stream().filter(row -> row.parentColumn().isEmpty()).count() <= 1) {
+                throw new TrinoException(NOT_SUPPORTED, "Cannot drop the only column of a table");
+            }
+            endColumnTree(commit, handle.tableId(), columns, column.columnId());
+            commit.setColumnTag(handle.tableId(), column.columnId(), COMMENT_TAG_KEY, Optional.empty());
+            commit.deleteTableColumnStats(handle.tableId(), column.columnId());
+            commit.recordAlteredTable(handle.tableId());
+            return null;
+        });
+    }
+
+    @Override
+    public void renameColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle columnHandle, String target)
+    {
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        DuckLakeColumnHandle column = (DuckLakeColumnHandle) columnHandle;
+        commit(commit -> {
+            // Data files store the name the column had when they were written, and this connector
+            // resolves a file's columns by name rather than by the DuckLake identifier they also
+            // carry. Renaming a column of a table that already holds data would therefore make the
+            // rows written so far read as NULL, so it is refused until the reader matches on the
+            // identifier.
+            if (!commit.visibleDataFiles(handle.tableId()).isEmpty()) {
+                throw new TrinoException(NOT_SUPPORTED, "Renaming a column of a table that already contains data is not supported");
+            }
+            DuckLakeColumnRow current = currentColumn(commit, handle, column.columnId());
+            commit.endColumn(handle.tableId(), column.columnId());
+            commit.insertColumn(handle.tableId(), current.withName(target));
+            commit.recordAlteredTable(handle.tableId());
+            return null;
+        });
+    }
+
+    @Override
+    public void setColumnType(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle columnHandle, Type type)
+    {
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        DuckLakeColumnHandle column = (DuckLakeColumnHandle) columnHandle;
+        if (!isWideningTypeChange(column.type(), type)) {
+            // data files already written keep the old physical type, so the new type has to be one
+            // every value of the old one reads back as
+            throw new TrinoException(NOT_SUPPORTED, "Cannot change the type of column '%s' from %s to %s".formatted(column.name(), column.type(), type));
+        }
+        replaceColumn(handle, column.columnId(), row -> row.withType(DuckLakeTypes.toDuckLakeType(type)));
+    }
+
+    @Override
+    public void dropNotNullConstraint(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle columnHandle)
+    {
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        DuckLakeColumnHandle column = (DuckLakeColumnHandle) columnHandle;
+        replaceColumn(handle, column.columnId(), row -> row.withNullsAllowed(true));
+    }
+
+    /**
+     * Replaces a column's definition, keeping its identifier. The row describing it until now is
+     * ended and a new one takes over at this snapshot, so a reader at an earlier snapshot still
+     * sees the column as it was.
+     */
+    private void replaceColumn(DuckLakeTableHandle handle, long columnId, UnaryOperator<DuckLakeColumnRow> update)
+    {
+        commit(commit -> {
+            DuckLakeColumnRow current = currentColumn(commit, handle, columnId);
+            commit.endColumn(handle.tableId(), columnId);
+            commit.insertColumn(handle.tableId(), update.apply(current));
+            commit.recordAlteredTable(handle.tableId());
+            return null;
+        });
+    }
+
+    private static DuckLakeColumnRow currentColumn(DuckLakeCommit commit, DuckLakeTableHandle handle, long columnId)
+    {
+        return commit.columns(handle.tableId()).stream()
+                .filter(row -> row.columnId() == columnId)
+                .findFirst()
+                .orElseThrow(() -> new TrinoException(DUCKLAKE_INVALID_METADATA, "Column %s of table %s is not visible".formatted(columnId, handle.schemaTableName())));
+    }
+
+    /**
+     * Ends a column and every field nested inside it.
+     */
+    private static void endColumnTree(DuckLakeCommit commit, long tableId, List<DuckLakeColumnRow> columns, long columnId)
+    {
+        commit.endColumn(tableId, columnId);
+        for (DuckLakeColumnRow row : columns) {
+            if (row.parentColumn().isPresent() && row.parentColumn().getAsLong() == columnId) {
+                endColumnTree(commit, tableId, columns, row.columnId());
+            }
+        }
+    }
+
+    /**
+     * Whether every value stored under the old type reads back correctly as the new one. DuckLake
+     * does not rewrite data files when a column's type changes, so only widenings are allowed.
+     */
+    private static boolean isWideningTypeChange(Type oldType, Type newType)
+    {
+        if (oldType.equals(newType)) {
+            return true;
+        }
+        if (oldType.equals(INTEGER) && newType.equals(BIGINT)) {
+            return true;
+        }
+        if (oldType.equals(SMALLINT) && (newType.equals(INTEGER) || newType.equals(BIGINT))) {
+            return true;
+        }
+        if (oldType.equals(TINYINT) && (newType.equals(SMALLINT) || newType.equals(INTEGER) || newType.equals(BIGINT))) {
+            return true;
+        }
+        if (oldType.equals(REAL) && newType.equals(DOUBLE)) {
+            return true;
+        }
+        return false;
+    }
+
+    @Override
     public ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, Optional<ConnectorTableLayout> layout, RetryMode retryMode, boolean replace)
     {
         if (replace) {
@@ -469,9 +647,9 @@ public class DuckLakeMetadata
         // the table is created in its own snapshot, so that the rows written afterwards land in a
         // table that already exists, exactly as an insert into an existing table would
         return commit(commit -> {
-            NewTable table = createTable(commit, tableName, tableMetadata.getColumns(), SaveMode.FAIL);
+            NewTable table = createTable(commit, tableName, tableMetadata.getColumns(), DuckLakeTableProperties.getPartitioning(tableMetadata.getProperties()), SaveMode.FAIL);
             tableMetadata.getComment().ifPresent(comment -> commit.setTableTag(table.tableId(), COMMENT_TAG_KEY, Optional.of(comment)));
-            return new DuckLakeWriteTarget(tableName, table.tableId(), table.location(), table.columns(), Optional.empty());
+            return new DuckLakeWriteTarget(tableName, table.tableId(), table.location(), table.columns(), table.partitioning());
         });
     }
 
@@ -934,7 +1112,63 @@ public class DuckLakeMetadata
         return name + "/";
     }
 
-    private record NewTable(long tableId, List<DuckLakeWriteColumn> columns, String location) {}
+    private record NewTable(long tableId, List<DuckLakeWriteColumn> columns, String location, Optional<DuckLakePartitioning> partitioning) {}
+
+    /**
+     * Records the partitioning of a table being created or altered, resolving each key to the
+     * column it reads and checking that the transform can be applied to it.
+     */
+    private static Optional<DuckLakePartitioning> createPartitioning(DuckLakeCommit commit, long tableId, List<DuckLakeWriteColumn> columns, List<String> partitionKeys)
+    {
+        if (partitionKeys.isEmpty()) {
+            return Optional.empty();
+        }
+        ImmutableList.Builder<DuckLakePartitionColumn> catalogColumns = ImmutableList.builder();
+        ImmutableList.Builder<DuckLakePartitioning.Field> fields = ImmutableList.builder();
+        for (int index = 0; index < partitionKeys.size(); index++) {
+            DuckLakeTableProperties.PartitionKey key = DuckLakeTableProperties.parsePartitionKey(partitionKeys.get(index));
+            int channel = -1;
+            for (int column = 0; column < columns.size(); column++) {
+                if (columns.get(column).name().equalsIgnoreCase(key.columnName())) {
+                    channel = column;
+                    break;
+                }
+            }
+            if (channel < 0) {
+                throw new TrinoException(INVALID_TABLE_PROPERTY, "Partition key refers to a column the table does not have: " + key.columnName());
+            }
+            DuckLakeWriteColumn column = columns.get(channel);
+            DuckLakeWritePartitioner.validateTransform(key.transform(), column.name(), column.type());
+            catalogColumns.add(new DuckLakePartitionColumn(index, column.columnId(), key.transform()));
+            fields.add(new DuckLakePartitioning.Field(channel, column.columnId(), column.name(), key.transform()));
+        }
+        long partitionId = commit.insertPartitioning(tableId, catalogColumns.build());
+        return Optional.of(new DuckLakePartitioning(partitionId, fields.build()));
+    }
+
+    @Override
+    public void setTableProperties(ConnectorSession session, ConnectorTableHandle tableHandle, Map<String, Optional<Object>> properties)
+    {
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        Set<String> unsupported = properties.keySet().stream()
+                .filter(name -> !name.equals(DuckLakeTableProperties.PARTITIONING_PROPERTY))
+                .collect(toImmutableSet());
+        if (!unsupported.isEmpty()) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support setting the table property " + unsupported.iterator().next());
+        }
+        @SuppressWarnings("unchecked")
+        List<String> partitionKeys = (List<String>) properties.get(DuckLakeTableProperties.PARTITIONING_PROPERTY)
+                .orElse(ImmutableList.of());
+        commit(commit -> {
+            List<DuckLakeWriteColumn> columns = DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId()));
+            // data files already written keep the partitioning they were written with, which the
+            // read path notices and stops using partition values to prune with
+            commit.endPartitioning(handle.tableId());
+            createPartitioning(commit, handle.tableId(), columns, partitionKeys);
+            commit.recordAlteredTable(handle.tableId());
+            return null;
+        });
+    }
 
     @Override
     public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(ConnectorSession session, ConnectorTableHandle tableHandle, Constraint constraint)

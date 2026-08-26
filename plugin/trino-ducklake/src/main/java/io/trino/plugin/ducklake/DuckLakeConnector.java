@@ -50,6 +50,7 @@ public class DuckLakeConnector
     private final ConnectorPageSinkProvider pageSinkProvider;
     private final ConnectorNodePartitioningProvider nodePartitioningProvider;
     private final List<PropertyMetadata<?>> sessionProperties;
+    private final List<PropertyMetadata<?>> tableProperties;
 
     public DuckLakeConnector(
             Injector injector,
@@ -59,7 +60,8 @@ public class DuckLakeConnector
             ConnectorPageSourceProvider pageSourceProvider,
             ConnectorPageSinkProvider pageSinkProvider,
             ConnectorNodePartitioningProvider nodePartitioningProvider,
-            Set<SessionPropertiesProvider> sessionPropertiesProviders)
+            Set<SessionPropertiesProvider> sessionPropertiesProviders,
+            DuckLakeTableProperties tableProperties)
     {
         this.injector = requireNonNull(injector, "injector is null");
         this.lifeCycleManager = requireNonNull(lifeCycleManager, "lifeCycleManager is null");
@@ -71,6 +73,7 @@ public class DuckLakeConnector
         this.sessionProperties = requireNonNull(sessionPropertiesProviders, "sessionPropertiesProviders is null").stream()
                 .flatMap(sessionPropertiesProvider -> sessionPropertiesProvider.getSessionProperties().stream())
                 .collect(toImmutableList());
+        this.tableProperties = requireNonNull(tableProperties, "tableProperties is null").getTableProperties();
     }
 
     @Override
@@ -108,6 +111,12 @@ public class DuckLakeConnector
     public List<PropertyMetadata<?>> getSessionProperties()
     {
         return sessionProperties;
+    }
+
+    @Override
+    public List<PropertyMetadata<?>> getTableProperties()
+    {
+        return tableProperties;
     }
 
     @Override

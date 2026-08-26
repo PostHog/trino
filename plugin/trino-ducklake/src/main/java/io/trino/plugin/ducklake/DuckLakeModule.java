@@ -59,6 +59,7 @@ public class DuckLakeModule
         binder.bind(ConnectorNodePartitioningProvider.class).to(HiveNodePartitioningProvider.class).in(Scopes.SINGLETON);
         binder.bind(ConnectorPageSinkProvider.class).to(DuckLakePageSinkProvider.class).in(Scopes.SINGLETON);
         binder.bind(DuckLakeWriterFactory.class).in(Scopes.SINGLETON);
+        binder.bind(DuckLakeTableProperties.class).in(Scopes.SINGLETON);
         jsonCodecBinder(binder).bindJsonCodec(DuckLakeDataFile.class);
         jsonCodecBinder(binder).bindJsonCodec(DuckLakeMergeFragment.class);
 

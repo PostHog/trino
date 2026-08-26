@@ -117,9 +117,22 @@ public final class DuckLakeWritePartitioner
     {
         StringBuilder path = new StringBuilder();
         for (int index = 0; index < fields.size(); index++) {
-            path.append(DuckLakePartitionValues.directorySegment(fields.get(index).columnName(), partitionValues.get(index)));
+            path.append(DuckLakePartitionValues.directorySegment(directoryKey(fields.get(index)), partitionValues.get(index)));
         }
         return path.toString();
+    }
+
+    /**
+     * The name a partition key is filed under in the directory layout. DuckDB names a transformed
+     * key after the transform rather than the column, which keeps two transforms of the same
+     * column apart.
+     */
+    private static String directoryKey(DuckLakePartitioning.Field field)
+    {
+        if (isIdentity(field)) {
+            return field.columnName();
+        }
+        return field.transform().toLowerCase(Locale.ENGLISH);
     }
 
     private static boolean isIdentity(DuckLakePartitioning.Field field)
