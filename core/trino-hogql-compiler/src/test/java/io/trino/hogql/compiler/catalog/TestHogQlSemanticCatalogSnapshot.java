@@ -13,7 +13,17 @@
  */
 package io.trino.hogql.compiler.catalog;
 
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.CastRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionFieldDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionCallRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionCapabilityDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionImplementation;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionKind;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionSignature;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.JoinKey;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LiteralEncoding;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LiteralRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalFieldDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalTableDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalType;
@@ -23,6 +33,7 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyDefi
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyStorage;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipCardinality;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.TypedLiteral;
 import io.trino.hogql.parser.HogQlLanguageVersion;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -99,6 +110,64 @@ public class TestHogQlSemanticCatalogSnapshot
                 .satisfies(relationships -> assertThat(relationships).singleElement().extracting(RelationshipDefinition::targetTable).isEqualTo("events"));
     }
 
+    @Test
+    public void testSemanticDefinitionsAreDeeplyImmutable()
+    {
+        List<ExpressionRecipe> arguments = new ArrayList<>(List.of(literal()));
+        FunctionCallRecipe recipe = new FunctionCallRecipe("identity", arguments);
+        List<ExpressionFieldDefinition> expressionFields = new ArrayList<>(List.of(
+                new ExpressionFieldDefinition("events", "derived", "bigint", LogicalType.INTEGER, false, true, recipe)));
+        List<FunctionSignature> signatures = new ArrayList<>(List.of(new FunctionSignature(List.of("bigint"), "bigint", false)));
+        List<FunctionCapabilityDefinition> functions = new ArrayList<>(List.of(
+                new FunctionCapabilityDefinition(
+                        "identity",
+                        FunctionKind.SCALAR,
+                        FunctionImplementation.STOCK,
+                        List.of(new PhysicalIdentifier("identity", false)),
+                        signatures,
+                        true,
+                        false,
+                        false,
+                        false,
+                        false)));
+
+        HogQlSemanticCatalogSnapshot snapshot = semanticSnapshot(expressionFields, functions);
+        arguments.clear();
+        expressionFields.clear();
+        signatures.clear();
+        functions.clear();
+
+        assertThat(snapshot.expressionFields()).singleElement().extracting(ExpressionFieldDefinition::recipe).isEqualTo(recipe);
+        assertThat(recipe.arguments()).singleElement().isEqualTo(literal());
+        assertThat(snapshot.functions()).singleElement().extracting(FunctionCapabilityDefinition::signatures).satisfies(values -> assertThat(values).hasSize(1));
+        assertThatThrownBy(() -> recipe.arguments().clear()).isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
+    public void testEnforcesExpressionRecipeDepthAndNodeLimits()
+    {
+        ExpressionRecipe deepRecipe = literal();
+        for (int depth = 1; depth < 65; depth++) {
+            deepRecipe = new CastRecipe(deepRecipe, "bigint");
+        }
+        ExpressionRecipe finalDeepRecipe = deepRecipe;
+        assertThatThrownBy(() -> semanticSnapshot(
+                List.of(new ExpressionFieldDefinition("events", "derived", "bigint", LogicalType.INTEGER, false, true, finalDeepRecipe)),
+                List.of()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("depth limit");
+
+        List<ExpressionRecipe> arguments = new ArrayList<>();
+        for (int node = 0; node < 4_096; node++) {
+            arguments.add(literal());
+        }
+        assertThatThrownBy(() -> semanticSnapshot(
+                List.of(new ExpressionFieldDefinition("events", "derived", "bigint", LogicalType.INTEGER, false, true, new FunctionCallRecipe("identity", arguments))),
+                List.of(function("identity"))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("node limit");
+    }
+
     private static Stream<Arguments> invalidSnapshots()
     {
         LogicalTableDefinition events = table("events");
@@ -149,7 +218,46 @@ public class TestHogQlSemanticCatalogSnapshot
 
     private static HogQlSemanticCatalogSnapshot snapshot(List<LogicalTableDefinition> tables)
     {
-        return new HogQlSemanticCatalogSnapshot(1, LANGUAGE_VERSION, CATALOG, 7, tables);
+        return new HogQlSemanticCatalogSnapshot(2, LANGUAGE_VERSION, CATALOG, 7, tables);
+    }
+
+    private static HogQlSemanticCatalogSnapshot semanticSnapshot(
+            List<ExpressionFieldDefinition> expressionFields,
+            List<FunctionCapabilityDefinition> functions)
+    {
+        return new HogQlSemanticCatalogSnapshot(
+                1,
+                2,
+                LANGUAGE_VERSION,
+                CATALOG,
+                7,
+                List.of(table("events")),
+                expressionFields,
+                List.of(),
+                List.of(),
+                List.of(),
+                functions,
+                List.of());
+    }
+
+    private static LiteralRecipe literal()
+    {
+        return new LiteralRecipe(new TypedLiteral("bigint", LiteralEncoding.INTEGER, "1"));
+    }
+
+    private static FunctionCapabilityDefinition function(String name)
+    {
+        return new FunctionCapabilityDefinition(
+                name,
+                FunctionKind.SCALAR,
+                FunctionImplementation.STOCK,
+                List.of(new PhysicalIdentifier(name, false)),
+                List.of(new FunctionSignature(List.of("bigint"), "bigint", false)),
+                true,
+                false,
+                false,
+                false,
+                false);
     }
 
     private static LogicalTableDefinition table(String name)

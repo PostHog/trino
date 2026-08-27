@@ -268,7 +268,7 @@ public class TestBoundedAsyncHogQlSemanticCatalogSnapshotCache
     private static HogQlSemanticCatalogSnapshot snapshot(PhysicalIdentifier catalog, long generation)
     {
         return new HogQlSemanticCatalogSnapshot(
-                1,
+                2,
                 LANGUAGE_VERSION,
                 catalog,
                 generation,

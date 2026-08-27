@@ -22,16 +22,40 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.CastRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionFieldDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionRecipeKind;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FieldReferenceRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionCallRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionCapabilityDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionImplementation;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionKind;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionSignature;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.JoinKey;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LiteralEncoding;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LiteralRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalFieldDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalTableDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalType;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.MaterializedViewReference;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ModifierBehavior;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.OperatorRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalQualifiedName;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyStorage;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ReferencedField;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationKind;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationReference;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipCardinality;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.SavedQueryReference;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.SemanticModifierDefault;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.SemanticOperator;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.TypedLiteral;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.VirtualProjection;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.VirtualTableDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotLoader.LoadRequest;
 import io.trino.hogql.parser.HogQlLanguageVersion;
 
@@ -48,8 +72,8 @@ public final class HogQlSemanticCatalogSnapshotJsonDecoder
     public static final int PROTOCOL_VERSION = 1;
     public static final int MAXIMUM_PAYLOAD_BYTES = 8 * 1024 * 1024;
 
-    private static final int SCHEMA_VERSION = 1;
-    private static final Limits DEFAULT_LIMITS = new Limits(MAXIMUM_PAYLOAD_BYTES, 64, 100_000);
+    private static final int SCHEMA_VERSION = 2;
+    private static final Limits DEFAULT_LIMITS = new Limits(MAXIMUM_PAYLOAD_BYTES, 256, 100_000);
 
     private static final Set<String> SNAPSHOT_FIELDS = Set.of(
             "protocolVersion",
@@ -57,7 +81,13 @@ public final class HogQlSemanticCatalogSnapshotJsonDecoder
             "languageVersion",
             "catalog",
             "generation",
-            "logicalTables");
+            "logicalTables",
+            "expressionFields",
+            "virtualTables",
+            "savedQueries",
+            "materializedViews",
+            "functions",
+            "modifierDefaults");
     private static final Set<String> IDENTIFIER_FIELDS = Set.of("value", "delimited");
     private static final Set<String> QUALIFIED_NAME_FIELDS = Set.of("catalog", "schema", "table");
     private static final Set<String> TABLE_FIELDS = Set.of("name", "physicalTable", "fields", "properties", "relationships");
@@ -65,6 +95,27 @@ public final class HogQlSemanticCatalogSnapshotJsonDecoder
     private static final Set<String> PROPERTY_FIELDS = Set.of("name", "sourceField", "storage", "logicalType", "nullable");
     private static final Set<String> RELATIONSHIP_FIELDS = Set.of("name", "targetTable", "cardinality", "joinKeys");
     private static final Set<String> JOIN_KEY_FIELDS = Set.of("sourceField", "targetField");
+    private static final Set<String> EXPRESSION_FIELD_FIELDS = Set.of("table", "name", "trinoTypeSignature", "logicalType", "nullable", "starVisible", "recipe");
+    private static final Set<String> RECIPE_FIELD_REFERENCE_FIELDS = Set.of("kind", "fieldReference");
+    private static final Set<String> RECIPE_LITERAL_FIELDS = Set.of("kind", "literal");
+    private static final Set<String> RECIPE_FUNCTION_CALL_FIELDS = Set.of("kind", "functionCall");
+    private static final Set<String> RECIPE_OPERATOR_FIELDS = Set.of("kind", "operator");
+    private static final Set<String> RECIPE_CAST_FIELDS = Set.of("kind", "cast");
+    private static final Set<String> FIELD_REFERENCE_FIELDS = Set.of("table", "field");
+    private static final Set<String> TYPED_LITERAL_FIELDS = Set.of("typeSignature", "encoding", "value");
+    private static final Set<String> FUNCTION_CALL_FIELDS = Set.of("name", "arguments");
+    private static final Set<String> OPERATOR_FIELDS = Set.of("operator", "arguments");
+    private static final Set<String> CAST_FIELDS = Set.of("expression", "targetTypeSignature");
+    private static final Set<String> VIRTUAL_TABLE_FIELDS = Set.of("name", "source", "projections");
+    private static final Set<String> RELATION_REFERENCE_FIELDS = Set.of("kind", "name");
+    private static final Set<String> VIRTUAL_PROJECTION_FIELDS = Set.of("name", "sourceField", "starVisible");
+    private static final Set<String> SAVED_QUERY_FIELDS = Set.of("name", "queryId", "target", "fields");
+    private static final Set<String> MATERIALIZED_VIEW_FIELDS = Set.of("name", "physicalView", "fields");
+    private static final Set<String> REFERENCED_FIELD_FIELDS = Set.of("name", "trinoTypeSignature", "logicalType", "nullable", "starVisible");
+    private static final Set<String> FUNCTION_FIELDS = Set.of("name", "kind", "implementation", "trinoName", "signatures", "deterministic", "supportsDistinct", "supportsOrderBy", "supportsFilter", "supportsWindow");
+    private static final Set<String> FUNCTION_SIGNATURE_FIELDS = Set.of("argumentTypes", "returnType", "variadic");
+    private static final Set<String> MODIFIER_FIELDS = Set.of("name", "behavior", "defaultValue", "sessionProperty");
+    private static final Set<String> MODIFIER_FIELDS_WITHOUT_SESSION_PROPERTY = Set.of("name", "behavior", "defaultValue");
 
     private final Limits limits;
     private final ObjectMapper objectMapper;
@@ -128,7 +179,25 @@ public final class HogQlSemanticCatalogSnapshotJsonDecoder
 
             CollectionBudget budget = new CollectionBudget(limits.maximumCollectionEntries());
             List<LogicalTableDefinition> tables = logicalTables(required(root, "logicalTables"), budget);
-            return new HogQlSemanticCatalogSnapshot(schemaVersion, languageVersion, catalog, generation, tables);
+            List<ExpressionFieldDefinition> expressionFields = expressionFields(required(root, "expressionFields"), budget);
+            List<VirtualTableDefinition> virtualTables = virtualTables(required(root, "virtualTables"), budget);
+            List<SavedQueryReference> savedQueries = savedQueries(required(root, "savedQueries"), budget);
+            List<MaterializedViewReference> materializedViews = materializedViews(required(root, "materializedViews"), budget);
+            List<FunctionCapabilityDefinition> functions = functions(required(root, "functions"), budget);
+            List<SemanticModifierDefault> modifierDefaults = modifierDefaults(required(root, "modifierDefaults"), budget);
+            return new HogQlSemanticCatalogSnapshot(
+                    protocolVersion,
+                    schemaVersion,
+                    languageVersion,
+                    catalog,
+                    generation,
+                    tables,
+                    expressionFields,
+                    virtualTables,
+                    savedQueries,
+                    materializedViews,
+                    functions,
+                    modifierDefaults);
         }
         catch (DecodeException e) {
             throw e;
@@ -245,6 +314,244 @@ public final class HogQlSemanticCatalogSnapshotJsonDecoder
             joinKeys.add(new JoinKey(text(joinKey, "sourceField"), text(joinKey, "targetField")));
         }
         return List.copyOf(joinKeys);
+    }
+
+    private static List<ExpressionFieldDefinition> expressionFields(JsonNode node, CollectionBudget budget)
+    {
+        ArrayNode array = array(node, budget);
+        List<ExpressionFieldDefinition> definitions = new ArrayList<>(array.size());
+        for (JsonNode element : array) {
+            ObjectNode field = object(element);
+            validateFields(field, EXPRESSION_FIELD_FIELDS);
+            definitions.add(new ExpressionFieldDefinition(
+                    text(field, "table"),
+                    text(field, "name"),
+                    text(field, "trinoTypeSignature"),
+                    enumValue(field, "logicalType", LogicalType.class),
+                    bool(field, "nullable"),
+                    bool(field, "starVisible"),
+                    expressionRecipe(required(field, "recipe"), budget)));
+        }
+        return List.copyOf(definitions);
+    }
+
+    private static ExpressionRecipe expressionRecipe(JsonNode node, CollectionBudget budget)
+    {
+        ObjectNode recipe = object(node);
+        ExpressionRecipeKind kind = enumValue(recipe, "kind", ExpressionRecipeKind.class);
+        return switch (kind) {
+            case FIELD_REFERENCE -> {
+                validateFields(recipe, RECIPE_FIELD_REFERENCE_FIELDS);
+                ObjectNode reference = object(required(recipe, "fieldReference"));
+                validateFields(reference, FIELD_REFERENCE_FIELDS);
+                yield new FieldReferenceRecipe(text(reference, "table"), text(reference, "field"));
+            }
+            case LITERAL -> {
+                validateFields(recipe, RECIPE_LITERAL_FIELDS);
+                yield new LiteralRecipe(typedLiteral(required(recipe, "literal")));
+            }
+            case FUNCTION_CALL -> {
+                validateFields(recipe, RECIPE_FUNCTION_CALL_FIELDS);
+                ObjectNode call = object(required(recipe, "functionCall"));
+                validateFields(call, FUNCTION_CALL_FIELDS);
+                yield new FunctionCallRecipe(text(call, "name"), expressionRecipes(required(call, "arguments"), budget));
+            }
+            case OPERATOR -> {
+                validateFields(recipe, RECIPE_OPERATOR_FIELDS);
+                ObjectNode operator = object(required(recipe, "operator"));
+                validateFields(operator, OPERATOR_FIELDS);
+                yield new OperatorRecipe(enumValue(operator, "operator", SemanticOperator.class), expressionRecipes(required(operator, "arguments"), budget));
+            }
+            case CAST -> {
+                validateFields(recipe, RECIPE_CAST_FIELDS);
+                ObjectNode cast = object(required(recipe, "cast"));
+                validateFields(cast, CAST_FIELDS);
+                yield new CastRecipe(expressionRecipe(required(cast, "expression"), budget), text(cast, "targetTypeSignature"));
+            }
+        };
+    }
+
+    private static List<ExpressionRecipe> expressionRecipes(JsonNode node, CollectionBudget budget)
+    {
+        ArrayNode array = array(node, budget);
+        List<ExpressionRecipe> recipes = new ArrayList<>(array.size());
+        for (JsonNode element : array) {
+            recipes.add(expressionRecipe(element, budget));
+        }
+        return List.copyOf(recipes);
+    }
+
+    private static TypedLiteral typedLiteral(JsonNode node)
+    {
+        ObjectNode literal = object(node);
+        validateFields(literal, TYPED_LITERAL_FIELDS);
+        return new TypedLiteral(
+                text(literal, "typeSignature"),
+                enumValue(literal, "encoding", LiteralEncoding.class),
+                text(literal, "value"));
+    }
+
+    private static List<VirtualTableDefinition> virtualTables(JsonNode node, CollectionBudget budget)
+    {
+        ArrayNode array = array(node, budget);
+        List<VirtualTableDefinition> definitions = new ArrayList<>(array.size());
+        for (JsonNode element : array) {
+            ObjectNode table = object(element);
+            validateFields(table, VIRTUAL_TABLE_FIELDS);
+            definitions.add(new VirtualTableDefinition(
+                    text(table, "name"),
+                    relationReference(required(table, "source")),
+                    virtualProjections(required(table, "projections"), budget)));
+        }
+        return List.copyOf(definitions);
+    }
+
+    private static RelationReference relationReference(JsonNode node)
+    {
+        ObjectNode reference = object(node);
+        validateFields(reference, RELATION_REFERENCE_FIELDS);
+        return new RelationReference(enumValue(reference, "kind", RelationKind.class), text(reference, "name"));
+    }
+
+    private static List<VirtualProjection> virtualProjections(JsonNode node, CollectionBudget budget)
+    {
+        ArrayNode array = array(node, budget);
+        List<VirtualProjection> projections = new ArrayList<>(array.size());
+        for (JsonNode element : array) {
+            ObjectNode projection = object(element);
+            validateFields(projection, VIRTUAL_PROJECTION_FIELDS);
+            projections.add(new VirtualProjection(text(projection, "name"), text(projection, "sourceField"), bool(projection, "starVisible")));
+        }
+        return List.copyOf(projections);
+    }
+
+    private static List<SavedQueryReference> savedQueries(JsonNode node, CollectionBudget budget)
+    {
+        ArrayNode array = array(node, budget);
+        List<SavedQueryReference> definitions = new ArrayList<>(array.size());
+        for (JsonNode element : array) {
+            ObjectNode savedQuery = object(element);
+            validateFields(savedQuery, SAVED_QUERY_FIELDS);
+            definitions.add(new SavedQueryReference(
+                    text(savedQuery, "name"),
+                    text(savedQuery, "queryId"),
+                    relationReference(required(savedQuery, "target")),
+                    referencedFields(required(savedQuery, "fields"), budget)));
+        }
+        return List.copyOf(definitions);
+    }
+
+    private static List<MaterializedViewReference> materializedViews(JsonNode node, CollectionBudget budget)
+    {
+        ArrayNode array = array(node, budget);
+        List<MaterializedViewReference> definitions = new ArrayList<>(array.size());
+        for (JsonNode element : array) {
+            ObjectNode view = object(element);
+            validateFields(view, MATERIALIZED_VIEW_FIELDS);
+            definitions.add(new MaterializedViewReference(
+                    text(view, "name"),
+                    qualifiedName(required(view, "physicalView")),
+                    referencedFields(required(view, "fields"), budget)));
+        }
+        return List.copyOf(definitions);
+    }
+
+    private static List<ReferencedField> referencedFields(JsonNode node, CollectionBudget budget)
+    {
+        ArrayNode array = array(node, budget);
+        List<ReferencedField> fields = new ArrayList<>(array.size());
+        for (JsonNode element : array) {
+            ObjectNode field = object(element);
+            validateFields(field, REFERENCED_FIELD_FIELDS);
+            fields.add(new ReferencedField(
+                    text(field, "name"),
+                    text(field, "trinoTypeSignature"),
+                    enumValue(field, "logicalType", LogicalType.class),
+                    bool(field, "nullable"),
+                    bool(field, "starVisible")));
+        }
+        return List.copyOf(fields);
+    }
+
+    private static List<FunctionCapabilityDefinition> functions(JsonNode node, CollectionBudget budget)
+    {
+        ArrayNode array = array(node, budget);
+        List<FunctionCapabilityDefinition> definitions = new ArrayList<>(array.size());
+        for (JsonNode element : array) {
+            ObjectNode function = object(element);
+            validateFields(function, FUNCTION_FIELDS);
+            definitions.add(new FunctionCapabilityDefinition(
+                    text(function, "name"),
+                    enumValue(function, "kind", FunctionKind.class),
+                    enumValue(function, "implementation", FunctionImplementation.class),
+                    physicalIdentifiers(required(function, "trinoName"), budget),
+                    functionSignatures(required(function, "signatures"), budget),
+                    bool(function, "deterministic"),
+                    bool(function, "supportsDistinct"),
+                    bool(function, "supportsOrderBy"),
+                    bool(function, "supportsFilter"),
+                    bool(function, "supportsWindow")));
+        }
+        return List.copyOf(definitions);
+    }
+
+    private static List<PhysicalIdentifier> physicalIdentifiers(JsonNode node, CollectionBudget budget)
+    {
+        ArrayNode array = array(node, budget);
+        List<PhysicalIdentifier> identifiers = new ArrayList<>(array.size());
+        for (JsonNode element : array) {
+            identifiers.add(physicalIdentifier(element));
+        }
+        return List.copyOf(identifiers);
+    }
+
+    private static List<FunctionSignature> functionSignatures(JsonNode node, CollectionBudget budget)
+    {
+        ArrayNode array = array(node, budget);
+        List<FunctionSignature> signatures = new ArrayList<>(array.size());
+        for (JsonNode element : array) {
+            ObjectNode signature = object(element);
+            validateFields(signature, FUNCTION_SIGNATURE_FIELDS);
+            signatures.add(new FunctionSignature(
+                    strings(required(signature, "argumentTypes"), budget),
+                    text(signature, "returnType"),
+                    bool(signature, "variadic")));
+        }
+        return List.copyOf(signatures);
+    }
+
+    private static List<String> strings(JsonNode node, CollectionBudget budget)
+    {
+        ArrayNode array = array(node, budget);
+        List<String> values = new ArrayList<>(array.size());
+        for (JsonNode element : array) {
+            if (!element.isTextual()) {
+                throw failure(DecodeFailure.INVALID_PAYLOAD);
+            }
+            values.add(element.textValue());
+        }
+        return List.copyOf(values);
+    }
+
+    private static List<SemanticModifierDefault> modifierDefaults(JsonNode node, CollectionBudget budget)
+    {
+        ArrayNode array = array(node, budget);
+        List<SemanticModifierDefault> modifiers = new ArrayList<>(array.size());
+        for (JsonNode element : array) {
+            ObjectNode modifier = object(element);
+            if (modifier.has("sessionProperty")) {
+                validateFields(modifier, MODIFIER_FIELDS);
+            }
+            else {
+                validateFields(modifier, MODIFIER_FIELDS_WITHOUT_SESSION_PROPERTY);
+            }
+            modifiers.add(new SemanticModifierDefault(
+                    text(modifier, "name"),
+                    enumValue(modifier, "behavior", ModifierBehavior.class),
+                    typedLiteral(required(modifier, "defaultValue")),
+                    modifier.has("sessionProperty") ? physicalIdentifiers(required(modifier, "sessionProperty"), budget) : List.of()));
+        }
+        return List.copyOf(modifiers);
     }
 
     private static PhysicalQualifiedName qualifiedName(JsonNode node)

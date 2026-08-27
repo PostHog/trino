@@ -107,7 +107,7 @@ public class TestHogQlSemanticCatalogSnapshotProvider
     private static HogQlSemanticCatalogSnapshot snapshot(PhysicalIdentifier catalog, HogQlLanguageVersion languageVersion, long generation)
     {
         return new HogQlSemanticCatalogSnapshot(
-                1,
+                2,
                 languageVersion,
                 catalog,
                 generation,

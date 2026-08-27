@@ -67,11 +67,17 @@ public class TestHogQlSemanticCatalogSnapshotLoader
         return """
                {
                  "protocolVersion": 1,
-                 "schemaVersion": 1,
+                 "schemaVersion": 2,
                  "languageVersion": "1.0.0",
                  "catalog": {"value": "ducklake", "delimited": false},
                  "generation": %s,
-                 "logicalTables": []
+                 "logicalTables": [],
+                 "expressionFields": [],
+                 "virtualTables": [],
+                 "savedQueries": [],
+                 "materializedViews": [],
+                 "functions": [],
+                 "modifierDefaults": []
                }
                """.formatted(generation);
     }

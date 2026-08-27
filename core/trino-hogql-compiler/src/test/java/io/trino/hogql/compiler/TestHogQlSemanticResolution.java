@@ -47,7 +47,7 @@ public class TestHogQlSemanticResolution
 {
     private static final PhysicalIdentifier CATALOG = new PhysicalIdentifier("analytics", false);
     private static final HogQlSemanticCatalogSnapshot SNAPSHOT = new HogQlSemanticCatalogSnapshot(
-            1,
+            2,
             HogQlLanguageContract.current().languageVersion(),
             CATALOG,
             7,
