@@ -22,7 +22,6 @@ import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import com.google.common.collect.ImmutableList;
-import com.google.common.net.InetAddresses;
 import io.trino.hogql.compiler.HogQlCompilationResult;
 import io.trino.hogql.compiler.HogQlTypedValue;
 import io.trino.hogql.compiler.HogQlTypedValue.ArrayValue;
@@ -62,6 +61,7 @@ import io.trino.sql.tree.TypeParameter;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.RoundingMode;
+import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -228,7 +228,7 @@ final class HogQlParameterDecoder
             }
             case "IPADDRESS" -> {
                 requireNoArguments(type);
-                InetAddresses.forString(value.value());
+                InetAddress.ofLiteral(value.value());
                 yield new GenericLiteral(location, "IPADDRESS", value.value());
             }
             case "VARBINARY" -> {
