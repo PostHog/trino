@@ -13,6 +13,10 @@
  */
 package io.trino.hogql.compiler;
 
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider.PinRequest;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider.PinnedSnapshot;
+import io.trino.hogql.parser.HogQlLanguageContract;
+import io.trino.hogql.parser.HogQlLanguageVersion;
 import io.trino.hogql.parser.HogQlParser;
 import io.trino.hogql.parser.HogQlParsingException;
 import io.trino.hogql.parser.tree.HogQlQuery;
@@ -43,6 +47,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 
 import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_BINDING_ERROR;
@@ -70,16 +75,33 @@ public final class HogQlCompiler
 
     public HogQlCompilationResult compile(HogQlCompileEnvelope envelope)
     {
+        return compile(envelope, Optional.empty());
+    }
+
+    public HogQlCompilationResult compile(HogQlCompileEnvelope envelope, Optional<HogQlSemanticCatalogContext> catalogContext)
+    {
         requireNonNull(envelope, "envelope is null");
-        return compile(envelope.query(), envelope.parameters());
+        requireNonNull(catalogContext, "catalogContext is null");
+        return compile(
+                parse(envelope.query()),
+                envelope.parameters(),
+                catalogContext,
+                envelope.languageVersion(),
+                envelope.catalogGeneration());
     }
 
     public HogQlCompilationResult compile(String hogql, Map<String, HogQlTypedValue> parameters)
     {
         requireNonNull(hogql, "hogql is null");
         requireNonNull(parameters, "parameters is null");
+        return compile(parse(hogql), parameters, Optional.empty(), HogQlLanguageContract.current().languageVersion(), OptionalLong.empty());
+    }
+
+    private HogQlQuery parse(String hogql)
+    {
+        requireNonNull(hogql, "hogql is null");
         try {
-            return compile(parser.parseStatement(hogql), parameters);
+            return parser.parseStatement(hogql);
         }
         catch (HogQlParsingException exception) {
             throw new TrinoException(
@@ -90,7 +112,12 @@ public final class HogQlCompiler
         }
     }
 
-    private static HogQlCompilationResult compile(HogQlQuery query, Map<String, HogQlTypedValue> parameters)
+    private static HogQlCompilationResult compile(
+            HogQlQuery query,
+            Map<String, HogQlTypedValue> parameters,
+            Optional<HogQlSemanticCatalogContext> catalogContext,
+            HogQlLanguageVersion languageVersion,
+            OptionalLong expectedCatalogGeneration)
     {
         validateParameters(query, parameters);
         if (query.from().orElse(null) instanceof TablePlaceholder tablePlaceholder) {
@@ -140,10 +167,40 @@ public final class HogQlCompiler
         for (int index = 0; index < placeholders.size(); index++) {
             parameterIds.put(placeholders.get(index).span(), index);
         }
-        Statement statement = TrinoAstFactory.createStatement(query, parameterIds);
+        ResolvedQuery resolved = resolveQuery(query, catalogContext, languageVersion, expectedCatalogGeneration);
+        Statement statement = TrinoAstFactory.createStatement(resolved.query(), parameterIds);
         return new HogQlCompilationResult(statement, placeholders.stream()
                 .map(Placeholder::name)
-                .toList());
+                .toList(), resolved.catalogGeneration());
+    }
+
+    private static ResolvedQuery resolveQuery(
+            HogQlQuery query,
+            Optional<HogQlSemanticCatalogContext> catalogContext,
+            HogQlLanguageVersion languageVersion,
+            OptionalLong expectedCatalogGeneration)
+    {
+        if (!(query.from().orElse(null) instanceof HogQlQuery.TableReference table) || table.parts().size() != 1 || catalogContext.isEmpty()) {
+            return new ResolvedQuery(query, OptionalLong.empty());
+        }
+        HogQlSemanticCatalogContext context = catalogContext.orElseThrow();
+        PinnedSnapshot pinned = context.snapshotProvider().pin(new PinRequest(
+                context.catalog(),
+                requireNonNull(languageVersion, "languageVersion is null"),
+                expectedCatalogGeneration));
+        HogQlQuery resolved = HogQlSemanticResolver.resolve(pinned, query)
+                .map(HogQlSemanticResolver.ResolvedQuery::query)
+                .orElse(query);
+        return new ResolvedQuery(resolved, OptionalLong.of(pinned.generation()));
+    }
+
+    private record ResolvedQuery(HogQlQuery query, OptionalLong catalogGeneration)
+    {
+        private ResolvedQuery
+        {
+            query = requireNonNull(query, "query is null");
+            catalogGeneration = requireNonNull(catalogGeneration, "catalogGeneration is null");
+        }
     }
 
     private static void validateParameters(HogQlQuery query, Map<String, HogQlTypedValue> parameters)

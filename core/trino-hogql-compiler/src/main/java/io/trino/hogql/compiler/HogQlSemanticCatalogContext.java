@@ -13,19 +13,18 @@
  */
 package io.trino.hogql.compiler;
 
-import io.trino.sql.tree.Statement;
-
-import java.util.List;
-import java.util.OptionalLong;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider;
 
 import static java.util.Objects.requireNonNull;
 
-public record HogQlCompilationResult(Statement statement, List<String> parameterNames, OptionalLong catalogGeneration)
+public record HogQlSemanticCatalogContext(
+        PhysicalIdentifier catalog,
+        HogQlSemanticCatalogSnapshotProvider snapshotProvider)
 {
-    public HogQlCompilationResult
+    public HogQlSemanticCatalogContext
     {
-        statement = requireNonNull(statement, "statement is null");
-        parameterNames = List.copyOf(requireNonNull(parameterNames, "parameterNames is null"));
-        catalogGeneration = requireNonNull(catalogGeneration, "catalogGeneration is null");
+        catalog = requireNonNull(catalog, "catalog is null");
+        snapshotProvider = requireNonNull(snapshotProvider, "snapshotProvider is null");
     }
 }
