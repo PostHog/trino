@@ -69,12 +69,12 @@
         {
             "id": "alternative:columnAliases",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
             ]
         },
         {
@@ -2115,12 +2115,12 @@
         {
             "id": "alternative:selectSetStmt",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createQueryBody",
+            "parseHandler": "AstBuilder#buildSetQuery",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
             ]
         },
         {
@@ -2401,12 +2401,12 @@
         {
             "id": "alternative:subsequentSelectSetClause",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createQueryBody",
+            "parseHandler": "AstBuilder#buildSetQuery",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
             ]
         },
         {
@@ -2512,12 +2512,12 @@
         {
             "id": "alternative:tableExpr:TableExprValues",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
             ]
         },
         {
@@ -2611,23 +2611,23 @@
         {
             "id": "alternative:valuesClause",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
             ]
         },
         {
             "id": "alternative:valuesRow",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
             ]
         },
         {
@@ -2886,12 +2886,12 @@
         {
             "id": "rule:columnAliases",
             "kind": "parserRule",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
             ]
         },
         {
@@ -3713,12 +3713,12 @@
         {
             "id": "rule:selectSetStmt",
             "kind": "parserRule",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createQueryBody",
+            "parseHandler": "AstBuilder#buildSetQuery",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
             ]
         },
         {
@@ -3823,12 +3823,12 @@
         {
             "id": "rule:subsequentSelectSetClause",
             "kind": "parserRule",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createQueryBody",
+            "parseHandler": "AstBuilder#buildSetQuery",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
             ]
         },
         {
@@ -3944,23 +3944,23 @@
         {
             "id": "rule:valuesClause",
             "kind": "parserRule",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
             ]
         },
         {
             "id": "rule:valuesRow",
             "kind": "parserRule",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
             ]
         },
         {

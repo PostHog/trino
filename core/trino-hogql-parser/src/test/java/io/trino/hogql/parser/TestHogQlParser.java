@@ -25,8 +25,11 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinType;
 import io.trino.hogql.parser.tree.HogQlQuery.NullPlacement;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
+import io.trino.hogql.parser.tree.HogQlQuery.SetOperation;
+import io.trino.hogql.parser.tree.HogQlQuery.SetOperationType;
 import io.trino.hogql.parser.tree.HogQlQuery.SortDirection;
 import io.trino.hogql.parser.tree.HogQlQuery.SubqueryRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.ValuesRelation;
 import io.trino.hogql.parser.tree.HogQlSyntaxTree;
 import io.trino.hogql.parser.tree.HogQlSyntaxTree.Element;
 import io.trino.hogql.parser.tree.HogQlSyntaxTree.Node;
@@ -53,7 +56,6 @@ public class TestHogQlParser
             "SELECT * FROM first ASOF JOIN second ON first.id = second.id",
             "SELECT * FROM first POSITIONAL JOIN second",
             "SELECT * FROM first, second",
-            "SELECT * FROM events AS e(id)",
             "SELECT count(*) OVER ()",
             "SELECT function(1)(value)",
             "DROP TABLE events",
@@ -71,6 +73,12 @@ public class TestHogQlParser
             "WITH x AS (SELECT 1), x AS (SELECT 2) SELECT * FROM x",
             "SELECT * FROM events e JOIN (SELECT * FROM persons WHERE personId = e.person_id) p ON true",
             "SELECT * FROM events e JOIN (SELECT person_id) p ON true",
+            "SELECT 1 UNION BY NAME SELECT 1",
+            "SELECT 1 UNION ALL BY NAME SELECT 1",
+            "SELECT 1 INTERSECT BY NAME SELECT 1",
+            "SELECT 1 EXCEPT BY NAME SELECT 1",
+            "SELECT * FROM (VALUES (1, 2), (3)) AS data(first, second)",
+            "SELECT * FROM (VALUES (1, 2)) AS data(first)",
     })
     public void testRejectsSyntaxWithoutAnAstMapping(String hogql)
     {
@@ -166,6 +174,36 @@ public class TestHogQlParser
         SubqueryRelation subquery = (SubqueryRelation) derived.relation();
         assertThat(subquery.query().from()).get().isInstanceOf(CommonTableReference.class);
         assertThat(subquery.span()).isEqualTo(new HogQlQuery.SourceSpan(80, 120, 2, 18, 2, 58));
+    }
+
+    @Test
+    public void testBuildsSetOperationAstWithPrecedenceAndSourceSpans()
+    {
+        HogQlQuery query = parser.parseStatement("SELECT {left}\nUNION ALL\nSELECT {middle}\nINTERSECT\nSELECT {right}");
+
+        SetOperation union = (SetOperation) query.body();
+        assertThat(union.type()).isEqualTo(SetOperationType.UNION);
+        assertThat(union.distinct()).isFalse();
+        assertThat(union.operatorSpan()).isEqualTo(new HogQlQuery.SourceSpan(14, 23, 2, 1, 2, 10));
+        SetOperation intersect = (SetOperation) union.right().body();
+        assertThat(intersect.type()).isEqualTo(SetOperationType.INTERSECT);
+        assertThat(intersect.distinct()).isTrue();
+        assertThat(intersect.operatorSpan()).isEqualTo(new HogQlQuery.SourceSpan(40, 49, 4, 1, 4, 10));
+    }
+
+    @Test
+    public void testBuildsValuesRelationWithColumnSchema()
+    {
+        HogQlQuery query = parser.parseStatement("SELECT *\nFROM (VALUES (1, {first}), (2, {second})) AS data(id, label)");
+
+        AliasedRelation alias = (AliasedRelation) query.from().orElseThrow();
+        assertThat(alias.columnAliases())
+                .extracting(HogQlQuery.Identifier::value)
+                .containsExactly("id", "label");
+        ValuesRelation values = (ValuesRelation) alias.relation();
+        assertThat(values.rows()).hasSize(2).allSatisfy(row -> assertThat(row).hasSize(2));
+        assertThat(values.span().startLine()).isEqualTo(2);
+        assertThat(values.span().startColumn()).isEqualTo(6);
     }
 
     @Test

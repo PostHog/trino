@@ -43,6 +43,8 @@ import io.trino.hogql.parser.tree.HogQlQuery.NullPlacement;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
+import io.trino.hogql.parser.tree.HogQlQuery.SetOperation;
+import io.trino.hogql.parser.tree.HogQlQuery.SetOperationType;
 import io.trino.hogql.parser.tree.HogQlQuery.SortDirection;
 import io.trino.hogql.parser.tree.HogQlQuery.SortItem;
 import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
@@ -52,6 +54,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.ValuesRelation;
 import io.trino.hogql.parser.tree.HogQlSyntaxTree;
 import org.antlr.v4.runtime.ANTLRErrorListener;
 import org.antlr.v4.runtime.BailErrorStrategy;
@@ -460,10 +463,242 @@ public final class HogQlParser
 
         public HogQlQuery build(HogQLParser.SelectContext context)
         {
-            HogQlQuery query = buildQuery(extractPlainSelect(context));
+            HogQlQuery query;
+            if (context.selectStmt() != null) {
+                query = buildQuery(new SelectedQuery(context.selectStmt(), null, null));
+            }
+            else if (context.selectSetStmt() != null) {
+                query = buildSetQuery(context.selectSetStmt());
+            }
+            else {
+                throw unsupported(context, "query");
+            }
             validateUncorrelatedSubqueries(query);
             return query;
         }
+
+        private HogQlQuery buildSetQuery(HogQLParser.SelectSetStmtContext context)
+        {
+            commonTableScopes.push(new LinkedHashSet<>());
+            prohibitedCommonTableScopes.push(new LinkedHashSet<>());
+            try {
+                QueryOperand first = buildSetOperand(context.selectStmtWithParens());
+                if (context.subsequentSelectSetClause().isEmpty()) {
+                    return attachSetLevelClauses(first.query(), context);
+                }
+
+                List<CommonTableExpression> commonTables = List.of();
+                if (!first.parenthesized() && !first.query().with().isEmpty()) {
+                    commonTables = first.query().with();
+                    commonTables.stream()
+                            .map(CommonTableExpression::name)
+                            .map(HogQlParser.AstBuilder::canonicalName)
+                            .forEach(commonTableScopes.getFirst()::add);
+                    first = first.withQuery(copyQuery(List.of(), first.query().body(), first.query().orderBy(), first.query().limit(), first.query().offset(), first.query().span()));
+                }
+
+                List<QueryOperand> operands = new ArrayList<>();
+                List<SetOperator> operators = new ArrayList<>();
+                operands.add(first);
+                for (HogQLParser.SubsequentSelectSetClauseContext clause : context.subsequentSelectSetClause()) {
+                    SetOperator operator = buildSetOperator(clause);
+                    QueryOperand operand = buildSetOperand(clause.selectStmtWithParens());
+                    if (!operand.parenthesized() && !operand.query().with().isEmpty()) {
+                        throw unsupported(clause.selectStmtWithParens(), "unparenthesized WITH set operand");
+                    }
+                    operators.add(operator);
+                    operands.add(operand);
+                }
+
+                for (QueryOperand operand : operands.subList(0, operands.size() - 1)) {
+                    if (!operand.parenthesized() && hasQueryClauses(operand.query())) {
+                        throw unsupported(context, "unparenthesized set operand ORDER BY or pagination");
+                    }
+                }
+                List<SortItem> orderBy = buildOrderBy(context.orderByClause());
+                Pagination pagination = context.limitAndOffsetClauseOptional() == null
+                        ? new Pagination(Optional.empty(), Optional.empty())
+                        : buildPagination(context.limitAndOffsetClauseOptional());
+                QueryOperand last = operands.getLast();
+                if (!last.parenthesized() && hasQueryClauses(last.query())) {
+                    if (!orderBy.isEmpty() && !last.query().orderBy().isEmpty()) {
+                        throw unsupported(context.orderByClause(), "multiple ORDER BY clauses");
+                    }
+                    orderBy = orderBy.isEmpty() ? last.query().orderBy() : orderBy;
+                    pagination = mergePagination(
+                            new Pagination(last.query().limit(), last.query().offset()),
+                            pagination,
+                            context);
+                    operands.set(
+                            operands.size() - 1,
+                            last.withQuery(copyQuery(
+                                    last.query().with(),
+                                    last.query().body(),
+                                    List.of(),
+                                    Optional.empty(),
+                                    Optional.empty(),
+                                    last.query().span())));
+                }
+                QueryOperand operation = applySetOperationPrecedence(operands, operators);
+                return copyQuery(
+                        commonTables,
+                        operation.query().body(),
+                        orderBy,
+                        pagination.limit(),
+                        pagination.offset(),
+                        sourceSpan(context));
+            }
+            finally {
+                prohibitedCommonTableScopes.pop();
+                commonTableScopes.pop();
+            }
+        }
+
+        private static boolean hasQueryClauses(HogQlQuery query)
+        {
+            return !query.orderBy().isEmpty() || query.limit().isPresent() || query.offset().isPresent();
+        }
+
+        private QueryOperand buildSetOperand(HogQLParser.SelectStmtWithParensContext context)
+        {
+            if (context.selectStmt() != null) {
+                return new QueryOperand(buildQuery(new SelectedQuery(context.selectStmt(), null, null)), false, sourceSpan(context));
+            }
+            if (context.withClause() != null) {
+                throw unsupported(context, "non-standard WITH query wrapper");
+            }
+            if (context.selectSetStmt() != null) {
+                return new QueryOperand(buildSetQuery(context.selectSetStmt()), true, sourceSpan(context));
+            }
+            throw unsupported(context, "placeholder query operand");
+        }
+
+        private SetOperator buildSetOperator(HogQLParser.SubsequentSelectSetClauseContext context)
+        {
+            if (context.BY() != null) {
+                throw unsupported(context, "set operation BY NAME");
+            }
+            TerminalNode operator;
+            SetOperationType type;
+            if (context.UNION() != null) {
+                operator = context.UNION();
+                type = SetOperationType.UNION;
+            }
+            else if (context.INTERSECT() != null) {
+                operator = context.INTERSECT();
+                type = SetOperationType.INTERSECT;
+            }
+            else {
+                operator = context.EXCEPT();
+                type = SetOperationType.EXCEPT;
+            }
+            Token stop = context.ALL() != null
+                    ? context.ALL().getSymbol()
+                    : context.DISTINCT() != null ? context.DISTINCT().getSymbol() : operator.getSymbol();
+            return new SetOperator(type, context.ALL() == null, sourceSpan(operator.getSymbol(), stop));
+        }
+
+        private QueryOperand applySetOperationPrecedence(List<QueryOperand> operands, List<SetOperator> operators)
+        {
+            List<QueryOperand> unionAndExceptOperands = new ArrayList<>();
+            List<SetOperator> unionAndExceptOperators = new ArrayList<>();
+            QueryOperand current = operands.getFirst();
+            for (int index = 0; index < operators.size(); index++) {
+                SetOperator operator = operators.get(index);
+                QueryOperand right = operands.get(index + 1);
+                if (operator.type() == SetOperationType.INTERSECT) {
+                    current = combineSetOperation(current, operator, right);
+                }
+                else {
+                    unionAndExceptOperands.add(current);
+                    unionAndExceptOperators.add(operator);
+                    current = right;
+                }
+            }
+            unionAndExceptOperands.add(current);
+
+            current = unionAndExceptOperands.getFirst();
+            for (int index = 0; index < unionAndExceptOperators.size(); index++) {
+                current = combineSetOperation(current, unionAndExceptOperators.get(index), unionAndExceptOperands.get(index + 1));
+            }
+            return current;
+        }
+
+        private QueryOperand combineSetOperation(QueryOperand left, SetOperator operator, QueryOperand right)
+        {
+            SourceSpan span = enclosingSpan(left.span(), right.span());
+            SetOperation body = new SetOperation(
+                    operator.type(),
+                    operator.distinct(),
+                    left.query(),
+                    right.query(),
+                    left.parenthesized(),
+                    right.parenthesized(),
+                    operator.span(),
+                    span);
+            HogQlQuery query = new HogQlQuery(
+                    List.of(),
+                    body,
+                    List.of(),
+                    Optional.empty(),
+                    Optional.empty(),
+                    span);
+            return new QueryOperand(query, false, span);
+        }
+
+        private HogQlQuery attachSetLevelClauses(HogQlQuery query, HogQLParser.SelectSetStmtContext context)
+        {
+            List<SortItem> outerOrderBy = buildOrderBy(context.orderByClause());
+            if (!outerOrderBy.isEmpty() && !query.orderBy().isEmpty()) {
+                throw unsupported(context.orderByClause(), "multiple ORDER BY clauses");
+            }
+            Pagination outerPagination = context.limitAndOffsetClauseOptional() == null
+                    ? new Pagination(Optional.empty(), Optional.empty())
+                    : buildPagination(context.limitAndOffsetClauseOptional());
+            Pagination pagination = mergePagination(
+                    new Pagination(query.limit(), query.offset()),
+                    outerPagination,
+                    context);
+            return copyQuery(
+                    query.with(),
+                    query.body(),
+                    outerOrderBy.isEmpty() ? query.orderBy() : outerOrderBy,
+                    pagination.limit(),
+                    pagination.offset(),
+                    sourceSpan(context));
+        }
+
+        private static HogQlQuery copyQuery(
+                List<CommonTableExpression> commonTables,
+                HogQlQuery.QueryBody body,
+                List<SortItem> orderBy,
+                Optional<Expression> limit,
+                Optional<Expression> offset,
+                SourceSpan span)
+        {
+            return new HogQlQuery(commonTables, body, orderBy, limit, offset, span);
+        }
+
+        private static SourceSpan enclosingSpan(SourceSpan left, SourceSpan right)
+        {
+            return new SourceSpan(
+                    left.startOffset(),
+                    right.endOffset(),
+                    left.startLine(),
+                    left.startColumn(),
+                    right.endLine(),
+                    right.endColumn());
+        }
+
+        private record QueryOperand(HogQlQuery query, boolean parenthesized, SourceSpan span)
+        {
+            private QueryOperand withQuery(HogQlQuery query)
+            {
+                return new QueryOperand(query, parenthesized, span);
+            }
+        }
+
+        private record SetOperator(SetOperationType type, boolean distinct, SourceSpan span) {}
 
         private HogQlQuery buildQuery(SelectedQuery selectedQuery)
         {
@@ -540,7 +775,7 @@ public final class HogQlParser
                 prohibitedNames.add(canonicalName);
                 HogQlQuery query;
                 try {
-                    query = buildQuery(extractPlainSelect(subquery.selectSetStmt()));
+                    query = buildSetQuery(subquery.selectSetStmt());
                 }
                 finally {
                     prohibitedNames.remove(canonicalName);
@@ -565,40 +800,6 @@ public final class HogQlParser
                 return plain.selectColumnExprList().selectColumnExpr();
             }
             throw unsupported(context, "select list");
-        }
-
-        private SelectedQuery extractPlainSelect(HogQLParser.SelectContext context)
-        {
-            if (context.selectStmt() != null) {
-                return new SelectedQuery(context.selectStmt(), null, null);
-            }
-            HogQLParser.SelectSetStmtContext set = context.selectSetStmt();
-            if (set == null || !set.subsequentSelectSetClause().isEmpty()) {
-                throw unsupported(context, "set query");
-            }
-            HogQLParser.SelectStmtWithParensContext wrapped = set.selectStmtWithParens();
-            if (wrapped.selectStmt() == null) {
-                throw unsupported(wrapped, "parenthesized or placeholder query");
-            }
-            return new SelectedQuery(wrapped.selectStmt(), set.orderByClause(), set.limitAndOffsetClauseOptional());
-        }
-
-        private SelectedQuery extractPlainSelect(HogQLParser.SelectSetStmtContext context)
-        {
-            if (!context.subsequentSelectSetClause().isEmpty()) {
-                throw unsupported(context, "set query");
-            }
-            HogQLParser.SelectStmtWithParensContext wrapped = context.selectStmtWithParens();
-            if (wrapped.selectStmt() != null) {
-                return new SelectedQuery(wrapped.selectStmt(), context.orderByClause(), context.limitAndOffsetClauseOptional());
-            }
-            if (wrapped.withClause() != null) {
-                throw unsupported(wrapped, "non-standard WITH query wrapper");
-            }
-            if (wrapped.selectSetStmt() != null && context.orderByClause() == null && context.limitAndOffsetClauseOptional() == null) {
-                return extractPlainSelect(wrapped.selectSetStmt());
-            }
-            throw unsupported(wrapped, "parenthesized, placeholder, or decorated query");
         }
 
         private record SelectedQuery(
@@ -1097,16 +1298,36 @@ public final class HogQlParser
                 return new TablePlaceholder(buildPlaceholder(placeholder.placeholder()));
             }
             if (context instanceof HogQLParser.TableExprSubqueryContext subquery) {
-                return new SubqueryRelation(buildQuery(extractPlainSelect(subquery.selectSetStmt())), sourceSpan(context));
+                return new SubqueryRelation(buildSetQuery(subquery.selectSetStmt()), sourceSpan(context));
+            }
+            if (context instanceof HogQLParser.TableExprValuesContext values) {
+                List<List<Expression>> rows = values.valuesClause().valuesRow().stream()
+                        .map(row -> row.columnExpr().stream()
+                                .map(this::buildExpression)
+                                .toList())
+                        .toList();
+                int width = rows.getFirst().size();
+                for (int index = 1; index < rows.size(); index++) {
+                    if (rows.get(index).size() != width) {
+                        throw unsupported(values.valuesClause().valuesRow(index), "VALUES rows with different column counts");
+                    }
+                }
+                return new ValuesRelation(rows, sourceSpan(context));
             }
             if (context instanceof HogQLParser.TableExprAliasContext alias) {
-                if (alias.columnAliases() != null) {
-                    throw unsupported(context, "table column aliases");
-                }
+                Relation relation = buildTableExpression(alias.tableExpr());
                 Identifier identifier = alias.identifier() != null
                         ? buildIdentifier(alias.identifier())
                         : buildIdentifier(alias.alias().getText(), alias.alias());
-                return new AliasedRelation(buildTableExpression(alias.tableExpr()), identifier, sourceSpan(context));
+                List<Identifier> columnAliases = alias.columnAliases() == null
+                        ? List.of()
+                        : alias.columnAliases().identifier().stream()
+                          .map(this::buildIdentifier)
+                          .toList();
+                if (relation instanceof ValuesRelation values && !columnAliases.isEmpty() && columnAliases.size() != values.columnCount()) {
+                    throw unsupported(alias.columnAliases(), "VALUES column alias count");
+                }
+                return new AliasedRelation(relation, identifier, columnAliases, sourceSpan(context));
             }
             throw unsupported(context, "table expression");
         }
@@ -1147,6 +1368,16 @@ public final class HogQlParser
 
         private void validateQueryScope(HogQlQuery query, Set<String> forbiddenOuterRelations)
         {
+            query.with().forEach(commonTable -> validateQueryScope(commonTable.query(), forbiddenOuterRelations));
+            if (query.body() instanceof SetOperation setOperation) {
+                query.orderBy().forEach(item -> validateExpressionScope(item.expression(), forbiddenOuterRelations, Set.of()));
+                query.limit().ifPresent(expression -> validateExpressionScope(expression, forbiddenOuterRelations, Set.of()));
+                query.offset().ifPresent(expression -> validateExpressionScope(expression, forbiddenOuterRelations, Set.of()));
+                validateQueryScope(setOperation.left(), forbiddenOuterRelations);
+                validateQueryScope(setOperation.right(), forbiddenOuterRelations);
+                return;
+            }
+
             Set<String> localRelations = relationNames(query.from());
             query.projections().forEach(projection -> {
                 if (projection instanceof ExpressionProjection expression) {
@@ -1161,7 +1392,6 @@ public final class HogQlParser
             query.offset().ifPresent(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations));
             query.from().ifPresent(relation -> validateRelationExpressionScopes(relation, forbiddenOuterRelations, localRelations));
 
-            query.with().forEach(commonTable -> validateQueryScope(commonTable.query(), forbiddenOuterRelations));
             Set<String> nestedForbiddenRelations = new LinkedHashSet<>(forbiddenOuterRelations);
             nestedForbiddenRelations.addAll(localRelations);
             query.from().ifPresent(relation -> validateNestedRelationScopes(relation, Set.copyOf(nestedForbiddenRelations)));
@@ -1180,7 +1410,7 @@ public final class HogQlParser
                         }
                     });
                 }
-                case CommonTableReference _, SubqueryRelation _, TablePlaceholder _, TableReference _ -> {}
+                case CommonTableReference _, SubqueryRelation _, TablePlaceholder _, TableReference _, ValuesRelation _ -> {}
             }
         }
 
@@ -1193,6 +1423,7 @@ public final class HogQlParser
                     validateNestedRelationScopes(join.right(), forbiddenOuterRelations);
                 }
                 case SubqueryRelation subquery -> validateQueryScope(subquery.query(), forbiddenOuterRelations);
+                case ValuesRelation values -> values.rows().forEach(row -> row.forEach(expression -> validateExpressionScope(expression, forbiddenOuterRelations, Set.of())));
                 case CommonTableReference _, TablePlaceholder _, TableReference _ -> {}
             }
         }
@@ -1213,7 +1444,7 @@ public final class HogQlParser
                     collectRelationNames(join.left(), names);
                     collectRelationNames(join.right(), names);
                 }
-                case SubqueryRelation _, TablePlaceholder _ -> {}
+                case SubqueryRelation _, TablePlaceholder _, ValuesRelation _ -> {}
                 case TableReference table -> names.add(canonicalName(table.parts().getLast()));
             }
         }

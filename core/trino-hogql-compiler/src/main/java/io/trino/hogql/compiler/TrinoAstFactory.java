@@ -35,6 +35,8 @@ import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
+import io.trino.hogql.parser.tree.HogQlQuery.SelectQueryBody;
+import io.trino.hogql.parser.tree.HogQlQuery.SetOperation;
 import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
 import io.trino.hogql.parser.tree.HogQlQuery.SubqueryRelation;
@@ -42,6 +44,8 @@ import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.ValuesRelation;
+import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.AllColumns;
 import io.trino.sql.tree.ArithmeticBinaryExpression;
 import io.trino.sql.tree.ArithmeticUnaryExpression;
@@ -52,11 +56,12 @@ import io.trino.sql.tree.CallArgument;
 import io.trino.sql.tree.Cast;
 import io.trino.sql.tree.ComparisonPredicate;
 import io.trino.sql.tree.DereferenceExpression;
+import io.trino.sql.tree.Except;
 import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.GenericDataType;
 import io.trino.sql.tree.GroupBy;
 import io.trino.sql.tree.InListExpression;
 import io.trino.sql.tree.InPredicate;
+import io.trino.sql.tree.Intersect;
 import io.trino.sql.tree.IsNullPredicate;
 import io.trino.sql.tree.Limit;
 import io.trino.sql.tree.LogicalExpression;
@@ -70,6 +75,7 @@ import io.trino.sql.tree.Parameter;
 import io.trino.sql.tree.Predicated;
 import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.Query;
+import io.trino.sql.tree.QueryBody;
 import io.trino.sql.tree.QuerySpecification;
 import io.trino.sql.tree.Row;
 import io.trino.sql.tree.SearchedCaseExpression;
@@ -84,6 +90,8 @@ import io.trino.sql.tree.Statement;
 import io.trino.sql.tree.StringLiteral;
 import io.trino.sql.tree.Table;
 import io.trino.sql.tree.TableSubquery;
+import io.trino.sql.tree.Union;
+import io.trino.sql.tree.Values;
 import io.trino.sql.tree.WhenClause;
 import io.trino.sql.tree.With;
 import io.trino.sql.tree.WithQuery;
@@ -94,6 +102,8 @@ import java.util.Optional;
 
 final class TrinoAstFactory
 {
+    private static final SqlParser SQL_PARSER = new SqlParser();
+
     private TrinoAstFactory() {}
 
     public static Statement createStatement(HogQlQuery query, Map<SourceSpan, Integer> parameterIds)
@@ -104,28 +114,70 @@ final class TrinoAstFactory
     private static Query createQuery(HogQlQuery query, Map<SourceSpan, Integer> parameterIds)
     {
         NodeLocation location = location(query.span());
-        QuerySpecification querySpecification = new QuerySpecification(
-                location,
-                new Select(location, query.distinct(), query.projections().stream()
-                        .map(projection -> createSelectItem(projection, parameterIds))
-                        .toList()),
-                query.from().map(relation -> createRelation(relation, parameterIds)),
-                query.where().map(expression -> createExpression(expression, parameterIds)),
-                createGroupBy(query, parameterIds),
-                query.having().map(expression -> createExpression(expression, parameterIds)),
-                List.of(),
-                createOrderBy(query, parameterIds),
-                query.offset().map(offset -> new Offset(location(offset.span()), createExpression(offset, parameterIds))),
-                query.limit().map(limit -> new Limit(location(limit.span()), createExpression(limit, parameterIds))));
+        QueryBody queryBody = createQueryBody(query, parameterIds);
+        boolean setOperation = query.body() instanceof SetOperation;
         return new Query(
                 location,
                 List.of(),
                 List.of(),
                 createWith(query, parameterIds),
-                querySpecification,
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty());
+                queryBody,
+                setOperation ? createOrderBy(query, parameterIds) : Optional.empty(),
+                setOperation ? query.offset().map(offset -> new Offset(location(offset.span()), createExpression(offset, parameterIds))) : Optional.empty(),
+                setOperation ? query.limit().map(limit -> new Limit(location(limit.span()), createExpression(limit, parameterIds))) : Optional.empty());
+    }
+
+    private static QueryBody createQueryBody(HogQlQuery query, Map<SourceSpan, Integer> parameterIds)
+    {
+        return switch (query.body()) {
+            case SelectQueryBody select -> createQuerySpecification(query, select, parameterIds);
+            case SetOperation setOperation -> createSetOperation(setOperation, parameterIds);
+        };
+    }
+
+    private static QuerySpecification createQuerySpecification(
+            HogQlQuery query,
+            SelectQueryBody select,
+            Map<SourceSpan, Integer> parameterIds)
+    {
+        NodeLocation location = location(select.span());
+        QuerySpecification querySpecification = new QuerySpecification(
+                location,
+                new Select(location, select.distinct(), select.projections().stream()
+                        .map(projection -> createSelectItem(projection, parameterIds))
+                        .toList()),
+                select.from().map(relation -> createRelation(relation, parameterIds)),
+                select.where().map(expression -> createExpression(expression, parameterIds)),
+                createGroupBy(select.groupBy(), parameterIds),
+                select.having().map(expression -> createExpression(expression, parameterIds)),
+                List.of(),
+                createOrderBy(query, parameterIds),
+                query.offset().map(offset -> new Offset(location(offset.span()), createExpression(offset, parameterIds))),
+                query.limit().map(limit -> new Limit(location(limit.span()), createExpression(limit, parameterIds))));
+        return querySpecification;
+    }
+
+    private static QueryBody createSetOperation(SetOperation setOperation, Map<SourceSpan, Integer> parameterIds)
+    {
+        NodeLocation location = location(setOperation.operatorSpan());
+        QueryBody left = createSetOperand(setOperation.left(), setOperation.leftParenthesized(), parameterIds);
+        QueryBody right = createSetOperand(setOperation.right(), setOperation.rightParenthesized(), parameterIds);
+        return switch (setOperation.type()) {
+            case EXCEPT -> new Except(location, left, right, setOperation.distinct(), Optional.empty());
+            case INTERSECT -> new Intersect(location, List.of(left, right), setOperation.distinct(), Optional.empty());
+            case UNION -> new Union(location, List.of(left, right), setOperation.distinct(), Optional.empty());
+        };
+    }
+
+    private static QueryBody createSetOperand(
+            HogQlQuery query,
+            boolean parenthesized,
+            Map<SourceSpan, Integer> parameterIds)
+    {
+        if (parenthesized || !query.with().isEmpty() || !query.orderBy().isEmpty() || query.limit().isPresent() || query.offset().isPresent()) {
+            return new TableSubquery(location(query.span()), createQuery(query, parameterIds));
+        }
+        return createQueryBody(query, parameterIds);
     }
 
     private static Optional<With> createWith(HogQlQuery query, Map<SourceSpan, Integer> parameterIds)
@@ -182,18 +234,18 @@ final class TrinoAstFactory
                         .toList()));
     }
 
-    private static Optional<GroupBy> createGroupBy(HogQlQuery query, Map<SourceSpan, Integer> parameterIds)
+    private static Optional<GroupBy> createGroupBy(List<HogQlQuery.Expression> expressions, Map<SourceSpan, Integer> parameterIds)
     {
-        if (query.groupBy().isEmpty()) {
+        if (expressions.isEmpty()) {
             return Optional.empty();
         }
-        NodeLocation location = location(query.groupBy().getFirst().span());
+        NodeLocation location = location(expressions.getFirst().span());
         return Optional.of(new GroupBy(
                 location,
                 false,
                 List.of(new SimpleGroupBy(
                         location,
-                        query.groupBy().stream()
+                        expressions.stream()
                                 .map(expression -> createExpression(expression, parameterIds))
                                 .toList()))));
     }
@@ -223,7 +275,7 @@ final class TrinoAstFactory
             case CastExpression cast -> new Cast(
                     location(cast.span()),
                     createExpression(cast.value(), parameterIds),
-                    new GenericDataType(location(cast.type().span()), createIdentifier(cast.type()), List.of()),
+                    SQL_PARSER.createType(cast.type().value()),
                     cast.safe());
             case ColumnReference reference -> createColumnReference(reference);
             case FunctionCall function -> createFunctionCall(function, parameterIds);
@@ -251,7 +303,9 @@ final class TrinoAstFactory
     {
         return new io.trino.sql.tree.FunctionCall(
                 location(function.span()),
-                QualifiedName.of(List.of(createIdentifier(function.name()))),
+                QualifiedName.of(function.nameParts().stream()
+                        .map(TrinoAstFactory::createIdentifier)
+                        .toList()),
                 Optional.empty(),
                 function.filter().map(filter -> createExpression(filter, parameterIds)),
                 createOrderBy(function.orderBy(), parameterIds),
@@ -366,7 +420,11 @@ final class TrinoAstFactory
                     location(alias.span()),
                     createRelation(alias.relation(), parameterIds),
                     createIdentifier(alias.alias()),
-                    null);
+                    alias.columnAliases().isEmpty()
+                            ? null
+                            : alias.columnAliases().stream()
+                              .map(TrinoAstFactory::createIdentifier)
+                              .toList());
             case CommonTableReference commonTable -> new Table(
                     location(commonTable.span()),
                     QualifiedName.of(List.of(createIdentifier(commonTable.name()))));
@@ -390,7 +448,40 @@ final class TrinoAstFactory
             case SubqueryRelation subquery -> new TableSubquery(location(subquery.span()), createQuery(subquery.query(), parameterIds));
             case TablePlaceholder _ -> throw new IllegalArgumentException("table placeholder was not validated");
             case TableReference table -> createTable(table);
+            case ValuesRelation values -> createValuesRelation(values, parameterIds);
         };
+    }
+
+    private static TableSubquery createValuesRelation(ValuesRelation values, Map<SourceSpan, Integer> parameterIds)
+    {
+        NodeLocation valuesLocation = new NodeLocation(values.span().startLine(), values.span().startColumn() + 1);
+        Values body = new Values(
+                valuesLocation,
+                values.rows().stream()
+                        .map(row -> createValuesRow(row, parameterIds))
+                        .toList());
+        Query query = new Query(
+                valuesLocation,
+                List.of(),
+                List.of(),
+                Optional.empty(),
+                body,
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty());
+        return new TableSubquery(location(values.span()), query);
+    }
+
+    private static Expression createValuesRow(List<HogQlQuery.Expression> row, Map<SourceSpan, Integer> parameterIds)
+    {
+        if (row.size() == 1) {
+            return createExpression(row.getFirst(), parameterIds);
+        }
+        return new Row(
+                location(row.getFirst().span()),
+                row.stream()
+                        .map(value -> new Row.Field(location(value.span()), Optional.empty(), createExpression(value, parameterIds)))
+                        .toList());
     }
 
     private static Table createTable(TableReference table)

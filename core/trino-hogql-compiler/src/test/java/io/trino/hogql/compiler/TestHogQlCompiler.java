@@ -33,6 +33,8 @@ import io.trino.sql.tree.SingleColumn;
 import io.trino.sql.tree.Statement;
 import io.trino.sql.tree.Table;
 import io.trino.sql.tree.TableSubquery;
+import io.trino.sql.tree.Union;
+import io.trino.sql.tree.Values;
 import io.trino.sql.tree.WithQuery;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -230,6 +232,74 @@ public class TestHogQlCompiler
         assertThat(aliasedRelation.getLocation()).contains(new NodeLocation(2, 18));
         assertThat(derivedTable.getLocation()).contains(new NodeLocation(2, 18));
         assertThat(derivedTable.getQuery().getLocation()).contains(new NodeLocation(2, 19));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "SELECT 1 UNION SELECT 2",
+            "SELECT 1 UNION ALL SELECT 2",
+            "SELECT 1 UNION DISTINCT SELECT 2",
+            "SELECT 1 INTERSECT SELECT 2",
+            "SELECT 1 INTERSECT ALL SELECT 2",
+            "SELECT 1 INTERSECT DISTINCT SELECT 2",
+            "SELECT 1 EXCEPT SELECT 2",
+            "SELECT 1 EXCEPT ALL SELECT 2",
+            "SELECT 1 UNION SELECT 2 INTERSECT SELECT 2",
+            "SELECT 1 EXCEPT SELECT 2 UNION SELECT 3",
+            "SELECT 1 UNION (SELECT 2 EXCEPT SELECT 3)",
+            "WITH base AS (SELECT 1 AS id) SELECT id FROM base UNION SELECT id FROM base",
+            "WITH base AS (SELECT 1 UNION ALL SELECT 2) SELECT * FROM base",
+            "SELECT * FROM (SELECT 1 UNION ALL SELECT 2) AS data",
+            "SELECT * FROM (VALUES (1, 'first'), (2, 'second')) AS data(id, label)",
+    })
+    public void testLowersSetOperationsAndValuesToStockTrinoAst(String hogql)
+    {
+        Statement statement = compiler.compile(hogql);
+
+        assertThat(statement).isEqualTo(sqlParser.createStatement(hogql));
+        assertThat(sqlParser.createStatement(SqlFormatter.formatSql(statement))).isEqualTo(statement);
+    }
+
+    @Test
+    public void testLowersSetOperationOrderLimitAndOffset()
+    {
+        Statement statement = compiler.compile("SELECT 1 UNION SELECT 2 ORDER BY 1 LIMIT 3 OFFSET 1");
+
+        assertThat(statement).isEqualTo(sqlParser.createStatement("SELECT 1 UNION SELECT 2 ORDER BY 1 OFFSET 1 ROW LIMIT 3"));
+        assertThat(sqlParser.createStatement(SqlFormatter.formatSql(statement))).isEqualTo(statement);
+    }
+
+    @Test
+    public void testBindsPlaceholdersAcrossSetBranchesAndValuesRows()
+    {
+        HogQlCompilationResult result = compiler.compile(
+                "SELECT {left} UNION ALL SELECT {right} FROM (VALUES ({first}), ({second})) AS data(value)",
+                Map.of(
+                        "left", typedValue("left"),
+                        "right", typedValue("right"),
+                        "first", typedValue("first"),
+                        "second", typedValue("second")));
+
+        assertThat(result.parameterNames()).containsExactly("left", "right", "first", "second");
+        assertThat(parameters(result.statement()))
+                .extracting(Parameter::getId)
+                .containsExactly(0, 1, 2, 3);
+    }
+
+    @Test
+    public void testPreservesSetOperationAndValuesSourceLocations()
+    {
+        Query query = (Query) compiler.compile("SELECT 1\nUNION ALL\nSELECT * FROM (VALUES (2), (3)) data(value)");
+        Union union = (Union) query.getQueryBody();
+        QuerySpecification right = (QuerySpecification) union.getRelations().get(1);
+        AliasedRelation alias = (AliasedRelation) right.getFrom().orElseThrow();
+        TableSubquery valuesSubquery = (TableSubquery) alias.getRelation();
+        Values values = (Values) valuesSubquery.getQuery().getQueryBody();
+
+        assertThat(union.getLocation()).contains(new NodeLocation(2, 1));
+        assertThat(alias.getLocation()).contains(new NodeLocation(3, 15));
+        assertThat(valuesSubquery.getLocation()).contains(new NodeLocation(3, 15));
+        assertThat(values.getLocation()).contains(new NodeLocation(3, 16));
     }
 
     @Test

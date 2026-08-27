@@ -537,6 +537,13 @@ public record HogQlSemanticCatalogSnapshot(
             if (arguments.isEmpty()) {
                 throw new IllegalArgumentException("operator recipe requires arguments");
             }
+            int expectedArguments = switch (operator) {
+                case NOT, NEGATE, IS_NULL, IS_NOT_NULL -> 1;
+                default -> 2;
+            };
+            if (arguments.size() != expectedArguments) {
+                throw new IllegalArgumentException("invalid operator arity");
+            }
         }
 
         @Override

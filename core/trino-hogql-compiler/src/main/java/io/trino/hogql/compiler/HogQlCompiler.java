@@ -37,11 +37,14 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
+import io.trino.hogql.parser.tree.HogQlQuery.SelectQueryBody;
+import io.trino.hogql.parser.tree.HogQlQuery.SetOperation;
 import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
 import io.trino.hogql.parser.tree.HogQlQuery.SubqueryRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.ValuesRelation;
 import io.trino.spi.Location;
 import io.trino.spi.TrinoException;
 import io.trino.sql.tree.Statement;
@@ -171,15 +174,23 @@ public final class HogQlCompiler
     private static void collectPlaceholders(HogQlQuery query, List<Placeholder> placeholders)
     {
         query.with().forEach(commonTable -> collectPlaceholders(commonTable.query(), placeholders));
-        query.projections().forEach(projection -> {
-            if (projection instanceof HogQlQuery.ExpressionProjection expressionProjection) {
-                collectPlaceholders(expressionProjection.expression(), placeholders);
+        switch (query.body()) {
+            case SelectQueryBody select -> {
+                select.projections().forEach(projection -> {
+                    if (projection instanceof HogQlQuery.ExpressionProjection expressionProjection) {
+                        collectPlaceholders(expressionProjection.expression(), placeholders);
+                    }
+                });
+                select.from().ifPresent(relation -> collectPlaceholders(relation, placeholders));
+                select.where().ifPresent(expression -> collectPlaceholders(expression, placeholders));
+                select.groupBy().forEach(expression -> collectPlaceholders(expression, placeholders));
+                select.having().ifPresent(expression -> collectPlaceholders(expression, placeholders));
             }
-        });
-        query.from().ifPresent(relation -> collectPlaceholders(relation, placeholders));
-        query.where().ifPresent(expression -> collectPlaceholders(expression, placeholders));
-        query.groupBy().forEach(expression -> collectPlaceholders(expression, placeholders));
-        query.having().ifPresent(expression -> collectPlaceholders(expression, placeholders));
+            case SetOperation setOperation -> {
+                collectPlaceholders(setOperation.left(), placeholders);
+                collectPlaceholders(setOperation.right(), placeholders);
+            }
+        }
         query.orderBy().forEach(sortItem -> collectPlaceholders(sortItem.expression(), placeholders));
         query.limit().ifPresent(expression -> collectPlaceholders(expression, placeholders));
         query.offset().ifPresent(expression -> collectPlaceholders(expression, placeholders));
@@ -208,7 +219,10 @@ public final class HogQlCompiler
     private static boolean containsSemanticCandidate(HogQlQuery query)
     {
         return query.with().stream().anyMatch(commonTable -> containsSemanticCandidate(commonTable.query())) ||
-                query.from().map(HogQlCompiler::containsSemanticCandidate).orElse(false);
+                switch (query.body()) {
+                    case SelectQueryBody select -> select.from().map(HogQlCompiler::containsSemanticCandidate).orElse(false);
+                    case SetOperation setOperation -> containsSemanticCandidate(setOperation.left()) || containsSemanticCandidate(setOperation.right());
+                };
     }
 
     private static boolean containsSemanticCandidate(Relation relation)
@@ -220,6 +234,7 @@ public final class HogQlCompiler
             case SubqueryRelation subquery -> containsSemanticCandidate(subquery.query());
             case TablePlaceholder _ -> false;
             case HogQlQuery.TableReference table -> table.parts().size() == 1;
+            case ValuesRelation _ -> false;
         };
     }
 
@@ -247,7 +262,13 @@ public final class HogQlCompiler
     private static void validateQuery(HogQlQuery query)
     {
         query.with().forEach(commonTable -> validateQuery(commonTable.query()));
-        query.from().ifPresent(HogQlCompiler::validateRelation);
+        switch (query.body()) {
+            case SelectQueryBody select -> select.from().ifPresent(HogQlCompiler::validateRelation);
+            case SetOperation setOperation -> {
+                validateQuery(setOperation.left());
+                validateQuery(setOperation.right());
+            }
+        }
     }
 
     private static void collectPlaceholders(Expression expression, List<Placeholder> placeholders)
@@ -304,6 +325,7 @@ public final class HogQlCompiler
                     tablePlaceholder.span(),
                     "HogQL parameter placeholders are not supported in table positions: " + tablePlaceholder.placeholder().name());
             case HogQlQuery.TableReference _ -> {}
+            case ValuesRelation _ -> {}
         }
     }
 
@@ -324,6 +346,7 @@ public final class HogQlCompiler
             case SubqueryRelation subquery -> collectPlaceholders(subquery.query(), placeholders);
             case TablePlaceholder _ -> {}
             case HogQlQuery.TableReference _ -> {}
+            case ValuesRelation values -> values.rows().forEach(row -> row.forEach(expression -> collectPlaceholders(expression, placeholders)));
         }
     }
 

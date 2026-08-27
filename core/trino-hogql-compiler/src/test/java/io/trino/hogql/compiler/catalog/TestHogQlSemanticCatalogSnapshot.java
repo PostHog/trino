@@ -27,12 +27,14 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LiteralRecip
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalFieldDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalTableDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalType;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.OperatorRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalQualifiedName;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyStorage;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipCardinality;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.SemanticOperator;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.TypedLiteral;
 import io.trino.hogql.parser.HogQlLanguageVersion;
 import org.junit.jupiter.api.Test;
@@ -166,6 +168,42 @@ public class TestHogQlSemanticCatalogSnapshot
                 List.of(function("identity"))))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("node limit");
+    }
+
+    @ParameterizedTest(name = "{0} with {1} arguments")
+    @MethodSource("invalidOperatorArities")
+    public void testRejectsInvalidOperatorArity(SemanticOperator operator, int argumentCount)
+    {
+        List<ExpressionRecipe> arguments = new ArrayList<>();
+        for (int index = 0; index < argumentCount; index++) {
+            arguments.add(literal());
+        }
+
+        assertThatThrownBy(() -> semanticSnapshot(
+                List.of(new ExpressionFieldDefinition(
+                        "events",
+                        "derived",
+                        "bigint",
+                        LogicalType.INTEGER,
+                        false,
+                        true,
+                        new OperatorRecipe(operator, arguments))),
+                List.of()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("operator arity");
+    }
+
+    private static Stream<Arguments> invalidOperatorArities()
+    {
+        return Stream.concat(
+                Stream.of(SemanticOperator.values())
+                        .filter(operator -> switch (operator) {
+                            case NOT, NEGATE, IS_NULL, IS_NOT_NULL -> false;
+                            default -> true;
+                        })
+                        .map(operator -> Arguments.of(operator, 1)),
+                Stream.of(SemanticOperator.NOT, SemanticOperator.NEGATE, SemanticOperator.IS_NULL, SemanticOperator.IS_NOT_NULL)
+                        .map(operator -> Arguments.of(operator, 2)));
     }
 
     private static Stream<Arguments> invalidSnapshots()

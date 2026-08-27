@@ -20,12 +20,7 @@ import static java.util.Objects.requireNonNull;
 
 public record HogQlQuery(
         List<CommonTableExpression> with,
-        boolean distinct,
-        List<Projection> projections,
-        Optional<Relation> from,
-        Optional<Expression> where,
-        List<Expression> groupBy,
-        Optional<Expression> having,
+        QueryBody body,
         List<SortItem> orderBy,
         Optional<Expression> limit,
         Optional<Expression> offset,
@@ -34,15 +29,120 @@ public record HogQlQuery(
     public HogQlQuery
     {
         with = List.copyOf(requireNonNull(with, "with is null"));
-        projections = List.copyOf(requireNonNull(projections, "projections is null"));
-        from = requireNonNull(from, "from is null");
-        where = requireNonNull(where, "where is null");
-        groupBy = List.copyOf(requireNonNull(groupBy, "groupBy is null"));
-        having = requireNonNull(having, "having is null");
+        body = requireNonNull(body, "body is null");
         orderBy = List.copyOf(requireNonNull(orderBy, "orderBy is null"));
         limit = requireNonNull(limit, "limit is null");
         offset = requireNonNull(offset, "offset is null");
         span = requireNonNull(span, "span is null");
+    }
+
+    public HogQlQuery(
+            List<CommonTableExpression> with,
+            boolean distinct,
+            List<Projection> projections,
+            Optional<Relation> from,
+            Optional<Expression> where,
+            List<Expression> groupBy,
+            Optional<Expression> having,
+            List<SortItem> orderBy,
+            Optional<Expression> limit,
+            Optional<Expression> offset,
+            SourceSpan span)
+    {
+        this(with, new SelectQueryBody(distinct, projections, from, where, groupBy, having, span), orderBy, limit, offset, span);
+    }
+
+    public boolean distinct()
+    {
+        return selectBody().distinct();
+    }
+
+    public List<Projection> projections()
+    {
+        return selectBody().projections();
+    }
+
+    public Optional<Relation> from()
+    {
+        return selectBody().from();
+    }
+
+    public Optional<Expression> where()
+    {
+        return selectBody().where();
+    }
+
+    public List<Expression> groupBy()
+    {
+        return selectBody().groupBy();
+    }
+
+    public Optional<Expression> having()
+    {
+        return selectBody().having();
+    }
+
+    private SelectQueryBody selectBody()
+    {
+        if (body instanceof SelectQueryBody select) {
+            return select;
+        }
+        throw new IllegalStateException("query body is not a SELECT");
+    }
+
+    public sealed interface QueryBody
+            permits SelectQueryBody, SetOperation
+    {
+        SourceSpan span();
+    }
+
+    public record SelectQueryBody(
+            boolean distinct,
+            List<Projection> projections,
+            Optional<Relation> from,
+            Optional<Expression> where,
+            List<Expression> groupBy,
+            Optional<Expression> having,
+            SourceSpan span)
+            implements QueryBody
+    {
+        public SelectQueryBody
+        {
+            projections = List.copyOf(requireNonNull(projections, "projections is null"));
+            from = requireNonNull(from, "from is null");
+            where = requireNonNull(where, "where is null");
+            groupBy = List.copyOf(requireNonNull(groupBy, "groupBy is null"));
+            having = requireNonNull(having, "having is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record SetOperation(
+            SetOperationType type,
+            boolean distinct,
+            HogQlQuery left,
+            HogQlQuery right,
+            boolean leftParenthesized,
+            boolean rightParenthesized,
+            SourceSpan operatorSpan,
+            SourceSpan span)
+            implements QueryBody
+    {
+        public SetOperation
+        {
+            type = requireNonNull(type, "type is null");
+            left = requireNonNull(left, "left is null");
+            right = requireNonNull(right, "right is null");
+            operatorSpan = requireNonNull(operatorSpan, "operatorSpan is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public enum SetOperationType
+    {
+        EXCEPT,
+        INTERSECT,
+        UNION,
     }
 
     public record CommonTableExpression(Identifier name, List<Identifier> columnAliases, HogQlQuery query, SourceSpan span)
@@ -251,7 +351,7 @@ public record HogQlQuery(
     }
 
     public record FunctionCall(
-            Identifier name,
+            List<Identifier> nameParts,
             List<Expression> arguments,
             boolean distinct,
             List<SortItem> orderBy,
@@ -261,11 +361,30 @@ public record HogQlQuery(
     {
         public FunctionCall
         {
-            name = requireNonNull(name, "name is null");
+            nameParts = List.copyOf(requireNonNull(nameParts, "nameParts is null"));
+            if (nameParts.isEmpty()) {
+                throw new IllegalArgumentException("nameParts is empty");
+            }
             arguments = List.copyOf(requireNonNull(arguments, "arguments is null"));
             orderBy = List.copyOf(requireNonNull(orderBy, "orderBy is null"));
             filter = requireNonNull(filter, "filter is null");
             span = requireNonNull(span, "span is null");
+        }
+
+        public FunctionCall(
+                Identifier name,
+                List<Expression> arguments,
+                boolean distinct,
+                List<SortItem> orderBy,
+                Optional<Expression> filter,
+                SourceSpan span)
+        {
+            this(List.of(name), arguments, distinct, orderBy, filter, span);
+        }
+
+        public Identifier name()
+        {
+            return nameParts.getLast();
         }
     }
 
@@ -344,18 +463,25 @@ public record HogQlQuery(
                     JoinRelation,
                     SubqueryRelation,
                     TablePlaceholder,
-                    TableReference
+                    TableReference,
+                    ValuesRelation
     {
         SourceSpan span();
     }
 
-    public record AliasedRelation(Relation relation, Identifier alias, SourceSpan span)
+    public record AliasedRelation(Relation relation, Identifier alias, List<Identifier> columnAliases, SourceSpan span)
             implements Relation
     {
+        public AliasedRelation(Relation relation, Identifier alias, SourceSpan span)
+        {
+            this(relation, alias, List.of(), span);
+        }
+
         public AliasedRelation
         {
             relation = requireNonNull(relation, "relation is null");
             alias = requireNonNull(alias, "alias is null");
+            columnAliases = List.copyOf(requireNonNull(columnAliases, "columnAliases is null"));
             span = requireNonNull(span, "span is null");
         }
     }
@@ -377,6 +503,30 @@ public record HogQlQuery(
         {
             query = requireNonNull(query, "query is null");
             span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record ValuesRelation(List<List<Expression>> rows, SourceSpan span)
+            implements Relation
+    {
+        public ValuesRelation
+        {
+            rows = requireNonNull(rows, "rows is null").stream()
+                    .map(row -> List.copyOf(requireNonNull(row, "row is null")))
+                    .toList();
+            if (rows.isEmpty()) {
+                throw new IllegalArgumentException("rows is empty");
+            }
+            int columnCount = rows.getFirst().size();
+            if (columnCount == 0 || rows.stream().anyMatch(row -> row.size() != columnCount)) {
+                throw new IllegalArgumentException("VALUES rows must have the same non-zero column count");
+            }
+            span = requireNonNull(span, "span is null");
+        }
+
+        public int columnCount()
+        {
+            return rows.getFirst().size();
         }
     }
 
