@@ -15,13 +15,16 @@ package io.trino.execution;
 
 import io.trino.Session;
 import io.trino.execution.QueryPreparer.PreparedQuery;
+import io.trino.hogql.compiler.HogQlCompiler;
 import io.trino.sql.parser.ParsingException;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.AllColumns;
 import io.trino.sql.tree.QualifiedName;
+import io.trino.sql.tree.Query;
 import org.junit.jupiter.api.Test;
 
 import static io.trino.SessionTestUtils.TEST_SESSION;
+import static io.trino.execution.QueryLanguage.HOGQL;
 import static io.trino.spi.StandardErrorCode.INVALID_PARAMETER_USAGE;
 import static io.trino.spi.StandardErrorCode.NOT_FOUND;
 import static io.trino.sql.QueryUtil.selectList;
@@ -36,12 +39,20 @@ public class TestQueryPreparer
 {
     private static final SqlParser SQL_PARSER = new SqlParser();
     private static final QueryPreparer QUERY_PREPARER = new QueryPreparer(SQL_PARSER);
+    private static final QueryPreparer HOGQL_QUERY_PREPARER = new QueryPreparer(SQL_PARSER, new HogQlCompiler());
 
     @Test
     public void testSelectStatement()
     {
         PreparedQuery preparedQuery = QUERY_PREPARER.prepareQuery(TEST_SESSION, "SELECT * FROM foo");
         assertThat(preparedQuery.getStatement()).isEqualTo(simpleQuery(selectList(new AllColumns()), table(QualifiedName.of("foo"))));
+    }
+
+    @Test
+    public void testHogQlStatement()
+    {
+        PreparedQuery preparedQuery = HOGQL_QUERY_PREPARER.prepareQuery(TEST_SESSION, "SELECT 1", HOGQL);
+        assertThat(preparedQuery.getStatement()).isInstanceOf(Query.class);
     }
 
     @Test

@@ -27,6 +27,7 @@ import io.trino.Session;
 import io.trino.event.QueryMonitor;
 import io.trino.execution.QueryIdGenerator;
 import io.trino.execution.QueryInfo;
+import io.trino.execution.QueryLanguage;
 import io.trino.execution.QueryManagerConfig;
 import io.trino.execution.QueryManagerStats;
 import io.trino.execution.QueryPreparer;
@@ -59,6 +60,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
+import static io.trino.execution.QueryLanguage.SQL;
 import static io.trino.execution.QueryState.FINISHING;
 import static io.trino.execution.QueryState.QUEUED;
 import static io.trino.execution.QueryState.RUNNING;
@@ -175,10 +177,16 @@ public class DispatchManager
 
     public ListenableFuture<Void> createQuery(QueryId queryId, Span querySpan, Slug slug, SessionContext sessionContext, String query)
     {
+        return createQuery(queryId, querySpan, slug, sessionContext, query, SQL);
+    }
+
+    public ListenableFuture<Void> createQuery(QueryId queryId, Span querySpan, Slug slug, SessionContext sessionContext, String query, QueryLanguage queryLanguage)
+    {
         requireNonNull(queryId, "queryId is null");
         requireNonNull(querySpan, "querySpan is null");
         requireNonNull(sessionContext, "sessionContext is null");
         requireNonNull(query, "query is null");
+        requireNonNull(queryLanguage, "queryLanguage is null");
         checkArgument(!query.isEmpty(), "query must not be empty string");
         checkArgument(!queryTracker.hasQuery(queryId), "query %s already exists", queryId);
 
@@ -192,7 +200,7 @@ public class DispatchManager
                     .setParent(Context.current().with(querySpan))
                     .startSpan();
             try (var _ = scopedSpan(span)) {
-                createQueryInternal(queryId, querySpan, slug, sessionContext, query, resourceGroupManager);
+                createQueryInternal(queryId, querySpan, slug, sessionContext, query, queryLanguage, resourceGroupManager);
             }
             finally {
                 queryCreationFuture.set(null);
@@ -205,7 +213,7 @@ public class DispatchManager
      * Creates and registers a dispatch query with the query tracker.  This method will never fail to register a query with the query
      * tracker.  If an error occurs while creating a dispatch query, a failed dispatch will be created and registered.
      */
-    private <C> void createQueryInternal(QueryId queryId, Span querySpan, Slug slug, SessionContext sessionContext, String query, ResourceGroupManager<C> resourceGroupManager)
+    private <C> void createQueryInternal(QueryId queryId, Span querySpan, Slug slug, SessionContext sessionContext, String query, QueryLanguage queryLanguage, ResourceGroupManager<C> resourceGroupManager)
     {
         Session session = null;
         PreparedQuery preparedQuery = null;
@@ -223,7 +231,7 @@ public class DispatchManager
             accessControl.checkCanExecuteQuery(sessionContext.getIdentity(), queryId);
 
             // prepare query
-            preparedQuery = queryPreparer.prepareQuery(session, query);
+            preparedQuery = queryPreparer.prepareQuery(session, query, queryLanguage);
 
             // select resource group
             Optional<String> queryType = getQueryType(preparedQuery.getStatement()).map(Enum::name);

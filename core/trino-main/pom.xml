@@ -247,6 +247,11 @@
 
         <dependency>
             <groupId>io.trino</groupId>
+            <artifactId>trino-hogql-compiler</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>io.trino</groupId>
             <artifactId>trino-matching</artifactId>
         </dependency>
 

@@ -41,6 +41,7 @@ import io.trino.dispatcher.DispatchExecutor;
 import io.trino.dispatcher.DispatchManager;
 import io.trino.dispatcher.DispatchQueryFactory;
 import io.trino.dispatcher.FailedDispatchQueryFactory;
+import io.trino.dispatcher.HogQlStatementResource;
 import io.trino.dispatcher.LocalDispatchQueryFactory;
 import io.trino.dispatcher.QueuedStatementResource;
 import io.trino.event.QueryMonitor;
@@ -97,6 +98,8 @@ import io.trino.execution.scheduler.faulttolerant.TaskDescriptorStorage;
 import io.trino.execution.scheduler.policy.AllAtOnceExecutionPolicy;
 import io.trino.execution.scheduler.policy.ExecutionPolicy;
 import io.trino.execution.scheduler.policy.PhasedExecutionPolicy;
+import io.trino.hogql.HogQlConfig;
+import io.trino.hogql.compiler.HogQlCompiler;
 import io.trino.memory.ClusterMemoryManager;
 import io.trino.memory.ForMemoryManager;
 import io.trino.memory.LeastWastedEffortTaskLowMemoryKiller;
@@ -175,6 +178,11 @@ public class CoordinatorModule
         jsonCodecBinder(binder).bindJsonCodec(TaskInfo.class);
         jaxrsBinder(binder).bind(QueuedStatementResource.class);
         jaxrsBinder(binder).bind(ExecutingStatementResource.class);
+        configBinder(binder).bindConfig(HogQlConfig.class);
+        binder.bind(HogQlCompiler.class).in(Scopes.SINGLETON);
+        if (buildConfigObject(HogQlConfig.class).isEnabled()) {
+            jaxrsBinder(binder).bind(HogQlStatementResource.class);
+        }
         binder.bind(StatementHttpExecutionMBean.class).in(Scopes.SINGLETON);
         newExporter(binder).export(StatementHttpExecutionMBean.class).withGeneratedName();
         binder.bind(QueryInfoUrlFactory.class).in(Scopes.SINGLETON);

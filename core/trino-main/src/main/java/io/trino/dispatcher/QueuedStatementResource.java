@@ -29,6 +29,7 @@ import io.trino.client.QueryError;
 import io.trino.client.QueryResults;
 import io.trino.client.StatementStats;
 import io.trino.execution.ExecutionFailureInfo;
+import io.trino.execution.QueryLanguage;
 import io.trino.execution.QueryManagerConfig;
 import io.trino.execution.QueryState;
 import io.trino.server.ExternalUriInfo;
@@ -89,6 +90,7 @@ import static io.trino.client.ProtocolHeaders.TRINO_HEADERS;
 import static io.trino.dispatcher.QueuedStatementResource.SubmissionState.ABANDONED;
 import static io.trino.dispatcher.QueuedStatementResource.SubmissionState.NOT_SUBMITTED;
 import static io.trino.dispatcher.QueuedStatementResource.SubmissionState.SUBMITTED;
+import static io.trino.execution.QueryLanguage.SQL;
 import static io.trino.execution.QueryState.FAILED;
 import static io.trino.execution.QueryState.QUEUED;
 import static io.trino.server.ServletSecurityUtils.authenticatedIdentity;
@@ -175,15 +177,25 @@ public class QueuedStatementResource
             @Context HttpHeaders httpHeaders,
             @BeanParam ExternalUriInfo externalUriInfo)
     {
+        return postStatement(statement, SQL, servletRequest, httpHeaders, externalUriInfo);
+    }
+
+    Response postStatement(
+            String statement,
+            QueryLanguage queryLanguage,
+            HttpServletRequest servletRequest,
+            HttpHeaders httpHeaders,
+            ExternalUriInfo externalUriInfo)
+    {
         if (isNullOrEmpty(statement)) {
-            throw new BadRequestException("SQL statement is empty");
+            throw new BadRequestException(queryLanguage == SQL ? "SQL statement is empty" : "HogQL query is empty");
         }
 
-        Query query = registerQuery(statement, servletRequest, httpHeaders);
+        Query query = registerQuery(statement, queryLanguage, servletRequest, httpHeaders);
         return createQueryResultsResponse(query.getQueryResults(query.getLastToken(), externalUriInfo), query.sessionContext.getQueryDataEncoding());
     }
 
-    private Query registerQuery(String statement, HttpServletRequest servletRequest, HttpHeaders httpHeaders)
+    private Query registerQuery(String statement, QueryLanguage queryLanguage, HttpServletRequest servletRequest, HttpHeaders httpHeaders)
     {
         Optional<String> remoteAddress = Optional.ofNullable(servletRequest.getRemoteAddr());
         Optional<Identity> identity = authenticatedIdentity(servletRequest);
@@ -194,7 +206,7 @@ public class QueuedStatementResource
         MultivaluedMap<String, String> headers = httpHeaders.getRequestHeaders();
 
         SessionContext sessionContext = sessionContextFactory.createSessionContext(headers, remoteAddress, identity);
-        Query query = new Query(statement, sessionContext, dispatchManager, queryInfoUrlFactory, tracer);
+        Query query = new Query(statement, queryLanguage, sessionContext, dispatchManager, queryInfoUrlFactory, tracer);
         queryManager.registerQuery(query);
 
         // let authentication filter know that identity lifecycle has been handed off
@@ -315,6 +327,7 @@ public class QueuedStatementResource
     private static final class Query
     {
         private final String query;
+        private final QueryLanguage queryLanguage;
         private final SessionContext sessionContext;
         private final DispatchManager dispatchManager;
         private final QueryId queryId;
@@ -327,9 +340,10 @@ public class QueuedStatementResource
         private final AtomicReference<SubmissionState> submissionGate = new AtomicReference<>(NOT_SUBMITTED);
         private final SettableFuture<Void> creationFuture = SettableFuture.create();
 
-        public Query(String query, SessionContext sessionContext, DispatchManager dispatchManager, QueryInfoUrlFactory queryInfoUrlFactory, Tracer tracer)
+        public Query(String query, QueryLanguage queryLanguage, SessionContext sessionContext, DispatchManager dispatchManager, QueryInfoUrlFactory queryInfoUrlFactory, Tracer tracer)
         {
             this.query = requireNonNull(query, "query is null");
+            this.queryLanguage = requireNonNull(queryLanguage, "queryLanguage is null");
             this.sessionContext = requireNonNull(sessionContext, "sessionContext is null");
             this.dispatchManager = requireNonNull(dispatchManager, "dispatchManager is null");
             this.queryId = dispatchManager.createQueryId();
@@ -385,7 +399,7 @@ public class QueuedStatementResource
         {
             if (submissionGate.compareAndSet(NOT_SUBMITTED, SUBMITTED)) {
                 querySpan.addEvent("submit");
-                creationFuture.setFuture(dispatchManager.createQuery(queryId, querySpan, slug, sessionContext, query));
+                creationFuture.setFuture(dispatchManager.createQuery(queryId, querySpan, slug, sessionContext, query, queryLanguage));
             }
         }
 

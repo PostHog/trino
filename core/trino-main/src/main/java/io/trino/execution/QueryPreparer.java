@@ -16,6 +16,7 @@ package io.trino.execution;
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Inject;
 import io.trino.Session;
+import io.trino.hogql.compiler.HogQlCompiler;
 import io.trino.spi.TrinoException;
 import io.trino.spi.resourcegroups.QueryType;
 import io.trino.sql.parser.ParsingException;
@@ -41,17 +42,39 @@ import static java.util.Objects.requireNonNull;
 public class QueryPreparer
 {
     private final SqlParser sqlParser;
+    private final Optional<HogQlCompiler> hogQlCompiler;
 
-    @Inject
     public QueryPreparer(SqlParser sqlParser)
     {
+        this(sqlParser, Optional.empty());
+    }
+
+    @Inject
+    public QueryPreparer(SqlParser sqlParser, HogQlCompiler hogQlCompiler)
+    {
+        this(sqlParser, Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")));
+    }
+
+    private QueryPreparer(SqlParser sqlParser, Optional<HogQlCompiler> hogQlCompiler)
+    {
         this.sqlParser = requireNonNull(sqlParser, "sqlParser is null");
+        this.hogQlCompiler = requireNonNull(hogQlCompiler, "hogQlCompiler is null");
     }
 
     public PreparedQuery prepareQuery(Session session, String query)
             throws ParsingException, TrinoException
     {
-        Statement wrappedStatement = sqlParser.createStatement(query);
+        return prepareQuery(session, query, QueryLanguage.SQL);
+    }
+
+    public PreparedQuery prepareQuery(Session session, String query, QueryLanguage queryLanguage)
+            throws ParsingException, TrinoException
+    {
+        requireNonNull(queryLanguage, "queryLanguage is null");
+        Statement wrappedStatement = switch (queryLanguage) {
+            case SQL -> sqlParser.createStatement(query);
+            case HOGQL -> hogQlCompiler.orElseThrow(() -> new IllegalStateException("HogQL compiler is not configured")).compile(query);
+        };
         return prepareQuery(session, wrappedStatement);
     }
 
