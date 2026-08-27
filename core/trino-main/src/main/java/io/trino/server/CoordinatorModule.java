@@ -104,6 +104,7 @@ import io.trino.hogql.HogQlConfig;
 import io.trino.hogql.HogQlSemanticCatalogConfig;
 import io.trino.hogql.HogQlSemanticCatalogModule;
 import io.trino.hogql.compiler.HogQlCompiler;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider;
 import io.trino.memory.ClusterMemoryManager;
 import io.trino.memory.ForMemoryManager;
 import io.trino.memory.LeastWastedEffortTaskLowMemoryKiller;
@@ -187,6 +188,7 @@ public class CoordinatorModule
         binder.bind(HogQlCompiler.class).in(Scopes.SINGLETON);
         binder.bind(HogQlCompilationStats.class).in(Scopes.SINGLETON);
         binder.bind(HogQlCompilationObserver.class).to(HogQlCompilationStats.class);
+        OptionalBinder.newOptionalBinder(binder, HogQlSemanticCatalogSnapshotProvider.class);
         newExporter(binder).export(HogQlCompilationStats.class).withGeneratedName();
         if (buildConfigObject(HogQlConfig.class).isEnabled()) {
             jaxrsBinder(binder).bind(HogQlStatementResource.class);

@@ -22,6 +22,9 @@ import io.trino.hogql.HogQlCompilationTracker;
 import io.trino.hogql.compiler.HogQlCompilationResult;
 import io.trino.hogql.compiler.HogQlCompileEnvelope;
 import io.trino.hogql.compiler.HogQlCompiler;
+import io.trino.hogql.compiler.HogQlSemanticCatalogContext;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider;
 import io.trino.spi.TrinoException;
 import io.trino.spi.resourcegroups.QueryType;
 import io.trino.sql.parser.ParsingException;
@@ -33,7 +36,9 @@ import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.Statement;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 import static io.trino.execution.ParameterExtractor.getParameterCount;
 import static io.trino.hogql.HogQlCompilationEvent.Phase.COMPILATION;
@@ -49,33 +54,53 @@ import static java.util.Objects.requireNonNull;
 
 public class QueryPreparer
 {
+    private static final Pattern UNDELIMITED_IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
+
     private final SqlParser sqlParser;
     private final Optional<HogQlCompiler> hogQlCompiler;
     private final HogQlParameterDecoder hogQlParameterDecoder;
     private final HogQlCompilationObserver hogQlCompilationObserver;
+    private final Optional<HogQlSemanticCatalogSnapshotProvider> hogQlSemanticCatalogSnapshotProvider;
 
     public QueryPreparer(SqlParser sqlParser)
     {
-        this(sqlParser, Optional.empty(), NOOP);
+        this(sqlParser, Optional.empty(), NOOP, Optional.empty());
     }
 
     public QueryPreparer(SqlParser sqlParser, HogQlCompiler hogQlCompiler)
     {
-        this(sqlParser, Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")), NOOP);
+        this(sqlParser, Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")), NOOP, Optional.empty());
+    }
+
+    public QueryPreparer(SqlParser sqlParser, HogQlCompiler hogQlCompiler, HogQlCompilationObserver hogQlCompilationObserver)
+    {
+        this(sqlParser, Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")), hogQlCompilationObserver, Optional.empty());
     }
 
     @Inject
-    public QueryPreparer(SqlParser sqlParser, HogQlCompiler hogQlCompiler, HogQlCompilationObserver hogQlCompilationObserver)
+    public QueryPreparer(
+            SqlParser sqlParser,
+            HogQlCompiler hogQlCompiler,
+            HogQlCompilationObserver hogQlCompilationObserver,
+            Optional<HogQlSemanticCatalogSnapshotProvider> hogQlSemanticCatalogSnapshotProvider)
     {
-        this(sqlParser, Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")), hogQlCompilationObserver);
+        this(sqlParser,
+                Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")),
+                hogQlCompilationObserver,
+                hogQlSemanticCatalogSnapshotProvider);
     }
 
-    private QueryPreparer(SqlParser sqlParser, Optional<HogQlCompiler> hogQlCompiler, HogQlCompilationObserver hogQlCompilationObserver)
+    private QueryPreparer(
+            SqlParser sqlParser,
+            Optional<HogQlCompiler> hogQlCompiler,
+            HogQlCompilationObserver hogQlCompilationObserver,
+            Optional<HogQlSemanticCatalogSnapshotProvider> hogQlSemanticCatalogSnapshotProvider)
     {
         this.sqlParser = requireNonNull(sqlParser, "sqlParser is null");
         this.hogQlCompiler = requireNonNull(hogQlCompiler, "hogQlCompiler is null");
         this.hogQlParameterDecoder = new HogQlParameterDecoder(sqlParser);
         this.hogQlCompilationObserver = requireNonNull(hogQlCompilationObserver, "hogQlCompilationObserver is null");
+        this.hogQlSemanticCatalogSnapshotProvider = requireNonNull(hogQlSemanticCatalogSnapshotProvider, "hogQlSemanticCatalogSnapshotProvider is null");
     }
 
     public PreparedQuery prepareQuery(Session session, String query)
@@ -97,7 +122,7 @@ public class QueryPreparer
                 try {
                     HogQlCompilationResult result = tracker.observe(COMPILATION, () -> hogQlCompiler
                             .orElseThrow(() -> new TrinoException(NOT_SUPPORTED, "HogQL query submission is disabled"))
-                            .compile(envelope));
+                            .compile(envelope, semanticCatalogContext(session)));
                     preparedQuery = tracker.observe(PARAMETER_BINDING, () -> prepareQuery(
                             session,
                             result.statement(),
@@ -111,6 +136,18 @@ public class QueryPreparer
                 yield preparedQuery;
             }
         };
+    }
+
+    private Optional<HogQlSemanticCatalogContext> semanticCatalogContext(Session session)
+    {
+        if (hogQlSemanticCatalogSnapshotProvider.isEmpty() || session.getCatalog().isEmpty()) {
+            return Optional.empty();
+        }
+        String catalog = session.getCatalog().orElseThrow();
+        boolean delimited = !UNDELIMITED_IDENTIFIER.matcher(catalog).matches() || !catalog.equals(catalog.toLowerCase(Locale.ENGLISH));
+        return Optional.of(new HogQlSemanticCatalogContext(
+                new PhysicalIdentifier(catalog, delimited),
+                hogQlSemanticCatalogSnapshotProvider.orElseThrow()));
     }
 
     public PreparedQuery prepareQuery(Session session, Statement wrappedStatement)
