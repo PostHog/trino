@@ -17,6 +17,7 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionCapabilityDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionImplementation;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionKind;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionRewrite;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionSignature;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider.PinnedSnapshot;
@@ -78,6 +79,26 @@ public class TestHogQlFunctionResolver
         assertThat(pins).hasValue(1);
         assertThat(result.catalogGeneration()).hasValue(7);
         assertThat(result.statement()).isEqualTo(sqlParser.createStatement("SELECT ARRAY[system.builtin.upper('one')][1]"));
+    }
+
+    @Test
+    public void testCompilerRewritesNullPredicatesAndPreservesPlaceholders()
+    {
+        HogQlSemanticCatalogSnapshot snapshot = snapshot(List.of(
+                rewriteFunction("hogIsNull", FunctionRewrite.IS_NULL),
+                rewriteFunction("hogIsNotNull", FunctionRewrite.IS_NOT_NULL)));
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(snapshot));
+
+        HogQlCompilationResult result = new HogQlCompiler().compile(
+                envelope(
+                        "SELECT hogIsNull({first}), hogIsNotNull({second})",
+                        Map.of(
+                                "first", new HogQlTypedValue("varchar", new HogQlTypedValue.StringValue("one")),
+                                "second", new HogQlTypedValue("varchar", new HogQlTypedValue.StringValue("two")))),
+                Optional.of(context));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement("SELECT ? IS NULL, ? IS NOT NULL"));
+        assertThat(result.parameterNames()).containsExactly("first", "second");
     }
 
     @Test
@@ -168,6 +189,10 @@ public class TestHogQlFunctionResolver
                 false);
 
         assertResolutionError("SELECT exact('one', 'two')", function, "HogQL function exact does not accept 2 arguments");
+        assertResolutionError(
+                "SELECT hogIsNull('one', 'two')",
+                rewriteFunction("hogIsNull", FunctionRewrite.IS_NULL),
+                "HogQL function hogIsNull does not accept 2 arguments");
     }
 
     @ParameterizedTest
@@ -206,25 +231,33 @@ public class TestHogQlFunctionResolver
                 Arguments.of(
                         "SELECT tableOnly(value)",
                         function("tableOnly", FunctionKind.TABLE, FunctionImplementation.STOCK, List.of("table_only"), signature(1), false, false, false, false),
-                        "HogQL table function tableOnly cannot be used as an expression"));
+                        "HogQL table function tableOnly cannot be used as an expression"),
+                Arguments.of(
+                        "SELECT hogIsNull(DISTINCT value)",
+                        rewriteFunction("hogIsNull", FunctionRewrite.IS_NULL),
+                        "HogQL function hogIsNull does not support DISTINCT"),
+                Arguments.of(
+                        "SELECT hogIsNull(value ORDER BY value)",
+                        rewriteFunction("hogIsNull", FunctionRewrite.IS_NULL),
+                        "HogQL function hogIsNull does not support ORDER BY"),
+                Arguments.of(
+                        "SELECT hogIsNull(value) FILTER (WHERE true)",
+                        rewriteFunction("hogIsNull", FunctionRewrite.IS_NULL),
+                        "HogQL function hogIsNull does not support FILTER"),
+                Arguments.of(
+                        "SELECT hogIsNull(value) OVER ()",
+                        rewriteFunction("hogIsNull", FunctionRewrite.IS_NULL),
+                        "HogQL function hogIsNull does not support OVER"),
+                Arguments.of(
+                        "SELECT hogIsNull(value) OVER () IGNORE NULLS",
+                        rewriteFunction("hogIsNull", FunctionRewrite.IS_NULL),
+                        "HogQL function hogIsNull does not support null treatment"));
     }
 
     @Test
-    public void testRejectsUnknownAndRewriteOnlyFunctionsAtCallLocation()
+    public void testRejectsUnknownFunctionsAtCallLocation()
     {
         assertResolutionError("SELECT missing('one')", "Unknown HogQL function: missing");
-
-        FunctionCapabilityDefinition rewrite = function(
-                "rewriteMe",
-                FunctionKind.SCALAR,
-                FunctionImplementation.REWRITE,
-                List.of(),
-                signature(1),
-                false,
-                false,
-                false,
-                false);
-        assertUnsupportedError("SELECT rewriteMe('one')", rewrite, "HogQL function rewriteMe requires a compiler rewrite");
     }
 
     private HogQlQuery resolve(String query, FunctionCapabilityDefinition... functions)
@@ -302,6 +335,22 @@ public class TestHogQlFunctionResolver
         return new FunctionSignature(Stream.generate(() -> "varchar").limit(arity).toList(), "varchar", false);
     }
 
+    private static FunctionCapabilityDefinition rewriteFunction(String name, FunctionRewrite rewrite)
+    {
+        return new FunctionCapabilityDefinition(
+                name,
+                FunctionKind.SCALAR,
+                FunctionImplementation.REWRITE,
+                List.of(),
+                Optional.of(rewrite),
+                List.of(new FunctionSignature(List.of("varchar"), "boolean", false)),
+                true,
+                false,
+                false,
+                false,
+                false);
+    }
+
     private static HogQlSemanticCatalogSnapshot snapshot(List<FunctionCapabilityDefinition> functions)
     {
         return new HogQlSemanticCatalogSnapshot(
@@ -321,11 +370,16 @@ public class TestHogQlFunctionResolver
 
     private static HogQlCompileEnvelope envelope(String query)
     {
+        return envelope(query, Map.of());
+    }
+
+    private static HogQlCompileEnvelope envelope(String query, Map<String, HogQlTypedValue> parameters)
+    {
         return new HogQlCompileEnvelope(
                 query,
                 HogQlCompileEnvelope.PROTOCOL_VERSION,
                 HogQlLanguageContract.current().languageVersion(),
-                Map.of(),
+                parameters,
                 Map.of(),
                 Map.of(),
                 Map.of(),

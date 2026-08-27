@@ -24,6 +24,7 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionCall
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionCapabilityDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionImplementation;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionKind;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionRewrite;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionSignature;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.JoinKey;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LazyProjectionDefinition;
@@ -158,6 +159,55 @@ public class TestHogQlSemanticCatalogSnapshot
         assertThat(recipe.arguments()).singleElement().isEqualTo(literal());
         assertThat(snapshot.functions()).singleElement().extracting(FunctionCapabilityDefinition::signatures).satisfies(values -> assertThat(values).hasSize(1));
         assertThatThrownBy(() -> recipe.arguments().clear()).isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
+    public void testValidatesFunctionRewriteContract()
+    {
+        FunctionCapabilityDefinition isNull = rewriteFunction("isNull", FunctionKind.SCALAR, List.of(), Optional.of(FunctionRewrite.IS_NULL), List.of(new FunctionSignature(List.of("varchar"), "boolean", false)));
+        FunctionCapabilityDefinition isNotNull = rewriteFunction("isNotNull", FunctionKind.SCALAR, List.of(), Optional.of(FunctionRewrite.IS_NOT_NULL), List.of(new FunctionSignature(List.of("varchar"), "boolean", false)));
+
+        HogQlSemanticCatalogSnapshot snapshot = semanticSnapshot(List.of(), List.of(isNull, isNotNull));
+
+        assertThat(snapshot.functions()).extracting(FunctionCapabilityDefinition::rewrite)
+                .containsExactly(Optional.of(FunctionRewrite.IS_NULL), Optional.of(FunctionRewrite.IS_NOT_NULL));
+        assertThatThrownBy(() -> semanticSnapshot(List.of(), List.of(
+                rewriteFunction("missing", FunctionKind.SCALAR, List.of(), Optional.empty(), List.of(new FunctionSignature(List.of("varchar"), "boolean", false))))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must declare a rewrite");
+        assertThatThrownBy(() -> semanticSnapshot(List.of(), List.of(
+                rewriteFunction("named", FunctionKind.SCALAR, List.of(new PhysicalIdentifier("named", false)), Optional.of(FunctionRewrite.IS_NULL), List.of(new FunctionSignature(List.of("varchar"), "boolean", false))))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("cannot name a Trino function");
+        assertThatThrownBy(() -> semanticSnapshot(List.of(), List.of(
+                new FunctionCapabilityDefinition(
+                        "stock",
+                        FunctionKind.SCALAR,
+                        FunctionImplementation.STOCK,
+                        List.of(new PhysicalIdentifier("stock", false)),
+                        Optional.of(FunctionRewrite.IS_NULL),
+                        List.of(new FunctionSignature(List.of("varchar"), "boolean", false)),
+                        true,
+                        false,
+                        false,
+                        false,
+                        false))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("cannot declare a rewrite");
+        assertThatThrownBy(() -> semanticSnapshot(List.of(), List.of(
+                rewriteFunction("aggregate", FunctionKind.AGGREGATE, List.of(), Optional.of(FunctionRewrite.IS_NULL), List.of(new FunctionSignature(List.of("varchar"), "boolean", false))))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must be scalar");
+        assertThatThrownBy(() -> semanticSnapshot(List.of(), List.of(
+                rewriteFunction("binary", FunctionKind.SCALAR, List.of(), Optional.of(FunctionRewrite.IS_NULL), List.of(new FunctionSignature(List.of("varchar", "varchar"), "boolean", false))))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unary signatures");
+        assertInvalidRewrite(rewriteFunction(false, false, false, false, false, "boolean"), "must be deterministic");
+        assertInvalidRewrite(rewriteFunction(true, true, false, false, false, "boolean"), "cannot support DISTINCT");
+        assertInvalidRewrite(rewriteFunction(true, false, true, false, false, "boolean"), "cannot support ORDER BY");
+        assertInvalidRewrite(rewriteFunction(true, false, false, true, false, "boolean"), "cannot support FILTER");
+        assertInvalidRewrite(rewriteFunction(true, false, false, false, true, "boolean"), "cannot support window invocation");
+        assertInvalidRewrite(rewriteFunction(true, false, false, false, false, "varchar"), "must return boolean");
     }
 
     @Test
@@ -452,6 +502,56 @@ public class TestHogQlSemanticCatalogSnapshot
                 false,
                 false,
                 false);
+    }
+
+    private static FunctionCapabilityDefinition rewriteFunction(
+            String name,
+            FunctionKind kind,
+            List<PhysicalIdentifier> trinoName,
+            Optional<FunctionRewrite> rewrite,
+            List<FunctionSignature> signatures)
+    {
+        return new FunctionCapabilityDefinition(
+                name,
+                kind,
+                FunctionImplementation.REWRITE,
+                trinoName,
+                rewrite,
+                signatures,
+                true,
+                false,
+                false,
+                false,
+                false);
+    }
+
+    private static FunctionCapabilityDefinition rewriteFunction(
+            boolean deterministic,
+            boolean supportsDistinct,
+            boolean supportsOrderBy,
+            boolean supportsFilter,
+            boolean supportsWindow,
+            String returnType)
+    {
+        return new FunctionCapabilityDefinition(
+                "rewrite",
+                FunctionKind.SCALAR,
+                FunctionImplementation.REWRITE,
+                List.of(),
+                Optional.of(FunctionRewrite.IS_NULL),
+                List.of(new FunctionSignature(List.of("varchar"), returnType, false)),
+                deterministic,
+                supportsDistinct,
+                supportsOrderBy,
+                supportsFilter,
+                supportsWindow);
+    }
+
+    private static void assertInvalidRewrite(FunctionCapabilityDefinition function, String message)
+    {
+        assertThatThrownBy(() -> semanticSnapshot(List.of(), List.of(function)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(message);
     }
 
     private static HogQlSemanticCatalogSnapshot logicalSemanticSnapshot(

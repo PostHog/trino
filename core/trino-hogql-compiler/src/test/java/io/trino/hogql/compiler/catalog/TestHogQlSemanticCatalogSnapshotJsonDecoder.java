@@ -16,6 +16,7 @@ package io.trino.hogql.compiler.catalog;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionRewrite;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalType;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ModifierBehavior;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
@@ -33,6 +34,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -94,6 +96,7 @@ public class TestHogQlSemanticCatalogSnapshotJsonDecoder
         });
         assertThat(snapshot.functions()).singleElement().satisfies(function -> {
             assertThat(function.name()).isEqualTo("length");
+            assertThat(function.rewrite()).isEmpty();
             assertThat(function.signatures()).singleElement().satisfies(signature -> {
                 assertThat(signature.argumentTypes()).containsExactly("json");
                 assertThat(signature.returnType()).isEqualTo("bigint");
@@ -115,6 +118,45 @@ public class TestHogQlSemanticCatalogSnapshotJsonDecoder
         });
         assertThat(snapshot.actions()).singleElement().extracting(HogQlSemanticCatalogSnapshot.ActionReference::actionId).isEqualTo("action-7");
         assertThat(snapshot.cohorts()).singleElement().extracting(HogQlSemanticCatalogSnapshot.CohortReference::cohortId).isEqualTo("cohort-7");
+    }
+
+    @Test
+    public void testDecodesClosedFunctionRewrite()
+            throws Exception
+    {
+        HogQlSemanticCatalogSnapshot snapshot = new HogQlSemanticCatalogSnapshotJsonDecoder()
+                .decode(bytes(functionPayload("REWRITE", Optional.of("IS_NULL"), true, false)), LoadRequest.latest(CATALOG, LANGUAGE_VERSION));
+
+        assertThat(snapshot.functions()).singleElement().satisfies(function -> {
+            assertThat(function.implementation()).isEqualTo(HogQlSemanticCatalogSnapshot.FunctionImplementation.REWRITE);
+            assertThat(function.rewrite()).contains(FunctionRewrite.IS_NULL);
+            assertThat(function.trinoName()).isEmpty();
+        });
+    }
+
+    @Test
+    public void testRejectsInvalidFunctionRewritePayloads()
+            throws Exception
+    {
+        List<String> payloads = List.of(
+                functionPayload("REWRITE", Optional.empty(), true, false),
+                functionPayload("REWRITE", Optional.of("IS_NULL"), false, false),
+                functionPayload("STOCK", Optional.of("IS_NULL"), false, false),
+                functionPayload("UDF", Optional.of("IS_NOT_NULL"), false, false),
+                functionPayload("REWRITE", Optional.of(SECRET), true, false),
+                functionPayload("REWRITE", Optional.empty(), true, true),
+                functionPayloadWithBoolean("deterministic", false),
+                functionPayloadWithBoolean("supportsDistinct", true),
+                functionPayloadWithBoolean("supportsOrderBy", true),
+                functionPayloadWithBoolean("supportsFilter", true),
+                functionPayloadWithBoolean("supportsWindow", true),
+                functionPayloadWithReturnType("varchar"));
+
+        payloads.forEach(payload -> assertDecodeFailure(
+                new HogQlSemanticCatalogSnapshotJsonDecoder(),
+                payload,
+                LoadRequest.latest(CATALOG, LANGUAGE_VERSION),
+                DecodeFailure.INVALID_PAYLOAD));
     }
 
     @Test
@@ -267,6 +309,49 @@ public class TestHogQlSemanticCatalogSnapshotJsonDecoder
     private static byte[] bytes(String value)
     {
         return value.getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static String functionPayload(String implementation, Optional<String> rewrite, boolean emptyTrinoName, boolean nullRewrite)
+            throws Exception
+    {
+        ObjectNode payload = (ObjectNode) new ObjectMapper().readTree(validSnapshotJson());
+        ObjectNode function = (ObjectNode) ((ArrayNode) payload.get("functions")).get(0);
+        function.put("implementation", implementation);
+        rewrite.ifPresentOrElse(value -> function.put("rewrite", value), () -> {
+            if (nullRewrite) {
+                function.putNull("rewrite");
+            }
+            else {
+                function.remove("rewrite");
+            }
+        });
+        if (emptyTrinoName) {
+            ((ArrayNode) function.get("trinoName")).removeAll();
+        }
+        if (implementation.equals("REWRITE")) {
+            ObjectNode signature = (ObjectNode) ((ArrayNode) function.get("signatures")).get(0);
+            signature.put("returnType", "boolean");
+        }
+        return payload.toString();
+    }
+
+    private static String functionPayloadWithBoolean(String field, boolean value)
+            throws Exception
+    {
+        ObjectNode payload = (ObjectNode) new ObjectMapper().readTree(functionPayload("REWRITE", Optional.of("IS_NULL"), true, false));
+        ObjectNode function = (ObjectNode) ((ArrayNode) payload.get("functions")).get(0);
+        function.put(field, value);
+        return payload.toString();
+    }
+
+    private static String functionPayloadWithReturnType(String returnType)
+            throws Exception
+    {
+        ObjectNode payload = (ObjectNode) new ObjectMapper().readTree(functionPayload("REWRITE", Optional.of("IS_NULL"), true, false));
+        ObjectNode function = (ObjectNode) ((ArrayNode) payload.get("functions")).get(0);
+        ObjectNode signature = (ObjectNode) ((ArrayNode) function.get("signatures")).get(0);
+        signature.put("returnType", returnType);
+        return payload.toString();
     }
 
     private static String validSnapshotJson()

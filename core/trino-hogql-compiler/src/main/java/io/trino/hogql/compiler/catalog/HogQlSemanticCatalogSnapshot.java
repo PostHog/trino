@@ -244,8 +244,42 @@ public record HogQlSemanticCatalogSnapshot(
             if (function.implementation() == FunctionImplementation.REWRITE && !function.trinoName().isEmpty()) {
                 throw new IllegalArgumentException("rewrite function cannot name a Trino function");
             }
-            if (function.implementation() != FunctionImplementation.REWRITE && function.trinoName().isEmpty()) {
-                throw new IllegalArgumentException("function must name a Trino function");
+            if (function.implementation() == FunctionImplementation.REWRITE) {
+                if (function.rewrite().isEmpty()) {
+                    throw new IllegalArgumentException("rewrite function must declare a rewrite");
+                }
+                if (function.kind() != FunctionKind.SCALAR) {
+                    throw new IllegalArgumentException("rewrite function must be scalar");
+                }
+                if (!function.deterministic()) {
+                    throw new IllegalArgumentException("rewrite function must be deterministic");
+                }
+                if (function.supportsDistinct()) {
+                    throw new IllegalArgumentException("rewrite function cannot support DISTINCT");
+                }
+                if (function.supportsOrderBy()) {
+                    throw new IllegalArgumentException("rewrite function cannot support ORDER BY");
+                }
+                if (function.supportsFilter()) {
+                    throw new IllegalArgumentException("rewrite function cannot support FILTER");
+                }
+                if (function.supportsWindow()) {
+                    throw new IllegalArgumentException("rewrite function cannot support window invocation");
+                }
+                if (function.signatures().stream().anyMatch(signature -> signature.variadic() || signature.argumentTypes().size() != 1)) {
+                    throw new IllegalArgumentException("rewrite function must declare unary signatures");
+                }
+                if (function.signatures().stream().anyMatch(signature -> !signature.returnType().equalsIgnoreCase("boolean"))) {
+                    throw new IllegalArgumentException("rewrite function signatures must return boolean");
+                }
+            }
+            else {
+                if (function.rewrite().isPresent()) {
+                    throw new IllegalArgumentException("non-rewrite function cannot declare a rewrite");
+                }
+                if (function.trinoName().isEmpty()) {
+                    throw new IllegalArgumentException("function must name a Trino function");
+                }
             }
         }
         return Map.copyOf(functions);
@@ -1026,7 +1060,7 @@ public record HogQlSemanticCatalogSnapshot(
         }
     }
 
-    public record FunctionCapabilityDefinition(String name, FunctionKind kind, FunctionImplementation implementation, List<PhysicalIdentifier> trinoName, List<FunctionSignature> signatures, boolean deterministic, boolean supportsDistinct, boolean supportsOrderBy, boolean supportsFilter, boolean supportsWindow)
+    public record FunctionCapabilityDefinition(String name, FunctionKind kind, FunctionImplementation implementation, List<PhysicalIdentifier> trinoName, Optional<FunctionRewrite> rewrite, List<FunctionSignature> signatures, boolean deterministic, boolean supportsDistinct, boolean supportsOrderBy, boolean supportsFilter, boolean supportsWindow)
     {
         public FunctionCapabilityDefinition
         {
@@ -1034,10 +1068,26 @@ public record HogQlSemanticCatalogSnapshot(
             kind = requireNonNull(kind, "kind is null");
             implementation = requireNonNull(implementation, "implementation is null");
             trinoName = copy(trinoName, "trinoName");
+            rewrite = requireNonNull(rewrite, "rewrite is null");
             signatures = copy(signatures, "signatures");
             if (signatures.isEmpty()) {
                 throw new IllegalArgumentException("function must include signatures");
             }
+        }
+
+        public FunctionCapabilityDefinition(
+                String name,
+                FunctionKind kind,
+                FunctionImplementation implementation,
+                List<PhysicalIdentifier> trinoName,
+                List<FunctionSignature> signatures,
+                boolean deterministic,
+                boolean supportsDistinct,
+                boolean supportsOrderBy,
+                boolean supportsFilter,
+                boolean supportsWindow)
+        {
+            this(name, kind, implementation, trinoName, Optional.empty(), signatures, deterministic, supportsDistinct, supportsOrderBy, supportsFilter, supportsWindow);
         }
     }
 
@@ -1210,6 +1260,11 @@ public record HogQlSemanticCatalogSnapshot(
     public enum FunctionImplementation
     {
         STOCK, UDF, REWRITE
+    }
+
+    public enum FunctionRewrite
+    {
+        IS_NULL, IS_NOT_NULL
     }
 
     public enum ModifierBehavior

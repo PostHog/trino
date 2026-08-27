@@ -16,6 +16,7 @@ package io.trino.hogql.compiler;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionCapabilityDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionImplementation;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionKind;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionRewrite;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionSignature;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider.PinnedSnapshot;
@@ -221,15 +222,15 @@ final class HogQlFunctionResolver
         };
     }
 
-    private FunctionCall resolveFunction(FunctionCall function, boolean windowInvocation)
+    private Expression resolveFunction(FunctionCall function, boolean windowInvocation)
     {
         String name = function.name().value();
         FunctionCapabilityDefinition capability = functions.get(canonical(name));
         if (capability == null) {
             throw resolutionError(function, "Unknown HogQL function: " + name);
         }
-        if (capability.implementation() == FunctionImplementation.REWRITE) {
-            throw unsupportedError(function, "HogQL function " + name + " requires a compiler rewrite");
+        if (capability.implementation() == FunctionImplementation.REWRITE && function.nullTreatment().isPresent()) {
+            throw unsupportedError(function, "HogQL function " + name + " does not support null treatment");
         }
         if (capability.kind() == FunctionKind.TABLE) {
             throw unsupportedError(function, "HogQL table function " + name + " cannot be used as an expression");
@@ -252,11 +253,21 @@ final class HogQlFunctionResolver
         if (function.filter().isPresent() && !capability.supportsFilter()) {
             throw unsupportedError(function, "HogQL function " + name + " does not support FILTER");
         }
+        List<Expression> arguments = function.arguments().stream().map(this::resolveExpression).toList();
+        if (capability.implementation() == FunctionImplementation.REWRITE) {
+            FunctionRewrite rewrite = capability.rewrite()
+                    .orElseThrow(() -> unsupportedError(function, "HogQL function " + name + " has no compiler rewrite"));
+            boolean negated = switch (rewrite) {
+                case IS_NULL -> false;
+                case IS_NOT_NULL -> true;
+            };
+            return new IsNullExpression(arguments.getFirst(), negated, function.span(), function.span());
+        }
         return new FunctionCall(
                 capability.trinoName().stream()
                         .map(identifier -> identifier(identifier, function.span()))
                         .toList(),
-                function.arguments().stream().map(this::resolveExpression).toList(),
+                arguments,
                 function.distinct(),
                 resolveSortItems(function.orderBy()),
                 function.filter().map(this::resolveExpression),

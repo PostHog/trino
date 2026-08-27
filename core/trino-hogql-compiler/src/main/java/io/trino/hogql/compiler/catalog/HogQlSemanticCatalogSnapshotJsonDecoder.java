@@ -35,6 +35,7 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionCall
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionCapabilityDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionImplementation;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionKind;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionRewrite;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionSignature;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.JoinKey;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LazyProjectionDefinition;
@@ -150,7 +151,8 @@ public final class HogQlSemanticCatalogSnapshotJsonDecoder
     private static final Set<String> SAVED_QUERY_FIELDS = Set.of("name", "queryId", "target", "fields");
     private static final Set<String> MATERIALIZED_VIEW_FIELDS = Set.of("name", "physicalView", "fields");
     private static final Set<String> REFERENCED_FIELD_FIELDS = Set.of("name", "trinoTypeSignature", "logicalType", "nullable", "starVisible");
-    private static final Set<String> FUNCTION_FIELDS = Set.of("name", "kind", "implementation", "trinoName", "signatures", "deterministic", "supportsDistinct", "supportsOrderBy", "supportsFilter", "supportsWindow");
+    private static final Set<String> FUNCTION_FIELDS = Set.of("name", "kind", "implementation", "trinoName", "rewrite", "signatures", "deterministic", "supportsDistinct", "supportsOrderBy", "supportsFilter", "supportsWindow");
+    private static final Set<String> REQUIRED_FUNCTION_FIELDS = Set.of("name", "kind", "implementation", "trinoName", "signatures", "deterministic", "supportsDistinct", "supportsOrderBy", "supportsFilter", "supportsWindow");
     private static final Set<String> FUNCTION_SIGNATURE_FIELDS = Set.of("argumentTypes", "returnType", "variadic");
     private static final Set<String> MODIFIER_FIELDS = Set.of("name", "behavior", "defaultValue", "sessionProperty");
     private static final Set<String> MODIFIER_FIELDS_WITHOUT_SESSION_PROPERTY = Set.of("name", "behavior", "defaultValue");
@@ -557,12 +559,13 @@ public final class HogQlSemanticCatalogSnapshotJsonDecoder
         List<FunctionCapabilityDefinition> definitions = new ArrayList<>(array.size());
         for (JsonNode element : array) {
             ObjectNode function = object(element);
-            validateFields(function, FUNCTION_FIELDS);
+            validateFields(function, FUNCTION_FIELDS, REQUIRED_FUNCTION_FIELDS);
             definitions.add(new FunctionCapabilityDefinition(
                     text(function, "name"),
                     enumValue(function, "kind", FunctionKind.class),
                     enumValue(function, "implementation", FunctionImplementation.class),
                     physicalIdentifiers(required(function, "trinoName"), budget),
+                    function.has("rewrite") ? Optional.of(enumValue(function, "rewrite", FunctionRewrite.class)) : Optional.empty(),
                     functionSignatures(required(function, "signatures"), budget),
                     bool(function, "deterministic"),
                     bool(function, "supportsDistinct"),
