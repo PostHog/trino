@@ -41,6 +41,7 @@ import io.trino.dispatcher.DispatchExecutor;
 import io.trino.dispatcher.DispatchManager;
 import io.trino.dispatcher.DispatchQueryFactory;
 import io.trino.dispatcher.FailedDispatchQueryFactory;
+import io.trino.dispatcher.HogQlPhysicalCatalogResource;
 import io.trino.dispatcher.HogQlStatementResource;
 import io.trino.dispatcher.LocalDispatchQueryFactory;
 import io.trino.dispatcher.QueuedStatementResource;
@@ -102,6 +103,7 @@ import io.trino.execution.scheduler.policy.PhasedExecutionPolicy;
 import io.trino.hogql.HogQlCompilationObserver;
 import io.trino.hogql.HogQlCompilationStats;
 import io.trino.hogql.HogQlConfig;
+import io.trino.hogql.HogQlPhysicalCatalogProvider;
 import io.trino.hogql.HogQlSemanticCatalogConfig;
 import io.trino.hogql.HogQlSemanticCatalogModule;
 import io.trino.hogql.compiler.HogQlCompiler;
@@ -187,6 +189,7 @@ public class CoordinatorModule
         configBinder(binder).bindConfig(HogQlConfig.class);
         configBinder(binder).bindConfig(HogQlSemanticCatalogConfig.class);
         binder.bind(HogQlCompiler.class).in(Scopes.SINGLETON);
+        binder.bind(HogQlPhysicalCatalogProvider.class).in(Scopes.SINGLETON);
         binder.bind(HogQlCompilationExecutor.class).in(Scopes.SINGLETON);
         binder.bind(HogQlCompilationStats.class).in(Scopes.SINGLETON);
         binder.bind(HogQlCompilationObserver.class).to(HogQlCompilationStats.class);
@@ -194,6 +197,7 @@ public class CoordinatorModule
         newExporter(binder).export(HogQlCompilationStats.class).withGeneratedName();
         if (buildConfigObject(HogQlConfig.class).isEnabled()) {
             jaxrsBinder(binder).bind(HogQlStatementResource.class);
+            jaxrsBinder(binder).bind(HogQlPhysicalCatalogResource.class);
             if (buildConfigObject(HogQlSemanticCatalogConfig.class).getUri() != null) {
                 install(new HogQlSemanticCatalogModule());
             }

@@ -106,10 +106,48 @@ The compatibility request path is
 selected Trino catalog, HogQL language version, and optional requested
 generation. Manifests contain typed identifiers and definitions, not SQL text.
 
+Qualified stars on relations without a manifest schema compile to standard
+Trino `relation.*`. `EXCLUDE` needs the manifest's ordered, star-visible field
+list, and fails with a source-located compatibility error when that schema is
+unavailable. Duckgres should publish physical tables as physical-derived
+semantic definitions from the physical catalog inventory when those tables
+need HogQL star exclusion. Schema inference for CTE and subquery outputs is not
+currently supported.
+
 The Trino transport does not currently send an application authentication
 credential. Duckgres requires `X-Duckgres-Internal-Secret` by default, so the
 production connection remains incomplete until the coordinator credential
 mechanism is configured.
+
+## Physical catalog inventory
+
+An authenticated client can read connector-facing table and column metadata
+from `GET /v1/hogql/compatibility/physical-catalog?catalog=<catalog>&protocolVersion=1`.
+The endpoint is available only on coordinators when `hogql.enabled=true`.
+
+The versioned response contains `protocolVersion` and `schemaVersion` before
+the structured catalog, schema, table, and column identifiers. Each column
+includes its one-based ordinal, exact Trino type signature, nullability, hidden
+state, and star visibility. Hidden columns are reported when the caller can see
+them, but remain excluded from star expansion. The ordinal is the connector's
+original column position. Column visibility filtering can therefore leave gaps
+in the returned ordinals.
+
+The `catalogHandleVersion` identifies the active Trino catalog registration.
+It detects a catalog replacement during the request, but it is not the
+connector's metadata snapshot or a semantic catalog generation. Duckgres
+assigns its own monotonically increasing generation when it publishes the
+inventory.
+
+The endpoint applies the same catalog, table, and column visibility filters as
+Trino metadata listings. It reads one connector transaction, so DuckLake
+metadata is pinned to one snapshot. The request fails if the catalog is dropped
+or replaced while the inventory is read. Results are limited to 10,000 tables,
+10,000 columns per table, 100,000 columns in total, and 8 million characters of
+identifier and type text.
+
+Use normal Trino HTTP authentication and request headers. The endpoint does not
+accept a separate credential or an existing transaction ID.
 
 ## Semantic catalog properties
 

@@ -26,12 +26,20 @@ import io.airlift.json.JsonMapperProvider;
 import io.trino.client.QueryDataJacksonModule;
 import io.trino.client.QueryResults;
 import io.trino.client.ResultRowsDecoder;
+import io.trino.connector.MockConnectorFactory;
+import io.trino.connector.MockConnectorPlugin;
+import io.trino.hogql.HogQlPhysicalCatalog;
 import io.trino.hogql.parser.HogQlLanguageContract;
 import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.server.testing.TestingTrinoServer;
+import io.trino.spi.connector.ColumnMetadata;
+import io.trino.spi.connector.RelationColumnsMetadata;
+import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.type.ArrayType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -51,12 +59,18 @@ import static io.airlift.http.client.StatusResponseHandler.createStatusResponseH
 import static io.airlift.http.client.StringResponseHandler.createStringResponseHandler;
 import static io.airlift.testing.Closeables.closeAll;
 import static io.trino.client.ProtocolHeaders.TRINO_HEADERS;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.VarcharType.createVarcharType;
+import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.SELECT_COLUMN;
+import static io.trino.testing.TestingAccessControlManager.privilege;
 import static jakarta.ws.rs.core.MediaType.APPLICATION_JSON;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.IntStream.range;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
+@Execution(SAME_THREAD)
 class TestHogQlStatementResource
 {
     private static final HeaderName REQUEST_USER_HEADER = HeaderName.of(TRINO_HEADERS.requestUser());
@@ -67,6 +81,7 @@ class TestHogQlStatementResource
             .get())
             .jsonCodec(QueryResults.class);
     private static final JsonCodec<String> STRING_CODEC = JsonCodec.jsonCodec(String.class);
+    private static final JsonCodec<HogQlPhysicalCatalog> PHYSICAL_CATALOG_CODEC = JsonCodec.jsonCodec(HogQlPhysicalCatalog.class);
     private static final String SECRET = "do-not-echo-this-value";
 
     private static HttpClient client;
@@ -78,10 +93,40 @@ class TestHogQlStatementResource
     {
         client = new JettyHttpClient();
         server = TestingTrinoServer.builder()
-                .setProperties(Map.of("hogql.enabled", "true"))
+                .setProperties(Map.of(
+                        "hogql.enabled", "true",
+                        "sql.default-catalog", "tpch"))
                 .build();
         server.installPlugin(new TpchPlugin());
         server.createCatalog("tpch", "tpch");
+        SchemaTableName physicalTable = new SchemaTableName("analytics", "events");
+        server.installPlugin(new MockConnectorPlugin(MockConnectorFactory.builder()
+                .withName("physical_metadata_connector")
+                .withListSchemaNames(_ -> ImmutableList.of(physicalTable.getSchemaName()))
+                .withStreamRelationColumns((_, schema, relationFilter) -> {
+                    if (schema.isPresent() && !schema.orElseThrow().equals(physicalTable.getSchemaName())) {
+                        return ImmutableList.<RelationColumnsMetadata>of().iterator();
+                    }
+                    if (!relationFilter.apply(Set.of(physicalTable)).contains(physicalTable)) {
+                        return ImmutableList.<RelationColumnsMetadata>of().iterator();
+                    }
+                    return ImmutableList.of(RelationColumnsMetadata.forTable(
+                                    physicalTable,
+                                    ImmutableList.of(
+                                            ColumnMetadata.builder()
+                                                    .setName("event_id")
+                                                    .setType(BIGINT)
+                                                    .setNullable(false)
+                                                    .build(),
+                                            ColumnMetadata.builder()
+                                                    .setName("tags")
+                                                    .setType(new ArrayType(createVarcharType(7)))
+                                                    .setHidden(true)
+                                                    .build())))
+                            .iterator();
+                })
+                .build()));
+        server.createCatalog("physical_metadata", "physical_metadata_connector");
     }
 
     @AfterAll
@@ -108,6 +153,14 @@ class TestHogQlStatementResource
                     createStatusResponseHandler());
 
             assertThat(response.getStatusCode()).isEqualTo(404);
+
+            StatusResponse physicalCatalogResponse = disabledClient.execute(
+                    prepareGet()
+                            .setUri(disabledServer.resolve("/v1/hogql/compatibility/physical-catalog?catalog=missing&protocolVersion=1"))
+                            .setHeader(REQUEST_USER_HEADER, "user")
+                            .build(),
+                    createStatusResponseHandler());
+            assertThat(physicalCatalogResponse.getStatusCode()).isEqualTo(404);
         }
         finally {
             closeAll(disabledServer, disabledClient);
@@ -127,6 +180,111 @@ class TestHogQlStatementResource
 
         List<QueryResults> sqlResults = runToCompletion("/v1/statement", "SELECT 2", false);
         assertThat(rows(sqlResults)).containsExactly(ImmutableList.of(2));
+    }
+
+    @Test
+    public void testPhysicalCatalogCompatibilityEndpoint()
+    {
+        HogQlPhysicalCatalog catalog = client.execute(
+                prepareGet()
+                        .setUri(server.resolve("/v1/hogql/compatibility/physical-catalog?catalog=physical_metadata&protocolVersion=1"))
+                        .setHeader(REQUEST_USER_HEADER, "user")
+                        .build(),
+                createJsonResponseHandler(PHYSICAL_CATALOG_CODEC));
+
+        assertThat(catalog.protocolVersion()).isEqualTo(1);
+        assertThat(catalog.schemaVersion()).isEqualTo(1);
+        assertThat(catalog.catalog()).isEqualTo(new HogQlPhysicalCatalog.Identifier("physical_metadata", false));
+        assertThat(catalog.catalogHandleVersion()).isNotBlank();
+        assertThat(catalog.tables()).singleElement().satisfies(table -> {
+            assertThat(table.schema()).isEqualTo(new HogQlPhysicalCatalog.Identifier("analytics", false));
+            assertThat(table.table()).isEqualTo(new HogQlPhysicalCatalog.Identifier("events", false));
+            assertThat(table.columns()).containsExactly(
+                    new HogQlPhysicalCatalog.Column(
+                            new HogQlPhysicalCatalog.Identifier("event_id", false),
+                            1,
+                            "bigint",
+                            false,
+                            false,
+                            true),
+                    new HogQlPhysicalCatalog.Column(
+                            new HogQlPhysicalCatalog.Identifier("tags", false),
+                            2,
+                            "array(varchar(7))",
+                            true,
+                            true,
+                            false));
+        });
+    }
+
+    @Test
+    public void testPhysicalCatalogCompatibilityEndpointFailsClosed()
+    {
+        StatusResponse missingCatalog = client.execute(
+                prepareGet()
+                        .setUri(server.resolve("/v1/hogql/compatibility/physical-catalog"))
+                        .setHeader(REQUEST_USER_HEADER, "user")
+                        .build(),
+                createStatusResponseHandler());
+        assertThat(missingCatalog.getStatusCode()).isEqualTo(400);
+
+        StatusResponse missingProtocolVersion = client.execute(
+                prepareGet()
+                        .setUri(server.resolve("/v1/hogql/compatibility/physical-catalog?catalog=physical_metadata"))
+                        .setHeader(REQUEST_USER_HEADER, "user")
+                        .build(),
+                createStatusResponseHandler());
+        assertThat(missingProtocolVersion.getStatusCode()).isEqualTo(400);
+
+        StatusResponse unsupportedProtocolVersion = client.execute(
+                prepareGet()
+                        .setUri(server.resolve("/v1/hogql/compatibility/physical-catalog?catalog=physical_metadata&protocolVersion=2"))
+                        .setHeader(REQUEST_USER_HEADER, "user")
+                        .build(),
+                createStatusResponseHandler());
+        assertThat(unsupportedProtocolVersion.getStatusCode()).isEqualTo(400);
+
+        StatusResponse unknownCatalog = client.execute(
+                prepareGet()
+                        .setUri(server.resolve("/v1/hogql/compatibility/physical-catalog?catalog=missing&protocolVersion=1"))
+                        .setHeader(REQUEST_USER_HEADER, "user")
+                        .build(),
+                createStatusResponseHandler());
+        assertThat(unknownCatalog.getStatusCode()).isEqualTo(404);
+    }
+
+    @Test
+    public void testPhysicalCatalogCompatibilityEndpointRequiresAuthentication()
+    {
+        StatusResponse response = client.execute(
+                prepareGet()
+                        .setUri(server.resolve("/v1/hogql/compatibility/physical-catalog?catalog=physical_metadata&protocolVersion=1"))
+                        .build(),
+                createStatusResponseHandler());
+
+        assertThat(response.getStatusCode()).isEqualTo(401);
+    }
+
+    @Test
+    public void testPhysicalCatalogCompatibilityEndpointAppliesVisibilityFilters()
+    {
+        server.getAccessControl().deny(privilege("events.event_id", SELECT_COLUMN));
+        try {
+            HogQlPhysicalCatalog catalog = client.execute(
+                    prepareGet()
+                            .setUri(server.resolve("/v1/hogql/compatibility/physical-catalog?catalog=physical_metadata&protocolVersion=1"))
+                            .setHeader(REQUEST_USER_HEADER, "user")
+                            .build(),
+                    createJsonResponseHandler(PHYSICAL_CATALOG_CODEC));
+
+            assertThat(catalog.tables()).singleElement().satisfies(table -> {
+                assertThat(table.columns()).extracting(column -> column.name().value()).containsExactly("tags");
+                assertThat(table.columns()).extracting(HogQlPhysicalCatalog.Column::ordinal).containsExactly(2);
+            });
+        }
+        finally {
+            server.getAccessControl().reset();
+        }
     }
 
     @Test
@@ -356,7 +514,7 @@ class TestHogQlStatementResource
                  "parameters": {},
                  "variables": {"array": {"type": "array", "value": [true, "value", null]}},
                  "filters": {"object": {"type": "object", "value": {"nested": 2.5}}},
-                 "modifiers": {"missing": {"type": "nullable", "value": null}},
+                 "modifiers": {},
                  "catalogGeneration": 1
                }
                """.formatted(STRING_CODEC.toJson(query), HogQlLanguageContract.current().languageVersion());
