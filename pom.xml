@@ -32,6 +32,8 @@
         <module>client/trino-client</module>
         <module>client/trino-jdbc</module>
         <module>core/trino-grammar</module>
+        <module>core/trino-hogql-compiler</module>
+        <module>core/trino-hogql-parser</module>
         <module>core/trino-main</module>
         <module>core/trino-parser</module>
         <module>core/trino-server</module>
@@ -1118,6 +1120,18 @@
             <dependency>
                 <groupId>io.trino</groupId>
                 <artifactId>trino-hive-formats</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>io.trino</groupId>
+                <artifactId>trino-hogql-compiler</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>io.trino</groupId>
+                <artifactId>trino-hogql-parser</artifactId>
                 <version>${project.version}</version>
             </dependency>
 
