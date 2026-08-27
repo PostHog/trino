@@ -31,9 +31,12 @@ import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
+import io.trino.hogql.parser.tree.HogQlQuery.NullPlacement;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
+import io.trino.hogql.parser.tree.HogQlQuery.SortDirection;
+import io.trino.hogql.parser.tree.HogQlQuery.SortItem;
 import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
 import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
@@ -440,7 +443,8 @@ public final class HogQlParser
 
         public HogQlQuery build(HogQLParser.SelectContext context)
         {
-            HogQLParser.SelectStmtContext select = extractPlainSelect(context);
+            SelectedQuery selectedQuery = extractPlainSelect(context);
+            HogQLParser.SelectStmtContext select = selectedQuery.statement();
             rejectUnsupportedClauses(select);
 
             List<Projection> projections = selectColumns(select.selectColumnExprListBeforeFrom()).stream()
@@ -452,7 +456,20 @@ public final class HogQlParser
             Optional<Expression> where = Optional.ofNullable(select.whereClause())
                     .map(HogQLParser.WhereClauseContext::columnExpr)
                     .map(this::buildExpression);
-            return new HogQlQuery(projections, from, where, sourceSpan(select));
+            List<SortItem> orderBy = buildOrderBy(selectedQuery.orderBy() != null ? selectedQuery.orderBy() : select.orderByClause());
+            Pagination pagination = mergePagination(
+                    buildPagination(select.limitAndOffsetClause(), select.offsetOnlyClause()),
+                    selectedQuery.pagination() == null ? new Pagination(Optional.empty(), Optional.empty()) : buildPagination(selectedQuery.pagination()),
+                    select);
+            return new HogQlQuery(
+                    select.DISTINCT() != null,
+                    projections,
+                    from,
+                    where,
+                    orderBy,
+                    pagination.limit(),
+                    pagination.offset(),
+                    sourceSpan(select));
         }
 
         private List<HogQLParser.SelectColumnExprContext> selectColumns(HogQLParser.SelectColumnExprListBeforeFromContext context)
@@ -466,21 +483,26 @@ public final class HogQlParser
             throw unsupported(context, "select list");
         }
 
-        private HogQLParser.SelectStmtContext extractPlainSelect(HogQLParser.SelectContext context)
+        private SelectedQuery extractPlainSelect(HogQLParser.SelectContext context)
         {
             if (context.selectStmt() != null) {
-                return context.selectStmt();
+                return new SelectedQuery(context.selectStmt(), null, null);
             }
             HogQLParser.SelectSetStmtContext set = context.selectSetStmt();
-            if (set == null || !set.subsequentSelectSetClause().isEmpty() || set.orderByClause() != null || set.limitAndOffsetClauseOptional() != null) {
+            if (set == null || !set.subsequentSelectSetClause().isEmpty()) {
                 throw unsupported(context, "set query");
             }
             HogQLParser.SelectStmtWithParensContext wrapped = set.selectStmtWithParens();
             if (wrapped.selectStmt() == null) {
                 throw unsupported(wrapped, "parenthesized or placeholder query");
             }
-            return wrapped.selectStmt();
+            return new SelectedQuery(wrapped.selectStmt(), set.orderByClause(), set.limitAndOffsetClauseOptional());
         }
+
+        private record SelectedQuery(
+                HogQLParser.SelectStmtContext statement,
+                HogQLParser.OrderByClauseContext orderBy,
+                HogQLParser.LimitAndOffsetClauseOptionalContext pagination) {}
 
         private void rejectUnsupportedClauses(HogQLParser.SelectStmtContext context)
         {
@@ -494,10 +516,7 @@ public final class HogQlParser
             clauses.add(context.havingClause());
             clauses.add(context.qualifyClause());
             clauses.add(context.windowClause());
-            clauses.add(context.orderByClause());
             clauses.add(context.limitByClause());
-            clauses.add(context.limitAndOffsetClause());
-            clauses.add(context.offsetOnlyClause());
             clauses.add(context.settingsClause());
             Optional<ParserRuleContext> firstClause = clauses.stream()
                     .filter(requireNonNullClause -> requireNonNullClause != null)
@@ -505,10 +524,97 @@ public final class HogQlParser
             if (firstClause.isPresent()) {
                 throw unsupported(firstClause.orElseThrow(), "query clause");
             }
-            if (context.DISTINCT() != null) {
-                throw unsupported(context, "distinct query");
-            }
         }
+
+        private List<SortItem> buildOrderBy(HogQLParser.OrderByClauseContext context)
+        {
+            if (context == null) {
+                return List.of();
+            }
+            if (context.interpolateClause() != null) {
+                throw unsupported(context.interpolateClause(), "ORDER BY interpolation");
+            }
+            return context.orderExprList().orderExpr().stream()
+                    .map(this::buildSortItem)
+                    .toList();
+        }
+
+        private SortItem buildSortItem(HogQLParser.OrderExprContext context)
+        {
+            if (context.COLLATE() != null || context.withFillClause() != null) {
+                throw unsupported(context, "ORDER BY collation or fill");
+            }
+            SortDirection direction = context.DESC() != null || context.DESCENDING() != null
+                    ? SortDirection.DESCENDING
+                    : SortDirection.ASCENDING;
+            NullPlacement nullPlacement = context.FIRST() != null
+                    ? NullPlacement.FIRST
+                    : context.LAST() != null ? NullPlacement.LAST : NullPlacement.UNDEFINED;
+            return new SortItem(buildExpression(context.columnExpr()), direction, nullPlacement, sourceSpan(context));
+        }
+
+        private Pagination buildPagination(
+                HogQLParser.LimitAndOffsetClauseContext limitContext,
+                HogQLParser.OffsetOnlyClauseContext offsetContext)
+        {
+            if (limitContext == null) {
+                return new Pagination(Optional.empty(), Optional.ofNullable(offsetContext)
+                        .map(HogQLParser.OffsetOnlyClauseContext::columnExpr)
+                        .map(this::buildPaginationExpression));
+            }
+            if (limitContext.PERCENT() != null || limitContext.WITH() != null) {
+                throw unsupported(limitContext, "percent limit or ties");
+            }
+            List<HogQLParser.ColumnExprContext> expressions = limitContext.columnExpr();
+            if (limitContext.COMMA() != null) {
+                return new Pagination(
+                        Optional.of(buildPaginationExpression(expressions.get(1))),
+                        Optional.of(buildPaginationExpression(expressions.getFirst())));
+            }
+            return new Pagination(
+                    Optional.of(buildPaginationExpression(expressions.getFirst())),
+                    expressions.size() == 2 ? Optional.of(buildPaginationExpression(expressions.get(1))) : Optional.empty());
+        }
+
+        private Pagination buildPagination(HogQLParser.LimitAndOffsetClauseOptionalContext context)
+        {
+            if (context.PERCENT() != null || context.WITH() != null) {
+                throw unsupported(context, "percent limit or ties");
+            }
+            List<HogQLParser.ColumnExprContext> expressions = context.columnExpr();
+            if (context.LIMIT() == null) {
+                return new Pagination(Optional.empty(), Optional.of(buildPaginationExpression(expressions.getFirst())));
+            }
+            if (context.COMMA() != null) {
+                return new Pagination(
+                        Optional.of(buildPaginationExpression(expressions.get(1))),
+                        Optional.of(buildPaginationExpression(expressions.getFirst())));
+            }
+            return new Pagination(
+                    Optional.of(buildPaginationExpression(expressions.getFirst())),
+                    expressions.size() == 2 ? Optional.of(buildPaginationExpression(expressions.get(1))) : Optional.empty());
+        }
+
+        private Pagination mergePagination(Pagination inner, Pagination outer, ParserRuleContext context)
+        {
+            if (inner.limit().isPresent() && outer.limit().isPresent() || inner.offset().isPresent() && outer.offset().isPresent()) {
+                throw unsupported(context, "duplicate pagination");
+            }
+            return new Pagination(
+                    outer.limit().or(() -> inner.limit()),
+                    outer.offset().or(() -> inner.offset()));
+        }
+
+        private Expression buildPaginationExpression(HogQLParser.ColumnExprContext context)
+        {
+            Expression expression = buildExpression(context);
+            if (expression instanceof Literal literal && literal.kind() == INTEGER || expression instanceof Placeholder) {
+                return expression;
+            }
+            throw unsupported(context, "non-constant pagination");
+        }
+
+        private record Pagination(Optional<Expression> limit, Optional<Expression> offset) {}
 
         private Projection buildProjection(HogQLParser.SelectColumnExprContext context)
         {

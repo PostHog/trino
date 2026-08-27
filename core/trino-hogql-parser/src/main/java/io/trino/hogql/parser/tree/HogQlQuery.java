@@ -18,14 +18,49 @@ import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
-public record HogQlQuery(List<Projection> projections, Optional<Relation> from, Optional<Expression> where, SourceSpan span)
+public record HogQlQuery(
+        boolean distinct,
+        List<Projection> projections,
+        Optional<Relation> from,
+        Optional<Expression> where,
+        List<SortItem> orderBy,
+        Optional<Expression> limit,
+        Optional<Expression> offset,
+        SourceSpan span)
 {
     public HogQlQuery
     {
         projections = List.copyOf(requireNonNull(projections, "projections is null"));
         from = requireNonNull(from, "from is null");
         where = requireNonNull(where, "where is null");
+        orderBy = List.copyOf(requireNonNull(orderBy, "orderBy is null"));
+        limit = requireNonNull(limit, "limit is null");
+        offset = requireNonNull(offset, "offset is null");
         span = requireNonNull(span, "span is null");
+    }
+
+    public record SortItem(Expression expression, SortDirection direction, NullPlacement nullPlacement, SourceSpan span)
+    {
+        public SortItem
+        {
+            expression = requireNonNull(expression, "expression is null");
+            direction = requireNonNull(direction, "direction is null");
+            nullPlacement = requireNonNull(nullPlacement, "nullPlacement is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public enum SortDirection
+    {
+        ASCENDING,
+        DESCENDING,
+    }
+
+    public enum NullPlacement
+    {
+        FIRST,
+        LAST,
+        UNDEFINED,
     }
 
     public sealed interface Projection

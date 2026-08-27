@@ -76,6 +76,14 @@ public class TestHogQlCompiler
         assertThat(sqlParser.createStatement(SqlFormatter.formatSql(statement))).isEqualTo(statement);
     }
 
+    @Test
+    public void testLowersDistinctOrderingAndClickHousePaginationOrder()
+    {
+        Statement statement = compiler.compile("SELECT DISTINCT event FROM events ORDER BY event DESC NULLS FIRST LIMIT 10 OFFSET 2");
+
+        assertThat(statement).isEqualTo(sqlParser.createStatement("SELECT DISTINCT event FROM events ORDER BY event DESC NULLS FIRST OFFSET 2 LIMIT 10"));
+    }
+
     @ParameterizedTest
     @CsvSource(delimiter = '|', textBlock = """
                                             SELECT [1, 2, 3]                 | SELECT ARRAY[1, 2, 3]

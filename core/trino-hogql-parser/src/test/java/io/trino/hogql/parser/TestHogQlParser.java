@@ -17,7 +17,9 @@ import io.trino.hogql.parser.tree.HogQlQuery;
 import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
+import io.trino.hogql.parser.tree.HogQlQuery.NullPlacement;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
+import io.trino.hogql.parser.tree.HogQlQuery.SortDirection;
 import io.trino.hogql.parser.tree.HogQlSyntaxTree;
 import io.trino.hogql.parser.tree.HogQlSyntaxTree.Element;
 import io.trino.hogql.parser.tree.HogQlSyntaxTree.Node;
@@ -77,6 +79,20 @@ public class TestHogQlParser
         assertThat(first.span()).isEqualTo(new HogQlQuery.SourceSpan(17, 24, 2, 2, 2, 9));
         assertThat(repeated.name()).isEqualTo("later");
         assertThat(repeated.span()).isEqualTo(new HogQlQuery.SourceSpan(27, 34, 2, 12, 2, 19));
+    }
+
+    @Test
+    public void testBuildsDistinctOrderingAndPaginationAst()
+    {
+        HogQlQuery query = parser.parseStatement("SELECT DISTINCT event FROM events ORDER BY event DESC NULLS FIRST LIMIT 10 OFFSET 2");
+
+        assertThat(query.distinct()).isTrue();
+        assertThat(query.orderBy()).singleElement().satisfies(sortItem -> {
+            assertThat(sortItem.direction()).isEqualTo(SortDirection.DESCENDING);
+            assertThat(sortItem.nullPlacement()).isEqualTo(NullPlacement.FIRST);
+        });
+        assertThat(query.limit()).get().extracting(HogQlQuery.Literal.class::cast).extracting(HogQlQuery.Literal::value).isEqualTo("10");
+        assertThat(query.offset()).get().extracting(HogQlQuery.Literal.class::cast).extracting(HogQlQuery.Literal::value).isEqualTo("2");
     }
 
     @Test

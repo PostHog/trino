@@ -49,11 +49,14 @@ import io.trino.sql.tree.GenericDataType;
 import io.trino.sql.tree.InListExpression;
 import io.trino.sql.tree.InPredicate;
 import io.trino.sql.tree.IsNullPredicate;
+import io.trino.sql.tree.Limit;
 import io.trino.sql.tree.LogicalExpression;
 import io.trino.sql.tree.LongLiteral;
 import io.trino.sql.tree.NodeLocation;
 import io.trino.sql.tree.NotExpression;
 import io.trino.sql.tree.NullLiteral;
+import io.trino.sql.tree.Offset;
+import io.trino.sql.tree.OrderBy;
 import io.trino.sql.tree.Parameter;
 import io.trino.sql.tree.Predicated;
 import io.trino.sql.tree.QualifiedName;
@@ -65,6 +68,8 @@ import io.trino.sql.tree.Select;
 import io.trino.sql.tree.SelectItem;
 import io.trino.sql.tree.SimpleCaseExpression;
 import io.trino.sql.tree.SingleColumn;
+import io.trino.sql.tree.SortItem.NullOrdering;
+import io.trino.sql.tree.SortItem.Ordering;
 import io.trino.sql.tree.Statement;
 import io.trino.sql.tree.StringLiteral;
 import io.trino.sql.tree.Table;
@@ -83,7 +88,7 @@ final class TrinoAstFactory
         NodeLocation location = location(query.span());
         QuerySpecification querySpecification = new QuerySpecification(
                 location,
-                new Select(location, false, query.projections().stream()
+                new Select(location, query.distinct(), query.projections().stream()
                         .map(projection -> createSelectItem(projection, parameterIds))
                         .toList()),
                 query.from().map(TrinoAstFactory::createRelation),
@@ -91,9 +96,9 @@ final class TrinoAstFactory
                 Optional.empty(),
                 Optional.empty(),
                 List.of(),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty());
+                createOrderBy(query, parameterIds),
+                query.offset().map(offset -> new Offset(location(offset.span()), createExpression(offset, parameterIds))),
+                query.limit().map(limit -> new Limit(location(limit.span()), createExpression(limit, parameterIds))));
         return new Query(
                 location,
                 List.of(),
@@ -103,6 +108,29 @@ final class TrinoAstFactory
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty());
+    }
+
+    private static Optional<OrderBy> createOrderBy(HogQlQuery query, Map<SourceSpan, Integer> parameterIds)
+    {
+        if (query.orderBy().isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(new OrderBy(
+                location(query.orderBy().getFirst().span()),
+                query.orderBy().stream()
+                        .map(sortItem -> new io.trino.sql.tree.SortItem(
+                                location(sortItem.span()),
+                                createExpression(sortItem.expression(), parameterIds),
+                                switch (sortItem.direction()) {
+                                    case ASCENDING -> Ordering.ASCENDING;
+                                    case DESCENDING -> Ordering.DESCENDING;
+                                },
+                                switch (sortItem.nullPlacement()) {
+                                    case FIRST -> NullOrdering.FIRST;
+                                    case LAST -> NullOrdering.LAST;
+                                    case UNDEFINED -> NullOrdering.UNDEFINED;
+                                }))
+                        .toList()));
     }
 
     private static SelectItem createSelectItem(Projection projection, Map<SourceSpan, Integer> parameterIds)

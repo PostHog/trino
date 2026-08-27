@@ -104,6 +104,9 @@ public final class HogQlCompiler
             }
         });
         query.where().ifPresent(expression -> collectPlaceholders(expression, placeholders));
+        query.orderBy().forEach(sortItem -> collectPlaceholders(sortItem.expression(), placeholders));
+        query.limit().ifPresent(expression -> collectPlaceholders(expression, placeholders));
+        query.offset().ifPresent(expression -> collectPlaceholders(expression, placeholders));
         placeholders.sort(Comparator.comparingInt(placeholder -> placeholder.span().startOffset()));
 
         List<String> missing = placeholders.stream()
