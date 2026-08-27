@@ -47,6 +47,9 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinUsing;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.PivotAggregation;
+import io.trino.hogql.parser.tree.HogQlQuery.PivotRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.PivotValueGroup;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
@@ -169,6 +172,23 @@ final class HogQlFunctionResolver
                         case JoinUsing using -> using;
                     }),
                     join.span());
+            case PivotRelation pivot -> new PivotRelation(
+                    resolveRelation(pivot.input()),
+                    pivot.aggregations().stream()
+                            .map(aggregation -> new PivotAggregation(
+                                    resolveExpression(aggregation.expression()),
+                                    aggregation.alias(),
+                                    aggregation.span()))
+                            .toList(),
+                    pivot.pivotColumns().stream().map(this::resolveExpression).toList(),
+                    pivot.valueGroups().stream()
+                            .map(group -> new PivotValueGroup(
+                                    group.values().stream().map(this::resolveExpression).toList(),
+                                    group.alias(),
+                                    group.span()))
+                            .toList(),
+                    pivot.groupBy().stream().map(this::resolveExpression).toList(),
+                    pivot.span());
             case SubqueryRelation subquery -> new SubqueryRelation(resolveQuery(subquery.query()), subquery.span());
             case TablePlaceholder placeholder -> placeholder;
             case TableReference table -> table;

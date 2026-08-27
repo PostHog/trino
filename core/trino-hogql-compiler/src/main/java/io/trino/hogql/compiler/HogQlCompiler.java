@@ -274,6 +274,8 @@ public final class HogQlCompiler
             case AliasedRelation alias -> containsSemanticCandidate(alias.relation());
             case CommonTableReference _ -> false;
             case JoinRelation join -> containsSemanticCandidate(join.left()) || containsSemanticCandidate(join.right());
+            case HogQlQuery.PivotRelation pivot -> containsSemanticCandidate(pivot.input()) ||
+                    pivot.aggregations().stream().anyMatch(aggregation -> containsFunctionCall(aggregation.expression()));
             case SubqueryRelation subquery -> containsSemanticCandidate(subquery.query());
             case TablePlaceholder _ -> false;
             case HogQlQuery.TableReference table -> table.parts().size() == 1;
@@ -310,6 +312,13 @@ public final class HogQlCompiler
                             .map(JoinOn::expression)
                             .map(HogQlCompiler::containsFunctionCall)
                             .orElse(false);
+            case HogQlQuery.PivotRelation pivot -> containsFunctionCall(pivot.input()) ||
+                    pivot.aggregations().stream().anyMatch(aggregation -> containsFunctionCall(aggregation.expression())) ||
+                    pivot.pivotColumns().stream().anyMatch(HogQlCompiler::containsFunctionCall) ||
+                    pivot.valueGroups().stream()
+                            .flatMap(group -> group.values().stream())
+                            .anyMatch(HogQlCompiler::containsFunctionCall) ||
+                    pivot.groupBy().stream().anyMatch(HogQlCompiler::containsFunctionCall);
             case SubqueryRelation subquery -> containsFunctionCall(subquery.query());
             case TablePlaceholder _, HogQlQuery.TableReference _ -> false;
             case ValuesRelation values -> values.rows().stream()
@@ -489,6 +498,7 @@ public final class HogQlCompiler
                 validateRelation(join.left());
                 validateRelation(join.right());
             }
+            case HogQlQuery.PivotRelation pivot -> validateRelation(pivot.input());
             case SubqueryRelation subquery -> validateQuery(subquery.query());
             case TablePlaceholder tablePlaceholder -> throw bindingError(
                     tablePlaceholder.span(),
@@ -511,6 +521,13 @@ public final class HogQlCompiler
                         collectPlaceholders(on.expression(), placeholders);
                     }
                 });
+            }
+            case HogQlQuery.PivotRelation pivot -> {
+                collectPlaceholders(pivot.input(), placeholders);
+                pivot.aggregations().forEach(aggregation -> collectPlaceholders(aggregation.expression(), placeholders));
+                pivot.pivotColumns().forEach(expression -> collectPlaceholders(expression, placeholders));
+                pivot.valueGroups().forEach(group -> group.values().forEach(expression -> collectPlaceholders(expression, placeholders)));
+                pivot.groupBy().forEach(expression -> collectPlaceholders(expression, placeholders));
             }
             case SubqueryRelation subquery -> collectPlaceholders(subquery.query(), placeholders);
             case TablePlaceholder _ -> {}

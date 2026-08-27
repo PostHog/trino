@@ -52,6 +52,9 @@ import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.NullPlacement;
 import io.trino.hogql.parser.tree.HogQlQuery.NullTreatment;
+import io.trino.hogql.parser.tree.HogQlQuery.PivotAggregation;
+import io.trino.hogql.parser.tree.HogQlQuery.PivotRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.PivotValueGroup;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
@@ -1600,6 +1603,14 @@ public final class HogQlParser
                         Optional.of(buildJoinCriteria(join.joinConstraintClause())),
                         sourceSpan(context));
             }
+            if (context instanceof HogQLParser.JoinExprPivotContext pivot) {
+                return buildPivot(
+                        buildRelation(pivot.joinExpr()),
+                        pivot.columnExprList(),
+                        pivot.pivotColumnList(),
+                        pivot.GROUP() != null,
+                        context);
+            }
             throw unsupported(context, "HogQL-specific join variant");
         }
 
@@ -1639,6 +1650,14 @@ public final class HogQlParser
                 }
                 return new ValuesRelation(rows, sourceSpan(context));
             }
+            if (context instanceof HogQLParser.TableExprPivotContext pivot) {
+                return buildPivot(
+                        buildTableExpression(pivot.tableExpr()),
+                        pivot.columnExprList(),
+                        pivot.pivotColumnList(),
+                        pivot.GROUP() != null,
+                        context);
+            }
             if (context instanceof HogQLParser.TableExprAliasContext alias) {
                 Relation relation = buildTableExpression(alias.tableExpr());
                 Identifier identifier = alias.identifier() != null
@@ -1656,6 +1675,78 @@ public final class HogQlParser
             }
             throw unsupported(context, "table expression");
         }
+
+        private PivotRelation buildPivot(
+                Relation input,
+                List<HogQLParser.ColumnExprListContext> expressionLists,
+                HogQLParser.PivotColumnListContext pivotColumnList,
+                boolean hasGroupBy,
+                ParserRuleContext context)
+        {
+            List<PivotAggregation> aggregations = expressionLists.getFirst().columnExpr().stream()
+                    .map(this::buildPivotAggregation)
+                    .toList();
+            List<HogQLParser.PivotColumnContext> pivotColumns = pivotColumnList.pivotColumn();
+            if (pivotColumns.size() != 1) {
+                throw unsupported(pivotColumns.get(1), "multiple PIVOT column clauses");
+            }
+            HogQLParser.PivotColumnContext pivotColumn = pivotColumns.getFirst();
+            List<Expression> keys = buildPivotKeys(pivotColumn.columnExprTupleOrSingle());
+            List<PivotValueGroup> valueGroups = pivotColumn.columnExprList().columnExpr().stream()
+                    .map(this::buildPivotValueGroup)
+                    .toList();
+            List<Expression> groupBy = hasGroupBy
+                    ? expressionLists.get(1).columnExpr().stream().map(this::buildExpression).toList()
+                    : List.of();
+            return new PivotRelation(input, aggregations, keys, valueGroups, groupBy, sourceSpan(context));
+        }
+
+        private PivotAggregation buildPivotAggregation(HogQLParser.ColumnExprContext context)
+        {
+            PivotExpression expression = buildPivotExpression(context);
+            return new PivotAggregation(expression.expression(), expression.alias(), sourceSpan(context));
+        }
+
+        private List<Expression> buildPivotKeys(HogQLParser.ColumnExprTupleOrSingleContext context)
+        {
+            List<HogQLParser.ColumnExprContext> expressions = context.columnExprList() == null
+                    ? List.of(context.columnExpr())
+                    : context.columnExprList().columnExpr();
+            return expressions.stream()
+                    .map(expression -> {
+                        Expression key = buildExpression(expression);
+                        if (!(key instanceof ColumnReference)) {
+                            throw unsupported(expression, "non-column PIVOT key");
+                        }
+                        return key;
+                    })
+                    .toList();
+        }
+
+        private PivotValueGroup buildPivotValueGroup(HogQLParser.ColumnExprContext context)
+        {
+            PivotExpression expression = buildPivotExpression(context);
+            List<Expression> values = expression.expression() instanceof TupleExpression tuple
+                    ? tuple.values()
+                    : List.of(expression.expression());
+            return new PivotValueGroup(values, expression.alias(), sourceSpan(context));
+        }
+
+        private PivotExpression buildPivotExpression(HogQLParser.ColumnExprContext context)
+        {
+            if (context instanceof HogQLParser.ColumnExprAliasContext alias) {
+                Identifier identifier = alias.identifier() != null
+                        ? buildIdentifier(alias.identifier())
+                        : new Identifier(
+                        decodeQuoted(alias.STRING_LITERAL().getText()),
+                        true,
+                        sourceSpan(alias.STRING_LITERAL().getSymbol(), alias.STRING_LITERAL().getSymbol()));
+                return new PivotExpression(buildExpression(alias.columnExpr()), Optional.of(identifier));
+            }
+            return new PivotExpression(buildExpression(context), Optional.empty());
+        }
+
+        private record PivotExpression(Expression expression, Optional<Identifier> alias) {}
 
         private CommonTableNameResolution resolveCommonTableName(String name)
         {
@@ -1735,6 +1826,15 @@ public final class HogQlParser
                         }
                     });
                 }
+                case PivotRelation pivot -> {
+                    validateRelationExpressionScopes(pivot.input(), forbiddenOuterRelations, localRelations);
+                    pivot.aggregations().forEach(aggregation ->
+                            validateExpressionScope(aggregation.expression(), forbiddenOuterRelations, localRelations));
+                    pivot.pivotColumns().forEach(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations));
+                    pivot.valueGroups().forEach(group -> group.values().forEach(expression ->
+                            validateExpressionScope(expression, forbiddenOuterRelations, localRelations)));
+                    pivot.groupBy().forEach(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations));
+                }
                 case CommonTableReference _, SubqueryRelation _, TablePlaceholder _, TableReference _, ValuesRelation _ -> {}
             }
         }
@@ -1747,6 +1847,7 @@ public final class HogQlParser
                     validateNestedRelationScopes(join.left(), forbiddenOuterRelations);
                     validateNestedRelationScopes(join.right(), forbiddenOuterRelations);
                 }
+                case PivotRelation pivot -> validateNestedRelationScopes(pivot.input(), forbiddenOuterRelations);
                 case SubqueryRelation subquery -> validateQueryScope(subquery.query(), forbiddenOuterRelations);
                 case ValuesRelation values -> values.rows().forEach(row -> row.forEach(expression -> validateExpressionScope(expression, forbiddenOuterRelations, Set.of())));
                 case CommonTableReference _, TablePlaceholder _, TableReference _ -> {}
@@ -1769,6 +1870,7 @@ public final class HogQlParser
                     collectRelationNames(join.left(), names);
                     collectRelationNames(join.right(), names);
                 }
+                case PivotRelation pivot -> collectRelationNames(pivot.input(), names);
                 case SubqueryRelation _, TablePlaceholder _, ValuesRelation _ -> {}
                 case TableReference table -> names.add(canonicalName(table.parts().getLast()));
             }

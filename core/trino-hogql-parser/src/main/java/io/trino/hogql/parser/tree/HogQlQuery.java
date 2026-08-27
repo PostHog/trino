@@ -743,6 +743,7 @@ public record HogQlQuery(
             permits AliasedRelation,
                     CommonTableReference,
                     JoinRelation,
+                    PivotRelation,
                     SubqueryRelation,
                     TablePlaceholder,
                     TableReference,
@@ -862,6 +863,58 @@ public record HogQlQuery(
             span = requireNonNull(span, "span is null");
             if ((type == JoinType.CROSS) == criteria.isPresent()) {
                 throw new IllegalArgumentException("cross joins must omit criteria and qualified joins must provide criteria");
+            }
+        }
+    }
+
+    public record PivotRelation(
+            Relation input,
+            List<PivotAggregation> aggregations,
+            List<Expression> pivotColumns,
+            List<PivotValueGroup> valueGroups,
+            List<Expression> groupBy,
+            SourceSpan span)
+            implements Relation
+    {
+        public PivotRelation
+        {
+            input = requireNonNull(input, "input is null");
+            aggregations = List.copyOf(requireNonNull(aggregations, "aggregations is null"));
+            pivotColumns = List.copyOf(requireNonNull(pivotColumns, "pivotColumns is null"));
+            valueGroups = List.copyOf(requireNonNull(valueGroups, "valueGroups is null"));
+            groupBy = List.copyOf(requireNonNull(groupBy, "groupBy is null"));
+            span = requireNonNull(span, "span is null");
+            if (aggregations.isEmpty()) {
+                throw new IllegalArgumentException("aggregations is empty");
+            }
+            if (pivotColumns.isEmpty()) {
+                throw new IllegalArgumentException("pivotColumns is empty");
+            }
+            if (valueGroups.isEmpty()) {
+                throw new IllegalArgumentException("valueGroups is empty");
+            }
+        }
+    }
+
+    public record PivotAggregation(Expression expression, Optional<Identifier> alias, SourceSpan span)
+    {
+        public PivotAggregation
+        {
+            expression = requireNonNull(expression, "expression is null");
+            alias = requireNonNull(alias, "alias is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record PivotValueGroup(List<Expression> values, Optional<Identifier> alias, SourceSpan span)
+    {
+        public PivotValueGroup
+        {
+            values = List.copyOf(requireNonNull(values, "values is null"));
+            alias = requireNonNull(alias, "alias is null");
+            span = requireNonNull(span, "span is null");
+            if (values.isEmpty()) {
+                throw new IllegalArgumentException("values is empty");
             }
         }
     }

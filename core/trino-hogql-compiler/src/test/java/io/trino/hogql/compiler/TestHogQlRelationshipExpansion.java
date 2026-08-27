@@ -100,7 +100,7 @@ public class TestHogQlRelationshipExpansion
         HogQlCompilationResult result = compile("SELECT sub.event FROM (SELECT e.personProfile.*, e.* FROM events e) sub");
 
         assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
-                "SELECT sub.event FROM (SELECT e.event_name AS event FROM analytics.data.raw_events e) sub"));
+                "SELECT sub.\"event\" AS event FROM (SELECT e.event_name AS \"event\" FROM analytics.data.raw_events e) sub"));
     }
 
     @Test
@@ -109,8 +109,8 @@ public class TestHogQlRelationshipExpansion
         HogQlCompilationResult result = compile("SELECT sub.name FROM (SELECT e.personProfile.*, e.* FROM events e) sub");
 
         assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
-                "SELECT sub.name FROM (" +
-                        "SELECT \"__hogql_lazy_1\".full_name AS name " +
+                "SELECT sub.\"name\" AS name FROM (" +
+                        "SELECT \"__hogql_lazy_1\".full_name AS \"name\" " +
                         "FROM analytics.data.raw_events e " +
                         "LEFT JOIN analytics.data.raw_persons \"__hogql_lazy_1\" " +
                         "ON e.person_id = \"__hogql_lazy_1\".person_id " +

@@ -76,6 +76,9 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinUsing;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.PivotAggregation;
+import io.trino.hogql.parser.tree.HogQlQuery.PivotRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.PivotValueGroup;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
@@ -449,6 +452,7 @@ final class HogQlSemanticResolver
                 bindings.addAll(inferRelationBindings(join.right(), availableBindings));
                 yield List.copyOf(bindings);
             }
+            case PivotRelation _ -> List.of();
             case TableReference table -> table.parts().size() == 1
                     ? snapshot.logicalTable(table.parts().getFirst().value())
                       .map(definition -> resolveLogicalTable(definition, table.span()).bindings())
@@ -634,6 +638,11 @@ final class HogQlSemanticResolver
                 collectCommonTableDemands(join.left(), demand, availableBindings, demands);
                 collectCommonTableDemands(join.right(), demand, availableBindings, demands);
             }
+            case PivotRelation pivot -> collectCommonTableDemands(
+                    pivot.input(),
+                    HogQlProjectionDemand.preserveAll(),
+                    availableBindings,
+                    demands);
             case SubqueryRelation _, TablePlaceholder _, TableReference _, ValuesRelation _ -> {}
         }
     }
@@ -996,6 +1005,7 @@ final class HogQlSemanticResolver
                 qualifiers.addAll(relationQualifiers(join.right()));
                 yield Set.copyOf(qualifiers);
             }
+            case PivotRelation _ -> Set.of();
             case SubqueryRelation _ -> Set.of();
             case TablePlaceholder _ -> Set.of();
             case TableReference table -> Set.of(canonical(table.parts().getLast().value()));
@@ -1055,6 +1065,37 @@ final class HogQlSemanticResolver
                         new JoinRelation(join.type(), left.relation(), right.relation(), criteria, join.span()),
                         joinBindings,
                         left.allLogical() && right.allLogical());
+            }
+            case PivotRelation pivot -> {
+                ResolvedRelation input = resolveRelation(pivot.input(), HogQlProjectionDemand.preserveAll());
+                List<TableBinding> previousBindings = bindings;
+                boolean previousAllRelationsLogical = allRelationsLogical;
+                bindings = input.bindings();
+                allRelationsLogical = input.allLogical();
+                List<PivotAggregation> aggregations = pivot.aggregations().stream()
+                        .map(aggregation -> new PivotAggregation(
+                                resolveExpression(aggregation.expression()),
+                                aggregation.alias(),
+                                aggregation.span()))
+                        .toList();
+                List<Expression> pivotColumns = pivot.pivotColumns().stream()
+                        .map(this::resolveExpression)
+                        .toList();
+                List<PivotValueGroup> valueGroups = pivot.valueGroups().stream()
+                        .map(group -> new PivotValueGroup(
+                                group.values().stream().map(this::resolveExpression).toList(),
+                                group.alias(),
+                                group.span()))
+                        .toList();
+                List<Expression> groupBy = pivot.groupBy().stream()
+                        .map(this::resolveExpression)
+                        .toList();
+                bindings = previousBindings;
+                allRelationsLogical = previousAllRelationsLogical;
+                yield new ResolvedRelation(
+                        new PivotRelation(input.relation(), aggregations, pivotColumns, valueGroups, groupBy, pivot.span()),
+                        List.of(),
+                        false);
             }
             case SubqueryRelation subquery -> resolveSubquery(subquery, projectionDemand.unqualified());
             case TablePlaceholder placeholder -> new ResolvedRelation(placeholder, List.of(), false);

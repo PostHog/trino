@@ -40,6 +40,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinUsing;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.PivotRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
@@ -642,6 +643,27 @@ final class TrinoAstFactory
                                 .map(TrinoAstFactory::createIdentifier)
                                 .toList());
                     }));
+            case PivotRelation pivot -> new io.trino.sql.tree.Pivot(
+                    location(pivot.span()),
+                    createRelation(pivot.input(), parameterIds),
+                    pivot.aggregations().stream()
+                            .map(aggregation -> new io.trino.sql.tree.PivotAggregation(
+                                    location(aggregation.span()),
+                                    createExpression(aggregation.expression(), parameterIds),
+                                    aggregation.alias().map(TrinoAstFactory::createIdentifier)))
+                            .toList(),
+                    pivot.pivotColumns().stream()
+                            .map(column -> createExpression(column, parameterIds))
+                            .toList(),
+                    pivot.valueGroups().stream()
+                            .map(group -> new io.trino.sql.tree.PivotValueGroup(
+                                    location(group.span()),
+                                    group.values().stream()
+                                            .map(value -> createExpression(value, parameterIds))
+                                            .toList(),
+                                    group.alias().map(TrinoAstFactory::createIdentifier)))
+                            .toList(),
+                    createGroupBy(pivot.groupBy(), parameterIds));
             case SubqueryRelation subquery -> new TableSubquery(location(subquery.span()), createQuery(subquery.query(), parameterIds));
             case TablePlaceholder _ -> throw new IllegalArgumentException("table placeholder was not validated");
             case TableReference table -> createTable(table);

@@ -248,6 +248,13 @@ final class HogQlProjectionDemand
                     }
                 });
             }
+            case HogQlQuery.PivotRelation pivot -> {
+                collectJoinCriteria(pivot.input(), builder);
+                pivot.aggregations().forEach(aggregation -> collect(aggregation.expression(), builder));
+                pivot.pivotColumns().forEach(column -> collect(column, builder));
+                pivot.valueGroups().forEach(group -> group.values().forEach(value -> collect(value, builder)));
+                pivot.groupBy().forEach(expression -> collect(expression, builder));
+            }
         }
     }
 

@@ -27,6 +27,7 @@ import io.trino.sql.tree.JoinOn;
 import io.trino.sql.tree.Node;
 import io.trino.sql.tree.NodeLocation;
 import io.trino.sql.tree.Parameter;
+import io.trino.sql.tree.Pivot;
 import io.trino.sql.tree.Predicated;
 import io.trino.sql.tree.Query;
 import io.trino.sql.tree.QuerySpecification;
@@ -263,6 +264,43 @@ public class TestHogQlCompiler
     {
         assertThat(compiler.compile("SELECT * FROM events JOIN persons USING id"))
                 .isEqualTo(sqlParser.createStatement("SELECT * FROM events JOIN persons USING (id)"));
+    }
+
+    @Test
+    public void testLowersPivotToEquivalentStockAstWithSourceLocations()
+    {
+        String hogql = "SELECT * FROM orders PIVOT (sum(totalprice) AS total FOR (orderstatus, custkey) " +
+                "IN (('F', 1) AS filled, ('O', 2) AS open) GROUP BY clerk)";
+
+        Query query = (Query) compiler.compile(hogql);
+        Pivot pivot = (Pivot) ((QuerySpecification) query.getQueryBody()).getFrom().orElseThrow();
+
+        assertThat(query).isEqualTo(sqlParser.createStatement(hogql));
+        assertThat(sqlParser.createStatement(SqlFormatter.formatSql(query))).isEqualTo(query);
+        assertThat(pivot.getLocation()).contains(new NodeLocation(1, hogql.indexOf("orders") + 1));
+        assertThat(pivot.getAggregations()).singleElement().satisfies(aggregation -> {
+            assertThat(aggregation.getLocation()).contains(new NodeLocation(1, hogql.indexOf("sum(totalprice)") + 1));
+            assertThat(aggregation.getAlias()).get().satisfies(alias ->
+                    assertThat(alias.getLocation()).contains(new NodeLocation(1, hogql.indexOf("total FOR") + 1)));
+        });
+        assertThat(pivot.getPivotColumns()).hasSize(2);
+        assertThat(pivot.getValueGroups()).hasSize(2);
+        assertThat(pivot.getValueGroups().getFirst().getLocation())
+                .contains(new NodeLocation(1, hogql.indexOf("('F', 1)") + 1));
+        assertThat(pivot.getValueGroups().getFirst().getAlias()).get().satisfies(alias ->
+                assertThat(alias.getLocation()).contains(new NodeLocation(1, hogql.indexOf("filled") + 1)));
+        assertThat(pivot.getGroupBy()).isPresent();
+    }
+
+    @Test
+    public void testBindsPlaceholdersInsidePivot()
+    {
+        HogQlCompilationResult result = compiler.compile(
+                "SELECT * FROM orders PIVOT (sum({amount}) FOR orderstatus IN ({status}))",
+                Map.of("amount", typedValue("amount"), "status", typedValue("status")));
+
+        assertThat(result.parameterNames()).containsExactly("amount", "status");
+        assertThat(parameters(result.statement())).extracting(Parameter::getId).containsExactly(0, 1);
     }
 
     @ParameterizedTest

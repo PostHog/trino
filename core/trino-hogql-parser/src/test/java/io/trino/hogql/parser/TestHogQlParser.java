@@ -32,6 +32,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinType;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.NullPlacement;
+import io.trino.hogql.parser.tree.HogQlQuery.PivotRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.ScalarSubqueryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.SetOperation;
@@ -314,6 +315,55 @@ public class TestHogQlParser
     }
 
     @Test
+    public void testBuildsPivotAstWithCompositeKeysAliasesAndSourceSpans()
+    {
+        String hogql = "SELECT * FROM orders PIVOT (sum(totalprice) AS total FOR (orderstatus, custkey) " +
+                "IN (('F', 1) AS filled, ('O', 2) AS open) GROUP BY clerk)";
+
+        PivotRelation pivot = (PivotRelation) parser.parseStatement(hogql).from().orElseThrow();
+
+        assertThat(pivot.input()).isInstanceOf(HogQlQuery.TableReference.class);
+        assertThat(pivot.span()).isEqualTo(span(hogql, hogql.substring(hogql.indexOf("orders"))));
+        assertThat(pivot.aggregations()).singleElement().satisfies(aggregation -> {
+            assertThat(aggregation.expression()).isInstanceOf(FunctionCall.class);
+            assertThat(aggregation.alias()).get().extracting(HogQlQuery.Identifier::value).isEqualTo("total");
+            assertThat(aggregation.span()).isEqualTo(span(hogql, "sum(totalprice) AS total"));
+        });
+        assertThat(pivot.pivotColumns()).extracting(expression -> ((ColumnReference) expression).parts().getLast().value())
+                .containsExactly("orderstatus", "custkey");
+        assertThat(pivot.pivotColumns().getFirst().span()).isEqualTo(span(hogql, "orderstatus"));
+        assertThat(pivot.valueGroups()).hasSize(2);
+        assertThat(pivot.valueGroups().getFirst().values()).hasSize(2);
+        assertThat(pivot.valueGroups().getFirst().alias()).get().extracting(HogQlQuery.Identifier::value).isEqualTo("filled");
+        assertThat(pivot.valueGroups().getFirst().span()).isEqualTo(span(hogql, "('F', 1) AS filled"));
+        assertThat(pivot.groupBy()).singleElement().isInstanceOf(ColumnReference.class);
+    }
+
+    @Test
+    public void testAttachesPivotToWholeJoin()
+    {
+        HogQlQuery query = parser.parseStatement(
+                "SELECT * FROM orders o JOIN customer c ON o.custkey = c.custkey " +
+                        "PIVOT (count(*) FOR o.orderstatus IN ('F'))");
+
+        assertThat(query.from()).get().isInstanceOfSatisfying(PivotRelation.class, pivot ->
+                assertThat(pivot.input()).isInstanceOf(JoinRelation.class));
+    }
+
+    @Test
+    public void testRejectsPivotShapesWithoutAStockRepresentation()
+    {
+        assertThatThrownBy(() -> parser.parseStatement(
+                "SELECT * FROM orders PIVOT (sum(totalprice) FOR orderstatus IN ('F') custkey IN (1))"))
+                .isInstanceOf(HogQlParsingException.class)
+                .hasMessageContaining("multiple PIVOT column clauses");
+        assertThatThrownBy(() -> parser.parseStatement(
+                "SELECT * FROM orders PIVOT (sum(totalprice) FOR orderstatus + 1 IN ('F'))"))
+                .isInstanceOf(HogQlParsingException.class)
+                .hasMessageContaining("non-column PIVOT key");
+    }
+
+    @Test
     public void testBuildsCteAndDerivedTableAstWithSourceSpans()
     {
         String hogql = "WITH base(id) AS (SELECT {cte}), next AS (SELECT id FROM base)\n" +
@@ -471,5 +521,11 @@ public class TestHogQlParser
             return Stream.empty();
         }
         return Stream.concat(Stream.of(node), node.children().stream().flatMap(TestHogQlParser::nodes));
+    }
+
+    private static HogQlQuery.SourceSpan span(String source, String value)
+    {
+        int start = source.indexOf(value);
+        return new HogQlQuery.SourceSpan(start, start + value.length(), 1, start + 1, 1, start + value.length() + 1);
     }
 }
