@@ -40,6 +40,8 @@ import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
 import io.trino.hogql.parser.tree.HogQlQuery.InCohortExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.InSubqueryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.IntervalExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.IntervalUnit;
 import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinCriteria;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
@@ -1103,6 +1105,15 @@ public final class HogQlParser
             if (context instanceof HogQLParser.ColumnExprTryCastContext cast) {
                 return new CastExpression(buildExpression(cast.columnExpr()), buildType(cast.columnTypeExpr()), true, CastTypeDialect.HOGQL, sourceSpan(cast));
             }
+            if (context instanceof HogQLParser.ColumnExprIntervalContext interval) {
+                return new IntervalExpression(
+                        buildExpression(interval.columnExpr()),
+                        buildIntervalUnit(interval.interval().getText(), interval.interval()),
+                        sourceSpan(interval));
+            }
+            if (context instanceof HogQLParser.ColumnExprIntervalStringContext interval) {
+                return buildStringInterval(interval);
+            }
             if (context instanceof HogQLParser.ColumnExprIdentifierContext identifier) {
                 return buildColumnReference(identifier.columnIdentifier());
             }
@@ -1247,6 +1258,56 @@ public final class HogQlParser
                         new WindowReference(buildIdentifier(function.identifier(1)), sourceSpan(function.identifier(1))));
             }
             throw unsupported(context, "expression " + context.getClass().getSimpleName());
+        }
+
+        private IntervalExpression buildStringInterval(HogQLParser.ColumnExprIntervalStringContext context)
+        {
+            String value = decodeQuoted(context.STRING_LITERAL().getText());
+            int separator = value.indexOf(' ');
+            if (separator < 0) {
+                throw intervalError(context, "Unsupported interval type: must be in the format '<count> <unit>'");
+            }
+
+            String count = value.substring(0, separator);
+            String unit = value.substring(separator + 1);
+            if (!count.matches("[0-9]+")) {
+                throw intervalError(context, "Unsupported interval count: '" + count + "' is not a valid integer");
+            }
+            try {
+                Long.parseLong(count);
+            }
+            catch (NumberFormatException _) {
+                throw intervalError(context, "Unsupported interval count: '" + count + "' is too large");
+            }
+
+            String singularUnit = unit.endsWith("s") ? unit.substring(0, unit.length() - 1) : unit;
+            IntervalUnit intervalUnit;
+            try {
+                intervalUnit = IntervalUnit.valueOf(singularUnit.toUpperCase(Locale.ENGLISH));
+            }
+            catch (IllegalArgumentException _) {
+                throw intervalError(context, "Unsupported interval unit: " + unit);
+            }
+            if (!unit.equals(singularUnit) && !unit.equals(singularUnit + "s")) {
+                throw intervalError(context, "Unsupported interval unit: " + unit);
+            }
+            if (!unit.equals(unit.toLowerCase(Locale.ENGLISH))) {
+                throw intervalError(context, "Unsupported interval unit: " + unit);
+            }
+            return new IntervalExpression(
+                    new Literal(INTEGER, normalizeInteger(count), sourceSpan(context.STRING_LITERAL().getSymbol(), context.STRING_LITERAL().getSymbol())),
+                    intervalUnit,
+                    sourceSpan(context));
+        }
+
+        private IntervalUnit buildIntervalUnit(String value, ParserRuleContext context)
+        {
+            try {
+                return IntervalUnit.valueOf(value.toUpperCase(Locale.ENGLISH));
+            }
+            catch (IllegalArgumentException _) {
+                throw intervalError(context, "Unsupported interval unit: " + value);
+            }
         }
 
         private CaseExpression buildCaseExpression(HogQLParser.ColumnExprCaseContext context)
@@ -1750,6 +1811,7 @@ public final class HogQlParser
                     nestedForbiddenRelations.addAll(localRelations);
                     validateQueryScope(in.query(), Set.copyOf(nestedForbiddenRelations));
                 }
+                case IntervalExpression interval -> validateExpressionScope(interval.value(), forbiddenOuterRelations, localRelations);
                 case IsNullExpression isNull -> validateExpressionScope(isNull.value(), forbiddenOuterRelations, localRelations);
                 case Literal _, Placeholder _ -> {}
                 case MemberAccessExpression memberAccess -> validateExpressionScope(memberAccess.base(), forbiddenOuterRelations, localRelations);
@@ -1863,6 +1925,12 @@ public final class HogQlParser
         private HogQlParsingException unsupported(SourceSpan span, String feature)
         {
             return new HogQlParsingException("HogQL feature is not lowered yet: " + feature, null, span.startLine(), span.startColumn());
+        }
+
+        private HogQlParsingException intervalError(ParserRuleContext context, String message)
+        {
+            SourceSpan span = sourceSpan(context);
+            return new HogQlParsingException(message, null, span.startLine(), span.startColumn());
         }
 
         private static String normalizeInteger(String value)

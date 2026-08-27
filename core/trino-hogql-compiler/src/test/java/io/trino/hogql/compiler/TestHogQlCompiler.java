@@ -116,6 +116,26 @@ public class TestHogQlCompiler
         assertThat(compiler.compile(hogql)).isEqualTo(sqlParser.createStatement(trinoSql));
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+                                            SELECT INTERVAL 2 SECOND     | SELECT 2 * INTERVAL '1' SECOND
+                                            SELECT INTERVAL value MINUTE | SELECT value * INTERVAL '1' MINUTE
+                                            SELECT INTERVAL 2 HOUR       | SELECT 2 * INTERVAL '1' HOUR
+                                            SELECT INTERVAL 2 DAY        | SELECT 2 * INTERVAL '1' DAY
+                                            SELECT INTERVAL 2 WEEK       | SELECT 2 * INTERVAL '7' DAY
+                                            SELECT INTERVAL 2 MONTH      | SELECT 2 * INTERVAL '1' MONTH
+                                            SELECT INTERVAL 2 QUARTER    | SELECT 2 * INTERVAL '3' MONTH
+                                            SELECT INTERVAL value YEAR   | SELECT value * INTERVAL '1' YEAR
+                                            SELECT INTERVAL '5 months'   | SELECT 5 * INTERVAL '1' MONTH
+                                            """)
+    public void testLowersCanonicalIntervals(String hogql, String trinoSql)
+    {
+        Statement statement = compiler.compile(hogql);
+
+        assertThat(statement).isEqualTo(sqlParser.createStatement(trinoSql));
+        assertThat(sqlParser.createStatement(SqlFormatter.formatSql(statement))).isEqualTo(statement);
+    }
+
     @Test
     public void testBindsPlaceholdersInsideCollectionSubscriptsBySourceOrder()
     {

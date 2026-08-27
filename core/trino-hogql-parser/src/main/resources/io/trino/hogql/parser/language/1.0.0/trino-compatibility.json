@@ -461,23 +461,25 @@
         {
             "id": "alternative:columnExprValue:ColumnExprInterval",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createIntervalExpression",
+            "parseHandler": "AstBuilder#buildExpression",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersCanonicalIntervals",
+                "TestHogQlParser#testBuildsCanonicalIntervalExpressions"
             ]
         },
         {
             "id": "alternative:columnExprValue:ColumnExprIntervalString",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createIntervalExpression",
+            "parseHandler": "AstBuilder#buildStringInterval",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersCanonicalIntervals",
+                "TestHogQlParser#testRejectsInvalidCombinedStringIntervals"
             ]
         },
         {

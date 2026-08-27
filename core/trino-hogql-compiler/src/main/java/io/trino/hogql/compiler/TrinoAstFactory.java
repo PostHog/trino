@@ -33,6 +33,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
 import io.trino.hogql.parser.tree.HogQlQuery.InCohortExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.InSubqueryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.IntervalExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
@@ -77,6 +78,8 @@ import io.trino.sql.tree.GroupBy;
 import io.trino.sql.tree.InListExpression;
 import io.trino.sql.tree.InPredicate;
 import io.trino.sql.tree.Intersect;
+import io.trino.sql.tree.IntervalField;
+import io.trino.sql.tree.IntervalLiteral;
 import io.trino.sql.tree.IsNullPredicate;
 import io.trino.sql.tree.Limit;
 import io.trino.sql.tree.LogicalExpression;
@@ -98,6 +101,7 @@ import io.trino.sql.tree.Select;
 import io.trino.sql.tree.SelectItem;
 import io.trino.sql.tree.SimpleCaseExpression;
 import io.trino.sql.tree.SimpleGroupBy;
+import io.trino.sql.tree.SimpleIntervalQualifier;
 import io.trino.sql.tree.SingleColumn;
 import io.trino.sql.tree.SortItem.NullOrdering;
 import io.trino.sql.tree.SortItem.Ordering;
@@ -114,6 +118,7 @@ import io.trino.sql.tree.WithQuery;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_UNSUPPORTED_FEATURE;
 
@@ -335,6 +340,7 @@ final class TrinoAstFactory
             case InCohortExpression in -> throw unsupportedSemanticExpression(in.span(), "HogQL IN COHORT requires a semantic catalog snapshot");
             case InExpression in -> createInExpression(in, parameterIds);
             case InSubqueryExpression in -> createInSubqueryExpression(in, parameterIds);
+            case IntervalExpression interval -> createIntervalExpression(interval, parameterIds);
             case IsNullExpression isNull -> new Predicated(
                     location(isNull.predicateSpan()),
                     createExpression(isNull.value(), parameterIds),
@@ -360,6 +366,34 @@ final class TrinoAstFactory
                 case POSITIVE -> ArithmeticUnaryExpression.positive(location(unary.span()), createExpression(unary.operand(), parameterIds));
             };
         };
+    }
+
+    private static Expression createIntervalExpression(IntervalExpression interval, Map<SourceSpan, Integer> parameterIds)
+    {
+        NodeLocation location = location(interval.span());
+        int multiplier = switch (interval.unit()) {
+            case WEEK -> 7;
+            case QUARTER -> 3;
+            default -> 1;
+        };
+        IntervalField field = switch (interval.unit()) {
+            case SECOND -> new IntervalField.Second(OptionalInt.empty());
+            case MINUTE -> new IntervalField.Minute();
+            case HOUR -> new IntervalField.Hour();
+            case DAY, WEEK -> new IntervalField.Day();
+            case MONTH, QUARTER -> new IntervalField.Month();
+            case YEAR -> new IntervalField.Year();
+        };
+        IntervalLiteral unitInterval = new IntervalLiteral(
+                location,
+                Integer.toString(multiplier),
+                IntervalLiteral.Sign.POSITIVE,
+                new SimpleIntervalQualifier(location, OptionalInt.empty(), field));
+        return new ArithmeticBinaryExpression(
+                location,
+                ArithmeticBinaryExpression.Operator.MULTIPLY,
+                createExpression(interval.value(), parameterIds),
+                unitInterval);
     }
 
     private static io.trino.sql.tree.DataType createCastType(Identifier type, CastTypeDialect typeDialect)

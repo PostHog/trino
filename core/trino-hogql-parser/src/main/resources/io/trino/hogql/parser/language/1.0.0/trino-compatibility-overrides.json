@@ -930,6 +930,24 @@
             "testCaseIds": [
                 "TestHogQlWindowCompiler#testLowersCanonicalWindowNullTreatmentOrder"
             ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprInterval",
+            "loweringHandler": "TrinoAstFactory#createIntervalExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCanonicalIntervals",
+                "TestHogQlParser#testBuildsCanonicalIntervalExpressions"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprIntervalString",
+            "loweringHandler": "TrinoAstFactory#createIntervalExpression",
+            "parseHandler": "AstBuilder#buildStringInterval",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCanonicalIntervals",
+                "TestHogQlParser#testRejectsInvalidCombinedStringIntervals"
+            ]
         }
     ],
     "schemaVersion": 1

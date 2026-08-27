@@ -29,6 +29,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
 import io.trino.hogql.parser.tree.HogQlQuery.InCohortExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.InSubqueryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.IntervalExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
@@ -188,6 +189,7 @@ final class HogQlProjectionDemand
                 collect(in.value(), builder);
                 builder.all = true;
             }
+            case IntervalExpression interval -> collect(interval.value(), builder);
             case IsNullExpression isNull -> collect(isNull.value(), builder);
             case Literal _, Placeholder _ -> {}
             case MemberAccessExpression member -> collect(member.base(), builder);

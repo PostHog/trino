@@ -69,6 +69,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
 import io.trino.hogql.parser.tree.HogQlQuery.InCohortExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.InSubqueryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.IntervalExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
@@ -858,6 +859,7 @@ final class HogQlSemanticResolver
                     in.negated(),
                     in.predicateSpan(),
                     in.span());
+            case IntervalExpression interval -> new IntervalExpression(resolveExpression(interval.value()), interval.unit(), interval.span());
             case IsNullExpression isNull -> new IsNullExpression(
                     resolveExpression(isNull.value()),
                     isNull.negated(),

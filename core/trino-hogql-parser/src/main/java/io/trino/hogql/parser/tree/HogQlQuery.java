@@ -305,6 +305,7 @@ public record HogQlQuery(
                     InCohortExpression,
                     InExpression,
                     InSubqueryExpression,
+                    IntervalExpression,
                     IsNullExpression,
                     Literal,
                     MemberAccessExpression,
@@ -361,6 +362,29 @@ public record HogQlQuery(
         public CastExpression(Expression value, Identifier type, boolean safe, SourceSpan span)
         {
             this(value, type, safe, CastTypeDialect.TRINO, span);
+        }
+    }
+
+    public enum IntervalUnit
+    {
+        SECOND,
+        MINUTE,
+        HOUR,
+        DAY,
+        WEEK,
+        MONTH,
+        QUARTER,
+        YEAR,
+    }
+
+    public record IntervalExpression(Expression value, IntervalUnit unit, SourceSpan span)
+            implements Expression
+    {
+        public IntervalExpression
+        {
+            value = requireNonNull(value, "value is null");
+            unit = requireNonNull(unit, "unit is null");
+            span = requireNonNull(span, "span is null");
         }
     }
 

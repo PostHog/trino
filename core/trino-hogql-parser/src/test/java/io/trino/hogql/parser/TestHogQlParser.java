@@ -23,9 +23,12 @@ import io.trino.hogql.parser.tree.HogQlQuery.ColumnsRegex;
 import io.trino.hogql.parser.tree.HogQlQuery.CommonTableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
+import io.trino.hogql.parser.tree.HogQlQuery.IntervalExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.IntervalUnit;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinType;
+import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.NullPlacement;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
@@ -106,6 +109,40 @@ public class TestHogQlParser
         assertThat(query.projections()).hasSize(1);
         assertThat(query.from()).isPresent();
         assertThat(query.where()).isPresent();
+    }
+
+    @Test
+    public void testBuildsCanonicalIntervalExpressions()
+    {
+        HogQlQuery query = parser.parseStatement("SELECT INTERVAL 1 WEEK, INTERVAL event QUARTER, INTERVAL '5 months'");
+
+        assertThat(query.projections()).extracting(projection -> ((IntervalExpression) ((ExpressionProjection) projection).expression()).unit())
+                .containsExactly(IntervalUnit.WEEK, IntervalUnit.QUARTER, IntervalUnit.MONTH);
+        IntervalExpression stringInterval = (IntervalExpression) ((ExpressionProjection) query.projections().get(2)).expression();
+        assertThat(stringInterval.value()).isInstanceOfSatisfying(Literal.class, value -> {
+            assertThat(value.kind()).isEqualTo(HogQlQuery.LiteralKind.INTEGER);
+            assertThat(value.value()).isEqualTo("5");
+        });
+    }
+
+    @Test
+    public void testRejectsInvalidCombinedStringIntervals()
+    {
+        assertThatThrownBy(() -> parser.parseStatement("SELECT INTERVAL 'twenty days'"))
+                .isInstanceOf(HogQlParsingException.class)
+                .hasMessageContaining("Unsupported interval count: 'twenty' is not a valid integer");
+        assertThatThrownBy(() -> parser.parseStatement("SELECT INTERVAL '9223372036854775808 day'"))
+                .isInstanceOf(HogQlParsingException.class)
+                .hasMessageContaining("Unsupported interval count: '9223372036854775808' is too large");
+        assertThatThrownBy(() -> parser.parseStatement("SELECT INTERVAL '1 SECOND'"))
+                .isInstanceOf(HogQlParsingException.class)
+                .hasMessageContaining("Unsupported interval unit: SECOND");
+        assertThatThrownBy(() -> parser.parseStatement("SELECT INTERVAL '1 dayss'"))
+                .isInstanceOf(HogQlParsingException.class)
+                .hasMessageContaining("Unsupported interval unit: dayss");
+        assertThatThrownBy(() -> parser.parseStatement("SELECT INTERVAL 'x'"))
+                .isInstanceOf(HogQlParsingException.class)
+                .hasMessageContaining("Unsupported interval type: must be in the format '<count> <unit>'");
     }
 
     @Test

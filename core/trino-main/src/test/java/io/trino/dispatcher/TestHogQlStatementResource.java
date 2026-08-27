@@ -229,7 +229,13 @@ class TestHogQlStatementResource
                 Arguments.of(
                         "timestamp precision",
                         "SELECT CAST('2024-03-10 01:59:59.123456' AS Timestamp(6)) AS value",
-                        "SELECT CAST('2024-03-10 01:59:59.123456' AS timestamp(6)) AS value"));
+                        "SELECT CAST('2024-03-10 01:59:59.123456' AS timestamp(6)) AS value"),
+                Arguments.of(
+                        "interval expressions",
+                        "SELECT INTERVAL 2 WEEK AS weeks, INTERVAL '3 months' AS months, INTERVAL nationkey DAY AS dynamic " +
+                                "FROM tpch.tiny.nation WHERE nationkey = 2",
+                        "SELECT 2 * INTERVAL '7' DAY AS weeks, 3 * INTERVAL '1' MONTH AS months, nationkey * INTERVAL '1' DAY AS dynamic " +
+                                "FROM tpch.tiny.nation WHERE nationkey = 2"));
     }
 
     @Test

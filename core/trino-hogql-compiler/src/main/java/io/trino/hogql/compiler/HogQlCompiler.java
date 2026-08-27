@@ -38,6 +38,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.InCohortExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.InSubqueryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.IntervalExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
@@ -341,6 +342,7 @@ public final class HogQlCompiler
             case InCohortExpression _ -> true;
             case InExpression in -> containsFunctionCall(in.value()) || in.values().stream().anyMatch(HogQlCompiler::containsFunctionCall);
             case InSubqueryExpression in -> containsFunctionCall(in.value()) || containsFunctionCall(in.query());
+            case IntervalExpression interval -> containsFunctionCall(interval.value());
             case IsNullExpression isNull -> containsFunctionCall(isNull.value());
             case MemberAccessExpression memberAccess -> containsFunctionCall(memberAccess.base());
             case SubscriptExpression subscript -> containsFunctionCall(subscript.base()) || containsFunctionCall(subscript.index());
@@ -446,6 +448,7 @@ public final class HogQlCompiler
                 collectPlaceholders(in.value(), placeholders);
                 collectPlaceholders(in.query(), placeholders);
             }
+            case IntervalExpression interval -> collectPlaceholders(interval.value(), placeholders);
             case IsNullExpression isNull -> collectPlaceholders(isNull.value(), placeholders);
             case Literal _ -> {}
             case MemberAccessExpression memberAccess -> collectPlaceholders(memberAccess.base(), placeholders);
