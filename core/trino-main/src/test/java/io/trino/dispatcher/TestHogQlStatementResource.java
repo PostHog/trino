@@ -42,6 +42,7 @@ import java.util.Set;
 import java.util.stream.Stream;
 
 import static io.airlift.http.client.JsonResponseHandler.createJsonResponseHandler;
+import static io.airlift.http.client.Request.Builder.prepareDelete;
 import static io.airlift.http.client.Request.Builder.prepareGet;
 import static io.airlift.http.client.Request.Builder.preparePost;
 import static io.airlift.http.client.StaticBodyGenerator.createStaticBodyGenerator;
@@ -127,6 +128,33 @@ class TestHogQlStatementResource
     }
 
     @Test
+    public void testEmptyResultsAndCompilerDiagnostics()
+            throws Exception
+    {
+        List<QueryResults> emptyResults = runHogQlToCompletion(hogQlRequest("SELECT 1 WHERE false"));
+        assertThat(rows(emptyResults)).isEmpty();
+        assertThat(emptyResults.getLast().getWarnings()).isEmpty();
+
+        List<QueryResults> invalidResults = runHogQlToCompletion(hogQlRequest("SELECT ("));
+        assertThat(invalidResults.getLast().getError().getErrorName()).isEqualTo("HOGQL_SYNTAX_ERROR");
+    }
+
+    @Test
+    public void testQueuedQueryCanBeCancelled()
+    {
+        QueryResults queued = postQuery(hogQlRequest("SELECT nationkey FROM tpch.tiny.nation"));
+
+        StatusResponse response = client.execute(
+                prepareDelete()
+                        .setUri(queued.getNextUri())
+                        .setHeader(REQUEST_USER_HEADER, "user")
+                        .build(),
+                createStatusResponseHandler());
+
+        assertThat(response.getStatusCode()).isEqualTo(204);
+    }
+
+    @Test
     public void testEndpointRequiresJsonContentType()
     {
         StringResponse response = post(hogQlRequest("SELECT 1"), "text/plain");
@@ -198,9 +226,7 @@ class TestHogQlStatementResource
         if (json) {
             request.setHeader(CONTENT_TYPE_HEADER, APPLICATION_JSON);
         }
-        QueryResults current = client.execute(
-                request.build(),
-                createJsonResponseHandler(QUERY_RESULTS_CODEC));
+        QueryResults current = client.execute(request.build(), createJsonResponseHandler(QUERY_RESULTS_CODEC));
         results.add(current);
 
         while (current.getNextUri() != null) {
@@ -213,6 +239,18 @@ class TestHogQlStatementResource
             results.add(current);
         }
         return results.build();
+    }
+
+    private static QueryResults postQuery(String request)
+    {
+        return client.execute(
+                preparePost()
+                        .setUri(server.resolve("/v1/hogql"))
+                        .setHeader(REQUEST_USER_HEADER, "user")
+                        .setHeader(CONTENT_TYPE_HEADER, APPLICATION_JSON)
+                        .setBodyGenerator(createStaticBodyGenerator(request, UTF_8))
+                        .build(),
+                createJsonResponseHandler(QUERY_RESULTS_CODEC));
     }
 
     private static StringResponse post(String body, String contentType)
