@@ -51,7 +51,13 @@ concurrency:
 
 jobs:
   check-commit-messages:
-    if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
+    # A branch that merges upstream trinodb/master into this fork carries
+    # hundreds of upstream commits this fork neither wrote nor can rewrite, so
+    # their messages are not this fork's to enforce.
+    if: >-
+      github.event_name == 'pull_request'
+      && github.event.pull_request.user.login != 'dependabot[bot]'
+      && !contains(github.head_ref, 'upstream-merge')
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -199,7 +205,14 @@ jobs:
 
   check-commits-dispatcher:
     needs: path-filters
-    if: github.event_name == 'pull_request' && needs.path-filters.outputs.non_docs == 'true'
+    # Skipped for the same branches as check-commit-messages. The merge commit
+    # such a branch ends in is the point of the branch, not a mistake to
+    # rebase away, and dispatching one build per upstream commit would run
+    # hundreds of builds that upstream has already run.
+    if: >-
+      github.event_name == 'pull_request'
+      && needs.path-filters.outputs.non_docs == 'true'
+      && !contains(github.head_ref, 'upstream-merge')
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
