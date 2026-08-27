@@ -17,17 +17,36 @@ import io.trino.Session;
 import io.trino.execution.QueryPreparer.PreparedQuery;
 import io.trino.hogql.compiler.HogQlCompileEnvelope;
 import io.trino.hogql.compiler.HogQlCompiler;
+import io.trino.hogql.compiler.HogQlErrorCode;
+import io.trino.hogql.compiler.HogQlTypedValue;
+import io.trino.hogql.compiler.HogQlTypedValue.ArrayValue;
+import io.trino.hogql.compiler.HogQlTypedValue.BooleanValue;
+import io.trino.hogql.compiler.HogQlTypedValue.NullValue;
+import io.trino.hogql.compiler.HogQlTypedValue.NumberValue;
+import io.trino.hogql.compiler.HogQlTypedValue.ObjectValue;
+import io.trino.hogql.compiler.HogQlTypedValue.StringValue;
 import io.trino.hogql.parser.HogQlLanguageContract;
+import io.trino.sql.SqlFormatter;
 import io.trino.sql.parser.ParsingException;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.AllColumns;
+import io.trino.sql.tree.Array;
+import io.trino.sql.tree.Cast;
+import io.trino.sql.tree.FunctionCall;
+import io.trino.sql.tree.GenericLiteral;
 import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.Query;
+import io.trino.sql.tree.Row;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.stream.Stream;
 
 import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.execution.QuerySubmission.hogQl;
@@ -42,6 +61,7 @@ import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 public class TestQueryPreparer
 {
@@ -69,6 +89,75 @@ public class TestQueryPreparer
     }
 
     @Test
+    public void testHogQlTypedParametersUseThePreparedValueBoundary()
+    {
+        Map<String, HogQlTypedValue> parameters = new LinkedHashMap<>();
+        parameters.put("json_value", typedValue("json", new ObjectValue(Map.of("enabled", new BooleanValue(true), "items", new ArrayValue(List.of(new NumberValue("1"), NullValue.NULL))))));
+        parameters.put("row_value", typedValue("row(label varchar, count bigint)", new ObjectValue(Map.of("count", new NumberValue("2"), "label", new StringValue("synthetic-row")))));
+        parameters.put("map_value", typedValue("map(varchar, bigint)", new ObjectValue(Map.of("second", NullValue.NULL, "first", new NumberValue("1")))));
+        parameters.put("array_value", typedValue("array(bigint)", new ArrayValue(List.of(new NumberValue("1"), NullValue.NULL, new NumberValue("2")))));
+        parameters.put("uuid_value", typedValue("uuid", new StringValue("018f6b9d-89f4-7e8a-8f5d-4c621e5d4a33")));
+        parameters.put("timestamp_value", typedValue("timestamp(3)", new StringValue("2026-08-27 12:34:56.789")));
+        parameters.put("date_value", typedValue("date", new StringValue("2026-08-27")));
+        parameters.put("varchar_value", typedValue("varchar", new StringValue("synthetic-text")));
+        parameters.put("decimal_value", typedValue("decimal(4, 2)", new NumberValue("12.30")));
+        parameters.put("double_value", typedValue("double", new NumberValue("1.25")));
+        parameters.put("bigint_value", typedValue("bigint", new NumberValue("42")));
+        parameters.put("boolean_value", typedValue("boolean", new BooleanValue(true)));
+
+        PreparedQuery preparedQuery = HOGQL_QUERY_PREPARER.prepareQuery(
+                TEST_SESSION,
+                hogQl(envelope(
+                        "SELECT {boolean_value}, {bigint_value}, {double_value}, {decimal_value}, {varchar_value}, {date_value}, {timestamp_value}, {uuid_value}, {array_value}, {map_value}, {row_value}, {json_value}, {varchar_value}",
+                        parameters)));
+
+        assertThat(preparedQuery.getParameters()).hasSize(13);
+        assertThat(preparedQuery.getParameters())
+                .extracting(expression -> expression.getLocation())
+                .containsExactlyElementsOf(ParameterExtractor.extractParameters(preparedQuery.getStatement()).stream()
+                        .map(parameter -> parameter.getLocation())
+                        .toList());
+        assertThat(preparedQuery.getParameters().subList(0, 11)).allMatch(Cast.class::isInstance);
+        assertThat(preparedQuery.getParameters().subList(0, 11))
+                .extracting(expression -> ((Cast) expression).getType())
+                .containsExactly(
+                        SQL_PARSER.createType("boolean"),
+                        SQL_PARSER.createType("bigint"),
+                        SQL_PARSER.createType("double"),
+                        SQL_PARSER.createType("decimal(4, 2)"),
+                        SQL_PARSER.createType("varchar"),
+                        SQL_PARSER.createType("date"),
+                        SQL_PARSER.createType("timestamp(3)"),
+                        SQL_PARSER.createType("uuid"),
+                        SQL_PARSER.createType("array(bigint)"),
+                        SQL_PARSER.createType("map(varchar, bigint)"),
+                        SQL_PARSER.createType("row(label varchar, count bigint)"));
+        assertThat(((Cast) preparedQuery.getParameters().get(8)).getExpression()).isInstanceOf(Array.class);
+        assertThat(((Cast) preparedQuery.getParameters().get(9)).getExpression()).isInstanceOf(FunctionCall.class);
+        assertThat(((Cast) preparedQuery.getParameters().get(10)).getExpression()).isInstanceOf(Row.class);
+        assertThat(preparedQuery.getParameters().get(11))
+                .isInstanceOfSatisfying(GenericLiteral.class, json -> assertThat(json.getValue()).isEqualTo("{\"enabled\":true,\"items\":[1,null]}"));
+        assertThat(preparedQuery.getParameters().get(12)).isEqualTo(preparedQuery.getParameters().get(4));
+        assertThat(SqlFormatter.formatSql(preparedQuery.getStatement()))
+                .doesNotContain("synthetic-text", "synthetic-row", "018f6b9d")
+                .contains("?");
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidHogQlTypedParameters")
+    public void testHogQlTypedParameterErrorsAreStableAndRedacted(HogQlTypedValue typedValue)
+    {
+        String sensitiveValue = "sensitive-binding-value";
+
+        assertTrinoExceptionThrownBy(() -> HOGQL_QUERY_PREPARER.prepareQuery(
+                TEST_SESSION,
+                hogQl(envelope("SELECT {input}", Map.of("input", typedValue)))))
+                .hasErrorCode(HogQlErrorCode.HOGQL_BINDING_ERROR)
+                .hasMessage("line 1:8: Invalid HogQL parameter binding: input")
+                .satisfies(exception -> assertThat(exception.getMessage()).doesNotContain(sensitiveValue));
+    }
+
+    @Test
     public void testHogQlSubmissionFailsClosedWithoutCompiler()
     {
         assertTrinoExceptionThrownBy(() -> QUERY_PREPARER.prepareQuery(TEST_SESSION, hogQl(envelope("SELECT 1"))))
@@ -78,15 +167,39 @@ public class TestQueryPreparer
 
     private static HogQlCompileEnvelope envelope(String query)
     {
+        return envelope(query, Map.of());
+    }
+
+    private static HogQlCompileEnvelope envelope(String query, Map<String, HogQlTypedValue> parameters)
+    {
         return new HogQlCompileEnvelope(
                 query,
                 HogQlCompileEnvelope.PROTOCOL_VERSION,
                 HogQlLanguageContract.current().languageVersion(),
-                Map.of(),
+                parameters,
                 Map.of(),
                 Map.of(),
                 Map.of(),
                 OptionalLong.empty());
+    }
+
+    private static Stream<Arguments> invalidHogQlTypedParameters()
+    {
+        String sensitiveValue = "sensitive-binding-value";
+        return Stream.of(
+                arguments(typedValue(sensitiveValue, new StringValue(sensitiveValue))),
+                arguments(typedValue("boolean", new StringValue(sensitiveValue))),
+                arguments(typedValue("tinyint", new NumberValue("128"))),
+                arguments(typedValue("decimal(3, 1)", new NumberValue("123.4"))),
+                arguments(typedValue("uuid", new StringValue(sensitiveValue))),
+                arguments(typedValue("array(bigint)", new ArrayValue(List.of(new StringValue(sensitiveValue))))),
+                arguments(typedValue("map(bigint, varchar)", new ObjectValue(Map.of("field", new StringValue(sensitiveValue))))),
+                arguments(typedValue("row(label varchar)", new ObjectValue(Map.of("unexpected", new StringValue(sensitiveValue))))));
+    }
+
+    private static HogQlTypedValue typedValue(String type, HogQlTypedValue.Value value)
+    {
+        return new HogQlTypedValue(type, value);
     }
 
     @Test

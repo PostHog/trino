@@ -16,6 +16,8 @@ package io.trino.execution;
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Inject;
 import io.trino.Session;
+import io.trino.hogql.compiler.HogQlCompilationResult;
+import io.trino.hogql.compiler.HogQlCompileEnvelope;
 import io.trino.hogql.compiler.HogQlCompiler;
 import io.trino.spi.TrinoException;
 import io.trino.spi.resourcegroups.QueryType;
@@ -43,6 +45,7 @@ public class QueryPreparer
 {
     private final SqlParser sqlParser;
     private final Optional<HogQlCompiler> hogQlCompiler;
+    private final HogQlParameterDecoder hogQlParameterDecoder;
 
     public QueryPreparer(SqlParser sqlParser)
     {
@@ -59,6 +62,7 @@ public class QueryPreparer
     {
         this.sqlParser = requireNonNull(sqlParser, "sqlParser is null");
         this.hogQlCompiler = requireNonNull(hogQlCompiler, "hogQlCompiler is null");
+        this.hogQlParameterDecoder = new HogQlParameterDecoder(sqlParser);
     }
 
     public PreparedQuery prepareQuery(Session session, String query)
@@ -71,17 +75,25 @@ public class QueryPreparer
             throws ParsingException, TrinoException
     {
         requireNonNull(submission, "submission is null");
-        Statement wrappedStatement = switch (submission.language()) {
-            case TRINO -> sqlParser.createStatement(submission.originalText());
-            case HOGQL -> hogQlCompiler
-                    .orElseThrow(() -> new TrinoException(NOT_SUPPORTED, "HogQL query submission is disabled"))
-                    .compile(submission.hogQlEnvelope().orElseThrow())
-                    .statement();
+        return switch (submission.language()) {
+            case TRINO -> prepareQuery(session, sqlParser.createStatement(submission.originalText()));
+            case HOGQL -> {
+                HogQlCompileEnvelope envelope = submission.hogQlEnvelope().orElseThrow();
+                HogQlCompilationResult result = hogQlCompiler
+                        .orElseThrow(() -> new TrinoException(NOT_SUPPORTED, "HogQL query submission is disabled"))
+                        .compile(envelope);
+                yield prepareQuery(session, result.statement(), Optional.of(hogQlParameterDecoder.decode(result, envelope.parameters())));
+            }
         };
-        return prepareQuery(session, wrappedStatement);
     }
 
     public PreparedQuery prepareQuery(Session session, Statement wrappedStatement)
+            throws ParsingException, TrinoException
+    {
+        return prepareQuery(session, wrappedStatement, Optional.empty());
+    }
+
+    private PreparedQuery prepareQuery(Session session, Statement wrappedStatement, Optional<List<Expression>> suppliedParameters)
             throws ParsingException, TrinoException
     {
         Statement statement = wrappedStatement;
@@ -103,12 +115,18 @@ public class QueryPreparer
             }
         }
 
-        List<Expression> parameters = ImmutableList.of();
-        if (wrappedStatement instanceof Execute executeStatement) {
+        List<Expression> parameters;
+        if (suppliedParameters.isPresent()) {
+            parameters = suppliedParameters.orElseThrow();
+        }
+        else if (wrappedStatement instanceof Execute executeStatement) {
             parameters = executeStatement.getParameters();
         }
         else if (wrappedStatement instanceof ExecuteImmediate executeImmediateStatement) {
             parameters = executeImmediateStatement.getParameters();
+        }
+        else {
+            parameters = ImmutableList.of();
         }
         validateParameters(statement, parameters);
 
