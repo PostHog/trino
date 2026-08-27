@@ -24,6 +24,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
 import io.trino.hogql.parser.tree.HogQlQuery.CommonTableExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CommonTableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
+import io.trino.hogql.parser.tree.HogQlQuery.FrameBound;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
@@ -45,6 +46,11 @@ import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ValuesRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.Window;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowDefinition;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowFrame;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowReference;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowSpecification;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.AllColumns;
 import io.trino.sql.tree.ArithmeticBinaryExpression;
@@ -150,7 +156,9 @@ final class TrinoAstFactory
                 select.where().map(expression -> createExpression(expression, parameterIds)),
                 createGroupBy(select.groupBy(), parameterIds),
                 select.having().map(expression -> createExpression(expression, parameterIds)),
-                List.of(),
+                select.windows().stream()
+                        .map(window -> createWindowDefinition(window, parameterIds))
+                        .toList(),
                 createOrderBy(query, parameterIds),
                 query.offset().map(offset -> new Offset(location(offset.span()), createExpression(offset, parameterIds))),
                 query.limit().map(limit -> new Limit(location(limit.span()), createExpression(limit, parameterIds))));
@@ -306,11 +314,11 @@ final class TrinoAstFactory
                 QualifiedName.of(function.nameParts().stream()
                         .map(TrinoAstFactory::createIdentifier)
                         .toList()),
-                Optional.empty(),
+                function.window().map(window -> createWindow(window, parameterIds)),
                 function.filter().map(filter -> createExpression(filter, parameterIds)),
                 createOrderBy(function.orderBy(), parameterIds),
                 function.distinct(),
-                Optional.empty(),
+                function.nullTreatment().map(_ -> io.trino.sql.tree.FunctionCall.NullTreatment.IGNORE),
                 Optional.empty(),
                 function.arguments().stream()
                         .map(argument -> new CallArgument(
@@ -318,6 +326,72 @@ final class TrinoAstFactory
                                 Optional.empty(),
                                 createExpression(argument, parameterIds)))
                         .toList());
+    }
+
+    private static io.trino.sql.tree.WindowDefinition createWindowDefinition(
+            WindowDefinition definition,
+            Map<SourceSpan, Integer> parameterIds)
+    {
+        return new io.trino.sql.tree.WindowDefinition(
+                location(definition.span()),
+                createIdentifier(definition.name()),
+                (io.trino.sql.tree.WindowSpecification) createWindow(definition.specification(), parameterIds));
+    }
+
+    private static io.trino.sql.tree.Window createWindow(Window window, Map<SourceSpan, Integer> parameterIds)
+    {
+        return switch (window) {
+            case WindowReference reference -> new io.trino.sql.tree.WindowReference(
+                    location(reference.span()),
+                    createIdentifier(reference.name()));
+            case WindowSpecification specification -> new io.trino.sql.tree.WindowSpecification(
+                    location(specification.span()),
+                    Optional.empty(),
+                    specification.partitionBy().stream()
+                            .map(expression -> createExpression(expression, parameterIds))
+                            .toList(),
+                    createOrderBy(specification.orderBy(), parameterIds),
+                    specification.frame().map(frame -> createWindowFrame(frame, parameterIds)));
+        };
+    }
+
+    private static io.trino.sql.tree.WindowFrame createWindowFrame(
+            WindowFrame frame,
+            Map<SourceSpan, Integer> parameterIds)
+    {
+        return new io.trino.sql.tree.WindowFrame(
+                location(frame.span()),
+                switch (frame.type()) {
+                    case RANGE -> io.trino.sql.tree.WindowFrame.Type.RANGE;
+                    case ROWS -> io.trino.sql.tree.WindowFrame.Type.ROWS;
+                },
+                createFrameBound(frame.start(), parameterIds),
+                frame.end().map(bound -> createFrameBound(bound, parameterIds)),
+                List.of(),
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty(),
+                List.of(),
+                List.of());
+    }
+
+    private static io.trino.sql.tree.FrameBound createFrameBound(
+            FrameBound bound,
+            Map<SourceSpan, Integer> parameterIds)
+    {
+        io.trino.sql.tree.FrameBound.Type type = switch (bound.type()) {
+            case CURRENT_ROW -> io.trino.sql.tree.FrameBound.Type.CURRENT_ROW;
+            case FOLLOWING -> io.trino.sql.tree.FrameBound.Type.FOLLOWING;
+            case PRECEDING -> io.trino.sql.tree.FrameBound.Type.PRECEDING;
+            case UNBOUNDED_FOLLOWING -> io.trino.sql.tree.FrameBound.Type.UNBOUNDED_FOLLOWING;
+            case UNBOUNDED_PRECEDING -> io.trino.sql.tree.FrameBound.Type.UNBOUNDED_PRECEDING;
+        };
+        return bound.value()
+                .map(value -> new io.trino.sql.tree.FrameBound(
+                        location(bound.span()),
+                        type,
+                        createExpression(value, parameterIds)))
+                .orElseGet(() -> new io.trino.sql.tree.FrameBound(location(bound.span()), type));
     }
 
     private static Expression createCaseExpression(CaseExpression caseExpression, Map<SourceSpan, Integer> parameterIds)

@@ -759,6 +759,150 @@
             "testCaseIds": [
                 "TestHogQlCompiler#testLowersCtesAndDerivedTables"
             ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprWinFunction",
+            "loweringHandler": "TrinoAstFactory#createFunctionCall",
+            "parseHandler": "AstBuilder#buildWindowFunction",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprWinFunctionTarget",
+            "loweringHandler": "TrinoAstFactory#createFunctionCall",
+            "parseHandler": "AstBuilder#buildWindowFunction",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:winFrameBound",
+            "loweringHandler": "TrinoAstFactory#createFrameBound",
+            "parseHandler": "AstBuilder#buildFrameBound",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
+            ]
+        },
+        {
+            "id": "alternative:winFrameClause",
+            "loweringHandler": "TrinoAstFactory#createWindowFrame",
+            "parseHandler": "AstBuilder#buildWindowFrame",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
+            ]
+        },
+        {
+            "id": "alternative:winFrameExtend:frameBetween",
+            "loweringHandler": "TrinoAstFactory#createWindowFrame",
+            "parseHandler": "AstBuilder#buildWindowFrame",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
+            ]
+        },
+        {
+            "id": "alternative:winFrameExtend:frameStart",
+            "loweringHandler": "TrinoAstFactory#createWindowFrame",
+            "parseHandler": "AstBuilder#buildWindowFrame",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
+            ]
+        },
+        {
+            "id": "alternative:winOrderByClause",
+            "loweringHandler": "TrinoAstFactory#createWindow",
+            "parseHandler": "AstBuilder#buildWindowSpecification",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:winPartitionByClause",
+            "loweringHandler": "TrinoAstFactory#createWindow",
+            "parseHandler": "AstBuilder#buildWindowSpecification",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:windowClause",
+            "loweringHandler": "TrinoAstFactory#createWindowDefinition",
+            "parseHandler": "AstBuilder#buildWindowDefinitions",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:windowExpr",
+            "loweringHandler": "TrinoAstFactory#createWindow",
+            "parseHandler": "AstBuilder#buildWindowSpecification",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "rule:winFrameBound",
+            "loweringHandler": "TrinoAstFactory#createFrameBound",
+            "parseHandler": "AstBuilder#buildFrameBound",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
+            ]
+        },
+        {
+            "id": "rule:winFrameClause",
+            "loweringHandler": "TrinoAstFactory#createWindowFrame",
+            "parseHandler": "AstBuilder#buildWindowFrame",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
+            ]
+        },
+        {
+            "id": "rule:winFrameExtend",
+            "loweringHandler": "TrinoAstFactory#createWindowFrame",
+            "parseHandler": "AstBuilder#buildWindowFrame",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
+            ]
+        },
+        {
+            "id": "rule:winOrderByClause",
+            "loweringHandler": "TrinoAstFactory#createWindow",
+            "parseHandler": "AstBuilder#buildWindowSpecification",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "rule:winPartitionByClause",
+            "loweringHandler": "TrinoAstFactory#createWindow",
+            "parseHandler": "AstBuilder#buildWindowSpecification",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "rule:windowClause",
+            "loweringHandler": "TrinoAstFactory#createWindowDefinition",
+            "parseHandler": "AstBuilder#buildWindowDefinitions",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "rule:windowExpr",
+            "loweringHandler": "TrinoAstFactory#createWindow",
+            "parseHandler": "AstBuilder#buildWindowSpecification",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprIgnoreNulls",
+            "loweringHandler": "TrinoAstFactory#createFunctionCall",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersCanonicalWindowNullTreatmentOrder"
+            ]
         }
     ],
     "schemaVersion": 1

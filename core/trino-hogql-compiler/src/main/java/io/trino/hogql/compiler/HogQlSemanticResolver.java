@@ -67,6 +67,11 @@ import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ValuesRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.Window;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowDefinition;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowFrame;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowReference;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowSpecification;
 import io.trino.spi.Location;
 import io.trino.spi.TrinoException;
 
@@ -143,6 +148,7 @@ final class HogQlSemanticResolver
                     select.where(),
                     select.groupBy(),
                     select.having(),
+                    select.windows(),
                     query.orderBy(),
                     query.limit(),
                     query.offset(),
@@ -163,6 +169,7 @@ final class HogQlSemanticResolver
                 query.where().map(this::resolveExpression),
                 query.groupBy().stream().map(this::resolveExpression).toList(),
                 query.having().map(this::resolveExpression),
+                query.windows().stream().map(this::resolveWindowDefinition).toList(),
                 resolveSortItems(query.orderBy()),
                 query.limit().map(this::resolveExpression),
                 query.offset().map(this::resolveExpression),
@@ -500,6 +507,8 @@ final class HogQlSemanticResolver
                     function.distinct(),
                     resolveSortItems(function.orderBy()),
                     function.filter().map(this::resolveExpression),
+                    function.nullTreatment(),
+                    function.window().map(this::resolveWindow),
                     function.span());
             case InExpression in -> new InExpression(
                     resolveExpression(in.value()),
@@ -517,6 +526,38 @@ final class HogQlSemanticResolver
             case TupleExpression tuple -> new TupleExpression(tuple.values().stream().map(this::resolveExpression).toList(), tuple.span());
             case UnaryExpression unary -> new UnaryExpression(unary.operator(), resolveExpression(unary.operand()), unary.span());
         };
+    }
+
+    private WindowDefinition resolveWindowDefinition(WindowDefinition definition)
+    {
+        return new WindowDefinition(definition.name(), (WindowSpecification) resolveWindow(definition.specification()), definition.span());
+    }
+
+    private Window resolveWindow(Window window)
+    {
+        return switch (window) {
+            case WindowReference reference -> reference;
+            case WindowSpecification specification -> new WindowSpecification(
+                    specification.partitionBy().stream().map(this::resolveExpression).toList(),
+                    resolveSortItems(specification.orderBy()),
+                    specification.frame().map(this::resolveWindowFrame),
+                    specification.span());
+        };
+    }
+
+    private WindowFrame resolveWindowFrame(WindowFrame frame)
+    {
+        return new WindowFrame(
+                frame.type(),
+                new HogQlQuery.FrameBound(
+                        frame.start().type(),
+                        frame.start().value().map(this::resolveExpression),
+                        frame.start().span()),
+                frame.end().map(bound -> new HogQlQuery.FrameBound(
+                        bound.type(),
+                        bound.value().map(this::resolveExpression),
+                        bound.span())),
+                frame.span());
     }
 
     private Expression resolveColumn(ColumnReference reference)

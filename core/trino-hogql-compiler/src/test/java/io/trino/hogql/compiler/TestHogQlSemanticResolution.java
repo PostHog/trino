@@ -134,6 +134,23 @@ public class TestHogQlSemanticResolution
     }
 
     @Test
+    public void testResolvesLogicalFieldsInsideNamedWindows()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+
+        HogQlCompilationResult result = compiler.compile(
+                envelope(
+                        "SELECT count(*) OVER recent FROM events " +
+                                "WINDOW recent AS (PARTITION BY event ORDER BY personId ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)",
+                        OptionalLong.of(7)),
+                Optional.of(context));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT count(*) OVER recent FROM analytics.\"Hog Data\".\"raw-events\" " +
+                        "WINDOW recent AS (PARTITION BY event_name ORDER BY \"Person ID\" ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"));
+    }
+
+    @Test
     public void testCatalogIndependentAndPhysicalQueriesDoNotFetchSemanticMetadata()
     {
         AtomicInteger pins = new AtomicInteger();

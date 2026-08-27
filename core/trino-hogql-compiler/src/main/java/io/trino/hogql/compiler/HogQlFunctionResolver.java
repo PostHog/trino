@@ -53,6 +53,11 @@ import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ValuesRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.Window;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowDefinition;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowFrame;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowReference;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowSpecification;
 import io.trino.spi.Location;
 import io.trino.spi.TrinoException;
 
@@ -101,6 +106,7 @@ final class HogQlFunctionResolver
                     select.where().map(this::resolveExpression),
                     select.groupBy().stream().map(this::resolveExpression).toList(),
                     select.having().map(this::resolveExpression),
+                    select.windows().stream().map(this::resolveWindowDefinition).toList(),
                     select.span());
             case SetOperation set -> new SetOperation(
                     set.type(),
@@ -186,7 +192,7 @@ final class HogQlFunctionResolver
                     caseExpression.span());
             case CastExpression cast -> new CastExpression(resolveExpression(cast.value()), cast.type(), cast.safe(), cast.span());
             case ColumnReference reference -> reference;
-            case FunctionCall function -> resolveFunction(function, false);
+            case FunctionCall function -> resolveFunction(function, function.window().isPresent());
             case InExpression in -> new InExpression(
                     resolveExpression(in.value()),
                     in.values().stream().map(this::resolveExpression).toList(),
@@ -244,7 +250,41 @@ final class HogQlFunctionResolver
                 function.distinct(),
                 resolveSortItems(function.orderBy()),
                 function.filter().map(this::resolveExpression),
+                function.nullTreatment(),
+                function.window().map(this::resolveWindow),
                 function.span());
+    }
+
+    private WindowDefinition resolveWindowDefinition(WindowDefinition definition)
+    {
+        return new WindowDefinition(definition.name(), (WindowSpecification) resolveWindow(definition.specification()), definition.span());
+    }
+
+    private Window resolveWindow(Window window)
+    {
+        return switch (window) {
+            case WindowReference reference -> reference;
+            case WindowSpecification specification -> new WindowSpecification(
+                    specification.partitionBy().stream().map(this::resolveExpression).toList(),
+                    resolveSortItems(specification.orderBy()),
+                    specification.frame().map(this::resolveWindowFrame),
+                    specification.span());
+        };
+    }
+
+    private WindowFrame resolveWindowFrame(WindowFrame frame)
+    {
+        return new WindowFrame(
+                frame.type(),
+                new HogQlQuery.FrameBound(
+                        frame.start().type(),
+                        frame.start().value().map(this::resolveExpression),
+                        frame.start().span()),
+                frame.end().map(bound -> new HogQlQuery.FrameBound(
+                        bound.type(),
+                        bound.value().map(this::resolveExpression),
+                        bound.span())),
+                frame.span());
     }
 
     private static boolean matchesArity(List<FunctionSignature> signatures, int arity)

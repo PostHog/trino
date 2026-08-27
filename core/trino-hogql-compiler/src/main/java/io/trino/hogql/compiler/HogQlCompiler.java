@@ -46,6 +46,10 @@ import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ValuesRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.Window;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowDefinition;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowReference;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowSpecification;
 import io.trino.spi.Location;
 import io.trino.spi.TrinoException;
 import io.trino.sql.tree.Statement;
@@ -186,6 +190,7 @@ public final class HogQlCompiler
                 select.where().ifPresent(expression -> collectPlaceholders(expression, placeholders));
                 select.groupBy().forEach(expression -> collectPlaceholders(expression, placeholders));
                 select.having().ifPresent(expression -> collectPlaceholders(expression, placeholders));
+                select.windows().forEach(window -> collectPlaceholders(window.specification(), placeholders));
             }
             case SetOperation setOperation -> {
                 collectPlaceholders(setOperation.left(), placeholders);
@@ -252,7 +257,8 @@ public final class HogQlCompiler
                             select.from().map(HogQlCompiler::containsFunctionCall).orElse(false) ||
                             select.where().map(HogQlCompiler::containsFunctionCall).orElse(false) ||
                             select.groupBy().stream().anyMatch(HogQlCompiler::containsFunctionCall) ||
-                            select.having().map(HogQlCompiler::containsFunctionCall).orElse(false);
+                            select.having().map(HogQlCompiler::containsFunctionCall).orElse(false) ||
+                            select.windows().stream().map(WindowDefinition::specification).anyMatch(HogQlCompiler::containsFunctionCall);
                     case SetOperation set -> containsFunctionCall(set.left()) || containsFunctionCall(set.right());
                 } ||
                 query.orderBy().stream().anyMatch(sortItem -> containsFunctionCall(sortItem.expression())) ||
@@ -297,6 +303,22 @@ public final class HogQlCompiler
             case TupleExpression tuple -> tuple.values().stream().anyMatch(HogQlCompiler::containsFunctionCall);
             case UnaryExpression unary -> containsFunctionCall(unary.operand());
         };
+    }
+
+    private static boolean containsFunctionCall(Window window)
+    {
+        return switch (window) {
+            case WindowReference _ -> false;
+            case WindowSpecification specification -> specification.partitionBy().stream().anyMatch(HogQlCompiler::containsFunctionCall) ||
+                    specification.orderBy().stream().anyMatch(sortItem -> containsFunctionCall(sortItem.expression())) ||
+                    specification.frame().map(frame -> containsFunctionCall(frame.start().value()) ||
+                            frame.end().map(bound -> containsFunctionCall(bound.value())).orElse(false)).orElse(false);
+        };
+    }
+
+    private static boolean containsFunctionCall(Optional<Expression> expression)
+    {
+        return expression.map(HogQlCompiler::containsFunctionCall).orElse(false);
     }
 
     private record ResolvedQuery(HogQlQuery query, OptionalLong catalogGeneration)
@@ -359,6 +381,7 @@ public final class HogQlCompiler
                 function.arguments().forEach(argument -> collectPlaceholders(argument, placeholders));
                 function.orderBy().forEach(sortItem -> collectPlaceholders(sortItem.expression(), placeholders));
                 function.filter().ifPresent(filter -> collectPlaceholders(filter, placeholders));
+                function.window().ifPresent(window -> collectPlaceholders(window, placeholders));
             }
             case InExpression in -> {
                 collectPlaceholders(in.value(), placeholders);
@@ -369,6 +392,21 @@ public final class HogQlCompiler
             case Placeholder placeholder -> placeholders.add(placeholder);
             case TupleExpression tuple -> tuple.values().forEach(value -> collectPlaceholders(value, placeholders));
             case UnaryExpression unary -> collectPlaceholders(unary.operand(), placeholders);
+        }
+    }
+
+    private static void collectPlaceholders(Window window, List<Placeholder> placeholders)
+    {
+        switch (window) {
+            case WindowReference _ -> {}
+            case WindowSpecification specification -> {
+                specification.partitionBy().forEach(expression -> collectPlaceholders(expression, placeholders));
+                specification.orderBy().forEach(sortItem -> collectPlaceholders(sortItem.expression(), placeholders));
+                specification.frame().ifPresent(frame -> {
+                    frame.start().value().ifPresent(value -> collectPlaceholders(value, placeholders));
+                    frame.end().flatMap(HogQlQuery.FrameBound::value).ifPresent(value -> collectPlaceholders(value, placeholders));
+                });
+            }
         }
     }
 

@@ -449,12 +449,12 @@
         {
             "id": "alternative:columnExprValue:ColumnExprIgnoreNulls",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createFunctionCall",
+            "parseHandler": "AstBuilder#buildExpression",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlWindowCompiler#testLowersCanonicalWindowNullTreatmentOrder"
             ]
         },
         {
@@ -816,23 +816,23 @@
         {
             "id": "alternative:columnExprValue:ColumnExprWinFunction",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createFunctionCall",
+            "parseHandler": "AstBuilder#buildWindowFunction",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
             ]
         },
         {
             "id": "alternative:columnExprValue:ColumnExprWinFunctionTarget",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createFunctionCall",
+            "parseHandler": "AstBuilder#buildWindowFunction",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
             ]
         },
         {
@@ -2677,89 +2677,89 @@
         {
             "id": "alternative:winFrameBound",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createFrameBound",
+            "parseHandler": "AstBuilder#buildFrameBound",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
             ]
         },
         {
             "id": "alternative:winFrameClause",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWindowFrame",
+            "parseHandler": "AstBuilder#buildWindowFrame",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
             ]
         },
         {
             "id": "alternative:winFrameExtend:frameBetween",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWindowFrame",
+            "parseHandler": "AstBuilder#buildWindowFrame",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
             ]
         },
         {
             "id": "alternative:winFrameExtend:frameStart",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWindowFrame",
+            "parseHandler": "AstBuilder#buildWindowFrame",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
             ]
         },
         {
             "id": "alternative:winOrderByClause",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWindow",
+            "parseHandler": "AstBuilder#buildWindowSpecification",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
             ]
         },
         {
             "id": "alternative:winPartitionByClause",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWindow",
+            "parseHandler": "AstBuilder#buildWindowSpecification",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
             ]
         },
         {
             "id": "alternative:windowClause",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWindowDefinition",
+            "parseHandler": "AstBuilder#buildWindowDefinitions",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
             ]
         },
         {
             "id": "alternative:windowExpr",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWindow",
+            "parseHandler": "AstBuilder#buildWindowSpecification",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
             ]
         },
         {
@@ -4010,78 +4010,78 @@
         {
             "id": "rule:winFrameBound",
             "kind": "parserRule",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createFrameBound",
+            "parseHandler": "AstBuilder#buildFrameBound",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
             ]
         },
         {
             "id": "rule:winFrameClause",
             "kind": "parserRule",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWindowFrame",
+            "parseHandler": "AstBuilder#buildWindowFrame",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
             ]
         },
         {
             "id": "rule:winFrameExtend",
             "kind": "parserRule",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWindowFrame",
+            "parseHandler": "AstBuilder#buildWindowFrame",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
             ]
         },
         {
             "id": "rule:winOrderByClause",
             "kind": "parserRule",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWindow",
+            "parseHandler": "AstBuilder#buildWindowSpecification",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
             ]
         },
         {
             "id": "rule:winPartitionByClause",
             "kind": "parserRule",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWindow",
+            "parseHandler": "AstBuilder#buildWindowSpecification",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
             ]
         },
         {
             "id": "rule:windowClause",
             "kind": "parserRule",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWindowDefinition",
+            "parseHandler": "AstBuilder#buildWindowDefinitions",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
             ]
         },
         {
             "id": "rule:windowExpr",
             "kind": "parserRule",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWindow",
+            "parseHandler": "AstBuilder#buildWindowSpecification",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
             ]
         },
         {

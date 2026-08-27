@@ -29,6 +29,9 @@ import io.trino.hogql.parser.tree.HogQlQuery.CommonTableExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CommonTableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.Expression;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
+import io.trino.hogql.parser.tree.HogQlQuery.FrameBound;
+import io.trino.hogql.parser.tree.HogQlQuery.FrameBoundType;
+import io.trino.hogql.parser.tree.HogQlQuery.FrameType;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
@@ -40,6 +43,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinType;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinUsing;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.NullPlacement;
+import io.trino.hogql.parser.tree.HogQlQuery.NullTreatment;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
@@ -55,6 +59,11 @@ import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ValuesRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.Window;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowDefinition;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowFrame;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowReference;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowSpecification;
 import io.trino.hogql.parser.tree.HogQlSyntaxTree;
 import org.antlr.v4.runtime.ANTLRErrorListener;
 import org.antlr.v4.runtime.BailErrorStrategy;
@@ -722,6 +731,7 @@ public final class HogQlParser
                 Optional<Expression> having = Optional.ofNullable(select.havingClause())
                         .map(HogQLParser.HavingClauseContext::columnExpr)
                         .map(this::buildExpression);
+                List<WindowDefinition> windows = buildWindowDefinitions(select.windowClause());
                 List<SortItem> orderBy = buildOrderBy(selectedQuery.orderBy() != null ? selectedQuery.orderBy() : select.orderByClause());
                 Pagination pagination = mergePagination(
                         buildPagination(select.limitAndOffsetClause(), select.offsetOnlyClause()),
@@ -735,6 +745,7 @@ public final class HogQlParser
                         where,
                         groupBy,
                         having,
+                        windows,
                         orderBy,
                         pagination.limit(),
                         pagination.offset(),
@@ -815,7 +826,6 @@ public final class HogQlParser
             clauses.add(context.prewhereClause());
             clauses.addAll(context.sampleClause());
             clauses.add(context.qualifyClause());
-            clauses.add(context.windowClause());
             clauses.add(context.limitByClause());
             clauses.add(context.settingsClause());
             Optional<ParserRuleContext> firstClause = clauses.stream()
@@ -1080,8 +1090,44 @@ public final class HogQlParser
                         sourceSpan(between.NOT() == null ? between.BETWEEN().getSymbol() : between.NOT().getSymbol(), between.getStop()),
                         sourceSpan(between));
             }
+            if (context instanceof HogQLParser.ColumnExprIgnoreNullsContext ignoreNulls) {
+                Expression expression = buildExpression(ignoreNulls.columnExprValue());
+                if (!(expression instanceof FunctionCall function) || function.window().isEmpty()) {
+                    throw unsupported(ignoreNulls, "IGNORE NULLS outside window function");
+                }
+                if (function.nullTreatment().isPresent()) {
+                    throw unsupported(ignoreNulls, "duplicate window null treatment");
+                }
+                return new FunctionCall(
+                        function.nameParts(),
+                        function.arguments(),
+                        function.distinct(),
+                        function.orderBy(),
+                        function.filter(),
+                        Optional.of(NullTreatment.IGNORE),
+                        function.window(),
+                        sourceSpan(ignoreNulls));
+            }
             if (context instanceof HogQLParser.ColumnExprFunctionContext function) {
                 return buildFunction(function);
+            }
+            if (context instanceof HogQLParser.ColumnExprWinFunctionContext function) {
+                return buildWindowFunction(
+                        function,
+                        function.identifier(),
+                        function.columnExprs,
+                        function.columnArgList,
+                        function.filterExpr,
+                        buildWindowSpecification(function.windowExpr()));
+            }
+            if (context instanceof HogQLParser.ColumnExprWinFunctionTargetContext function) {
+                return buildWindowFunction(
+                        function,
+                        function.identifier(0),
+                        function.columnExprs,
+                        function.columnArgList,
+                        function.filterExpr,
+                        new WindowReference(buildIdentifier(function.identifier(1)), sourceSpan(function.identifier(1))));
             }
             throw unsupported(context, "expression " + context.getClass().getSimpleName());
         }
@@ -1159,6 +1205,94 @@ public final class HogQlParser
                     orderBy,
                     filter,
                     sourceSpan(context));
+        }
+
+        private FunctionCall buildWindowFunction(
+                ParserRuleContext context,
+                HogQLParser.IdentifierContext name,
+                HogQLParser.ColumnExprListContext arguments,
+                HogQLParser.ColumnExprListContext parametricArguments,
+                HogQLParser.ColumnExprContext filter,
+                Window window)
+        {
+            if (parametricArguments != null) {
+                throw unsupported(context, "parametric window function");
+            }
+            List<Expression> functionArguments;
+            if (arguments == null) {
+                functionArguments = List.of();
+            }
+            else if (arguments.columnExpr().size() == 1 && isUnqualifiedStar(arguments.columnExpr().getFirst())) {
+                functionArguments = List.of();
+            }
+            else {
+                functionArguments = buildExpressions(arguments);
+            }
+            Optional<Expression> functionFilter = Optional.ofNullable(filter).map(this::buildExpression);
+            return new FunctionCall(
+                    List.of(buildIdentifier(name)),
+                    functionArguments,
+                    false,
+                    List.of(),
+                    functionFilter,
+                    Optional.empty(),
+                    Optional.of(window),
+                    sourceSpan(context));
+        }
+
+        private List<WindowDefinition> buildWindowDefinitions(HogQLParser.WindowClauseContext context)
+        {
+            if (context == null) {
+                return List.of();
+            }
+            List<WindowDefinition> definitions = new ArrayList<>();
+            for (int index = 0; index < context.identifier().size(); index++) {
+                Identifier name = buildIdentifier(context.identifier(index));
+                WindowSpecification specification = buildWindowSpecification(context.windowExpr(index));
+                definitions.add(new WindowDefinition(name, specification, enclosingSpan(name.span(), specification.span())));
+            }
+            return List.copyOf(definitions);
+        }
+
+        private WindowSpecification buildWindowSpecification(HogQLParser.WindowExprContext context)
+        {
+            List<Expression> partitionBy = context.winPartitionByClause() == null
+                    ? List.of()
+                    : buildExpressions(context.winPartitionByClause().columnExprList());
+            List<SortItem> orderBy = context.winOrderByClause() == null
+                    ? List.of()
+                    : buildSortItems(context.winOrderByClause().orderExprList());
+            Optional<WindowFrame> frame = Optional.ofNullable(context.winFrameClause()).map(this::buildWindowFrame);
+            return new WindowSpecification(partitionBy, orderBy, frame, sourceSpan(context));
+        }
+
+        private WindowFrame buildWindowFrame(HogQLParser.WinFrameClauseContext context)
+        {
+            FrameType type = context.ROWS() != null ? FrameType.ROWS : FrameType.RANGE;
+            if (context.winFrameExtend() instanceof HogQLParser.FrameStartContext start) {
+                return new WindowFrame(type, buildFrameBound(start.winFrameBound()), Optional.empty(), sourceSpan(context));
+            }
+            HogQLParser.FrameBetweenContext between = (HogQLParser.FrameBetweenContext) context.winFrameExtend();
+            return new WindowFrame(
+                    type,
+                    buildFrameBound(between.winFrameBound(0)),
+                    Optional.of(buildFrameBound(between.winFrameBound(1))),
+                    sourceSpan(context));
+        }
+
+        private FrameBound buildFrameBound(HogQLParser.WinFrameBoundContext context)
+        {
+            if (context.CURRENT() != null) {
+                return new FrameBound(FrameBoundType.CURRENT_ROW, Optional.empty(), sourceSpan(context));
+            }
+            if (context.UNBOUNDED() != null) {
+                FrameBoundType type = context.PRECEDING() != null
+                        ? FrameBoundType.UNBOUNDED_PRECEDING
+                        : FrameBoundType.UNBOUNDED_FOLLOWING;
+                return new FrameBound(type, Optional.empty(), sourceSpan(context));
+            }
+            FrameBoundType type = context.PRECEDING() != null ? FrameBoundType.PRECEDING : FrameBoundType.FOLLOWING;
+            return new FrameBound(type, Optional.of(buildExpression(context.columnExpr())), sourceSpan(context));
         }
 
         private List<Expression> buildFunctionArguments(HogQLParser.ColumnExprFunctionContext context)

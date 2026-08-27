@@ -137,6 +137,17 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testMapsWindowFunctionsAndPreservesWindowSpecifications()
+    {
+        HogQlQuery query = resolve(
+                "SELECT hogRank(value) OVER (PARTITION BY team_id ORDER BY timestamp ROWS CURRENT ROW)",
+                function("hogRank", FunctionKind.WINDOW, FunctionImplementation.STOCK, List.of("analytics", "rank_value"), signature(1), false, false, false, true));
+
+        assertThat(TrinoAstFactory.createStatement(query, Map.of())).isEqualTo(sqlParser.createStatement(
+                "SELECT analytics.rank_value(value) OVER (PARTITION BY team_id ORDER BY timestamp ROWS CURRENT ROW)"));
+    }
+
+    @Test
     public void testRejectsCallsOutsideEveryDeclaredArity()
     {
         FunctionCapabilityDefinition function = function(
@@ -182,6 +193,10 @@ public class TestHogQlFunctionResolver
                         "SELECT windowOnly(value)",
                         function("windowOnly", FunctionKind.WINDOW, FunctionImplementation.STOCK, List.of("window_only"), signature(1), false, false, false, true),
                         "HogQL window function windowOnly requires an OVER clause"),
+                Arguments.of(
+                        "SELECT aggregate(value) OVER ()",
+                        function("aggregate", FunctionKind.AGGREGATE, FunctionImplementation.STOCK, List.of("aggregate"), signature(1), false, false, false, false),
+                        "HogQL function aggregate does not support OVER"),
                 Arguments.of(
                         "SELECT tableOnly(value)",
                         function("tableOnly", FunctionKind.TABLE, FunctionImplementation.STOCK, List.of("table_only"), signature(1), false, false, false, false),

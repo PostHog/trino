@@ -56,7 +56,6 @@ public class TestHogQlParser
             "SELECT * FROM first ASOF JOIN second ON first.id = second.id",
             "SELECT * FROM first POSITIONAL JOIN second",
             "SELECT * FROM first, second",
-            "SELECT count(*) OVER ()",
             "SELECT function(1)(value)",
             "DROP TABLE events",
             "SELECT 1; SELECT 2",

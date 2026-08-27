@@ -44,12 +44,29 @@ public record HogQlQuery(
             Optional<Expression> where,
             List<Expression> groupBy,
             Optional<Expression> having,
+            List<WindowDefinition> windows,
             List<SortItem> orderBy,
             Optional<Expression> limit,
             Optional<Expression> offset,
             SourceSpan span)
     {
-        this(with, new SelectQueryBody(distinct, projections, from, where, groupBy, having, span), orderBy, limit, offset, span);
+        this(with, new SelectQueryBody(distinct, projections, from, where, groupBy, having, windows, span), orderBy, limit, offset, span);
+    }
+
+    public HogQlQuery(
+            List<CommonTableExpression> with,
+            boolean distinct,
+            List<Projection> projections,
+            Optional<Relation> from,
+            Optional<Expression> where,
+            List<Expression> groupBy,
+            Optional<Expression> having,
+            List<SortItem> orderBy,
+            Optional<Expression> limit,
+            Optional<Expression> offset,
+            SourceSpan span)
+    {
+        this(with, distinct, projections, from, where, groupBy, having, List.of(), orderBy, limit, offset, span);
     }
 
     public boolean distinct()
@@ -82,6 +99,11 @@ public record HogQlQuery(
         return selectBody().having();
     }
 
+    public List<WindowDefinition> windows()
+    {
+        return selectBody().windows();
+    }
+
     private SelectQueryBody selectBody()
     {
         if (body instanceof SelectQueryBody select) {
@@ -103,6 +125,7 @@ public record HogQlQuery(
             Optional<Expression> where,
             List<Expression> groupBy,
             Optional<Expression> having,
+            List<WindowDefinition> windows,
             SourceSpan span)
             implements QueryBody
     {
@@ -113,7 +136,20 @@ public record HogQlQuery(
             where = requireNonNull(where, "where is null");
             groupBy = List.copyOf(requireNonNull(groupBy, "groupBy is null"));
             having = requireNonNull(having, "having is null");
+            windows = List.copyOf(requireNonNull(windows, "windows is null"));
             span = requireNonNull(span, "span is null");
+        }
+
+        public SelectQueryBody(
+                boolean distinct,
+                List<Projection> projections,
+                Optional<Relation> from,
+                Optional<Expression> where,
+                List<Expression> groupBy,
+                Optional<Expression> having,
+                SourceSpan span)
+        {
+            this(distinct, projections, from, where, groupBy, having, List.of(), span);
         }
     }
 
@@ -356,6 +392,8 @@ public record HogQlQuery(
             boolean distinct,
             List<SortItem> orderBy,
             Optional<Expression> filter,
+            Optional<NullTreatment> nullTreatment,
+            Optional<Window> window,
             SourceSpan span)
             implements Expression
     {
@@ -368,7 +406,20 @@ public record HogQlQuery(
             arguments = List.copyOf(requireNonNull(arguments, "arguments is null"));
             orderBy = List.copyOf(requireNonNull(orderBy, "orderBy is null"));
             filter = requireNonNull(filter, "filter is null");
+            nullTreatment = requireNonNull(nullTreatment, "nullTreatment is null");
+            window = requireNonNull(window, "window is null");
             span = requireNonNull(span, "span is null");
+        }
+
+        public FunctionCall(
+                List<Identifier> nameParts,
+                List<Expression> arguments,
+                boolean distinct,
+                List<SortItem> orderBy,
+                Optional<Expression> filter,
+                SourceSpan span)
+        {
+            this(nameParts, arguments, distinct, orderBy, filter, Optional.empty(), Optional.empty(), span);
         }
 
         public FunctionCall(
@@ -379,13 +430,100 @@ public record HogQlQuery(
                 Optional<Expression> filter,
                 SourceSpan span)
         {
-            this(List.of(name), arguments, distinct, orderBy, filter, span);
+            this(List.of(name), arguments, distinct, orderBy, filter, Optional.empty(), Optional.empty(), span);
         }
 
         public Identifier name()
         {
             return nameParts.getLast();
         }
+    }
+
+    public enum NullTreatment
+    {
+        IGNORE
+    }
+
+    public record WindowDefinition(Identifier name, WindowSpecification specification, SourceSpan span)
+    {
+        public WindowDefinition
+        {
+            name = requireNonNull(name, "name is null");
+            specification = requireNonNull(specification, "specification is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public sealed interface Window
+            permits WindowReference, WindowSpecification
+    {
+        SourceSpan span();
+    }
+
+    public record WindowReference(Identifier name, SourceSpan span)
+            implements Window
+    {
+        public WindowReference
+        {
+            name = requireNonNull(name, "name is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record WindowSpecification(
+            List<Expression> partitionBy,
+            List<SortItem> orderBy,
+            Optional<WindowFrame> frame,
+            SourceSpan span)
+            implements Window
+    {
+        public WindowSpecification
+        {
+            partitionBy = List.copyOf(requireNonNull(partitionBy, "partitionBy is null"));
+            orderBy = List.copyOf(requireNonNull(orderBy, "orderBy is null"));
+            frame = requireNonNull(frame, "frame is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record WindowFrame(FrameType type, FrameBound start, Optional<FrameBound> end, SourceSpan span)
+    {
+        public WindowFrame
+        {
+            type = requireNonNull(type, "type is null");
+            start = requireNonNull(start, "start is null");
+            end = requireNonNull(end, "end is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public enum FrameType
+    {
+        RANGE,
+        ROWS,
+    }
+
+    public record FrameBound(FrameBoundType type, Optional<Expression> value, SourceSpan span)
+    {
+        public FrameBound
+        {
+            type = requireNonNull(type, "type is null");
+            value = requireNonNull(value, "value is null");
+            span = requireNonNull(span, "span is null");
+            boolean valueRequired = type == FrameBoundType.PRECEDING || type == FrameBoundType.FOLLOWING;
+            if (value.isPresent() != valueRequired) {
+                throw new IllegalArgumentException("window frame bound value does not match bound type");
+            }
+        }
+    }
+
+    public enum FrameBoundType
+    {
+        CURRENT_ROW,
+        FOLLOWING,
+        PRECEDING,
+        UNBOUNDED_FOLLOWING,
+        UNBOUNDED_PRECEDING,
     }
 
     public enum UnaryOperator
