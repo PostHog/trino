@@ -15,9 +15,13 @@ package io.trino.hogql.compiler;
 
 import io.trino.hogql.parser.HogQlParser;
 import io.trino.hogql.parser.HogQlParsingException;
-import io.trino.sql.parser.ParsingException;
+import io.trino.spi.Location;
+import io.trino.spi.TrinoException;
 import io.trino.sql.tree.Statement;
 
+import java.util.Optional;
+
+import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_SYNTAX_ERROR;
 import static java.util.Objects.requireNonNull;
 
 public final class HogQlCompiler
@@ -40,11 +44,11 @@ public final class HogQlCompiler
             return TrinoAstFactory.createStatement(parser.parseStatement(hogql));
         }
         catch (HogQlParsingException exception) {
-            throw new ParsingException(
+            throw new TrinoException(
+                    HOGQL_SYNTAX_ERROR,
+                    Optional.of(new Location(exception.getLineNumber(), exception.getColumnNumber())),
                     exception.getErrorMessage(),
-                    null,
-                    exception.getLineNumber(),
-                    exception.getColumnNumber());
+                    exception);
         }
     }
 }

@@ -13,8 +13,9 @@
  */
 package io.trino.hogql.compiler;
 
+import io.trino.spi.Location;
+import io.trino.spi.TrinoException;
 import io.trino.sql.SqlFormatter;
-import io.trino.sql.parser.ParsingException;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.AllColumns;
 import io.trino.sql.tree.Identifier;
@@ -35,7 +36,7 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 
 public class TestHogQlCompiler
 {
@@ -161,10 +162,14 @@ public class TestHogQlCompiler
     }
 
     @Test
-    public void testReportsParsingFailureAsTrinoSyntaxError()
+    public void testReportsSourceLocatedHogQlSyntaxError()
     {
-        assertThatThrownBy(() -> compiler.compile("SELECT 1\nGROUP BY 1"))
-                .isInstanceOf(ParsingException.class)
-                .hasMessageStartingWith("line 2:1:");
+        TrinoException exception = catchThrowableOfType(
+                TrinoException.class,
+                () -> compiler.compile("SELECT 1\nGROUP BY 1"));
+
+        assertThat(exception.getErrorCode()).isEqualTo(HogQlErrorCode.HOGQL_SYNTAX_ERROR.toErrorCode());
+        assertThat(exception.getLocation()).contains(new Location(2, 1));
+        assertThat(exception).hasMessageStartingWith("line 2:1:");
     }
 }
