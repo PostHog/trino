@@ -23,6 +23,7 @@ import io.airlift.http.client.jetty.JettyHttpClient;
 import io.airlift.json.JsonCodec;
 import io.airlift.json.JsonCodecFactory;
 import io.airlift.json.JsonMapperProvider;
+import io.trino.client.Column;
 import io.trino.client.QueryDataJacksonModule;
 import io.trino.client.QueryResults;
 import io.trino.client.ResultRowsDecoder;
@@ -180,6 +181,55 @@ class TestHogQlStatementResource
 
         List<QueryResults> sqlResults = runToCompletion("/v1/statement", "SELECT 2", false);
         assertThat(rows(sqlResults)).containsExactly(ImmutableList.of(2));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("differentialQueries")
+    public void testHogQlExecutionMatchesTrinoSql(String name, String hogql, String trinoSql)
+            throws Exception
+    {
+        List<QueryResults> hogqlResults = runHogQlToCompletion(hogQlRequest(hogql));
+        List<QueryResults> trinoResults = runToCompletion("/v1/statement", trinoSql, false);
+
+        assertThat(hogqlResults.getLast().getError()).describedAs("HogQL result for %s", name).isNull();
+        assertThat(trinoResults.getLast().getError()).describedAs("Trino SQL result for %s", name).isNull();
+        assertThat(resultColumns(hogqlResults)).isEqualTo(resultColumns(trinoResults));
+        assertThat(rows(hogqlResults)).isEqualTo(rows(trinoResults));
+    }
+
+    private static Stream<Arguments> differentialQueries()
+    {
+        return Stream.of(
+                Arguments.of(
+                        "nulls, cases, and nested casts",
+                        "SELECT CAST(NULL AS Nullable(Int32)) AS value, CASE WHEN NULL IS NULL THEN 'yes' ELSE 'no' END AS marker",
+                        "SELECT CAST(NULL AS integer) AS value, CASE WHEN NULL IS NULL THEN 'yes' ELSE 'no' END AS marker"),
+                Arguments.of(
+                        "joins, grouping, and ordering",
+                        "SELECT r.regionkey, count(n.nationkey) AS nations " +
+                                "FROM tpch.tiny.region r LEFT JOIN tpch.tiny.nation n ON r.regionkey = n.regionkey " +
+                                "GROUP BY r.regionkey ORDER BY r.regionkey",
+                        "SELECT r.regionkey, count(n.nationkey) AS nations " +
+                                "FROM tpch.tiny.region r LEFT JOIN tpch.tiny.nation n ON r.regionkey = n.regionkey " +
+                                "GROUP BY r.regionkey ORDER BY r.regionkey"),
+                Arguments.of(
+                        "window frames",
+                        "SELECT nationkey, sum(nationkey) OVER (ORDER BY nationkey ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS running " +
+                                "FROM tpch.tiny.nation WHERE nationkey < 5 ORDER BY nationkey",
+                        "SELECT nationkey, sum(nationkey) OVER (ORDER BY nationkey ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS running " +
+                                "FROM tpch.tiny.nation WHERE nationkey < 5 ORDER BY nationkey"),
+                Arguments.of(
+                        "values and set operations",
+                        "SELECT value FROM (VALUES (2), (1), (2)) AS numbers(value) UNION SELECT 3 ORDER BY value",
+                        "SELECT value FROM (VALUES (2), (1), (2)) AS numbers(value) UNION SELECT 3 ORDER BY value"),
+                Arguments.of(
+                        "arrays, maps, and rows",
+                        "SELECT ARRAY[1, 2, 3][2] AS array_value, MAP(ARRAY['k'], ARRAY[7])['k'] AS map_value, (11, 'x').1 AS row_value",
+                        "SELECT ARRAY[1, 2, 3][2] AS array_value, MAP(ARRAY['k'], ARRAY[7])['k'] AS map_value, ROW(11, 'x')[1] AS row_value"),
+                Arguments.of(
+                        "timestamp precision",
+                        "SELECT CAST('2024-03-10 01:59:59.123456' AS Timestamp(6)) AS value",
+                        "SELECT CAST('2024-03-10 01:59:59.123456' AS timestamp(6)) AS value"));
     }
 
     @Test
@@ -543,5 +593,14 @@ class TestHogQlStatementResource
             }
         }
         return rows.build();
+    }
+
+    private static List<Column> resultColumns(List<QueryResults> results)
+    {
+        return results.stream()
+                .map(QueryResults::getColumns)
+                .filter(columns -> columns != null)
+                .findFirst()
+                .orElseThrow();
     }
 }
