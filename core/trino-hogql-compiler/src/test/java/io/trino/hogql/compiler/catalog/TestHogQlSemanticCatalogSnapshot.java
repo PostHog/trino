@@ -13,7 +13,11 @@
  */
 package io.trino.hogql.compiler.catalog;
 
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ActionReference;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ArgumentReferenceRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.CastRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.CohortReference;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionArgument;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionFieldDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionCallRecipe;
@@ -22,6 +26,8 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionImpl
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionKind;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionSignature;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.JoinKey;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LazyProjectionDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LazyTableDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LiteralEncoding;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LiteralRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalFieldDefinition;
@@ -30,10 +36,18 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalType;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.OperatorRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalQualifiedName;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PredicateRepresentation;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyLookupRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyStorage;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationKind;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationMembershipRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationMembershipRepresentation;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationReference;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipCardinality;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipJoinSide;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ScopedFieldReferenceRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.SemanticOperator;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.TypedLiteral;
 import io.trino.hogql.parser.HogQlLanguageVersion;
@@ -45,6 +59,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -146,6 +161,111 @@ public class TestHogQlSemanticCatalogSnapshot
     }
 
     @Test
+    public void testLogicalSemanticRecipesAreDeeplyImmutable()
+    {
+        List<ExpressionRecipe> lookupArguments = new ArrayList<>(List.of(
+                new ArgumentReferenceRecipe(ExpressionArgument.PROPERTY_SOURCE),
+                new ArgumentReferenceRecipe(ExpressionArgument.PROPERTY_KEY)));
+        PropertyDefinition property = propertyWithLookup(new OperatorRecipe(SemanticOperator.SUBSCRIPT, lookupArguments));
+        List<String> relationshipPath = new ArrayList<>(List.of("self"));
+        List<LazyProjectionDefinition> projections = new ArrayList<>(List.of(new LazyProjectionDefinition(
+                "browser",
+                "varchar",
+                LogicalType.STRING,
+                true,
+                true,
+                propertyLookup("events", "browser"))));
+        List<LazyTableDefinition> lazyTables = new ArrayList<>(List.of(new LazyTableDefinition("events", "profile", relationshipPath, projections)));
+        List<ActionReference> actions = new ArrayList<>(List.of(new ActionReference(
+                "paid",
+                "action-1",
+                "events",
+                new PredicateRepresentation(propertyLookup("events", "browser")))));
+        List<CohortReference> cohorts = new ArrayList<>(List.of(new CohortReference(
+                "active",
+                "cohort-1",
+                "events",
+                new RelationMembershipRepresentation(new RelationMembershipRecipe(
+                        new RelationReference(RelationKind.LOGICAL_TABLE, "events"),
+                        "properties",
+                        "properties")))));
+
+        HogQlSemanticCatalogSnapshot snapshot = logicalSemanticSnapshot(property, relationshipPathPredicate(), lazyTables, actions, cohorts);
+        lookupArguments.clear();
+        relationshipPath.clear();
+        projections.clear();
+        lazyTables.clear();
+        actions.clear();
+        cohorts.clear();
+
+        assertThat(snapshot.logicalTables().getFirst().properties().getFirst().lookupRecipe()).isPresent();
+        assertThat(snapshot.logicalTables().getFirst().relationships().getFirst().joinPredicate()).isPresent();
+        assertThat(snapshot.lazyTables()).singleElement().satisfies(lazy -> {
+            assertThat(lazy.relationshipPath()).containsExactly("self");
+            assertThat(lazy.projections()).hasSize(1);
+        });
+        assertThat(snapshot.actions()).hasSize(1);
+        assertThat(snapshot.cohorts()).hasSize(1);
+        assertThatThrownBy(() -> snapshot.lazyTables().getFirst().relationshipPath().clear())
+                .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
+    public void testRejectsInvalidLogicalSemanticScopes()
+    {
+        assertThatThrownBy(() -> logicalSemanticSnapshot(
+                propertyWithLookup(new ArgumentReferenceRecipe(ExpressionArgument.PROPERTY_SOURCE)),
+                relationshipPathPredicate(),
+                List.of(),
+                List.of(),
+                List.of()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("source and key arguments");
+
+        assertThatThrownBy(() -> logicalSemanticSnapshot(
+                propertyWithLookup(validLookupRecipe()),
+                Optional.empty(),
+                List.of(),
+                List.of(new ActionReference(
+                        "invalid",
+                        "action-1",
+                        "events",
+                        new PredicateRepresentation(new ScopedFieldReferenceRecipe(RelationshipJoinSide.SOURCE, "properties")))),
+                List.of()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("scoped field reference");
+
+        assertThatThrownBy(() -> logicalSemanticSnapshot(
+                propertyWithLookup(validLookupRecipe()),
+                relationshipPathPredicate(),
+                List.of(new LazyTableDefinition(
+                        "events",
+                        "profile",
+                        List.of("missing"),
+                        List.of(new LazyProjectionDefinition("browser", "varchar", LogicalType.STRING, true, true, propertyLookup("events", "browser"))))),
+                List.of(),
+                List.of()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unknown relationship");
+
+        assertThatThrownBy(() -> logicalSemanticSnapshot(
+                propertyWithLookup(validLookupRecipe()),
+                relationshipPathPredicate(),
+                List.of(),
+                List.of(),
+                List.of(new CohortReference(
+                        "invalid",
+                        "cohort-1",
+                        "events",
+                        new RelationMembershipRepresentation(new RelationMembershipRecipe(
+                                new RelationReference(RelationKind.LOGICAL_TABLE, "events"),
+                                "properties",
+                                "missing"))))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unknown target field");
+    }
+
+    @Test
     public void testEnforcesExpressionRecipeDepthAndNodeLimits()
     {
         ExpressionRecipe deepRecipe = literal();
@@ -165,7 +285,7 @@ public class TestHogQlSemanticCatalogSnapshot
         }
         assertThatThrownBy(() -> semanticSnapshot(
                 List.of(new ExpressionFieldDefinition("events", "derived", "bigint", LogicalType.INTEGER, false, true, new FunctionCallRecipe("identity", arguments))),
-                List.of(function("identity"))))
+                List.of(variadicFunction("identity"))))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("node limit");
     }
@@ -191,6 +311,23 @@ public class TestHogQlSemanticCatalogSnapshot
                 List.of()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("operator arity");
+    }
+
+    @Test
+    public void testRejectsUnsupportedRecipeFunctionArity()
+    {
+        assertThatThrownBy(() -> semanticSnapshot(
+                List.of(new ExpressionFieldDefinition(
+                        "events",
+                        "derived",
+                        "bigint",
+                        LogicalType.INTEGER,
+                        false,
+                        true,
+                        new FunctionCallRecipe("identity", List.of()))),
+                List.of(function("identity"))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unsupported argument count");
     }
 
     private static Stream<Arguments> invalidOperatorArities()
@@ -296,6 +433,91 @@ public class TestHogQlSemanticCatalogSnapshot
                 false,
                 false,
                 false);
+    }
+
+    private static FunctionCapabilityDefinition variadicFunction(String name)
+    {
+        return new FunctionCapabilityDefinition(
+                name,
+                FunctionKind.SCALAR,
+                FunctionImplementation.STOCK,
+                List.of(new PhysicalIdentifier(name, false)),
+                List.of(new FunctionSignature(List.of("bigint"), "bigint", true)),
+                true,
+                false,
+                false,
+                false,
+                false);
+    }
+
+    private static HogQlSemanticCatalogSnapshot logicalSemanticSnapshot(
+            PropertyDefinition property,
+            Optional<ExpressionRecipe> joinPredicate,
+            List<LazyTableDefinition> lazyTables,
+            List<ActionReference> actions,
+            List<CohortReference> cohorts)
+    {
+        return new HogQlSemanticCatalogSnapshot(
+                1,
+                2,
+                LANGUAGE_VERSION,
+                CATALOG,
+                7,
+                List.of(table(
+                        "events",
+                        List.of(field("properties")),
+                        List.of(property),
+                        List.of(new RelationshipDefinition(
+                                "self",
+                                "events",
+                                RelationshipCardinality.MANY_TO_ONE,
+                                List.of(new JoinKey("properties", "properties")),
+                                joinPredicate)))),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(),
+                lazyTables,
+                actions,
+                cohorts);
+    }
+
+    private static PropertyDefinition propertyWithLookup(ExpressionRecipe recipe)
+    {
+        return new PropertyDefinition(
+                "browser",
+                "properties",
+                PropertyStorage.JSON_OBJECT,
+                LogicalType.STRING,
+                true,
+                Optional.of("varchar"),
+                Optional.of("varchar"),
+                Optional.of(recipe));
+    }
+
+    private static OperatorRecipe validLookupRecipe()
+    {
+        return new OperatorRecipe(
+                SemanticOperator.SUBSCRIPT,
+                List.of(
+                        new ArgumentReferenceRecipe(ExpressionArgument.PROPERTY_SOURCE),
+                        new ArgumentReferenceRecipe(ExpressionArgument.PROPERTY_KEY)));
+    }
+
+    private static Optional<ExpressionRecipe> relationshipPathPredicate()
+    {
+        return Optional.of(new OperatorRecipe(
+                SemanticOperator.EQUAL,
+                List.of(
+                        new ScopedFieldReferenceRecipe(RelationshipJoinSide.SOURCE, "properties"),
+                        new ScopedFieldReferenceRecipe(RelationshipJoinSide.TARGET, "properties"))));
+    }
+
+    private static PropertyLookupRecipe propertyLookup(String table, String property)
+    {
+        return new PropertyLookupRecipe(table, property, new LiteralRecipe(new TypedLiteral("varchar", LiteralEncoding.STRING, "browser")));
     }
 
     private static LogicalTableDefinition table(String name)

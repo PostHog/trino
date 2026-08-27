@@ -22,7 +22,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ActionReference;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ArgumentReferenceRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.CastRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.CohortReference;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionArgument;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionFieldDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionRecipeKind;
@@ -33,6 +37,8 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionImpl
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionKind;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionSignature;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.JoinKey;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LazyProjectionDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LazyTableDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LiteralEncoding;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LiteralRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalFieldDefinition;
@@ -43,14 +49,21 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ModifierBeha
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.OperatorRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalQualifiedName;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PredicateRepresentation;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyLookupRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyStorage;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ReferencedField;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationKind;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationMembershipRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationMembershipRepresentation;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationReference;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipCardinality;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipJoinSide;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.SavedQueryReference;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ScopedFieldReferenceRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.SemanticEntityKind;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.SemanticModifierDefault;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.SemanticOperator;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.TypedLiteral;
@@ -63,6 +76,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 import static java.util.Objects.requireNonNull;
@@ -87,13 +101,31 @@ public final class HogQlSemanticCatalogSnapshotJsonDecoder
             "savedQueries",
             "materializedViews",
             "functions",
+            "modifierDefaults",
+            "lazyTables",
+            "actions",
+            "cohorts");
+    private static final Set<String> REQUIRED_SNAPSHOT_FIELDS = Set.of(
+            "protocolVersion",
+            "schemaVersion",
+            "languageVersion",
+            "catalog",
+            "generation",
+            "logicalTables",
+            "expressionFields",
+            "virtualTables",
+            "savedQueries",
+            "materializedViews",
+            "functions",
             "modifierDefaults");
     private static final Set<String> IDENTIFIER_FIELDS = Set.of("value", "delimited");
     private static final Set<String> QUALIFIED_NAME_FIELDS = Set.of("catalog", "schema", "table");
     private static final Set<String> TABLE_FIELDS = Set.of("name", "physicalTable", "fields", "properties", "relationships");
     private static final Set<String> LOGICAL_FIELD_FIELDS = Set.of("name", "physicalColumn", "trinoTypeSignature", "logicalType", "nullable", "starVisible");
-    private static final Set<String> PROPERTY_FIELDS = Set.of("name", "sourceField", "storage", "logicalType", "nullable");
-    private static final Set<String> RELATIONSHIP_FIELDS = Set.of("name", "targetTable", "cardinality", "joinKeys");
+    private static final Set<String> PROPERTY_FIELDS = Set.of("name", "sourceField", "storage", "logicalType", "nullable", "keyTypeSignature", "valueTypeSignature", "lookupRecipe");
+    private static final Set<String> REQUIRED_PROPERTY_FIELDS = Set.of("name", "sourceField", "storage", "logicalType", "nullable");
+    private static final Set<String> RELATIONSHIP_FIELDS = Set.of("name", "targetTable", "cardinality", "joinKeys", "joinPredicate");
+    private static final Set<String> REQUIRED_RELATIONSHIP_FIELDS = Set.of("name", "targetTable", "cardinality", "joinKeys");
     private static final Set<String> JOIN_KEY_FIELDS = Set.of("sourceField", "targetField");
     private static final Set<String> EXPRESSION_FIELD_FIELDS = Set.of("table", "name", "trinoTypeSignature", "logicalType", "nullable", "starVisible", "recipe");
     private static final Set<String> RECIPE_FIELD_REFERENCE_FIELDS = Set.of("kind", "fieldReference");
@@ -101,11 +133,17 @@ public final class HogQlSemanticCatalogSnapshotJsonDecoder
     private static final Set<String> RECIPE_FUNCTION_CALL_FIELDS = Set.of("kind", "functionCall");
     private static final Set<String> RECIPE_OPERATOR_FIELDS = Set.of("kind", "operator");
     private static final Set<String> RECIPE_CAST_FIELDS = Set.of("kind", "cast");
+    private static final Set<String> RECIPE_ARGUMENT_REFERENCE_FIELDS = Set.of("kind", "argumentReference");
+    private static final Set<String> RECIPE_SCOPED_FIELD_REFERENCE_FIELDS = Set.of("kind", "scopedFieldReference");
+    private static final Set<String> RECIPE_PROPERTY_LOOKUP_FIELDS = Set.of("kind", "propertyLookup");
     private static final Set<String> FIELD_REFERENCE_FIELDS = Set.of("table", "field");
     private static final Set<String> TYPED_LITERAL_FIELDS = Set.of("typeSignature", "encoding", "value");
     private static final Set<String> FUNCTION_CALL_FIELDS = Set.of("name", "arguments");
     private static final Set<String> OPERATOR_FIELDS = Set.of("operator", "arguments");
     private static final Set<String> CAST_FIELDS = Set.of("expression", "targetTypeSignature");
+    private static final Set<String> ARGUMENT_REFERENCE_FIELDS = Set.of("argument");
+    private static final Set<String> SCOPED_FIELD_REFERENCE_FIELDS = Set.of("side", "field");
+    private static final Set<String> PROPERTY_LOOKUP_FIELDS = Set.of("table", "property", "key");
     private static final Set<String> VIRTUAL_TABLE_FIELDS = Set.of("name", "source", "projections");
     private static final Set<String> RELATION_REFERENCE_FIELDS = Set.of("kind", "name");
     private static final Set<String> VIRTUAL_PROJECTION_FIELDS = Set.of("name", "sourceField", "starVisible");
@@ -116,6 +154,13 @@ public final class HogQlSemanticCatalogSnapshotJsonDecoder
     private static final Set<String> FUNCTION_SIGNATURE_FIELDS = Set.of("argumentTypes", "returnType", "variadic");
     private static final Set<String> MODIFIER_FIELDS = Set.of("name", "behavior", "defaultValue", "sessionProperty");
     private static final Set<String> MODIFIER_FIELDS_WITHOUT_SESSION_PROPERTY = Set.of("name", "behavior", "defaultValue");
+    private static final Set<String> LAZY_TABLE_FIELDS = Set.of("table", "name", "relationshipPath", "projections");
+    private static final Set<String> LAZY_PROJECTION_FIELDS = Set.of("name", "trinoTypeSignature", "logicalType", "nullable", "starVisible", "recipe");
+    private static final Set<String> ACTION_FIELDS = Set.of("name", "actionId", "table", "representation");
+    private static final Set<String> COHORT_FIELDS = Set.of("name", "cohortId", "table", "representation");
+    private static final Set<String> PREDICATE_REPRESENTATION_FIELDS = Set.of("kind", "predicate");
+    private static final Set<String> RELATION_REPRESENTATION_FIELDS = Set.of("kind", "relation");
+    private static final Set<String> RELATION_MEMBERSHIP_FIELDS = Set.of("relation", "sourceField", "targetField");
 
     private final Limits limits;
     private final ObjectMapper objectMapper;
@@ -151,7 +196,7 @@ public final class HogQlSemanticCatalogSnapshotJsonDecoder
 
         try {
             ObjectNode root = parse(payload);
-            validateFields(root, SNAPSHOT_FIELDS);
+            validateFields(root, SNAPSHOT_FIELDS, REQUIRED_SNAPSHOT_FIELDS);
 
             int protocolVersion = integer(root, "protocolVersion");
             if (protocolVersion != PROTOCOL_VERSION) {
@@ -185,6 +230,9 @@ public final class HogQlSemanticCatalogSnapshotJsonDecoder
             List<MaterializedViewReference> materializedViews = materializedViews(required(root, "materializedViews"), budget);
             List<FunctionCapabilityDefinition> functions = functions(required(root, "functions"), budget);
             List<SemanticModifierDefault> modifierDefaults = modifierDefaults(required(root, "modifierDefaults"), budget);
+            List<LazyTableDefinition> lazyTables = root.has("lazyTables") ? lazyTables(required(root, "lazyTables"), budget) : List.of();
+            List<ActionReference> actions = root.has("actions") ? actions(required(root, "actions"), budget) : List.of();
+            List<CohortReference> cohorts = root.has("cohorts") ? cohorts(required(root, "cohorts"), budget) : List.of();
             return new HogQlSemanticCatalogSnapshot(
                     protocolVersion,
                     schemaVersion,
@@ -197,7 +245,10 @@ public final class HogQlSemanticCatalogSnapshotJsonDecoder
                     savedQueries,
                     materializedViews,
                     functions,
-                    modifierDefaults);
+                    modifierDefaults,
+                    lazyTables,
+                    actions,
+                    cohorts);
         }
         catch (DecodeException e) {
             throw e;
@@ -277,13 +328,16 @@ public final class HogQlSemanticCatalogSnapshotJsonDecoder
         List<PropertyDefinition> properties = new ArrayList<>(array.size());
         for (JsonNode element : array) {
             ObjectNode property = object(element);
-            validateFields(property, PROPERTY_FIELDS);
+            validateFields(property, PROPERTY_FIELDS, REQUIRED_PROPERTY_FIELDS);
             properties.add(new PropertyDefinition(
                     text(property, "name"),
                     text(property, "sourceField"),
                     enumValue(property, "storage", PropertyStorage.class),
                     enumValue(property, "logicalType", LogicalType.class),
-                    bool(property, "nullable")));
+                    bool(property, "nullable"),
+                    property.has("keyTypeSignature") ? Optional.of(text(property, "keyTypeSignature")) : Optional.empty(),
+                    property.has("valueTypeSignature") ? Optional.of(text(property, "valueTypeSignature")) : Optional.empty(),
+                    property.has("lookupRecipe") ? Optional.of(expressionRecipe(required(property, "lookupRecipe"), budget)) : Optional.empty()));
         }
         return List.copyOf(properties);
     }
@@ -294,12 +348,13 @@ public final class HogQlSemanticCatalogSnapshotJsonDecoder
         List<RelationshipDefinition> relationships = new ArrayList<>(array.size());
         for (JsonNode element : array) {
             ObjectNode relationship = object(element);
-            validateFields(relationship, RELATIONSHIP_FIELDS);
+            validateFields(relationship, RELATIONSHIP_FIELDS, REQUIRED_RELATIONSHIP_FIELDS);
             relationships.add(new RelationshipDefinition(
                     text(relationship, "name"),
                     text(relationship, "targetTable"),
                     enumValue(relationship, "cardinality", RelationshipCardinality.class),
-                    joinKeys(required(relationship, "joinKeys"), budget)));
+                    joinKeys(required(relationship, "joinKeys"), budget),
+                    relationship.has("joinPredicate") ? Optional.of(expressionRecipe(required(relationship, "joinPredicate"), budget)) : Optional.empty()));
         }
         return List.copyOf(relationships);
     }
@@ -367,6 +422,29 @@ public final class HogQlSemanticCatalogSnapshotJsonDecoder
                 ObjectNode cast = object(required(recipe, "cast"));
                 validateFields(cast, CAST_FIELDS);
                 yield new CastRecipe(expressionRecipe(required(cast, "expression"), budget), text(cast, "targetTypeSignature"));
+            }
+            case ARGUMENT_REFERENCE -> {
+                validateFields(recipe, RECIPE_ARGUMENT_REFERENCE_FIELDS);
+                ObjectNode reference = object(required(recipe, "argumentReference"));
+                validateFields(reference, ARGUMENT_REFERENCE_FIELDS);
+                yield new ArgumentReferenceRecipe(enumValue(reference, "argument", ExpressionArgument.class));
+            }
+            case SCOPED_FIELD_REFERENCE -> {
+                validateFields(recipe, RECIPE_SCOPED_FIELD_REFERENCE_FIELDS);
+                ObjectNode reference = object(required(recipe, "scopedFieldReference"));
+                validateFields(reference, SCOPED_FIELD_REFERENCE_FIELDS);
+                yield new ScopedFieldReferenceRecipe(
+                        enumValue(reference, "side", RelationshipJoinSide.class),
+                        text(reference, "field"));
+            }
+            case PROPERTY_LOOKUP -> {
+                validateFields(recipe, RECIPE_PROPERTY_LOOKUP_FIELDS);
+                ObjectNode lookup = object(required(recipe, "propertyLookup"));
+                validateFields(lookup, PROPERTY_LOOKUP_FIELDS);
+                yield new PropertyLookupRecipe(
+                        text(lookup, "table"),
+                        text(lookup, "property"),
+                        expressionRecipe(required(lookup, "key"), budget));
             }
         };
     }
@@ -554,6 +632,93 @@ public final class HogQlSemanticCatalogSnapshotJsonDecoder
         return List.copyOf(modifiers);
     }
 
+    private static List<LazyTableDefinition> lazyTables(JsonNode node, CollectionBudget budget)
+    {
+        ArrayNode array = array(node, budget);
+        List<LazyTableDefinition> definitions = new ArrayList<>(array.size());
+        for (JsonNode element : array) {
+            ObjectNode table = object(element);
+            validateFields(table, LAZY_TABLE_FIELDS);
+            definitions.add(new LazyTableDefinition(
+                    text(table, "table"),
+                    text(table, "name"),
+                    strings(required(table, "relationshipPath"), budget),
+                    lazyProjections(required(table, "projections"), budget)));
+        }
+        return List.copyOf(definitions);
+    }
+
+    private static List<LazyProjectionDefinition> lazyProjections(JsonNode node, CollectionBudget budget)
+    {
+        ArrayNode array = array(node, budget);
+        List<LazyProjectionDefinition> projections = new ArrayList<>(array.size());
+        for (JsonNode element : array) {
+            ObjectNode projection = object(element);
+            validateFields(projection, LAZY_PROJECTION_FIELDS);
+            projections.add(new LazyProjectionDefinition(
+                    text(projection, "name"),
+                    text(projection, "trinoTypeSignature"),
+                    enumValue(projection, "logicalType", LogicalType.class),
+                    bool(projection, "nullable"),
+                    bool(projection, "starVisible"),
+                    expressionRecipe(required(projection, "recipe"), budget)));
+        }
+        return List.copyOf(projections);
+    }
+
+    private static List<ActionReference> actions(JsonNode node, CollectionBudget budget)
+    {
+        ArrayNode array = array(node, budget);
+        List<ActionReference> actions = new ArrayList<>(array.size());
+        for (JsonNode element : array) {
+            ObjectNode action = object(element);
+            validateFields(action, ACTION_FIELDS);
+            actions.add(new ActionReference(
+                    text(action, "name"),
+                    text(action, "actionId"),
+                    text(action, "table"),
+                    semanticEntityRepresentation(required(action, "representation"), budget)));
+        }
+        return List.copyOf(actions);
+    }
+
+    private static List<CohortReference> cohorts(JsonNode node, CollectionBudget budget)
+    {
+        ArrayNode array = array(node, budget);
+        List<CohortReference> cohorts = new ArrayList<>(array.size());
+        for (JsonNode element : array) {
+            ObjectNode cohort = object(element);
+            validateFields(cohort, COHORT_FIELDS);
+            cohorts.add(new CohortReference(
+                    text(cohort, "name"),
+                    text(cohort, "cohortId"),
+                    text(cohort, "table"),
+                    semanticEntityRepresentation(required(cohort, "representation"), budget)));
+        }
+        return List.copyOf(cohorts);
+    }
+
+    private static HogQlSemanticCatalogSnapshot.SemanticEntityRepresentation semanticEntityRepresentation(JsonNode node, CollectionBudget budget)
+    {
+        ObjectNode representation = object(node);
+        SemanticEntityKind kind = enumValue(representation, "kind", SemanticEntityKind.class);
+        return switch (kind) {
+            case PREDICATE -> {
+                validateFields(representation, PREDICATE_REPRESENTATION_FIELDS);
+                yield new PredicateRepresentation(expressionRecipe(required(representation, "predicate"), budget));
+            }
+            case RELATION -> {
+                validateFields(representation, RELATION_REPRESENTATION_FIELDS);
+                ObjectNode membership = object(required(representation, "relation"));
+                validateFields(membership, RELATION_MEMBERSHIP_FIELDS);
+                yield new RelationMembershipRepresentation(new RelationMembershipRecipe(
+                        relationReference(required(membership, "relation")),
+                        text(membership, "sourceField"),
+                        text(membership, "targetField")));
+            }
+        };
+    }
+
     private static PhysicalQualifiedName qualifiedName(JsonNode node)
     {
         ObjectNode name = object(node);
@@ -638,6 +803,19 @@ public final class HogQlSemanticCatalogSnapshotJsonDecoder
             }
         }
         if (object.size() != allowedFields.size()) {
+            throw failure(DecodeFailure.INVALID_PAYLOAD);
+        }
+    }
+
+    private static void validateFields(ObjectNode object, Set<String> allowedFields, Set<String> requiredFields)
+    {
+        Iterator<String> fieldNames = object.fieldNames();
+        while (fieldNames.hasNext()) {
+            if (!allowedFields.contains(fieldNames.next())) {
+                throw failure(DecodeFailure.INVALID_PAYLOAD);
+            }
+        }
+        if (!requiredFields.stream().allMatch(object::has)) {
             throw failure(DecodeFailure.INVALID_PAYLOAD);
         }
     }

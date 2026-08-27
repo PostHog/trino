@@ -13,6 +13,9 @@
  */
 package io.trino.hogql.compiler.catalog;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalType;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ModifierBehavior;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
@@ -29,6 +32,7 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -99,6 +103,40 @@ public class TestHogQlSemanticCatalogSnapshotJsonDecoder
             assertThat(modifier.behavior()).isEqualTo(ModifierBehavior.TRINO_SESSION_PROPERTY);
             assertThat(modifier.sessionProperty()).extracting(PhysicalIdentifier::value).containsExactly("hogql", "sampling");
         });
+        assertThat(snapshot.logicalTables().getFirst().properties().getFirst()).satisfies(property -> {
+            assertThat(property.keyTypeSignature()).contains("varchar");
+            assertThat(property.valueTypeSignature()).contains("varchar");
+            assertThat(property.lookupRecipe()).isPresent();
+        });
+        assertThat(snapshot.logicalTables().getFirst().relationships().getFirst().joinPredicate()).isPresent();
+        assertThat(snapshot.lazyTables()).singleElement().satisfies(table -> {
+            assertThat(table.relationshipPath()).containsExactly("self");
+            assertThat(table.projections()).singleElement().extracting(HogQlSemanticCatalogSnapshot.LazyProjectionDefinition::name).isEqualTo("browser");
+        });
+        assertThat(snapshot.actions()).singleElement().extracting(HogQlSemanticCatalogSnapshot.ActionReference::actionId).isEqualTo("action-7");
+        assertThat(snapshot.cohorts()).singleElement().extracting(HogQlSemanticCatalogSnapshot.CohortReference::cohortId).isEqualTo("cohort-7");
+    }
+
+    @Test
+    public void testDecodesSnapshotFromOlderSchemaVersionTwoPublisher()
+            throws Exception
+    {
+        ObjectNode payload = (ObjectNode) new ObjectMapper().readTree(validSnapshotJson());
+        payload.remove(List.of("lazyTables", "actions", "cohorts"));
+        ObjectNode table = (ObjectNode) ((ArrayNode) payload.get("logicalTables")).get(0);
+        ObjectNode property = (ObjectNode) ((ArrayNode) table.get("properties")).get(0);
+        property.remove(List.of("keyTypeSignature", "valueTypeSignature", "lookupRecipe"));
+        ObjectNode relationship = (ObjectNode) ((ArrayNode) table.get("relationships")).get(0);
+        relationship.remove("joinPredicate");
+
+        HogQlSemanticCatalogSnapshot snapshot = new HogQlSemanticCatalogSnapshotJsonDecoder()
+                .decode(bytes(payload.toString()), LoadRequest.latest(CATALOG, LANGUAGE_VERSION));
+
+        assertThat(snapshot.lazyTables()).isEmpty();
+        assertThat(snapshot.actions()).isEmpty();
+        assertThat(snapshot.cohorts()).isEmpty();
+        assertThat(snapshot.logicalTables().getFirst().properties().getFirst().lookupRecipe()).isEmpty();
+        assertThat(snapshot.logicalTables().getFirst().relationships().getFirst().joinPredicate()).isEmpty();
     }
 
     @ParameterizedTest(name = "{0}")
@@ -162,6 +200,8 @@ public class TestHogQlSemanticCatalogSnapshotJsonDecoder
                 Arguments.of("unknown recipe field", validSnapshotJson().replace("\"fieldReference\": {", "\"unknown\": true, \"fieldReference\": {")),
                 Arguments.of("unknown recipe kind", validSnapshotJson().replace("\"kind\": \"FUNCTION_CALL\"", "\"kind\": \"" + SECRET + "\"")),
                 Arguments.of("mismatched recipe payload", validSnapshotJson().replace("\"functionCall\": {", "\"literal\": {")),
+                Arguments.of("partial property lookup metadata", validSnapshotJson().replace("\"valueTypeSignature\": \"varchar\",\n", "")),
+                Arguments.of("mismatched entity representation", validSnapshotJson().replace("\"kind\": \"PREDICATE\"", "\"kind\": \"RELATION\"")),
                 Arguments.of(
                         "unknown function reference",
                         validSnapshotJson().replaceFirst("\"name\": \"length\",", "\"name\": \"missing\",")),
@@ -262,7 +302,19 @@ public class TestHogQlSemanticCatalogSnapshotJsonDecoder
                          "sourceField": "properties",
                          "storage": "JSON_OBJECT",
                          "logicalType": "STRING",
-                         "nullable": true
+                         "nullable": true,
+                         "keyTypeSignature": "varchar",
+                         "valueTypeSignature": "varchar",
+                         "lookupRecipe": {
+                           "kind": "OPERATOR",
+                           "operator": {
+                             "operator": "SUBSCRIPT",
+                             "arguments": [
+                               {"kind": "ARGUMENT_REFERENCE", "argumentReference": {"argument": "PROPERTY_SOURCE"}},
+                               {"kind": "ARGUMENT_REFERENCE", "argumentReference": {"argument": "PROPERTY_KEY"}}
+                             ]
+                           }
+                         }
                        }
                      ],
                      "relationships": [
@@ -270,7 +322,17 @@ public class TestHogQlSemanticCatalogSnapshotJsonDecoder
                          "name": "self",
                          "targetTable": "events",
                          "cardinality": "MANY_TO_ONE",
-                         "joinKeys": [{"sourceField": "properties", "targetField": "properties"}]
+                         "joinKeys": [{"sourceField": "properties", "targetField": "properties"}],
+                         "joinPredicate": {
+                           "kind": "OPERATOR",
+                           "operator": {
+                             "operator": "EQUAL",
+                             "arguments": [
+                               {"kind": "SCOPED_FIELD_REFERENCE", "scopedFieldReference": {"side": "SOURCE", "field": "properties"}},
+                               {"kind": "SCOPED_FIELD_REFERENCE", "scopedFieldReference": {"side": "TARGET", "field": "properties"}}
+                             ]
+                           }
+                         }
                        }
                      ]
                    }
@@ -375,6 +437,63 @@ public class TestHogQlSemanticCatalogSnapshotJsonDecoder
                        {"value": "hogql", "delimited": false},
                        {"value": "sampling", "delimited": false}
                      ]
+                   }
+                 ],
+                 "lazyTables": [
+                   {
+                     "table": "events",
+                     "name": "profile",
+                     "relationshipPath": ["self"],
+                     "projections": [
+                       {
+                         "name": "browser",
+                         "trinoTypeSignature": "varchar",
+                         "logicalType": "STRING",
+                         "nullable": true,
+                         "starVisible": true,
+                         "recipe": {
+                           "kind": "PROPERTY_LOOKUP",
+                           "propertyLookup": {
+                             "table": "events",
+                             "property": "browser",
+                             "key": {"kind": "LITERAL", "literal": {"typeSignature": "varchar", "encoding": "STRING", "value": "browser"}}
+                           }
+                         }
+                       }
+                     ]
+                   }
+                 ],
+                 "actions": [
+                   {
+                     "name": "paid_event",
+                     "actionId": "action-7",
+                     "table": "events",
+                     "representation": {
+                       "kind": "PREDICATE",
+                       "predicate": {
+                         "kind": "PROPERTY_LOOKUP",
+                         "propertyLookup": {
+                           "table": "events",
+                           "property": "browser",
+                           "key": {"kind": "LITERAL", "literal": {"typeSignature": "varchar", "encoding": "STRING", "value": "browser"}}
+                         }
+                       }
+                     }
+                   }
+                 ],
+                 "cohorts": [
+                   {
+                     "name": "active_people",
+                     "cohortId": "cohort-7",
+                     "table": "events",
+                     "representation": {
+                       "kind": "RELATION",
+                       "relation": {
+                         "relation": {"kind": "MATERIALIZED_VIEW", "name": "daily_events"},
+                         "sourceField": "properties",
+                         "targetField": "day"
+                       }
+                     }
                    }
                  ]
                }

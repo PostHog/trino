@@ -43,7 +43,10 @@ public record HogQlSemanticCatalogSnapshot(
         List<SavedQueryReference> savedQueries,
         List<MaterializedViewReference> materializedViews,
         List<FunctionCapabilityDefinition> functions,
-        List<SemanticModifierDefault> modifierDefaults)
+        List<SemanticModifierDefault> modifierDefaults,
+        List<LazyTableDefinition> lazyTables,
+        List<ActionReference> actions,
+        List<CohortReference> cohorts)
 {
     public static final int PROTOCOL_VERSION = 1;
     public static final int SCHEMA_VERSION = 2;
@@ -73,18 +76,43 @@ public record HogQlSemanticCatalogSnapshot(
         materializedViews = copy(materializedViews, "materializedViews");
         functions = copy(functions, "functions");
         modifierDefaults = copy(modifierDefaults, "modifierDefaults");
-        int definitions = expressionFields.size() + virtualTables.size() + savedQueries.size() + materializedViews.size() + functions.size() + modifierDefaults.size();
+        lazyTables = copy(lazyTables, "lazyTables");
+        actions = copy(actions, "actions");
+        cohorts = copy(cohorts, "cohorts");
+        int definitions = expressionFields.size() + virtualTables.size() + savedQueries.size() + materializedViews.size() + functions.size() + modifierDefaults.size() + lazyTables.size() + actions.size() + cohorts.size();
         if (definitions > MAX_SEMANTIC_DEFINITIONS) {
             throw new IllegalArgumentException("semantic metadata exceeds definition limit");
         }
 
         Map<String, LogicalTableDefinition> tables = indexTables(catalog, logicalTables);
         validateLogicalReferences(tables);
-        Set<String> declaredFunctions = validateFunctions(functions);
+        Map<String, FunctionCapabilityDefinition> declaredFunctions = validateFunctions(functions);
         Map<String, ExpressionFieldDefinition> expressions = indexExpressionFields(expressionFields, tables);
-        validateExpressionRecipes(expressionFields, tables, expressions, declaredFunctions);
+        RecipeCounter counter = new RecipeCounter();
+        validatePropertyRecipes(tables, expressions, declaredFunctions, counter);
+        validateExpressionRecipes(expressionFields, tables, expressions, declaredFunctions, counter);
         validateModifiers(modifierDefaults);
-        validateRelations(catalog, tables, expressions, virtualTables, savedQueries, materializedViews);
+        validateRelationshipPredicates(tables, expressions, declaredFunctions, counter);
+        Map<String, SemanticRelation> relations = validateRelations(catalog, tables, expressions, virtualTables, savedQueries, materializedViews);
+        validateLazyTables(lazyTables, tables, expressions, declaredFunctions, counter);
+        validateSemanticEntities(actions, cohorts, tables, expressions, declaredFunctions, relations, counter);
+    }
+
+    public HogQlSemanticCatalogSnapshot(
+            int protocolVersion,
+            int schemaVersion,
+            HogQlLanguageVersion languageVersion,
+            PhysicalIdentifier catalog,
+            long generation,
+            List<LogicalTableDefinition> logicalTables,
+            List<ExpressionFieldDefinition> expressionFields,
+            List<VirtualTableDefinition> virtualTables,
+            List<SavedQueryReference> savedQueries,
+            List<MaterializedViewReference> materializedViews,
+            List<FunctionCapabilityDefinition> functions,
+            List<SemanticModifierDefault> modifierDefaults)
+    {
+        this(protocolVersion, schemaVersion, languageVersion, catalog, generation, logicalTables, expressionFields, virtualTables, savedQueries, materializedViews, functions, modifierDefaults, List.of(), List.of(), List.of());
     }
 
     public HogQlSemanticCatalogSnapshot(
@@ -94,7 +122,7 @@ public record HogQlSemanticCatalogSnapshot(
             long generation,
             List<LogicalTableDefinition> logicalTables)
     {
-        this(PROTOCOL_VERSION, schemaVersion, languageVersion, catalog, generation, logicalTables, List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
+        this(PROTOCOL_VERSION, schemaVersion, languageVersion, catalog, generation, logicalTables, List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
     }
 
     public Optional<LogicalTableDefinition> logicalTable(String name)
@@ -142,11 +170,67 @@ public record HogQlSemanticCatalogSnapshot(
         }
     }
 
-    private static Set<String> validateFunctions(List<FunctionCapabilityDefinition> definitions)
+    private static void validatePropertyRecipes(
+            Map<String, LogicalTableDefinition> tables,
+            Map<String, ExpressionFieldDefinition> expressions,
+            Map<String, FunctionCapabilityDefinition> functions,
+            RecipeCounter counter)
     {
-        Set<String> functions = new HashSet<>();
+        for (LogicalTableDefinition table : tables.values()) {
+            for (PropertyDefinition property : table.properties()) {
+                if (property.lookupRecipe().isEmpty()) {
+                    continue;
+                }
+                Map<ExpressionArgument, Integer> arguments = new HashMap<>();
+                validateRecipe(
+                        property.lookupRecipe().orElseThrow(),
+                        1,
+                        counter,
+                        new RecipeValidationContext(table.name(), tables, expressions, functions, null, false, false, arguments, Map.of()));
+                if (!arguments.containsKey(ExpressionArgument.PROPERTY_SOURCE) || !arguments.containsKey(ExpressionArgument.PROPERTY_KEY)) {
+                    throw new IllegalArgumentException("property lookup recipe must reference source and key arguments");
+                }
+            }
+        }
+    }
+
+    private static void validateRelationshipPredicates(
+            Map<String, LogicalTableDefinition> tables,
+            Map<String, ExpressionFieldDefinition> expressions,
+            Map<String, FunctionCapabilityDefinition> functions,
+            RecipeCounter counter)
+    {
+        for (LogicalTableDefinition source : tables.values()) {
+            for (RelationshipDefinition relationship : source.relationships()) {
+                if (relationship.joinPredicate().isEmpty()) {
+                    continue;
+                }
+                LogicalTableDefinition target = tables.get(canonical(relationship.targetTable(), "relationship target table"));
+                validateRecipe(
+                        relationship.joinPredicate().orElseThrow(),
+                        1,
+                        counter,
+                        new RecipeValidationContext(
+                                source.name(),
+                                tables,
+                                expressions,
+                                functions,
+                                null,
+                                false,
+                                true,
+                                null,
+                                Map.of(RelationshipJoinSide.SOURCE, source.name(), RelationshipJoinSide.TARGET, target.name())));
+            }
+        }
+    }
+
+    private static Map<String, FunctionCapabilityDefinition> validateFunctions(List<FunctionCapabilityDefinition> definitions)
+    {
+        Map<String, FunctionCapabilityDefinition> functions = new HashMap<>();
         for (FunctionCapabilityDefinition function : definitions) {
-            addUnique(functions, function.name(), "duplicate function");
+            if (functions.put(canonical(function.name(), "function name"), function) != null) {
+                throw new IllegalArgumentException("duplicate function");
+            }
             if (function.implementation() == FunctionImplementation.REWRITE && !function.trinoName().isEmpty()) {
                 throw new IllegalArgumentException("rewrite function cannot name a Trino function");
             }
@@ -154,7 +238,7 @@ public record HogQlSemanticCatalogSnapshot(
                 throw new IllegalArgumentException("function must name a Trino function");
             }
         }
-        return Set.copyOf(functions);
+        return Map.copyOf(functions);
     }
 
     private static Map<String, ExpressionFieldDefinition> indexExpressionFields(List<ExpressionFieldDefinition> definitions, Map<String, LogicalTableDefinition> tables)
@@ -182,13 +266,17 @@ public record HogQlSemanticCatalogSnapshot(
             List<ExpressionFieldDefinition> definitions,
             Map<String, LogicalTableDefinition> tables,
             Map<String, ExpressionFieldDefinition> expressions,
-            Set<String> functions)
+            Map<String, FunctionCapabilityDefinition> functions,
+            RecipeCounter counter)
     {
         Map<String, List<String>> dependencies = new HashMap<>();
-        RecipeCounter counter = new RecipeCounter();
         for (ExpressionFieldDefinition definition : definitions) {
             List<String> fieldDependencies = new ArrayList<>();
-            validateRecipe(definition.recipe(), definition.table(), 1, counter, tables, expressions, functions, fieldDependencies);
+            validateRecipe(
+                    definition.recipe(),
+                    1,
+                    counter,
+                    new RecipeValidationContext(definition.table(), tables, expressions, functions, fieldDependencies, true, true, null, Map.of()));
             dependencies.put(expressionKey(definition.table(), definition.name()), List.copyOf(fieldDependencies));
         }
         Map<String, VisitState> states = new HashMap<>();
@@ -197,13 +285,9 @@ public record HogQlSemanticCatalogSnapshot(
 
     private static void validateRecipe(
             ExpressionRecipe recipe,
-            String ownerTable,
             int depth,
             RecipeCounter counter,
-            Map<String, LogicalTableDefinition> tables,
-            Map<String, ExpressionFieldDefinition> expressions,
-            Set<String> functions,
-            List<String> dependencies)
+            RecipeValidationContext context)
     {
         requireNonNull(recipe, "expression recipe is null");
         if (depth > MAX_RECIPE_DEPTH) {
@@ -212,16 +296,21 @@ public record HogQlSemanticCatalogSnapshot(
         counter.add();
         switch (recipe) {
             case FieldReferenceRecipe reference -> {
-                if (!canonical(reference.table(), "field reference table").equals(canonical(ownerTable, "expression field table"))) {
+                if (!context.allowFieldReferences()) {
+                    throw new IllegalArgumentException("field reference is not valid in this recipe");
+                }
+                if (!canonical(reference.table(), "field reference table").equals(canonical(context.ownerTable(), "expression field table"))) {
                     throw new IllegalArgumentException("field reference crosses tables without a relationship path");
                 }
-                LogicalTableDefinition table = tables.get(canonical(reference.table(), "field reference table"));
+                LogicalTableDefinition table = context.tables().get(canonical(reference.table(), "field reference table"));
                 if (table == null) {
                     throw new IllegalArgumentException("field reference has unknown table");
                 }
                 String key = expressionKey(reference.table(), reference.field());
-                if (expressions.containsKey(key)) {
-                    dependencies.add(key);
+                if (context.expressions().containsKey(key)) {
+                    if (context.dependencies() != null) {
+                        context.dependencies().add(key);
+                    }
                 }
                 else {
                     requireReference(fieldNames(table), reference.field(), "field reference has unknown field");
@@ -229,12 +318,60 @@ public record HogQlSemanticCatalogSnapshot(
             }
             case LiteralRecipe _ -> {}
             case FunctionCallRecipe call -> {
-                requireReference(functions, call.name(), "function call references an undeclared function");
-                call.arguments().forEach(argument -> validateRecipe(argument, ownerTable, depth + 1, counter, tables, expressions, functions, dependencies));
+                FunctionCapabilityDefinition function = context.functions().get(canonical(call.name(), "function name"));
+                if (function == null) {
+                    throw new IllegalArgumentException("function call references an undeclared function");
+                }
+                if (!acceptsArity(function, call.arguments().size())) {
+                    throw new IllegalArgumentException("function call has an unsupported argument count");
+                }
+                call.arguments().forEach(argument -> validateRecipe(argument, depth + 1, counter, context));
             }
-            case OperatorRecipe operator -> operator.arguments().forEach(argument -> validateRecipe(argument, ownerTable, depth + 1, counter, tables, expressions, functions, dependencies));
-            case CastRecipe cast -> validateRecipe(cast.expression(), ownerTable, depth + 1, counter, tables, expressions, functions, dependencies);
+            case OperatorRecipe operator -> operator.arguments().forEach(argument -> validateRecipe(argument, depth + 1, counter, context));
+            case CastRecipe cast -> validateRecipe(cast.expression(), depth + 1, counter, context);
+            case ArgumentReferenceRecipe reference -> {
+                if (context.arguments() == null) {
+                    throw new IllegalArgumentException("argument reference is not valid in this recipe");
+                }
+                context.arguments().merge(reference.argument(), 1, Integer::sum);
+            }
+            case ScopedFieldReferenceRecipe reference -> {
+                String tableName = context.scopedTables().get(reference.side());
+                if (tableName == null) {
+                    throw new IllegalArgumentException("scoped field reference is not valid in this recipe");
+                }
+                LogicalTableDefinition table = context.tables().get(canonical(tableName, "scoped field table"));
+                requireReference(semanticFieldNames(table, context.expressions()), reference.field(), "scoped field reference has unknown field");
+            }
+            case PropertyLookupRecipe lookup -> {
+                if (!context.allowPropertyLookups() || !contextAllowsTable(context, lookup.table())) {
+                    throw new IllegalArgumentException("property lookup is not valid in this recipe");
+                }
+                LogicalTableDefinition table = context.tables().get(canonical(lookup.table(), "property lookup table"));
+                if (table == null || table.properties().stream().noneMatch(property -> canonical(property.name(), "property name").equals(canonical(lookup.property(), "property lookup name")))) {
+                    throw new IllegalArgumentException("property lookup references an unknown property");
+                }
+                validateRecipe(lookup.key(), depth + 1, counter, context);
+            }
         }
+    }
+
+    private static boolean contextAllowsTable(RecipeValidationContext context, String table)
+    {
+        String canonicalTable = canonical(table, "recipe table");
+        if (canonicalTable.equals(canonical(context.ownerTable(), "recipe owner table"))) {
+            return true;
+        }
+        return context.scopedTables().values().stream()
+                .map(value -> canonical(value, "scoped recipe table"))
+                .anyMatch(canonicalTable::equals);
+    }
+
+    private static boolean acceptsArity(FunctionCapabilityDefinition function, int arity)
+    {
+        return function.signatures().stream().anyMatch(signature -> signature.variadic()
+                ? arity >= signature.argumentTypes().size() - 1
+                : arity == signature.argumentTypes().size());
     }
 
     private static void visitDependency(String name, int depth, Map<String, List<String>> dependencies, Map<String, VisitState> states)
@@ -266,7 +403,7 @@ public record HogQlSemanticCatalogSnapshot(
         }
     }
 
-    private static void validateRelations(
+    private static Map<String, SemanticRelation> validateRelations(
             PhysicalIdentifier catalog,
             Map<String, LogicalTableDefinition> tables,
             Map<String, ExpressionFieldDefinition> expressions,
@@ -293,6 +430,108 @@ public record HogQlSemanticCatalogSnapshot(
         Map<String, VisitState> states = new HashMap<>();
         virtualTables.forEach(virtual -> resolveRelation(canonical(virtual.name(), "relation name"), relations, states, 1));
         savedQueries.forEach(saved -> resolveRelation(canonical(saved.name(), "relation name"), relations, states, 1));
+        return Map.copyOf(relations);
+    }
+
+    private static void validateLazyTables(
+            List<LazyTableDefinition> definitions,
+            Map<String, LogicalTableDefinition> tables,
+            Map<String, ExpressionFieldDefinition> expressions,
+            Map<String, FunctionCapabilityDefinition> functions,
+            RecipeCounter counter)
+    {
+        Map<String, Set<String>> members = new HashMap<>();
+        tables.forEach((name, table) -> members.put(name, semanticMemberNames(table, expressions)));
+        for (LazyTableDefinition definition : definitions) {
+            LogicalTableDefinition owner = tables.get(canonical(definition.table(), "lazy table owner"));
+            if (owner == null) {
+                throw new IllegalArgumentException("lazy table references an unknown owner table");
+            }
+            if (!members.get(canonical(owner.name(), "lazy table owner")).add(canonical(definition.name(), "lazy table name"))) {
+                throw new IllegalArgumentException("lazy table conflicts with an existing logical member");
+            }
+            if (definition.relationshipPath().isEmpty()) {
+                throw new IllegalArgumentException("lazy table must include a relationship path");
+            }
+            if (definition.relationshipPath().size() > MAX_RELATION_DEPTH) {
+                throw new IllegalArgumentException("lazy table relationship path exceeds depth limit");
+            }
+            LogicalTableDefinition terminal = owner;
+            for (String relationshipName : definition.relationshipPath()) {
+                LogicalTableDefinition pathSource = terminal;
+                RelationshipDefinition relationship = pathSource.relationships().stream()
+                        .filter(candidate -> canonical(candidate.name(), "relationship name").equals(canonical(relationshipName, "relationship path")))
+                        .findFirst()
+                        .orElseThrow(() -> new IllegalArgumentException("lazy table references an unknown relationship"));
+                terminal = tables.get(canonical(relationship.targetTable(), "relationship target table"));
+            }
+            if (definition.projections().isEmpty()) {
+                throw new IllegalArgumentException("lazy table must include projections");
+            }
+            Set<String> projectionNames = new HashSet<>();
+            for (LazyProjectionDefinition projection : definition.projections()) {
+                addUnique(projectionNames, projection.name(), "duplicate projection on lazy table");
+                validateRecipe(
+                        projection.recipe(),
+                        1,
+                        counter,
+                        new RecipeValidationContext(terminal.name(), tables, expressions, functions, null, true, true, null, Map.of()));
+            }
+        }
+    }
+
+    private static void validateSemanticEntities(
+            List<ActionReference> actions,
+            List<CohortReference> cohorts,
+            Map<String, LogicalTableDefinition> tables,
+            Map<String, ExpressionFieldDefinition> expressions,
+            Map<String, FunctionCapabilityDefinition> functions,
+            Map<String, SemanticRelation> relations,
+            RecipeCounter counter)
+    {
+        Set<String> actionNames = new HashSet<>();
+        for (ActionReference action : actions) {
+            addUnique(actionNames, action.name(), "duplicate action");
+            validateSemanticEntity(action.name(), action.table(), action.representation(), "action", tables, expressions, functions, relations, counter);
+        }
+        Set<String> cohortNames = new HashSet<>();
+        for (CohortReference cohort : cohorts) {
+            addUnique(cohortNames, cohort.name(), "duplicate cohort");
+            validateSemanticEntity(cohort.name(), cohort.table(), cohort.representation(), "cohort", tables, expressions, functions, relations, counter);
+        }
+    }
+
+    private static void validateSemanticEntity(
+            String name,
+            String tableName,
+            SemanticEntityRepresentation representation,
+            String kind,
+            Map<String, LogicalTableDefinition> tables,
+            Map<String, ExpressionFieldDefinition> expressions,
+            Map<String, FunctionCapabilityDefinition> functions,
+            Map<String, SemanticRelation> relations,
+            RecipeCounter counter)
+    {
+        LogicalTableDefinition owner = tables.get(canonical(tableName, kind + " table"));
+        if (owner == null) {
+            throw new IllegalArgumentException(kind + " references an unknown table");
+        }
+        switch (representation) {
+            case PredicateRepresentation predicate -> validateRecipe(
+                    predicate.predicate(),
+                    1,
+                    counter,
+                    new RecipeValidationContext(owner.name(), tables, expressions, functions, null, true, true, null, Map.of()));
+            case RelationMembershipRepresentation membershipRepresentation -> {
+                RelationMembershipRecipe membership = membershipRepresentation.relation();
+                SemanticRelation relation = relations.get(canonical(membership.relation().name(), kind + " relation"));
+                if (relation == null || relation.kind != membership.relation().kind()) {
+                    throw new IllegalArgumentException(kind + " references an unknown or mismatched relation");
+                }
+                requireReference(semanticFieldNames(owner, expressions), membership.sourceField(), kind + " references an unknown source field");
+                requireReference(requireNonNull(relation.fields, "resolved relation fields are null"), membership.targetField(), kind + " references an unknown target field");
+            }
+        }
     }
 
     private static void addRelation(Map<String, SemanticRelation> relations, String name, SemanticRelation relation)
@@ -363,6 +602,23 @@ public record HogQlSemanticCatalogSnapshot(
         return fields;
     }
 
+    private static Set<String> semanticFieldNames(LogicalTableDefinition table, Map<String, ExpressionFieldDefinition> expressions)
+    {
+        Set<String> fields = fieldNames(requireNonNull(table, "logical table is null"));
+        expressions.values().stream()
+                .filter(expression -> canonical(expression.table(), "expression table").equals(canonical(table.name(), "logical table")))
+                .forEach(expression -> fields.add(canonical(expression.name(), "expression field")));
+        return fields;
+    }
+
+    private static Set<String> semanticMemberNames(LogicalTableDefinition table, Map<String, ExpressionFieldDefinition> expressions)
+    {
+        Set<String> members = semanticFieldNames(table, expressions);
+        table.properties().forEach(property -> members.add(canonical(property.name(), "property name")));
+        table.relationships().forEach(relationship -> members.add(canonical(relationship.name(), "relationship name")));
+        return members;
+    }
+
     private static void requireReference(Set<String> names, String name, String message)
     {
         if (!names.contains(canonical(name, "reference"))) {
@@ -424,7 +680,15 @@ public record HogQlSemanticCatalogSnapshot(
         }
     }
 
-    public record PropertyDefinition(String name, String sourceField, PropertyStorage storage, LogicalType logicalType, boolean nullable)
+    public record PropertyDefinition(
+            String name,
+            String sourceField,
+            PropertyStorage storage,
+            LogicalType logicalType,
+            boolean nullable,
+            Optional<String> keyTypeSignature,
+            Optional<String> valueTypeSignature,
+            Optional<ExpressionRecipe> lookupRecipe)
     {
         public PropertyDefinition
         {
@@ -432,10 +696,21 @@ public record HogQlSemanticCatalogSnapshot(
             sourceField = definition(sourceField, "property source field");
             storage = requireNonNull(storage, "storage is null");
             logicalType = requireNonNull(logicalType, "logicalType is null");
+            keyTypeSignature = requireNonNull(keyTypeSignature, "keyTypeSignature is null").map(value -> definition(value, "property key type signature"));
+            valueTypeSignature = requireNonNull(valueTypeSignature, "valueTypeSignature is null").map(value -> definition(value, "property value type signature"));
+            lookupRecipe = requireNonNull(lookupRecipe, "lookupRecipe is null");
+            if (lookupRecipe.isPresent() != keyTypeSignature.isPresent() || lookupRecipe.isPresent() != valueTypeSignature.isPresent()) {
+                throw new IllegalArgumentException("property lookup recipe and type signatures must be declared together");
+            }
+        }
+
+        public PropertyDefinition(String name, String sourceField, PropertyStorage storage, LogicalType logicalType, boolean nullable)
+        {
+            this(name, sourceField, storage, logicalType, nullable, Optional.empty(), Optional.empty(), Optional.empty());
         }
     }
 
-    public record RelationshipDefinition(String name, String targetTable, RelationshipCardinality cardinality, List<JoinKey> joinKeys)
+    public record RelationshipDefinition(String name, String targetTable, RelationshipCardinality cardinality, List<JoinKey> joinKeys, Optional<ExpressionRecipe> joinPredicate)
     {
         public RelationshipDefinition
         {
@@ -446,6 +721,12 @@ public record HogQlSemanticCatalogSnapshot(
             if (joinKeys.isEmpty()) {
                 throw new IllegalArgumentException("relationship must have at least one join key");
             }
+            joinPredicate = requireNonNull(joinPredicate, "joinPredicate is null");
+        }
+
+        public RelationshipDefinition(String name, String targetTable, RelationshipCardinality cardinality, List<JoinKey> joinKeys)
+        {
+            this(name, targetTable, cardinality, joinKeys, Optional.empty());
         }
     }
 
@@ -471,11 +752,14 @@ public record HogQlSemanticCatalogSnapshot(
     }
 
     public sealed interface ExpressionRecipe
-            permits CastRecipe,
+            permits ArgumentReferenceRecipe,
+                    CastRecipe,
                     FieldReferenceRecipe,
                     FunctionCallRecipe,
                     LiteralRecipe,
-                    OperatorRecipe
+                    OperatorRecipe,
+                    PropertyLookupRecipe,
+                    ScopedFieldReferenceRecipe
     {
         ExpressionRecipeKind kind();
     }
@@ -566,6 +850,54 @@ public record HogQlSemanticCatalogSnapshot(
         public ExpressionRecipeKind kind()
         {
             return ExpressionRecipeKind.CAST;
+        }
+    }
+
+    public record ArgumentReferenceRecipe(ExpressionArgument argument)
+            implements ExpressionRecipe
+    {
+        public ArgumentReferenceRecipe
+        {
+            argument = requireNonNull(argument, "argument is null");
+        }
+
+        @Override
+        public ExpressionRecipeKind kind()
+        {
+            return ExpressionRecipeKind.ARGUMENT_REFERENCE;
+        }
+    }
+
+    public record ScopedFieldReferenceRecipe(RelationshipJoinSide side, String field)
+            implements ExpressionRecipe
+    {
+        public ScopedFieldReferenceRecipe
+        {
+            side = requireNonNull(side, "side is null");
+            field = definition(field, "scoped field reference");
+        }
+
+        @Override
+        public ExpressionRecipeKind kind()
+        {
+            return ExpressionRecipeKind.SCOPED_FIELD_REFERENCE;
+        }
+    }
+
+    public record PropertyLookupRecipe(String table, String property, ExpressionRecipe key)
+            implements ExpressionRecipe
+    {
+        public PropertyLookupRecipe
+        {
+            table = definition(table, "property lookup table");
+            property = definition(property, "property lookup name");
+            key = requireNonNull(key, "property lookup key is null");
+        }
+
+        @Override
+        public ExpressionRecipeKind kind()
+        {
+            return ExpressionRecipeKind.PROPERTY_LOOKUP;
         }
     }
 
@@ -705,6 +1037,9 @@ public record HogQlSemanticCatalogSnapshot(
         {
             argumentTypes = copy(argumentTypes, "argumentTypes").stream().map(value -> definition(value, "function argument type")).toList();
             returnType = definition(returnType, "function return type");
+            if (variadic && argumentTypes.isEmpty()) {
+                throw new IllegalArgumentException("variadic function signature must declare an argument");
+            }
         }
     }
 
@@ -716,6 +1051,98 @@ public record HogQlSemanticCatalogSnapshot(
             behavior = requireNonNull(behavior, "behavior is null");
             defaultValue = requireNonNull(defaultValue, "defaultValue is null");
             sessionProperty = copy(sessionProperty, "sessionProperty");
+        }
+    }
+
+    public record LazyTableDefinition(String table, String name, List<String> relationshipPath, List<LazyProjectionDefinition> projections)
+    {
+        public LazyTableDefinition
+        {
+            table = definition(table, "lazy table owner");
+            name = definition(name, "lazy table name");
+            relationshipPath = copy(relationshipPath, "relationshipPath").stream()
+                    .map(value -> definition(value, "lazy table relationship path"))
+                    .toList();
+            projections = copy(projections, "projections");
+        }
+    }
+
+    public record LazyProjectionDefinition(String name, String trinoTypeSignature, LogicalType logicalType, boolean nullable, boolean starVisible, ExpressionRecipe recipe)
+    {
+        public LazyProjectionDefinition
+        {
+            name = definition(name, "lazy projection name");
+            trinoTypeSignature = definition(trinoTypeSignature, "lazy projection type signature");
+            logicalType = requireNonNull(logicalType, "logicalType is null");
+            recipe = requireNonNull(recipe, "recipe is null");
+        }
+    }
+
+    public record ActionReference(String name, String actionId, String table, SemanticEntityRepresentation representation)
+    {
+        public ActionReference
+        {
+            name = definition(name, "action name");
+            actionId = definition(actionId, "action ID");
+            table = definition(table, "action table");
+            representation = requireNonNull(representation, "representation is null");
+        }
+    }
+
+    public record CohortReference(String name, String cohortId, String table, SemanticEntityRepresentation representation)
+    {
+        public CohortReference
+        {
+            name = definition(name, "cohort name");
+            cohortId = definition(cohortId, "cohort ID");
+            table = definition(table, "cohort table");
+            representation = requireNonNull(representation, "representation is null");
+        }
+    }
+
+    public sealed interface SemanticEntityRepresentation
+            permits PredicateRepresentation, RelationMembershipRepresentation
+    {
+        SemanticEntityKind kind();
+    }
+
+    public record PredicateRepresentation(ExpressionRecipe predicate)
+            implements SemanticEntityRepresentation
+    {
+        public PredicateRepresentation
+        {
+            predicate = requireNonNull(predicate, "predicate is null");
+        }
+
+        @Override
+        public SemanticEntityKind kind()
+        {
+            return SemanticEntityKind.PREDICATE;
+        }
+    }
+
+    public record RelationMembershipRepresentation(RelationMembershipRecipe relation)
+            implements SemanticEntityRepresentation
+    {
+        public RelationMembershipRepresentation
+        {
+            relation = requireNonNull(relation, "relation is null");
+        }
+
+        @Override
+        public SemanticEntityKind kind()
+        {
+            return SemanticEntityKind.RELATION;
+        }
+    }
+
+    public record RelationMembershipRecipe(RelationReference relation, String sourceField, String targetField)
+    {
+        public RelationMembershipRecipe
+        {
+            relation = requireNonNull(relation, "relation is null");
+            sourceField = definition(sourceField, "membership source field");
+            targetField = definition(targetField, "membership target field");
         }
     }
 
@@ -747,12 +1174,12 @@ public record HogQlSemanticCatalogSnapshot(
 
     public enum ExpressionRecipeKind
     {
-        FIELD_REFERENCE, LITERAL, FUNCTION_CALL, OPERATOR, CAST
+        FIELD_REFERENCE, LITERAL, FUNCTION_CALL, OPERATOR, CAST, ARGUMENT_REFERENCE, SCOPED_FIELD_REFERENCE, PROPERTY_LOOKUP
     }
 
     public enum SemanticOperator
     {
-        ADD, SUBTRACT, MULTIPLY, DIVIDE, MODULUS, EQUAL, NOT_EQUAL, LESS_THAN, LESS_THAN_OR_EQUAL, GREATER_THAN, GREATER_THAN_OR_EQUAL, AND, OR, NOT, NEGATE, IS_NULL, IS_NOT_NULL
+        ADD, SUBTRACT, MULTIPLY, DIVIDE, MODULUS, EQUAL, NOT_EQUAL, LESS_THAN, LESS_THAN_OR_EQUAL, GREATER_THAN, GREATER_THAN_OR_EQUAL, AND, OR, NOT, NEGATE, IS_NULL, IS_NOT_NULL, SUBSCRIPT
     }
 
     public enum LiteralEncoding
@@ -795,6 +1222,21 @@ public record HogQlSemanticCatalogSnapshot(
         ONE_TO_ONE, ONE_TO_MANY, MANY_TO_ONE, MANY_TO_MANY
     }
 
+    public enum ExpressionArgument
+    {
+        PROPERTY_SOURCE, PROPERTY_KEY
+    }
+
+    public enum RelationshipJoinSide
+    {
+        SOURCE, TARGET
+    }
+
+    public enum SemanticEntityKind
+    {
+        PREDICATE, RELATION
+    }
+
     private enum VisitState
     {
         VISITING, VISITED
@@ -809,6 +1251,27 @@ public record HogQlSemanticCatalogSnapshot(
             if (++nodes > MAX_RECIPE_NODES) {
                 throw new IllegalArgumentException("expression recipes exceed node limit");
             }
+        }
+    }
+
+    private record RecipeValidationContext(
+            String ownerTable,
+            Map<String, LogicalTableDefinition> tables,
+            Map<String, ExpressionFieldDefinition> expressions,
+            Map<String, FunctionCapabilityDefinition> functions,
+            List<String> dependencies,
+            boolean allowFieldReferences,
+            boolean allowPropertyLookups,
+            Map<ExpressionArgument, Integer> arguments,
+            Map<RelationshipJoinSide, String> scopedTables)
+    {
+        private RecipeValidationContext
+        {
+            ownerTable = definition(ownerTable, "recipe owner table");
+            tables = requireNonNull(tables, "tables is null");
+            expressions = requireNonNull(expressions, "expressions is null");
+            functions = requireNonNull(functions, "functions is null");
+            scopedTables = Map.copyOf(requireNonNull(scopedTables, "scopedTables is null"));
         }
     }
 

@@ -13,6 +13,7 @@
  */
 package io.trino.hogql.compiler;
 
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ArgumentReferenceRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.CastRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionFieldDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionRecipe;
@@ -25,10 +26,12 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalTable
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.MaterializedViewReference;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.OperatorRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyLookupRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ReferencedField;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationKind;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationReference;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.SavedQueryReference;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ScopedFieldReferenceRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.SemanticOperator;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.TypedLiteral;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.VirtualTableDefinition;
@@ -660,6 +663,9 @@ final class HogQlSemanticResolver
                         new Identifier(cast.targetTypeSignature(), false, span),
                         false,
                         span);
+                case ArgumentReferenceRecipe _ -> throw unsupportedExpansion(span, "HogQL recipe argument is only valid inside a property lookup recipe");
+                case ScopedFieldReferenceRecipe _ -> throw unsupportedExpansion(span, "HogQL scoped field recipe is only valid inside a relationship predicate");
+                case PropertyLookupRecipe _ -> throw unsupportedExpansion(span, "HogQL property lookup recipe expansion is unavailable");
             };
         }
         finally {
@@ -716,6 +722,7 @@ final class HogQlSemanticResolver
             case NEGATE -> new UnaryExpression(HogQlQuery.UnaryOperator.NEGATE, arguments.getFirst(), span);
             case IS_NULL -> new IsNullExpression(arguments.getFirst(), false, span, span);
             case IS_NOT_NULL -> new IsNullExpression(arguments.getFirst(), true, span, span);
+            case SUBSCRIPT -> new SubscriptExpression(arguments.getFirst(), arguments.getLast(), span);
             default -> new BinaryExpression(binaryOperator(operator.operator()), arguments.getFirst(), arguments.getLast(), span);
         };
     }
@@ -736,7 +743,7 @@ final class HogQlSemanticResolver
             case GREATER_THAN_OR_EQUAL -> HogQlQuery.BinaryOperator.GREATER_THAN_OR_EQUAL;
             case AND -> HogQlQuery.BinaryOperator.AND;
             case OR -> HogQlQuery.BinaryOperator.OR;
-            case NOT, NEGATE, IS_NULL, IS_NOT_NULL -> throw new IllegalArgumentException("unary operator cannot be lowered as binary");
+            case NOT, NEGATE, IS_NULL, IS_NOT_NULL, SUBSCRIPT -> throw new IllegalArgumentException("operator cannot be lowered as binary");
         };
     }
 
