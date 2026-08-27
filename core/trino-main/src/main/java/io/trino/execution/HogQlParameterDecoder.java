@@ -62,11 +62,6 @@ import io.trino.sql.tree.TypeParameter;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.RoundingMode;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.OffsetDateTime;
-import java.time.OffsetTime;
-import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -74,8 +69,18 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
+import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_BINDING_ERROR;
 import static io.trino.spi.type.CharType.MAX_LENGTH;
+import static io.trino.type.DateTimes.extractTimePrecision;
+import static io.trino.type.DateTimes.extractTimestampPrecision;
+import static io.trino.type.DateTimes.parseTime;
+import static io.trino.type.DateTimes.parseTimeWithTimeZone;
+import static io.trino.type.DateTimes.parseTimestamp;
+import static io.trino.type.DateTimes.parseTimestampWithTimeZone;
+import static io.trino.type.DateTimes.timeHasTimeZone;
+import static io.trino.type.DateTimes.timestampHasTimeZone;
+import static io.trino.util.DateTimeUtils.parseDate;
 import static java.lang.Float.isFinite;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
@@ -210,12 +215,15 @@ final class HogQlParameterDecoder
             }
             case "DATE" -> {
                 requireNoArguments(type);
-                LocalDate.parse(value.value());
+                parseDate(utf8Slice(value.value()));
                 yield new GenericLiteral(location, "DATE", value.value());
             }
             case "UUID" -> {
                 requireNoArguments(type);
                 UUID.fromString(value.value());
+                if (value.value().length() != 36) {
+                    throw new IllegalArgumentException("UUID value is not canonical");
+                }
                 yield new GenericLiteral(location, "UUID", value.value());
             }
             case "IPADDRESS" -> {
@@ -237,27 +245,34 @@ final class HogQlParameterDecoder
             throw new IllegalArgumentException("date-time value must be a string");
         }
         validateDateTimePrecision(type);
-        String normalized = stringValue.value().replace(' ', 'T');
-        try {
-            if (type.getType() == DateTimeDataType.Type.TIMESTAMP) {
-                if (type.isWithTimeZone()) {
-                    OffsetDateTime.parse(normalized);
-                }
-                else {
-                    LocalDateTime.parse(normalized);
-                }
+        String literal = stringValue.value();
+        if (type.getType() == DateTimeDataType.Type.TIMESTAMP) {
+            int precision = extractTimestampPrecision(literal);
+            validateLiteralPrecision(precision);
+            if (timestampHasTimeZone(literal) != type.isWithTimeZone()) {
+                throw new IllegalArgumentException("timestamp time zone does not match type");
             }
-            else if (type.isWithTimeZone()) {
-                OffsetTime.parse(normalized);
+            if (type.isWithTimeZone()) {
+                parseTimestampWithTimeZone(precision, literal);
             }
             else {
-                java.time.LocalTime.parse(normalized);
+                parseTimestamp(precision, literal);
             }
         }
-        catch (DateTimeParseException _) {
-            throw new IllegalArgumentException("date-time value is invalid");
+        else {
+            int precision = extractTimePrecision(literal);
+            validateLiteralPrecision(precision);
+            if (timeHasTimeZone(literal) != type.isWithTimeZone()) {
+                throw new IllegalArgumentException("time zone does not match type");
+            }
+            if (type.isWithTimeZone()) {
+                parseTimeWithTimeZone(precision, literal);
+            }
+            else {
+                parseTime(literal);
+            }
         }
-        return new GenericLiteral(location, type.getType().name(), stringValue.value());
+        return new GenericLiteral(location, type.getType().name(), literal);
     }
 
     private static Expression decodeArray(Value value, GenericDataType type, NodeLocation location)
@@ -469,6 +484,13 @@ final class HogQlParameterDecoder
                 throw new IllegalArgumentException("invalid date-time precision");
             }
         });
+    }
+
+    private static void validateLiteralPrecision(int precision)
+    {
+        if (precision > 12) {
+            throw new IllegalArgumentException("date-time literal precision is out of range");
+        }
     }
 
     private static void requireType(GenericDataType type, String expected)

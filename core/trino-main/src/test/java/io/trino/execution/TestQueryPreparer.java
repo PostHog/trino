@@ -31,7 +31,9 @@ import io.trino.sql.parser.ParsingException;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.AllColumns;
 import io.trino.sql.tree.Array;
+import io.trino.sql.tree.BinaryLiteral;
 import io.trino.sql.tree.Cast;
+import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.FunctionCall;
 import io.trino.sql.tree.GenericLiteral;
 import io.trino.sql.tree.QualifiedName;
@@ -144,17 +146,47 @@ public class TestQueryPreparer
     }
 
     @ParameterizedTest
-    @MethodSource("invalidHogQlTypedParameters")
-    public void testHogQlTypedParameterErrorsAreStableAndRedacted(HogQlTypedValue typedValue)
+    @MethodSource("validHogQlLiteralParameters")
+    public void testHogQlLiteralParametersPreserveStockAstValues(HogQlTypedValue typedValue, Class<? extends Expression> literalType, String expectedValue)
     {
-        String sensitiveValue = "sensitive-binding-value";
+        PreparedQuery preparedQuery = HOGQL_QUERY_PREPARER.prepareQuery(
+                TEST_SESSION,
+                hogQl(envelope("SELECT {input}", Map.of("input", typedValue))));
 
+        assertThat(preparedQuery.getParameters()).hasSize(1);
+        Expression parameter = preparedQuery.getParameters().getFirst();
+        Expression literal;
+        if (typedValue.type().equalsIgnoreCase("json")) {
+            literal = parameter;
+        }
+        else {
+            assertThat(parameter).isInstanceOf(Cast.class);
+            Cast cast = (Cast) parameter;
+            assertThat(cast.getType()).isEqualTo(SQL_PARSER.createType(typedValue.type()));
+            literal = cast.getExpression();
+        }
+        assertThat(literal).isInstanceOf(literalType);
+        String literalValue = switch (literal) {
+            case GenericLiteral genericLiteral -> genericLiteral.getValue();
+            case BinaryLiteral binaryLiteral -> binaryLiteral.toHexString();
+            default -> throw new AssertionError("unexpected literal type");
+        };
+        assertThat(literalValue).isEqualTo(expectedValue);
+        assertThat(SqlFormatter.formatSql(preparedQuery.getStatement()))
+                .contains("?")
+                .doesNotContain(expectedValue);
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidHogQlTypedParameters")
+    public void testHogQlTypedParameterErrorsAreStableAndRedacted(HogQlTypedValue typedValue, String redactedFragment)
+    {
         assertTrinoExceptionThrownBy(() -> HOGQL_QUERY_PREPARER.prepareQuery(
                 TEST_SESSION,
                 hogQl(envelope("SELECT {input}", Map.of("input", typedValue)))))
                 .hasErrorCode(HogQlErrorCode.HOGQL_BINDING_ERROR)
                 .hasMessage("line 1:8: Invalid HogQL parameter binding: input")
-                .satisfies(exception -> assertThat(exception.getMessage()).doesNotContain(sensitiveValue));
+                .satisfies(exception -> assertThat(exception.getMessage()).doesNotContain(redactedFragment));
     }
 
     @Test
@@ -187,14 +219,41 @@ public class TestQueryPreparer
     {
         String sensitiveValue = "sensitive-binding-value";
         return Stream.of(
-                arguments(typedValue(sensitiveValue, new StringValue(sensitiveValue))),
-                arguments(typedValue("boolean", new StringValue(sensitiveValue))),
-                arguments(typedValue("tinyint", new NumberValue("128"))),
-                arguments(typedValue("decimal(3, 1)", new NumberValue("123.4"))),
-                arguments(typedValue("uuid", new StringValue(sensitiveValue))),
-                arguments(typedValue("array(bigint)", new ArrayValue(List.of(new StringValue(sensitiveValue))))),
-                arguments(typedValue("map(bigint, varchar)", new ObjectValue(Map.of("field", new StringValue(sensitiveValue))))),
-                arguments(typedValue("row(label varchar)", new ObjectValue(Map.of("unexpected", new StringValue(sensitiveValue))))));
+                arguments(typedValue(sensitiveValue, new StringValue(sensitiveValue)), sensitiveValue),
+                arguments(typedValue("boolean", new StringValue(sensitiveValue)), sensitiveValue),
+                arguments(typedValue("tinyint", new NumberValue("128")), "128"),
+                arguments(typedValue("decimal(3, 1)", new NumberValue("123.4")), "123.4"),
+                arguments(typedValue("uuid", new StringValue(sensitiveValue)), sensitiveValue),
+                arguments(typedValue("array(bigint)", new ArrayValue(List.of(new StringValue(sensitiveValue)))), sensitiveValue),
+                arguments(typedValue("map(bigint, varchar)", new ObjectValue(Map.of("field", new StringValue(sensitiveValue)))), sensitiveValue),
+                arguments(typedValue("row(label varchar)", new ObjectValue(Map.of("unexpected", new StringValue(sensitiveValue)))), sensitiveValue),
+                arguments(typedValue("time(13)", new StringValue("12:34:56.123456789012")), "12:34:56.123456789012"),
+                arguments(typedValue("time(12) with time zone", new StringValue("12:34:56.123456789012+15:00")), "+15:00"),
+                arguments(typedValue("time(12) with time zone", new StringValue("12:34:56.123456789012 America/Toronto")), "America/Toronto"),
+                arguments(typedValue("timestamp(12) with time zone", new StringValue("2026-03-08 02:30:00.123456789012 America/Toronto")), "America/Toronto"),
+                arguments(typedValue("timestamp(12) with time zone", new StringValue("2026-08-27 12:34:56.123456789012 Invalid/Zone")), "Invalid/Zone"),
+                arguments(typedValue("timestamp(12)", new StringValue("2026-08-27 12:34:56.1234567890123")), "1234567890123"),
+                arguments(typedValue("date", new StringValue("2026-02-29")), "2026-02-29"),
+                arguments(typedValue("uuid", new StringValue("1-1-1-1-1")), "1-1-1-1-1"),
+                arguments(typedValue("ipaddress", new StringValue("host.example.com")), "host.example.com"),
+                arguments(typedValue("varbinary", new StringValue("ABC")), "ABC"));
+    }
+
+    private static Stream<Arguments> validHogQlLiteralParameters()
+    {
+        return Stream.of(
+                arguments(typedValue("time(0)", new StringValue("00:00")), GenericLiteral.class, "00:00"),
+                arguments(typedValue("time(10)", new StringValue("12:34:56.1234567890")), GenericLiteral.class, "12:34:56.1234567890"),
+                arguments(typedValue("time(12) with time zone", new StringValue("12:34:56.123456789012 +05:45")), GenericLiteral.class, "12:34:56.123456789012 +05:45"),
+                arguments(typedValue("timestamp(0)", new StringValue("2026-08-27 12:34:56")), GenericLiteral.class, "2026-08-27 12:34:56"),
+                arguments(typedValue("timestamp(10)", new StringValue("2026-08-27 12:34:56.1234567890")), GenericLiteral.class, "2026-08-27 12:34:56.1234567890"),
+                arguments(typedValue("timestamp(11) with time zone", new StringValue("2026-08-27 12:34:56.12345678901 +05:45")), GenericLiteral.class, "2026-08-27 12:34:56.12345678901 +05:45"),
+                arguments(typedValue("timestamp(12) with time zone", new StringValue("2026-08-27 12:34:56.123456789012 America/Toronto")), GenericLiteral.class, "2026-08-27 12:34:56.123456789012 America/Toronto"),
+                arguments(typedValue("date", new StringValue("2000-02-29")), GenericLiteral.class, "2000-02-29"),
+                arguments(typedValue("uuid", new StringValue("00000000-0000-0000-0000-000000000000")), GenericLiteral.class, "00000000-0000-0000-0000-000000000000"),
+                arguments(typedValue("ipaddress", new StringValue("64:ff9b::10.0.0.1")), GenericLiteral.class, "64:ff9b::10.0.0.1"),
+                arguments(typedValue("varbinary", new StringValue("00 ff 10")), BinaryLiteral.class, "00FF10"),
+                arguments(typedValue("json", new ObjectValue(Map.of("escaped", new StringValue("line\n\u2603"), "number", new NumberValue("12345678901234567890.000000000001"), "null", NullValue.NULL))), GenericLiteral.class, "{\"escaped\":\"line\\n☃\",\"null\":null,\"number\":12345678901234567890.000000000001}"));
     }
 
     private static HogQlTypedValue typedValue(String type, HogQlTypedValue.Value value)
