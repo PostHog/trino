@@ -94,6 +94,29 @@ public class TestHogQlRelationshipExpansion
                         "ON \"__hogql_lazy_1\".event_id = \"__hogql_lazy_2\".event_id"));
     }
 
+    @Test
+    public void testPrunesUnusedLazyStarProjectionBeforeExpansion()
+    {
+        HogQlCompilationResult result = compile("SELECT sub.event FROM (SELECT e.personProfile.*, e.* FROM events e) sub");
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT sub.event FROM (SELECT e.event_name AS event FROM analytics.data.raw_events e) sub"));
+    }
+
+    @Test
+    public void testRetainsDemandedLazyStarProjectionAsStockJoin()
+    {
+        HogQlCompilationResult result = compile("SELECT sub.name FROM (SELECT e.personProfile.*, e.* FROM events e) sub");
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT sub.name FROM (" +
+                        "SELECT \"__hogql_lazy_1\".full_name AS name " +
+                        "FROM analytics.data.raw_events e " +
+                        "LEFT JOIN analytics.data.raw_persons \"__hogql_lazy_1\" " +
+                        "ON e.person_id = \"__hogql_lazy_1\".person_id " +
+                        "AND e.workspace_id = \"__hogql_lazy_1\".workspace_id) sub"));
+    }
+
     @ParameterizedTest
     @MethodSource("nonProjectionRelationshipQueries")
     public void testExpandsRelationshipDemandedOutsideProjection(String hogql, String trinoSql)

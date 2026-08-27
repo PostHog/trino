@@ -13,6 +13,7 @@
  */
 package io.trino.hogql.compiler;
 
+import io.trino.hogql.compiler.HogQlProjectionDemand.RequiredOutputs;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ActionReference;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ArgumentReferenceRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.CastRecipe;
@@ -121,6 +122,7 @@ final class HogQlSemanticResolver
 
     private final PinnedSnapshot snapshot;
     private final ExpansionBudget expansionBudget;
+    private final Optional<RequiredOutputs> requiredOutputs;
     private final Map<RelationshipPathKey, TableBinding> relationshipPaths = new LinkedHashMap<>();
     private List<TableBinding> bindings = List.of();
     private boolean allRelationsLogical;
@@ -129,13 +131,19 @@ final class HogQlSemanticResolver
 
     private HogQlSemanticResolver(PinnedSnapshot snapshot)
     {
-        this(snapshot, new ExpansionBudget());
+        this(snapshot, new ExpansionBudget(), Optional.empty());
     }
 
     private HogQlSemanticResolver(PinnedSnapshot snapshot, ExpansionBudget expansionBudget)
     {
+        this(snapshot, expansionBudget, Optional.empty());
+    }
+
+    private HogQlSemanticResolver(PinnedSnapshot snapshot, ExpansionBudget expansionBudget, Optional<RequiredOutputs> requiredOutputs)
+    {
         this.snapshot = requireNonNull(snapshot, "snapshot is null");
         this.expansionBudget = requireNonNull(expansionBudget, "expansionBudget is null");
+        this.requiredOutputs = requireNonNull(requiredOutputs, "requiredOutputs is null");
     }
 
     public static Optional<ResolvedQuery> resolve(PinnedSnapshot snapshot, HogQlQuery query)
@@ -169,7 +177,8 @@ final class HogQlSemanticResolver
             return new HogQlQuery(commonTables, resolved, query.orderBy(), query.limit(), query.offset(), query.span());
         }
         SelectQueryBody select = (SelectQueryBody) query.body();
-        Optional<ResolvedRelation> relation = select.from().map(this::resolveRelation);
+        HogQlProjectionDemand projectionDemand = HogQlProjectionDemand.collect(query);
+        Optional<ResolvedRelation> relation = select.from().map(value -> resolveRelation(value, projectionDemand));
         bindings = relation.map(ResolvedRelation::bindings).orElse(List.of());
         allRelationsLogical = relation.map(ResolvedRelation::allLogical).orElse(false);
         expandedRelation = relation.map(ResolvedRelation::relation);
@@ -195,6 +204,11 @@ final class HogQlSemanticResolver
     {
         List<Projection> projections = new ArrayList<>();
         query.projections().forEach(projection -> projections.addAll(resolveProjection(projection)));
+        if (projections.isEmpty() && requiredOutputs.isPresent()) {
+            projections.add(new ExpressionProjection(
+                    new Literal(HogQlQuery.LiteralKind.INTEGER, "1", query.span()),
+                    Optional.of(new Identifier("__hogql_pruned", true, query.span()))));
+        }
         Optional<Expression> where = query.where().map(this::resolveExpression);
         List<Expression> groupBy = query.groupBy().stream().map(this::resolveExpression).toList();
         Optional<Expression> having = query.having().map(this::resolveExpression);
@@ -270,6 +284,11 @@ final class HogQlSemanticResolver
 
     private List<Projection> resolveStar(Star star)
     {
+        Optional<List<Projection>> lazyStar = resolveLazyStar(star);
+        if (lazyStar.isPresent()) {
+            return lazyStar.orElseThrow();
+        }
+
         List<TableBinding> starBindings;
         boolean qualified = !star.qualifier().isEmpty();
         if (qualified) {
@@ -299,6 +318,7 @@ final class HogQlSemanticResolver
                 .flatMap(binding -> binding.orderedFields().stream()
                         .filter(BoundField::starVisible)
                         .filter(field -> !exclusions.contains(new StarField(binding, field)))
+                        .filter(field -> projectionDemanded(field.name()))
                         .map(field -> {
                             StarReplacement replacement = replacements.get(new StarField(binding, field));
                             Expression expression = replacement == null
@@ -313,6 +333,99 @@ final class HogQlSemanticResolver
                         }))
                 .map(Projection.class::cast)
                 .toList();
+    }
+
+    private Optional<List<Projection>> resolveLazyStar(Star star)
+    {
+        if (star.qualifier().isEmpty() || star.qualifier().size() > 2) {
+            return Optional.empty();
+        }
+
+        List<LazyStar> matches;
+        if (star.qualifier().size() == 1) {
+            String lazyName = star.qualifier().getFirst().value();
+            matches = bindings.stream()
+                    .flatMap(binding -> lazyTable(binding, lazyName)
+                            .map(definition -> java.util.stream.Stream.of(new LazyStar(binding, definition)))
+                            .orElseGet(java.util.stream.Stream::empty))
+                    .toList();
+        }
+        else {
+            Identifier owner = star.qualifier().getFirst();
+            String lazyName = star.qualifier().getLast().value();
+            matches = bindings.stream()
+                    .filter(binding -> matchesStarQualifier(binding, List.of(owner)))
+                    .flatMap(binding -> lazyTable(binding, lazyName)
+                            .map(definition -> java.util.stream.Stream.of(new LazyStar(binding, definition)))
+                            .orElseGet(java.util.stream.Stream::empty))
+                    .toList();
+        }
+        if (matches.isEmpty()) {
+            return Optional.empty();
+        }
+        if (matches.size() > 1) {
+            throw starResolutionError(star.qualifier().getFirst(), "Ambiguous HogQL star qualifier: " + starQualifier(star));
+        }
+
+        LazyStar lazyStar = matches.getFirst();
+        List<LazyProjectionDefinition> visible = lazyStar.definition().projections().stream()
+                .filter(LazyProjectionDefinition::starVisible)
+                .toList();
+        Set<String> exclusions = new HashSet<>();
+        for (ColumnReference exclusion : star.exclusions()) {
+            Identifier name = exclusion.parts().getLast();
+            LazyProjectionDefinition matched = visible.stream()
+                    .filter(projection -> matchesIdentifier(name, projection.name()))
+                    .findFirst()
+                    .orElseThrow(() -> starResolutionError(exclusion.span(), "Unknown HogQL star exclusion: " + identifierPath(exclusion.parts())));
+            if (!exclusions.add(canonical(matched.name()))) {
+                throw starResolutionError(exclusion.span(), "Duplicate HogQL star exclusion: " + identifierPath(exclusion.parts()));
+            }
+        }
+        Map<String, StarReplacement> replacements = new HashMap<>();
+        for (StarReplacement replacement : star.replacements()) {
+            LazyProjectionDefinition matched = visible.stream()
+                    .filter(projection -> !exclusions.contains(canonical(projection.name())))
+                    .filter(projection -> matchesIdentifier(replacement.target(), projection.name()))
+                    .findFirst()
+                    .orElseThrow(() -> starResolutionError(replacement.target(), "Unknown HogQL star replacement: " + replacement.target().value()));
+            if (replacements.putIfAbsent(canonical(matched.name()), replacement) != null) {
+                throw starResolutionError(replacement.target(), "Duplicate HogQL star replacement: " + replacement.target().value());
+            }
+        }
+
+        return Optional.of(visible.stream()
+                .filter(projection -> !exclusions.contains(canonical(projection.name())))
+                .filter(projection -> projectionDemanded(projection.name()))
+                .map(projection -> {
+                    StarReplacement replacement = replacements.get(canonical(projection.name()));
+                    Expression expression = replacement == null
+                            ? resolveLazyProjection(lazyStar.binding(), lazyStar.definition(), projection, star.span())
+                            : resolveExpression(replacement.expression());
+                    return new ExpressionProjection(expression, Optional.of(new Identifier(projection.name(), true, star.span())));
+                })
+                .map(Projection.class::cast)
+                .toList());
+    }
+
+    private Expression resolveLazyProjection(
+            TableBinding owner,
+            LazyTableDefinition definition,
+            LazyProjectionDefinition projection,
+            HogQlQuery.SourceSpan span)
+    {
+        TableBinding terminal = ensureRelationshipPath(owner, definition.relationshipPath(), span);
+        return expandRecipe(
+                terminal,
+                projection.recipe(),
+                Optional.of(terminal.outputQualifier()),
+                span,
+                expansionBudget);
+    }
+
+    private boolean projectionDemanded(String name)
+    {
+        return requiredOutputs.map(outputs -> outputs.includes(name)).orElse(true);
     }
 
     private static Map<StarField, StarReplacement> resolveStarReplacements(Star star, List<TableBinding> starBindings, Set<StarField> exclusions)
@@ -415,9 +528,20 @@ final class HogQlSemanticResolver
 
     private ResolvedRelation resolveRelation(Relation relation)
     {
+        return resolveRelation(relation, HogQlProjectionDemand.preserveAll());
+    }
+
+    private ResolvedRelation resolveRelation(Relation relation, HogQlProjectionDemand projectionDemand)
+    {
         return switch (relation) {
             case AliasedRelation alias -> {
-                ResolvedRelation child = resolveRelation(alias.relation());
+                ResolvedRelation child;
+                if (alias.relation() instanceof SubqueryRelation subquery && alias.columnAliases().isEmpty()) {
+                    child = resolveSubquery(subquery, projectionDemand.forAlias(alias.alias()));
+                }
+                else {
+                    child = resolveRelation(alias.relation(), HogQlProjectionDemand.preserveAll());
+                }
                 List<TableBinding> aliasedBindings = child.bindings().stream()
                         .map(binding -> binding.withAlias(alias.alias()))
                         .toList();
@@ -428,8 +552,8 @@ final class HogQlSemanticResolver
             }
             case CommonTableReference commonTable -> new ResolvedRelation(commonTable, List.of(), false);
             case JoinRelation join -> {
-                ResolvedRelation left = resolveRelation(join.left());
-                ResolvedRelation right = resolveRelation(join.right());
+                ResolvedRelation left = resolveRelation(join.left(), projectionDemand);
+                ResolvedRelation right = resolveRelation(join.right(), projectionDemand);
                 List<TableBinding> joinBindings = new ArrayList<>(left.bindings());
                 joinBindings.addAll(right.bindings());
                 List<TableBinding> previousBindings = bindings;
@@ -447,14 +571,21 @@ final class HogQlSemanticResolver
                         joinBindings,
                         left.allLogical() && right.allLogical());
             }
-            case SubqueryRelation subquery -> new ResolvedRelation(
-                    new SubqueryRelation(new HogQlSemanticResolver(snapshot, expansionBudget).resolveNestedQuery(subquery.query()), subquery.span()),
-                    List.of(),
-                    false);
+            case SubqueryRelation subquery -> resolveSubquery(subquery, projectionDemand.unqualified());
             case TablePlaceholder placeholder -> new ResolvedRelation(placeholder, List.of(), false);
             case TableReference table -> resolveTable(table);
             case ValuesRelation values -> new ResolvedRelation(values, List.of(), false);
         };
+    }
+
+    private ResolvedRelation resolveSubquery(SubqueryRelation subquery, RequiredOutputs requiredOutputs)
+    {
+        return new ResolvedRelation(
+                new SubqueryRelation(
+                        new HogQlSemanticResolver(snapshot, expansionBudget, Optional.of(requiredOutputs)).resolveNestedQuery(subquery.query()),
+                        subquery.span()),
+                List.of(),
+                false);
     }
 
     private JoinUsing resolveJoinUsing(JoinUsing using, List<TableBinding> leftBindings, List<TableBinding> rightBindings)
@@ -1787,6 +1918,8 @@ final class HogQlSemanticResolver
     private record FieldMatch(TableBinding binding, BoundField field) {}
 
     private record StarField(TableBinding binding, BoundField field) {}
+
+    private record LazyStar(TableBinding binding, LazyTableDefinition definition) {}
 
     private record PropertyMatch(TableBinding binding, PropertyDefinition property) {}
 
