@@ -41,6 +41,7 @@ import io.trino.hogql.parser.tree.HogQlSyntaxTree;
 import org.antlr.v4.runtime.ANTLRErrorListener;
 import org.antlr.v4.runtime.BailErrorStrategy;
 import org.antlr.v4.runtime.BaseErrorListener;
+import org.antlr.v4.runtime.CharStream;
 import org.antlr.v4.runtime.CharStreams;
 import org.antlr.v4.runtime.CommonTokenStream;
 import org.antlr.v4.runtime.DefaultErrorStrategy;
@@ -48,9 +49,13 @@ import org.antlr.v4.runtime.ParserRuleContext;
 import org.antlr.v4.runtime.RecognitionException;
 import org.antlr.v4.runtime.Recognizer;
 import org.antlr.v4.runtime.Token;
+import org.antlr.v4.runtime.TokenFactory;
+import org.antlr.v4.runtime.TokenSource;
 import org.antlr.v4.runtime.atn.PredictionMode;
 import org.antlr.v4.runtime.misc.ParseCancellationException;
+import org.antlr.v4.runtime.tree.ErrorNode;
 import org.antlr.v4.runtime.tree.ParseTree;
+import org.antlr.v4.runtime.tree.ParseTreeListener;
 import org.antlr.v4.runtime.tree.TerminalNode;
 
 import java.util.ArrayList;
@@ -83,6 +88,8 @@ public final class HogQlParser
 {
     private static final HogQlLanguageVersion CURRENT_LANGUAGE_VERSION = HogQlLanguageContract.current().languageVersion();
 
+    private final HogQlParserLimits limits;
+
     private static final ANTLRErrorListener ERROR_LISTENER = new BaseErrorListener()
     {
         @Override
@@ -91,6 +98,16 @@ public final class HogQlParser
             throw new HogQlParsingException(message, cause, line, charPositionInLine + 1);
         }
     };
+
+    public HogQlParser()
+    {
+        this(HogQlParserLimits.defaults());
+    }
+
+    HogQlParser(HogQlParserLimits limits)
+    {
+        this.limits = requireNonNull(limits, "limits is null");
+    }
 
     public HogQlQuery parseStatement(String hogql)
     {
@@ -124,7 +141,7 @@ public final class HogQlParser
         }
     }
 
-    private static ParsedQuery parseQuery(String hogql, HogQlLanguageVersion languageVersion)
+    private ParsedQuery parseQuery(String hogql, HogQlLanguageVersion languageVersion)
     {
         requireNonNull(hogql, "hogql is null");
         requireNonNull(languageVersion, "languageVersion is null");
@@ -133,7 +150,7 @@ public final class HogQlParser
         }
 
         HogQLLexer lexer = new HogQLLexer(CharStreams.fromString(hogql));
-        CommonTokenStream tokenStream = new CommonTokenStream(lexer);
+        CommonTokenStream tokenStream = new CommonTokenStream(new BoundedTokenSource(lexer, limits.maxTokens()));
         HogQLParser parser = new HogQLParser(tokenStream);
 
         lexer.removeErrorListeners();
@@ -144,6 +161,7 @@ public final class HogQlParser
         try {
             parser.getInterpreter().setPredictionMode(PredictionMode.SLL);
             parser.setErrorHandler(new BailErrorStrategy());
+            parser.addParseListener(new ParseBudgetListener(limits));
             tree = parser.select();
         }
         catch (ParseCancellationException _) {
@@ -151,12 +169,127 @@ public final class HogQlParser
             parser.getInterpreter().setPredictionMode(PredictionMode.LL);
             parser.setErrorHandler(new DefaultErrorStrategy());
             parser.addErrorListener(ERROR_LISTENER);
+            parser.removeParseListeners();
+            parser.addParseListener(new ParseBudgetListener(limits));
             tree = parser.select();
         }
         return new ParsedQuery(hogql, tree);
     }
 
     private record ParsedQuery(String source, HogQLParser.SelectContext tree) {}
+
+    private static final class BoundedTokenSource
+            implements TokenSource
+    {
+        private final TokenSource delegate;
+        private final int maxTokens;
+        private int tokenCount;
+
+        private BoundedTokenSource(TokenSource delegate, int maxTokens)
+        {
+            this.delegate = requireNonNull(delegate, "delegate is null");
+            this.maxTokens = maxTokens;
+        }
+
+        @Override
+        public Token nextToken()
+        {
+            Token token = delegate.nextToken();
+            if (token.getType() != Token.EOF && ++tokenCount > maxTokens) {
+                throw new HogQlParsingException("token limit exceeded", null, token.getLine(), token.getCharPositionInLine() + 1);
+            }
+            return token;
+        }
+
+        @Override
+        public int getLine()
+        {
+            return delegate.getLine();
+        }
+
+        @Override
+        public int getCharPositionInLine()
+        {
+            return delegate.getCharPositionInLine();
+        }
+
+        @Override
+        public CharStream getInputStream()
+        {
+            return delegate.getInputStream();
+        }
+
+        @Override
+        public String getSourceName()
+        {
+            return delegate.getSourceName();
+        }
+
+        @Override
+        public void setTokenFactory(TokenFactory<?> factory)
+        {
+            delegate.setTokenFactory(factory);
+        }
+
+        @Override
+        public TokenFactory<?> getTokenFactory()
+        {
+            return delegate.getTokenFactory();
+        }
+    }
+
+    private static final class ParseBudgetListener
+            implements ParseTreeListener
+    {
+        private final HogQlParserLimits limits;
+        private int depth;
+        private int nodes;
+
+        private ParseBudgetListener(HogQlParserLimits limits)
+        {
+            this.limits = requireNonNull(limits, "limits is null");
+        }
+
+        @Override
+        public void visitTerminal(TerminalNode node)
+        {
+            addNode(node.getSymbol());
+        }
+
+        @Override
+        public void visitErrorNode(ErrorNode node)
+        {
+            addNode(node.getSymbol());
+        }
+
+        @Override
+        public void enterEveryRule(ParserRuleContext context)
+        {
+            depth++;
+            if (depth > limits.maxParseDepth()) {
+                throw limitExceeded("parse depth limit exceeded", context.getStart());
+            }
+            addNode(context.getStart());
+        }
+
+        @Override
+        public void exitEveryRule(ParserRuleContext context)
+        {
+            depth--;
+        }
+
+        private void addNode(Token token)
+        {
+            if (++nodes > limits.maxParseTreeNodes()) {
+                throw limitExceeded("parse tree node limit exceeded", token);
+            }
+        }
+
+        private static HogQlParsingException limitExceeded(String message, Token token)
+        {
+            return new HogQlParsingException(message, null, token.getLine(), token.getCharPositionInLine() + 1);
+        }
+    }
 
     private static final class SyntaxTreeBuilder
     {
