@@ -151,6 +151,20 @@ public class TestHogQlSemanticResolution
     }
 
     @Test
+    public void testResolvesLogicalFieldsInsideCollectionSubscripts()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+
+        HogQlCompilationResult result = compiler.compile(
+                envelope("SELECT [event][1], [personId][1], [event][1].label FROM events", OptionalLong.of(7)),
+                Optional.of(context));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT ARRAY[event_name][1], ARRAY[\"Person ID\"][1], ARRAY[event_name][1].label " +
+                        "FROM analytics.\"Hog Data\".\"raw-events\""));
+    }
+
+    @Test
     public void testCatalogIndependentAndPhysicalQueriesDoNotFetchSemanticMetadata()
     {
         AtomicInteger pins = new AtomicInteger();

@@ -182,12 +182,13 @@
         {
             "id": "alternative:columnExprValue:ColumnExprArrayAccess",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlParser#testBuildsCollectionAccessWithSourceSpans",
+                "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
             ]
         },
         {
@@ -672,12 +673,13 @@
         {
             "id": "alternative:columnExprValue:ColumnExprPropertyAccess",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlParser#testBuildsCollectionAccessWithSourceSpans",
+                "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
             ]
         },
         {
@@ -794,12 +796,13 @@
         {
             "id": "alternative:columnExprValue:ColumnExprTupleAccess",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlParser#testBuildsCollectionAccessWithSourceSpans",
+                "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
             ]
         },
         {

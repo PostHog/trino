@@ -73,11 +73,11 @@ public class TestHogQlFunctionResolver
             return new PinnedSnapshot(snapshot);
         });
 
-        HogQlCompilationResult result = new HogQlCompiler().compile(envelope("SELECT hogUpper('one')"), Optional.of(context));
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope("SELECT [hogUpper('one')][1]"), Optional.of(context));
 
         assertThat(pins).hasValue(1);
         assertThat(result.catalogGeneration()).hasValue(7);
-        assertThat(result.statement()).isEqualTo(sqlParser.createStatement("SELECT system.builtin.upper('one')"));
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement("SELECT ARRAY[system.builtin.upper('one')][1]"));
     }
 
     @Test
@@ -115,7 +115,13 @@ public class TestHogQlFunctionResolver
                         "SELECT system.builtin.upper('left') UNION ALL SELECT system.builtin.upper('right')"),
                 Arguments.of(
                         "SELECT * FROM (VALUES (hogUpper('value')))",
-                        "SELECT * FROM (VALUES (system.builtin.upper('value')))"));
+                        "SELECT * FROM (VALUES (system.builtin.upper('value')))"),
+                Arguments.of(
+                        "SELECT [hogUpper('value')][hogUpper('1')]",
+                        "SELECT ARRAY[system.builtin.upper('value')][system.builtin.upper('1')]"),
+                Arguments.of(
+                        "SELECT hogUpper('value').field",
+                        "SELECT system.builtin.upper('value').field"));
     }
 
     @Test

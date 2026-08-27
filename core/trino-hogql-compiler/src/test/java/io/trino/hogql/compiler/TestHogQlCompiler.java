@@ -31,6 +31,7 @@ import io.trino.sql.tree.Query;
 import io.trino.sql.tree.QuerySpecification;
 import io.trino.sql.tree.SingleColumn;
 import io.trino.sql.tree.Statement;
+import io.trino.sql.tree.SubscriptExpression;
 import io.trino.sql.tree.Table;
 import io.trino.sql.tree.TableSubquery;
 import io.trino.sql.tree.Union;
@@ -97,6 +98,11 @@ public class TestHogQlCompiler
                                             SELECT ARRAY[]                   | SELECT ARRAY[]
                                             SELECT (1, 'example')            | SELECT (1, 'example')
                                             SELECT (1,)                       | SELECT ROW(1)
+                                            SELECT [1, 2, 3][1]              | SELECT ARRAY[1, 2, 3][1]
+                                            SELECT (1, 'example').2          | SELECT ROW(1, 'example')[2]
+                                            SELECT attributes['plan']        | SELECT attributes['plan']
+                                            SELECT nested[position[1]]       | SELECT nested[position[1]]
+                                            SELECT [payload][1].plan          | SELECT ARRAY[payload][1].plan
                                             SELECT value BETWEEN 1 AND 10    | SELECT value BETWEEN 1 AND 10
                                             SELECT value NOT BETWEEN 1 AND 10| SELECT value NOT BETWEEN 1 AND 10
                                             SELECT value IS NULL             | SELECT value IS NULL
@@ -108,6 +114,38 @@ public class TestHogQlCompiler
     public void testLowersCollectionAndPredicateExpressions(String hogql, String trinoSql)
     {
         assertThat(compiler.compile(hogql)).isEqualTo(sqlParser.createStatement(trinoSql));
+    }
+
+    @Test
+    public void testBindsPlaceholdersInsideCollectionSubscriptsBySourceOrder()
+    {
+        HogQlCompilationResult result = compiler.compile(
+                "SELECT [{element}][{index}], ({left}, {right}).2, {object}.field",
+                Map.of(
+                        "element", typedValue("element"),
+                        "index", typedValue("index"),
+                        "left", typedValue("left"),
+                        "right", typedValue("right"),
+                        "object", typedValue("object")));
+
+        assertThat(result.parameterNames()).containsExactly("element", "index", "left", "right", "object");
+        assertThat(parameters(result.statement()))
+                .extracting(Parameter::getId)
+                .containsExactly(0, 1, 2, 3, 4);
+    }
+
+    @Test
+    public void testPreservesCollectionSubscriptSourceLocations()
+    {
+        Query query = (Query) compiler.compile("SELECT [10, 20][2], (1, 'two').2");
+        QuerySpecification querySpecification = (QuerySpecification) query.getQueryBody();
+        SubscriptExpression arrayAccess = (SubscriptExpression) ((SingleColumn) querySpecification.getSelect().getSelectItems().getFirst()).getExpression();
+        SubscriptExpression tupleAccess = (SubscriptExpression) ((SingleColumn) querySpecification.getSelect().getSelectItems().get(1)).getExpression();
+
+        assertThat(arrayAccess.getLocation()).contains(new NodeLocation(1, 8));
+        assertThat(arrayAccess.getIndex().getLocation()).contains(new NodeLocation(1, 17));
+        assertThat(tupleAccess.getLocation()).contains(new NodeLocation(1, 21));
+        assertThat(tupleAccess.getIndex().getLocation()).contains(new NodeLocation(1, 32));
     }
 
     @ParameterizedTest

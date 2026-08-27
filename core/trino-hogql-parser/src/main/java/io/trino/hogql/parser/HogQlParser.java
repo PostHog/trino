@@ -42,6 +42,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinType;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinUsing;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
+import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.NullPlacement;
 import io.trino.hogql.parser.tree.HogQlQuery.NullTreatment;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
@@ -54,6 +55,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.SortItem;
 import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
 import io.trino.hogql.parser.tree.HogQlQuery.SubqueryRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.SubscriptExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
@@ -1028,6 +1030,27 @@ public final class HogQlParser
             if (context instanceof HogQLParser.ColumnExprTupleContext tuple) {
                 return new TupleExpression(buildExpressions(tuple.columnExprList()), sourceSpan(tuple));
             }
+            if (context instanceof HogQLParser.ColumnExprArrayAccessContext access) {
+                return new SubscriptExpression(
+                        buildExpression(access.columnExprValue()),
+                        buildExpression(access.columnExpr()),
+                        sourceSpan(access));
+            }
+            if (context instanceof HogQLParser.ColumnExprTupleAccessContext access) {
+                if (access.DECIMAL_LITERAL().getText().equals("0")) {
+                    throw unsupported(access, "tuple index zero");
+                }
+                return new SubscriptExpression(
+                        buildExpression(access.columnExprValue()),
+                        new Literal(INTEGER, access.DECIMAL_LITERAL().getText(), sourceSpan(access.DECIMAL_LITERAL().getSymbol(), access.DECIMAL_LITERAL().getSymbol())),
+                        sourceSpan(access));
+            }
+            if (context instanceof HogQLParser.ColumnExprPropertyAccessContext access) {
+                return new MemberAccessExpression(
+                        buildExpression(access.columnExprValue()),
+                        buildIdentifier(access.identifier()),
+                        sourceSpan(access));
+            }
             if (context instanceof HogQLParser.ColumnExprNegateContext negate) {
                 return new UnaryExpression(NEGATE, buildExpression(negate.columnExprValue()), sourceSpan(negate));
             }
@@ -1627,6 +1650,11 @@ public final class HogQlParser
                 }
                 case IsNullExpression isNull -> validateExpressionScope(isNull.value(), forbiddenOuterRelations, localRelations);
                 case Literal _, Placeholder _ -> {}
+                case MemberAccessExpression memberAccess -> validateExpressionScope(memberAccess.base(), forbiddenOuterRelations, localRelations);
+                case SubscriptExpression subscript -> {
+                    validateExpressionScope(subscript.base(), forbiddenOuterRelations, localRelations);
+                    validateExpressionScope(subscript.index(), forbiddenOuterRelations, localRelations);
+                }
                 case TupleExpression tuple -> tuple.values().forEach(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations));
                 case UnaryExpression unary -> validateExpressionScope(unary.operand(), forbiddenOuterRelations, localRelations);
             }

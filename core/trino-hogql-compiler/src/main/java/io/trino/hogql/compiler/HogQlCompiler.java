@@ -36,12 +36,14 @@ import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
+import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
 import io.trino.hogql.parser.tree.HogQlQuery.SelectQueryBody;
 import io.trino.hogql.parser.tree.HogQlQuery.SetOperation;
 import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
 import io.trino.hogql.parser.tree.HogQlQuery.SubqueryRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.SubscriptExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
@@ -300,6 +302,8 @@ public final class HogQlCompiler
             case FunctionCall _ -> true;
             case InExpression in -> containsFunctionCall(in.value()) || in.values().stream().anyMatch(HogQlCompiler::containsFunctionCall);
             case IsNullExpression isNull -> containsFunctionCall(isNull.value());
+            case MemberAccessExpression memberAccess -> containsFunctionCall(memberAccess.base());
+            case SubscriptExpression subscript -> containsFunctionCall(subscript.base()) || containsFunctionCall(subscript.index());
             case TupleExpression tuple -> tuple.values().stream().anyMatch(HogQlCompiler::containsFunctionCall);
             case UnaryExpression unary -> containsFunctionCall(unary.operand());
         };
@@ -389,7 +393,12 @@ public final class HogQlCompiler
             }
             case IsNullExpression isNull -> collectPlaceholders(isNull.value(), placeholders);
             case Literal _ -> {}
+            case MemberAccessExpression memberAccess -> collectPlaceholders(memberAccess.base(), placeholders);
             case Placeholder placeholder -> placeholders.add(placeholder);
+            case SubscriptExpression subscript -> {
+                collectPlaceholders(subscript.base(), placeholders);
+                collectPlaceholders(subscript.index(), placeholders);
+            }
             case TupleExpression tuple -> tuple.values().forEach(value -> collectPlaceholders(value, placeholders));
             case UnaryExpression unary -> collectPlaceholders(unary.operand(), placeholders);
         }

@@ -54,6 +54,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinUsing;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
+import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
@@ -62,6 +63,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.SetOperation;
 import io.trino.hogql.parser.tree.HogQlQuery.SortItem;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
 import io.trino.hogql.parser.tree.HogQlQuery.SubqueryRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.SubscriptExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
@@ -522,7 +524,15 @@ final class HogQlSemanticResolver
                     isNull.predicateSpan(),
                     isNull.span());
             case Literal literal -> literal;
+            case MemberAccessExpression memberAccess -> new MemberAccessExpression(
+                    resolveExpression(memberAccess.base()),
+                    memberAccess.member(),
+                    memberAccess.span());
             case Placeholder placeholder -> placeholder;
+            case SubscriptExpression subscript -> new SubscriptExpression(
+                    resolveExpression(subscript.base()),
+                    resolveExpression(subscript.index()),
+                    subscript.span());
             case TupleExpression tuple -> new TupleExpression(tuple.values().stream().map(this::resolveExpression).toList(), tuple.span());
             case UnaryExpression unary -> new UnaryExpression(unary.operator(), resolveExpression(unary.operand()), unary.span());
         };

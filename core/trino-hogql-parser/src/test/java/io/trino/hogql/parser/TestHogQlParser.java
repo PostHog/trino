@@ -23,12 +23,15 @@ import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinType;
+import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.NullPlacement;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.SetOperation;
 import io.trino.hogql.parser.tree.HogQlQuery.SetOperationType;
 import io.trino.hogql.parser.tree.HogQlQuery.SortDirection;
 import io.trino.hogql.parser.tree.HogQlQuery.SubqueryRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.SubscriptExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ValuesRelation;
 import io.trino.hogql.parser.tree.HogQlSyntaxTree;
 import io.trino.hogql.parser.tree.HogQlSyntaxTree.Element;
@@ -57,6 +60,10 @@ public class TestHogQlParser
             "SELECT * FROM first POSITIONAL JOIN second",
             "SELECT * FROM first, second",
             "SELECT function(1)(value)",
+            "SELECT tuple_value.0",
+            "SELECT array_value[1:2]",
+            "SELECT array_value?.[1]",
+            "SELECT tuple_value?.1",
             "DROP TABLE events",
             "SELECT 1; SELECT 2",
             "SELECT * FROM",
@@ -125,6 +132,30 @@ public class TestHogQlParser
         });
         assertThat(query.limit()).get().extracting(HogQlQuery.Literal.class::cast).extracting(HogQlQuery.Literal::value).isEqualTo("10");
         assertThat(query.offset()).get().extracting(HogQlQuery.Literal.class::cast).extracting(HogQlQuery.Literal::value).isEqualTo("2");
+    }
+
+    @Test
+    public void testBuildsCollectionAccessWithSourceSpans()
+    {
+        HogQlQuery query = parser.parseStatement("SELECT [10,{element}][{index}], (1, 'two').2, {payload}.plan");
+
+        SubscriptExpression arrayAccess = (SubscriptExpression) ((ExpressionProjection) query.projections().getFirst()).expression();
+        assertThat(arrayAccess.base()).isInstanceOf(HogQlQuery.ArrayExpression.class);
+        assertThat(arrayAccess.index()).isInstanceOf(Placeholder.class);
+        assertThat(arrayAccess.span()).isEqualTo(new HogQlQuery.SourceSpan(7, 30, 1, 8, 1, 31));
+        assertThat(arrayAccess.index().span()).isEqualTo(new HogQlQuery.SourceSpan(22, 29, 1, 23, 1, 30));
+
+        SubscriptExpression tupleAccess = (SubscriptExpression) ((ExpressionProjection) query.projections().get(1)).expression();
+        assertThat(tupleAccess.base()).isInstanceOf(TupleExpression.class);
+        assertThat(tupleAccess.index()).isInstanceOf(HogQlQuery.Literal.class);
+        assertThat(tupleAccess.span()).isEqualTo(new HogQlQuery.SourceSpan(32, 44, 1, 33, 1, 45));
+        assertThat(tupleAccess.index().span()).isEqualTo(new HogQlQuery.SourceSpan(43, 44, 1, 44, 1, 45));
+
+        MemberAccessExpression memberAccess = (MemberAccessExpression) ((ExpressionProjection) query.projections().get(2)).expression();
+        assertThat(memberAccess.base()).isInstanceOf(Placeholder.class);
+        assertThat(memberAccess.member().value()).isEqualTo("plan");
+        assertThat(memberAccess.span()).isEqualTo(new HogQlQuery.SourceSpan(46, 60, 1, 47, 1, 61));
+        assertThat(memberAccess.member().span()).isEqualTo(new HogQlQuery.SourceSpan(56, 60, 1, 57, 1, 61));
     }
 
     @Test

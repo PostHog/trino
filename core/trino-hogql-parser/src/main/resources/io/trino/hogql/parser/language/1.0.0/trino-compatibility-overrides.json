@@ -190,6 +190,15 @@
             ]
         },
         {
+            "id": "alternative:columnExprValue:ColumnExprArrayAccess",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlParser#testBuildsCollectionAccessWithSourceSpans",
+                "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
+            ]
+        },
+        {
             "id": "alternative:columnExprValue:ColumnExprBetween",
             "loweringHandler": "TrinoAstFactory#createExpression",
             "parseHandler": "AstBuilder#buildExpression",
@@ -251,6 +260,15 @@
             ]
         },
         {
+            "id": "alternative:columnExprValue:ColumnExprPropertyAccess",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlParser#testBuildsCollectionAccessWithSourceSpans",
+                "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
+            ]
+        },
+        {
             "id": "alternative:columnExprValue:ColumnExprPrecedence1",
             "loweringHandler": "TrinoAstFactory#createExpression",
             "parseHandler": "AstBuilder#buildExpression",
@@ -273,6 +291,15 @@
             "parseHandler": "AstBuilder#buildExpression",
             "testCaseIds": [
                 "TestHogQlCompatibilityCorpus#expr.accept.tuple",
+                "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTupleAccess",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlParser#testBuildsCollectionAccessWithSourceSpans",
                 "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
             ]
         },

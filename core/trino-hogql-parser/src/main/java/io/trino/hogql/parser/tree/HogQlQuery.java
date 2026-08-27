@@ -258,7 +258,9 @@ public record HogQlQuery(
                     InExpression,
                     IsNullExpression,
                     Literal,
+                    MemberAccessExpression,
                     Placeholder,
+                    SubscriptExpression,
                     TupleExpression,
                     UnaryExpression
     {
@@ -320,6 +322,28 @@ public record HogQlQuery(
             if (values.isEmpty()) {
                 throw new IllegalArgumentException("values is empty");
             }
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record SubscriptExpression(Expression base, Expression index, SourceSpan span)
+            implements Expression
+    {
+        public SubscriptExpression
+        {
+            base = requireNonNull(base, "base is null");
+            index = requireNonNull(index, "index is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record MemberAccessExpression(Expression base, Identifier member, SourceSpan span)
+            implements Expression
+    {
+        public MemberAccessExpression
+        {
+            base = requireNonNull(base, "base is null");
+            member = requireNonNull(member, "member is null");
             span = requireNonNull(span, "span is null");
         }
     }

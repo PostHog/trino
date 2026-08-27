@@ -33,6 +33,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinUsing;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
+import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
@@ -41,6 +42,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.SetOperation;
 import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
 import io.trino.hogql.parser.tree.HogQlQuery.SubqueryRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.SubscriptExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
@@ -293,7 +295,15 @@ final class TrinoAstFactory
                     createExpression(isNull.value(), parameterIds),
                     new IsNullPredicate(location(isNull.predicateSpan()), isNull.negated()));
             case Literal literal -> createLiteral(literal);
+            case MemberAccessExpression memberAccess -> new DereferenceExpression(
+                    location(memberAccess.span()),
+                    createExpression(memberAccess.base(), parameterIds),
+                    createIdentifier(memberAccess.member()));
             case Placeholder placeholder -> new Parameter(location(placeholder.span()), parameterIds.get(placeholder.span()));
+            case SubscriptExpression subscript -> new io.trino.sql.tree.SubscriptExpression(
+                    location(subscript.span()),
+                    createExpression(subscript.base(), parameterIds),
+                    createExpression(subscript.index(), parameterIds));
             case TupleExpression tuple -> new Row(
                     location(tuple.span()),
                     tuple.values().stream()
