@@ -51,6 +51,8 @@ import static io.airlift.testing.Closeables.closeAll;
 import static io.trino.client.ProtocolHeaders.TRINO_HEADERS;
 import static jakarta.ws.rs.core.MediaType.APPLICATION_JSON;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.stream.Collectors.joining;
+import static java.util.stream.IntStream.range;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class TestHogQlStatementResource
@@ -165,9 +167,20 @@ class TestHogQlStatementResource
                 Arguments.of("nonpositive catalog generation", """
                         {"query":"SELECT '%s'","protocolVersion":1,"languageVersion":"%s","catalogGeneration":0}
                         """.formatted(SECRET, languageVersion)),
+                Arguments.of("too many parameter bindings", requestWithParameterCount(languageVersion, 1_001)),
                 Arguments.of("malformed JSON", """
                         {"query":"SELECT 1","protocolVersion":1,"languageVersion":"%s","parameters":{"p":{"type":"string","value":"%s"}}
                         """.formatted(languageVersion, SECRET)));
+    }
+
+    private static String requestWithParameterCount(String languageVersion, int parameterCount)
+    {
+        String parameters = range(0, parameterCount)
+                .mapToObj(index -> "\"p%s\":{\"type\":\"integer\",\"value\":%s}".formatted(index, index))
+                .collect(joining(","));
+        return """
+                {"query":"SELECT 1","protocolVersion":1,"languageVersion":"%s","parameters":{%s}}
+                """.formatted(languageVersion, parameters);
     }
 
     private static List<QueryResults> runHogQlToCompletion(String request)

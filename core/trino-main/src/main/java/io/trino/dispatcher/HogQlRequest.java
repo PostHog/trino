@@ -59,6 +59,7 @@ record HogQlRequest(
             "catalogGeneration");
     private static final Set<String> TYPED_VALUE_FIELDS = Set.of("type", "value");
     private static final int MAX_VALUE_DEPTH = 64;
+    private static final int MAX_BINDINGS_PER_FIELD = 1_000;
 
     HogQlRequest
     {
@@ -133,6 +134,9 @@ record HogQlRequest(
         }
         if (!values.isObject()) {
             throw new IllegalArgumentException("invalid HogQL semantic field");
+        }
+        if (values.size() > MAX_BINDINGS_PER_FIELD) {
+            throw new IllegalArgumentException("HogQL semantic field has too many bindings");
         }
 
         Map<String, HogQlTypedValue> result = new LinkedHashMap<>();
