@@ -32,7 +32,7 @@
     "grammarFeatureManifest": {
         "path": "grammar-features.json",
         "schemaVersion": 1,
-        "sha256": "b116128c3972a3c0ac3988f9d7ed9b16f4d0f58514e788c41604fae0b97ecbae"
+        "sha256": "fbf7236643b43d929e9ef1c8fd01a04b746736dca2f965cc2e78ad62f1a98b10"
     },
     "grammarSha256": "c255b1c828ea34b4eb5373dd1a153bbcf69f4f9eb58a900d353972ce07724242",
     "languageVersion": "1.0.0",

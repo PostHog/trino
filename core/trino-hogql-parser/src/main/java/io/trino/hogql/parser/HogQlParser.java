@@ -291,6 +291,9 @@ public final class HogQlParser
                 return binary(operator, binary.left, binary.right, binary);
             }
             if (context instanceof HogQLParser.ColumnExprPrecedence3Context binary) {
+                if (binary.operator == null) {
+                    throw unsupported(binary, "comparison operator");
+                }
                 BinaryOperator operator = switch (binary.operator.getType()) {
                     case HogQLParser.EQ_DOUBLE, HogQLParser.EQ_SINGLE -> EQUAL;
                     case HogQLParser.NOT_EQ -> NOT_EQUAL;

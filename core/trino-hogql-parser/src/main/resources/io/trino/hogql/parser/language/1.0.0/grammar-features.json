@@ -25,9 +25,37 @@
             "rule": "columnAliases"
         },
         {
+            "id": "alternative:columnExpr:ColumnExprAlias",
+            "kind": "parserAlternative",
+            "label": "ColumnExprAlias",
+            "queryReachable": true,
+            "rule": "columnExpr"
+        },
+        {
             "id": "alternative:columnExpr:ColumnExprAnd",
             "kind": "parserAlternative",
             "label": "ColumnExprAnd",
+            "queryReachable": true,
+            "rule": "columnExpr"
+        },
+        {
+            "id": "alternative:columnExpr:ColumnExprOr",
+            "kind": "parserAlternative",
+            "label": "ColumnExprOr",
+            "queryReachable": true,
+            "rule": "columnExpr"
+        },
+        {
+            "id": "alternative:columnExpr:ColumnExprTernaryOp",
+            "kind": "parserAlternative",
+            "label": "ColumnExprTernaryOp",
+            "queryReachable": true,
+            "rule": "columnExpr"
+        },
+        {
+            "id": "alternative:columnExpr:ColumnExprValuePassthrough",
+            "kind": "parserAlternative",
+            "label": "ColumnExprValuePassthrough",
             "queryReachable": true,
             "rule": "columnExpr"
         },
@@ -38,9 +66,422 @@
             "rule": "columnExprList"
         },
         {
+            "id": "alternative:columnExprValue:ColumnExprArray",
+            "kind": "parserAlternative",
+            "label": "ColumnExprArray",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprArrayAccess",
+            "kind": "parserAlternative",
+            "label": "ColumnExprArrayAccess",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprArraySlice",
+            "kind": "parserAlternative",
+            "label": "ColumnExprArraySlice",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprAsterisk",
+            "kind": "parserAlternative",
+            "label": "ColumnExprAsterisk",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprBetween",
+            "kind": "parserAlternative",
+            "label": "ColumnExprBetween",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprCall",
+            "kind": "parserAlternative",
+            "label": "ColumnExprCall",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprCallSelect",
+            "kind": "parserAlternative",
+            "label": "ColumnExprCallSelect",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
             "id": "alternative:columnExprValue:ColumnExprCase",
             "kind": "parserAlternative",
             "label": "ColumnExprCase",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprCast",
+            "kind": "parserAlternative",
+            "label": "ColumnExprCast",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColonLambda",
+            "kind": "parserAlternative",
+            "label": "ColumnExprColonLambda",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsAll",
+            "kind": "parserAlternative",
+            "label": "ColumnExprColumnsAll",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsExclude",
+            "kind": "parserAlternative",
+            "label": "ColumnExprColumnsExclude",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsExcludeReplace",
+            "kind": "parserAlternative",
+            "label": "ColumnExprColumnsExcludeReplace",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsList",
+            "kind": "parserAlternative",
+            "label": "ColumnExprColumnsList",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsQualifiedAll",
+            "kind": "parserAlternative",
+            "label": "ColumnExprColumnsQualifiedAll",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsQualifiedExclude",
+            "kind": "parserAlternative",
+            "label": "ColumnExprColumnsQualifiedExclude",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsQualifiedExcludeReplace",
+            "kind": "parserAlternative",
+            "label": "ColumnExprColumnsQualifiedExcludeReplace",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsQualifiedReplace",
+            "kind": "parserAlternative",
+            "label": "ColumnExprColumnsQualifiedReplace",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsRegex",
+            "kind": "parserAlternative",
+            "label": "ColumnExprColumnsRegex",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsReplace",
+            "kind": "parserAlternative",
+            "label": "ColumnExprColumnsReplace",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprDate",
+            "kind": "parserAlternative",
+            "label": "ColumnExprDate",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprDict",
+            "kind": "parserAlternative",
+            "label": "ColumnExprDict",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprFunction",
+            "kind": "parserAlternative",
+            "label": "ColumnExprFunction",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprFunctionWithinGroup",
+            "kind": "parserAlternative",
+            "label": "ColumnExprFunctionWithinGroup",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprIdentifier",
+            "kind": "parserAlternative",
+            "label": "ColumnExprIdentifier",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprIgnoreNulls",
+            "kind": "parserAlternative",
+            "label": "ColumnExprIgnoreNulls",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprInterval",
+            "kind": "parserAlternative",
+            "label": "ColumnExprInterval",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprIntervalString",
+            "kind": "parserAlternative",
+            "label": "ColumnExprIntervalString",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprIsDistinctFrom",
+            "kind": "parserAlternative",
+            "label": "ColumnExprIsDistinctFrom",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprIsNull",
+            "kind": "parserAlternative",
+            "label": "ColumnExprIsNull",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprLambda",
+            "kind": "parserAlternative",
+            "label": "ColumnExprLambda",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprLiteral",
+            "kind": "parserAlternative",
+            "label": "ColumnExprLiteral",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprNamedArg",
+            "kind": "parserAlternative",
+            "label": "ColumnExprNamedArg",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprNegate",
+            "kind": "parserAlternative",
+            "label": "ColumnExprNegate",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprNot",
+            "kind": "parserAlternative",
+            "label": "ColumnExprNot",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprNullArrayAccess",
+            "kind": "parserAlternative",
+            "label": "ColumnExprNullArrayAccess",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprNullPropertyAccess",
+            "kind": "parserAlternative",
+            "label": "ColumnExprNullPropertyAccess",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprNullSafeEq",
+            "kind": "parserAlternative",
+            "label": "ColumnExprNullSafeEq",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprNullTupleAccess",
+            "kind": "parserAlternative",
+            "label": "ColumnExprNullTupleAccess",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprNullish",
+            "kind": "parserAlternative",
+            "label": "ColumnExprNullish",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprParens",
+            "kind": "parserAlternative",
+            "label": "ColumnExprParens",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprPositional",
+            "kind": "parserAlternative",
+            "label": "ColumnExprPositional",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprPrecedence1",
+            "kind": "parserAlternative",
+            "label": "ColumnExprPrecedence1",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprPrecedence2",
+            "kind": "parserAlternative",
+            "label": "ColumnExprPrecedence2",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprPrecedence3",
+            "kind": "parserAlternative",
+            "label": "ColumnExprPrecedence3",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprPropertyAccess",
+            "kind": "parserAlternative",
+            "label": "ColumnExprPropertyAccess",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprSpreadColumnsList",
+            "kind": "parserAlternative",
+            "label": "ColumnExprSpreadColumnsList",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprSpreadColumnsRegex",
+            "kind": "parserAlternative",
+            "label": "ColumnExprSpreadColumnsRegex",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprSubquery",
+            "kind": "parserAlternative",
+            "label": "ColumnExprSubquery",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprSubstring",
+            "kind": "parserAlternative",
+            "label": "ColumnExprSubstring",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTagElement",
+            "kind": "parserAlternative",
+            "label": "ColumnExprTagElement",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTemplateString",
+            "kind": "parserAlternative",
+            "label": "ColumnExprTemplateString",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTimestamp",
+            "kind": "parserAlternative",
+            "label": "ColumnExprTimestamp",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTrim",
+            "kind": "parserAlternative",
+            "label": "ColumnExprTrim",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTryCast",
+            "kind": "parserAlternative",
+            "label": "ColumnExprTryCast",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTuple",
+            "kind": "parserAlternative",
+            "label": "ColumnExprTuple",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTupleAccess",
+            "kind": "parserAlternative",
+            "label": "ColumnExprTupleAccess",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTypeCast",
+            "kind": "parserAlternative",
+            "label": "ColumnExprTypeCast",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprWinFunction",
+            "kind": "parserAlternative",
+            "label": "ColumnExprWinFunction",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprWinFunctionTarget",
+            "kind": "parserAlternative",
+            "label": "ColumnExprWinFunctionTarget",
             "queryReachable": true,
             "rule": "columnExprValue"
         },
@@ -76,6 +517,48 @@
             "id": "alternative:columnTypeExpr:ColumnTypeExprArray",
             "kind": "parserAlternative",
             "label": "ColumnTypeExprArray",
+            "queryReachable": true,
+            "rule": "columnTypeExpr"
+        },
+        {
+            "id": "alternative:columnTypeExpr:ColumnTypeExprComplex",
+            "kind": "parserAlternative",
+            "label": "ColumnTypeExprComplex",
+            "queryReachable": true,
+            "rule": "columnTypeExpr"
+        },
+        {
+            "id": "alternative:columnTypeExpr:ColumnTypeExprCompound",
+            "kind": "parserAlternative",
+            "label": "ColumnTypeExprCompound",
+            "queryReachable": true,
+            "rule": "columnTypeExpr"
+        },
+        {
+            "id": "alternative:columnTypeExpr:ColumnTypeExprEnum",
+            "kind": "parserAlternative",
+            "label": "ColumnTypeExprEnum",
+            "queryReachable": true,
+            "rule": "columnTypeExpr"
+        },
+        {
+            "id": "alternative:columnTypeExpr:ColumnTypeExprNested",
+            "kind": "parserAlternative",
+            "label": "ColumnTypeExprNested",
+            "queryReachable": true,
+            "rule": "columnTypeExpr"
+        },
+        {
+            "id": "alternative:columnTypeExpr:ColumnTypeExprParam",
+            "kind": "parserAlternative",
+            "label": "ColumnTypeExprParam",
+            "queryReachable": true,
+            "rule": "columnTypeExpr"
+        },
+        {
+            "id": "alternative:columnTypeExpr:ColumnTypeExprSimple",
+            "kind": "parserAlternative",
+            "label": "ColumnTypeExprSimple",
             "queryReachable": true,
             "rule": "columnTypeExpr"
         },
@@ -232,9 +715,51 @@
             "rule": "interval"
         },
         {
+            "id": "alternative:joinExpr:JoinExprCrossOp",
+            "kind": "parserAlternative",
+            "label": "JoinExprCrossOp",
+            "queryReachable": true,
+            "rule": "joinExpr"
+        },
+        {
             "id": "alternative:joinExpr:JoinExprOp",
             "kind": "parserAlternative",
             "label": "JoinExprOp",
+            "queryReachable": true,
+            "rule": "joinExpr"
+        },
+        {
+            "id": "alternative:joinExpr:JoinExprParens",
+            "kind": "parserAlternative",
+            "label": "JoinExprParens",
+            "queryReachable": true,
+            "rule": "joinExpr"
+        },
+        {
+            "id": "alternative:joinExpr:JoinExprPivot",
+            "kind": "parserAlternative",
+            "label": "JoinExprPivot",
+            "queryReachable": true,
+            "rule": "joinExpr"
+        },
+        {
+            "id": "alternative:joinExpr:JoinExprPositional",
+            "kind": "parserAlternative",
+            "label": "JoinExprPositional",
+            "queryReachable": true,
+            "rule": "joinExpr"
+        },
+        {
+            "id": "alternative:joinExpr:JoinExprTable",
+            "kind": "parserAlternative",
+            "label": "JoinExprTable",
+            "queryReachable": true,
+            "rule": "joinExpr"
+        },
+        {
+            "id": "alternative:joinExpr:JoinExprUnpivot",
+            "kind": "parserAlternative",
+            "label": "JoinExprUnpivot",
             "queryReachable": true,
             "rule": "joinExpr"
         },
@@ -494,9 +1019,65 @@
             "rule": "tableArgList"
         },
         {
+            "id": "alternative:tableExpr:TableExprAlias",
+            "kind": "parserAlternative",
+            "label": "TableExprAlias",
+            "queryReachable": true,
+            "rule": "tableExpr"
+        },
+        {
+            "id": "alternative:tableExpr:TableExprFunction",
+            "kind": "parserAlternative",
+            "label": "TableExprFunction",
+            "queryReachable": true,
+            "rule": "tableExpr"
+        },
+        {
             "id": "alternative:tableExpr:TableExprIdentifier",
             "kind": "parserAlternative",
             "label": "TableExprIdentifier",
+            "queryReachable": true,
+            "rule": "tableExpr"
+        },
+        {
+            "id": "alternative:tableExpr:TableExprPivot",
+            "kind": "parserAlternative",
+            "label": "TableExprPivot",
+            "queryReachable": true,
+            "rule": "tableExpr"
+        },
+        {
+            "id": "alternative:tableExpr:TableExprPlaceholder",
+            "kind": "parserAlternative",
+            "label": "TableExprPlaceholder",
+            "queryReachable": true,
+            "rule": "tableExpr"
+        },
+        {
+            "id": "alternative:tableExpr:TableExprSubquery",
+            "kind": "parserAlternative",
+            "label": "TableExprSubquery",
+            "queryReachable": true,
+            "rule": "tableExpr"
+        },
+        {
+            "id": "alternative:tableExpr:TableExprTag",
+            "kind": "parserAlternative",
+            "label": "TableExprTag",
+            "queryReachable": true,
+            "rule": "tableExpr"
+        },
+        {
+            "id": "alternative:tableExpr:TableExprUnpivot",
+            "kind": "parserAlternative",
+            "label": "TableExprUnpivot",
+            "queryReachable": true,
+            "rule": "tableExpr"
+        },
+        {
+            "id": "alternative:tableExpr:TableExprValues",
+            "kind": "parserAlternative",
+            "label": "TableExprValues",
             "queryReachable": true,
             "rule": "tableExpr"
         },
