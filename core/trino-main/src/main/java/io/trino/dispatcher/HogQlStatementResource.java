@@ -14,7 +14,7 @@
 package io.trino.dispatcher;
 
 import com.google.inject.Inject;
-import io.trino.hogql.compiler.HogQlCompileEnvelope;
+import io.trino.execution.QuerySubmission;
 import io.trino.server.ExternalUriInfo;
 import io.trino.server.security.ResourceSecurity;
 import jakarta.servlet.http.HttpServletRequest;
@@ -54,13 +54,14 @@ public class HogQlStatementResource
             @Context HttpHeaders httpHeaders,
             @BeanParam ExternalUriInfo externalUriInfo)
     {
-        HogQlCompileEnvelope envelope;
+        QuerySubmission submission;
         try {
-            envelope = HogQlRequest.fromJson(requestBody).toCompileEnvelope();
+            HogQlRequest request = HogQlRequest.fromJson(requestBody);
+            submission = hogQl(request.toCompileEnvelope(), request.explain());
         }
         catch (RuntimeException _) {
             throw new BadRequestException("Invalid HogQL request");
         }
-        return queuedStatementResource.postStatement(hogQl(envelope), servletRequest, httpHeaders, externalUriInfo);
+        return queuedStatementResource.postStatement(submission, servletRequest, httpHeaders, externalUriInfo);
     }
 }

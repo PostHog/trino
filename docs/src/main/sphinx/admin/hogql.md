@@ -34,6 +34,22 @@ paging and cancellation. The coordinator rejects request bodies larger than 2
 MiB and more than 1,000 total entries across `parameters`, `variables`,
 `filters`, and `modifiers`.
 
+To return a native Trino plan instead of executing the query, add an `explain`
+object:
+
+```json
+{
+  "query": "SELECT event FROM events",
+  "protocolVersion": 1,
+  "languageVersion": "1.0.0",
+  "explain": {"type": "DISTRIBUTED", "format": "TEXT"}
+}
+```
+
+The supported plan types are `LOGICAL`, `DISTRIBUTED`, `VALIDATE`, and `IO`.
+The supported formats are `TEXT`, `GRAPHVIZ`, and `JSON`. Execution timeouts
+continue to use Trino session properties such as `query_max_execution_time`.
+
 ## Semantic catalog manifests
 
 Logical tables, fields, quoted physical names, and star expansion use an

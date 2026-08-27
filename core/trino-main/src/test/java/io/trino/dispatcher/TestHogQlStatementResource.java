@@ -38,6 +38,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -59,6 +60,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class TestHogQlStatementResource
 {
     private static final HeaderName REQUEST_USER_HEADER = HeaderName.of(TRINO_HEADERS.requestUser());
+    private static final HeaderName REQUEST_SESSION_HEADER = HeaderName.of(TRINO_HEADERS.requestSession());
     private static final HeaderName CONTENT_TYPE_HEADER = HeaderName.of("Content-Type");
     private static final JsonCodec<QueryResults> QUERY_RESULTS_CODEC = new JsonCodecFactory(new JsonMapperProvider()
             .withModules(Set.of(new QueryDataJacksonModule()))
@@ -155,6 +157,33 @@ class TestHogQlStatementResource
     }
 
     @Test
+    public void testQueryUsesNativeExecutionTimeout()
+            throws Exception
+    {
+        List<QueryResults> results = runHogQlToCompletion(
+                hogQlRequest("SELECT count(*) FROM tpch.tiny.lineitem a CROSS JOIN tpch.tiny.lineitem b CROSS JOIN tpch.tiny.lineitem c"),
+                "query_max_execution_time=1ms");
+
+        assertThat(results.getLast().getError().getErrorName())
+                .describedAs("query error: %s", results.getLast().getError())
+                .isEqualTo("EXCEEDED_TIME_LIMIT");
+    }
+
+    @Test
+    public void testExplainUsesNativePlanner()
+            throws Exception
+    {
+        List<QueryResults> results = runHogQlToCompletion(hogQlExplainRequest(
+                "SELECT nationkey FROM tpch.tiny.nation",
+                "DISTRIBUTED",
+                "TEXT"));
+
+        assertThat(results.getLast().getError()).isNull();
+        assertThat(rows(results)).singleElement().satisfies(row ->
+                assertThat(row).singleElement().asString().contains("TableScan"));
+    }
+
+    @Test
     public void testEndpointRequiresJsonContentType()
     {
         StringResponse response = post(hogQlRequest("SELECT 1"), "text/plain");
@@ -201,6 +230,14 @@ class TestHogQlStatementResource
                         """
                         {"query":"SELECT '%s'","protocolVersion":1,"languageVersion":"%s","catalogGeneration":0}
                         """.formatted(SECRET, languageVersion)),
+                Arguments.of("unknown explain field",
+                        """
+                        {"query":"SELECT 1","protocolVersion":1,"languageVersion":"%s","explain":{"type":"LOGICAL","format":"TEXT","unknown":"%s"}}
+                        """.formatted(languageVersion, SECRET)),
+                Arguments.of("invalid explain type",
+                        """
+                        {"query":"SELECT '%s'","protocolVersion":1,"languageVersion":"%s","explain":{"type":"UNKNOWN","format":"TEXT"}}
+                        """.formatted(SECRET, languageVersion)),
                 Arguments.of("too many parameter bindings", requestWithParameterCount(languageVersion, 1_001)),
                 Arguments.of("too many total bindings", requestWithTotalBindingCount(languageVersion)),
                 Arguments.of("request exceeds byte limit", oversizedRequest(languageVersion)),
@@ -239,10 +276,20 @@ class TestHogQlStatementResource
 
     private static List<QueryResults> runHogQlToCompletion(String request)
     {
-        return runToCompletion("/v1/hogql", request, true);
+        return runToCompletion("/v1/hogql", request, true, Optional.empty());
+    }
+
+    private static List<QueryResults> runHogQlToCompletion(String request, String session)
+    {
+        return runToCompletion("/v1/hogql", request, true, Optional.of(session));
     }
 
     private static List<QueryResults> runToCompletion(String path, String body, boolean json)
+    {
+        return runToCompletion(path, body, json, Optional.empty());
+    }
+
+    private static List<QueryResults> runToCompletion(String path, String body, boolean json, Optional<String> session)
     {
         ImmutableList.Builder<QueryResults> results = ImmutableList.builder();
         Request.Builder request = preparePost()
@@ -252,6 +299,7 @@ class TestHogQlStatementResource
         if (json) {
             request.setHeader(CONTENT_TYPE_HEADER, APPLICATION_JSON);
         }
+        session.ifPresent(value -> request.setHeader(REQUEST_SESSION_HEADER, value));
         QueryResults current = client.execute(request.build(), createJsonResponseHandler(QUERY_RESULTS_CODEC));
         results.add(current);
 
@@ -312,6 +360,17 @@ class TestHogQlStatementResource
                  "catalogGeneration": 1
                }
                """.formatted(STRING_CODEC.toJson(query), HogQlLanguageContract.current().languageVersion());
+    }
+
+    private static String hogQlExplainRequest(String query, String type, String format)
+    {
+        return """
+               {"query":%s,"protocolVersion":1,"languageVersion":"%s","explain":{"type":%s,"format":%s}}
+               """.formatted(
+                STRING_CODEC.toJson(query),
+                HogQlLanguageContract.current().languageVersion(),
+                STRING_CODEC.toJson(type),
+                STRING_CODEC.toJson(format));
     }
 
     private static List<List<Object>> rows(List<QueryResults> results)

@@ -30,8 +30,12 @@ import io.trino.sql.parser.ParsingException;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.Execute;
 import io.trino.sql.tree.ExecuteImmediate;
+import io.trino.sql.tree.Explain;
 import io.trino.sql.tree.ExplainAnalyze;
+import io.trino.sql.tree.ExplainFormat;
+import io.trino.sql.tree.ExplainType;
 import io.trino.sql.tree.Expression;
+import io.trino.sql.tree.NodeLocation;
 import io.trino.sql.tree.Statement;
 
 import java.util.List;
@@ -119,9 +123,10 @@ public class QueryPreparer
                     HogQlCompilationResult result = tracker.observe(COMPILATION, () -> hogQlCompiler
                             .orElseThrow(() -> new TrinoException(NOT_SUPPORTED, "HogQL query submission is disabled"))
                             .compile(envelope, semanticCatalogContext(session)));
+                    Statement statement = explain(result.statement(), submission.hogQlExplain());
                     preparedQuery = tracker.observe(PARAMETER_BINDING, () -> prepareQuery(
                             session,
-                            result.statement(),
+                            statement,
                             Optional.of(hogQlParameterDecoder.decode(result, envelope.parameters()))));
                 }
                 catch (RuntimeException | Error failure) {
@@ -132,6 +137,21 @@ public class QueryPreparer
                 yield preparedQuery;
             }
         };
+    }
+
+    private static Statement explain(Statement statement, Optional<QuerySubmission.HogQlExplain> explain)
+    {
+        if (explain.isEmpty()) {
+            return statement;
+        }
+        NodeLocation location = statement.getLocation().orElseThrow();
+        QuerySubmission.HogQlExplain options = explain.orElseThrow();
+        return new Explain(
+                location,
+                statement,
+                List.of(
+                        new ExplainType(location, options.type()),
+                        new ExplainFormat(location, options.format())));
     }
 
     private Optional<HogQlSemanticCatalogContext> semanticCatalogContext(Session session)

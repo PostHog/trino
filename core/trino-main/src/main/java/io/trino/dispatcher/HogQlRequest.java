@@ -16,6 +16,7 @@ package io.trino.dispatcher;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.base.Utf8;
 import io.airlift.json.JsonCodec;
+import io.trino.execution.QuerySubmission.HogQlExplain;
 import io.trino.hogql.compiler.HogQlCompileEnvelope;
 import io.trino.hogql.compiler.HogQlTypedValue;
 import io.trino.hogql.compiler.HogQlTypedValue.ArrayValue;
@@ -26,12 +27,15 @@ import io.trino.hogql.compiler.HogQlTypedValue.ObjectValue;
 import io.trino.hogql.compiler.HogQlTypedValue.StringValue;
 import io.trino.hogql.compiler.HogQlTypedValue.Value;
 import io.trino.hogql.parser.HogQlLanguageVersion;
+import io.trino.sql.tree.ExplainFormat;
+import io.trino.sql.tree.ExplainType;
 
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 
@@ -46,7 +50,8 @@ record HogQlRequest(
         Map<String, HogQlTypedValue> variables,
         Map<String, HogQlTypedValue> filters,
         Map<String, HogQlTypedValue> modifiers,
-        OptionalLong catalogGeneration)
+        OptionalLong catalogGeneration,
+        Optional<HogQlExplain> explain)
 {
     private static final JsonCodec<JsonNode> JSON_CODEC = jsonCodec(JsonNode.class);
     private static final Set<String> FIELDS = Set.of(
@@ -57,8 +62,10 @@ record HogQlRequest(
             "variables",
             "filters",
             "modifiers",
-            "catalogGeneration");
+            "catalogGeneration",
+            "explain");
     private static final Set<String> TYPED_VALUE_FIELDS = Set.of("type", "value");
+    private static final Set<String> EXPLAIN_FIELDS = Set.of("type", "format");
     private static final int MAX_VALUE_DEPTH = 64;
     private static final int MAX_REQUEST_BYTES = 2 * 1024 * 1024;
     private static final int MAX_BINDINGS_PER_FIELD = 1_000;
@@ -73,6 +80,7 @@ record HogQlRequest(
         filters = Map.copyOf(requireNonNull(filters, "filters is null"));
         modifiers = Map.copyOf(requireNonNull(modifiers, "modifiers is null"));
         catalogGeneration = requireNonNull(catalogGeneration, "catalogGeneration is null");
+        explain = requireNonNull(explain, "explain is null");
         if (parameters.size() + variables.size() + filters.size() + modifiers.size() > MAX_TOTAL_BINDINGS) {
             throw new IllegalArgumentException("HogQL request has too many bindings");
         }
@@ -98,7 +106,8 @@ record HogQlRequest(
                 typedValues(root, "variables"),
                 typedValues(root, "filters"),
                 typedValues(root, "modifiers"),
-                catalogGeneration(root));
+                catalogGeneration(root),
+                explain(root));
     }
 
     HogQlCompileEnvelope toCompileEnvelope()
@@ -134,6 +143,26 @@ record HogQlRequest(
             throw new IllegalArgumentException("invalid HogQL catalog generation");
         }
         return OptionalLong.of(value.longValue());
+    }
+
+    private static Optional<HogQlExplain> explain(JsonNode root)
+    {
+        JsonNode value = root.get("explain");
+        if (value == null) {
+            return Optional.empty();
+        }
+        if (!value.isObject()) {
+            throw new IllegalArgumentException("invalid HogQL explain request");
+        }
+        rejectUnknownFields(value, EXPLAIN_FIELDS, "unknown HogQL explain field");
+        try {
+            return Optional.of(new HogQlExplain(
+                    ExplainType.Type.valueOf(requiredText(value, "type")),
+                    ExplainFormat.Type.valueOf(requiredText(value, "format"))));
+        }
+        catch (RuntimeException _) {
+            throw new IllegalArgumentException("invalid HogQL explain request");
+        }
     }
 
     private static Map<String, HogQlTypedValue> typedValues(JsonNode root, String field)
