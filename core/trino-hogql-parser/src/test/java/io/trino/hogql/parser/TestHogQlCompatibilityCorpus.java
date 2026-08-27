@@ -67,6 +67,15 @@ public class TestHogQlCompatibilityCorpus
             assertThat(oracleCase.accepted()).isEqualTo(corpusCase.accepted());
             assertThat(oracleCase.languageVersion()).isEqualTo(HogQlLanguageContract.current().languageVersion());
             assertThat(oracleCase.grammarSha256()).isEqualTo(HogQlLanguageContract.current().grammarSha256());
+            assertThat(oracleCase.span()).isNotNull();
+            if (oracleCase.accepted()) {
+                assertThat(oracleCase.ast()).isNotNull();
+                assertThat(oracleCase.errorCategory()).isNull();
+            }
+            else {
+                assertThat(oracleCase.ast()).isNull();
+                assertThat(oracleCase.errorCategory()).isNotBlank();
+            }
         }
         assertThat(oracleById).isEmpty();
     }
@@ -89,8 +98,10 @@ public class TestHogQlCompatibilityCorpus
     public Stream<DynamicTest> testSyntaxTreeDispositionForEveryCorpusCase()
             throws IOException
     {
+        Map<String, OracleCase> oracleById = loadOracleCases().stream()
+                .collect(toMap(OracleCase::id, oracleCase -> oracleCase));
         return loadCorpusManifest().cases().stream()
-                .map(corpusCase -> dynamicTest(corpusCase.id(), () -> assertSyntaxDisposition(corpusCase)));
+                .map(corpusCase -> dynamicTest(corpusCase.id(), () -> assertSyntaxDisposition(corpusCase, oracleById.get(corpusCase.id()))));
     }
 
     private void assertDisposition(CorpusCase corpusCase, CorpusDisposition disposition)
@@ -112,20 +123,46 @@ public class TestHogQlCompatibilityCorpus
         }
     }
 
-    private void assertSyntaxDisposition(CorpusCase corpusCase)
+    private void assertSyntaxDisposition(CorpusCase corpusCase, OracleCase oracleCase)
     {
         if (!corpusCase.accepted()) {
             assertThatThrownBy(() -> parseSyntax(corpusCase))
                     .isInstanceOf(HogQlParsingException.class)
-                    .hasMessageStartingWith("line ");
+                    .satisfies(error -> {
+                        HogQlParsingException parsingException = (HogQlParsingException) error;
+                        assertThat(parsingException.getLineNumber()).isEqualTo(oracleCase.span().start().line());
+                        if (oracleCase.errorCategory().equals("unexpected-character")) {
+                            assertThat(parsingException.getColumnNumber()).isEqualTo(oracleCase.span().start().column() + 1);
+                        }
+                        else {
+                            assertThat(parsingException.getColumnNumber()).isBetween(1, oracleCase.span().start().column() + 1);
+                        }
+                    });
             return;
         }
 
         HogQlSyntaxTree syntaxTree = parseSyntax(corpusCase);
         String source = corpusCase.source();
         int sourceLength = source.codePointCount(0, source.length());
+        SourceSpan oracleSpan = toSourceSpan(oracleCase.span());
+        assertThat(syntaxTree.root().span().startOffset()).isEqualTo(oracleSpan.startOffset());
+        assertThat(syntaxTree.root().span().endOffset()).isGreaterThanOrEqualTo(oracleSpan.endOffset());
+        if (corpusCase.entryPoint().equals("expression")) {
+            assertThat(syntaxTree.root().span()).isEqualTo(oracleSpan);
+        }
         assertThat(syntaxTree.root().span()).isEqualTo(new SourceSpan(0, sourceLength, 1, 1, lineCount(source), finalColumn(source)));
         assertContainedSpans(syntaxTree.root(), sourceLength);
+    }
+
+    private static SourceSpan toSourceSpan(OracleSpan span)
+    {
+        return new SourceSpan(
+                span.start().offset(),
+                span.end().offset(),
+                span.start().line(),
+                span.start().column() + 1,
+                span.end().line(),
+                span.end().column() + 1);
     }
 
     private HogQlSyntaxTree parseSyntax(CorpusCase corpusCase)
@@ -245,7 +282,10 @@ public class TestHogQlCompatibilityCorpus
             String entryPoint,
             boolean accepted,
             HogQlLanguageVersion languageVersion,
-            String grammarSha256)
+            String grammarSha256,
+            Map<String, Object> ast,
+            OracleSpan span,
+            String errorCategory)
     {
         @JsonCreator
         public OracleCase(
@@ -254,7 +294,10 @@ public class TestHogQlCompatibilityCorpus
                 @JsonProperty("entryPoint") String entryPoint,
                 @JsonProperty("accepted") boolean accepted,
                 @JsonProperty("languageVersion") HogQlLanguageVersion languageVersion,
-                @JsonProperty("grammarSha256") String grammarSha256)
+                @JsonProperty("grammarSha256") String grammarSha256,
+                @JsonProperty("ast") Map<String, Object> ast,
+                @JsonProperty("span") OracleSpan span,
+                @JsonProperty("errorCategory") String errorCategory)
         {
             this.id = requireNonNull(id, "id is null");
             this.source = requireNonNull(source, "source is null");
@@ -262,8 +305,25 @@ public class TestHogQlCompatibilityCorpus
             this.accepted = accepted;
             this.languageVersion = requireNonNull(languageVersion, "languageVersion is null");
             this.grammarSha256 = requireNonNull(grammarSha256, "grammarSha256 is null");
+            this.ast = ast;
+            this.span = requireNonNull(span, "span is null");
+            this.errorCategory = errorCategory;
         }
     }
+
+    public record OracleSpan(OraclePoint start, OraclePoint end)
+    {
+        @JsonCreator
+        public OracleSpan(
+                @JsonProperty("start") OraclePoint start,
+                @JsonProperty("end") OraclePoint end)
+        {
+            this.start = requireNonNull(start, "start is null");
+            this.end = requireNonNull(end, "end is null");
+        }
+    }
+
+    public record OraclePoint(int line, int column, int offset) {}
 
     public record CompatibilityOverrides(List<CorpusDisposition> corpusCases)
     {
