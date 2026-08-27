@@ -13,22 +13,35 @@
  */
 package io.trino.hogql.compiler.catalog;
 
+import io.trino.hogql.compiler.HogQlErrorCode;
+import io.trino.spi.TrinoException;
+
+import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_CATALOG_GENERATION_MISMATCH;
+import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_CATALOG_NOT_READY;
 import static java.util.Objects.requireNonNull;
 
 public final class HogQlSemanticCatalogException
-        extends RuntimeException
+        extends TrinoException
 {
     private final Failure failure;
 
     public HogQlSemanticCatalogException(Failure failure, String message)
     {
-        super(message);
+        super(errorCode(requireNonNull(failure, "failure is null")), message);
         this.failure = requireNonNull(failure, "failure is null");
     }
 
     public Failure failure()
     {
         return failure;
+    }
+
+    private static HogQlErrorCode errorCode(Failure failure)
+    {
+        return switch (failure) {
+            case UNAVAILABLE -> HOGQL_CATALOG_NOT_READY;
+            case CATALOG_MISMATCH, LANGUAGE_VERSION_MISMATCH, GENERATION_MISMATCH -> HOGQL_CATALOG_GENERATION_MISMATCH;
+        };
     }
 
     public enum Failure

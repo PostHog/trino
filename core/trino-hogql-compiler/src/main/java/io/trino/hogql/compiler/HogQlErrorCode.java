@@ -17,6 +17,7 @@ import io.trino.spi.ErrorCode;
 import io.trino.spi.ErrorCodeSupplier;
 import io.trino.spi.ErrorType;
 
+import static io.trino.spi.ErrorType.EXTERNAL;
 import static io.trino.spi.ErrorType.INTERNAL_ERROR;
 import static io.trino.spi.ErrorType.USER_ERROR;
 
@@ -28,8 +29,8 @@ public enum HogQlErrorCode
     HOGQL_RESOLUTION_ERROR(2, USER_ERROR),
     HOGQL_TYPE_ERROR(3, USER_ERROR),
     HOGQL_UNSUPPORTED_FEATURE(4, USER_ERROR),
-    HOGQL_CATALOG_NOT_READY(5, USER_ERROR),
-    HOGQL_CATALOG_GENERATION_MISMATCH(6, USER_ERROR),
+    HOGQL_CATALOG_NOT_READY(5, EXTERNAL),
+    HOGQL_CATALOG_GENERATION_MISMATCH(6, EXTERNAL),
     HOGQL_COMPILER_LIMIT_EXCEEDED(7, USER_ERROR),
     HOGQL_COMPILER_INTERNAL_ERROR(8, INTERNAL_ERROR),
     ;

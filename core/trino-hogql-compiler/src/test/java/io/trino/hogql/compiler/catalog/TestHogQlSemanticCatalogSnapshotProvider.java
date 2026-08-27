@@ -33,6 +33,7 @@ import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
+import static io.trino.spi.ErrorType.EXTERNAL;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -64,7 +65,12 @@ public class TestHogQlSemanticCatalogSnapshotProvider
         HogQlSemanticCatalogSnapshotProvider provider = HogQlSemanticCatalogSnapshotProvider.fromCache(cache);
 
         assertThatThrownBy(() -> provider.pin(request))
-                .isInstanceOfSatisfying(HogQlSemanticCatalogException.class, exception -> assertThat(exception.failure()).isEqualTo(failure));
+                .isInstanceOfSatisfying(HogQlSemanticCatalogException.class, exception -> {
+                    assertThat(exception.failure()).isEqualTo(failure);
+                    assertThat(exception.getErrorCode().getName()).isEqualTo(
+                            failure == Failure.UNAVAILABLE ? "HOGQL_CATALOG_NOT_READY" : "HOGQL_CATALOG_GENERATION_MISMATCH");
+                    assertThat(exception.getErrorCode().getType()).isEqualTo(EXTERNAL);
+                });
     }
 
     private static Stream<Arguments> failClosedCases()
