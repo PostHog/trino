@@ -14,24 +14,34 @@
 package io.trino.hogql.compiler;
 
 import io.trino.hogql.parser.tree.HogQlQuery;
+import io.trino.hogql.parser.tree.HogQlQuery.ArrayExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.BetweenExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
+import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
+import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
 import io.trino.sql.tree.AllColumns;
 import io.trino.sql.tree.ArithmeticBinaryExpression;
 import io.trino.sql.tree.ArithmeticUnaryExpression;
+import io.trino.sql.tree.Array;
+import io.trino.sql.tree.BetweenPredicate;
 import io.trino.sql.tree.BooleanLiteral;
 import io.trino.sql.tree.ComparisonPredicate;
 import io.trino.sql.tree.DereferenceExpression;
 import io.trino.sql.tree.Expression;
+import io.trino.sql.tree.InListExpression;
+import io.trino.sql.tree.InPredicate;
+import io.trino.sql.tree.IsNullPredicate;
 import io.trino.sql.tree.LogicalExpression;
 import io.trino.sql.tree.LongLiteral;
 import io.trino.sql.tree.NodeLocation;
@@ -41,6 +51,7 @@ import io.trino.sql.tree.Predicated;
 import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.Query;
 import io.trino.sql.tree.QuerySpecification;
+import io.trino.sql.tree.Row;
 import io.trino.sql.tree.Select;
 import io.trino.sql.tree.SelectItem;
 import io.trino.sql.tree.SingleColumn;
@@ -96,6 +107,12 @@ final class TrinoAstFactory
     private static Expression createExpression(HogQlQuery.Expression expression)
     {
         return switch (expression) {
+            case ArrayExpression array -> new Array(
+                    location(array.span()),
+                    array.values().stream()
+                            .map(TrinoAstFactory::createExpression)
+                            .toList());
+            case BetweenExpression between -> createBetweenExpression(between);
             case BinaryExpression binary -> createBinaryExpression(binary);
             case ColumnReference reference -> createColumnReference(reference);
             case FunctionCall function -> new io.trino.sql.tree.FunctionCall(
@@ -104,13 +121,53 @@ final class TrinoAstFactory
                     function.arguments().stream()
                             .map(TrinoAstFactory::createExpression)
                             .toList());
+            case InExpression in -> createInExpression(in);
+            case IsNullExpression isNull -> new Predicated(
+                    location(isNull.predicateSpan()),
+                    createExpression(isNull.value()),
+                    new IsNullPredicate(location(isNull.predicateSpan()), isNull.negated()));
             case Literal literal -> createLiteral(literal);
+            case TupleExpression tuple -> new Row(
+                    location(tuple.span()),
+                    tuple.values().stream()
+                            .map(value -> new Row.Field(location(value.span()), Optional.empty(), createExpression(value)))
+                            .toList());
             case UnaryExpression unary -> switch (unary.operator()) {
                 case NEGATE -> ArithmeticUnaryExpression.negative(location(unary.span()), createExpression(unary.operand()));
                 case NOT -> new NotExpression(location(unary.span()), createExpression(unary.operand()));
                 case POSITIVE -> ArithmeticUnaryExpression.positive(location(unary.span()), createExpression(unary.operand()));
             };
         };
+    }
+
+    private static Expression createBetweenExpression(BetweenExpression between)
+    {
+        NodeLocation location = location(between.predicateSpan());
+        return new Predicated(
+                location,
+                createExpression(between.value()),
+                new BetweenPredicate(
+                        location,
+                        between.negated(),
+                        Optional.empty(),
+                        createExpression(between.min()),
+                        createExpression(between.max())));
+    }
+
+    private static Expression createInExpression(InExpression in)
+    {
+        NodeLocation location = location(in.predicateSpan());
+        return new Predicated(
+                location,
+                createExpression(in.value()),
+                new InPredicate(
+                        location,
+                        in.negated(),
+                        new InListExpression(
+                                location,
+                                in.values().stream()
+                                        .map(TrinoAstFactory::createExpression)
+                                        .toList())));
     }
 
     private static Expression createBinaryExpression(BinaryExpression binary)

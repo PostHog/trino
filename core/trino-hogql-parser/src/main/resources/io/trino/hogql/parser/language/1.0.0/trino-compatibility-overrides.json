@@ -6,11 +6,11 @@
         },
         {
             "id": "expr.accept.array",
-            "status": "explicitCurrentError"
+            "status": "supported"
         },
         {
             "id": "expr.accept.between",
-            "status": "explicitCurrentError"
+            "status": "supported"
         },
         {
             "id": "expr.accept.boolean",
@@ -34,7 +34,7 @@
         },
         {
             "id": "expr.accept.in-list",
-            "status": "explicitCurrentError"
+            "status": "supported"
         },
         {
             "id": "expr.accept.literal-boolean",
@@ -54,11 +54,11 @@
         },
         {
             "id": "expr.accept.null-predicate",
-            "status": "explicitCurrentError"
+            "status": "supported"
         },
         {
             "id": "expr.accept.tuple",
-            "status": "explicitCurrentError"
+            "status": "supported"
         },
         {
             "id": "expr.reject.incomplete-binary",
@@ -140,6 +140,42 @@
             ]
         },
         {
+            "id": "alternative:columnExprList",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpressions",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.array",
+                "TestHogQlCompatibilityCorpus#expr.accept.tuple"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprArray",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.array",
+                "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprBetween",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.between",
+                "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprIsNull",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.null-predicate",
+                "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
+            ]
+        },
+        {
             "id": "alternative:columnExprValue:ColumnExprNegate",
             "loweringHandler": "TrinoAstFactory#createExpression",
             "parseHandler": "AstBuilder#buildExpression",
@@ -171,6 +207,15 @@
             "testCaseIds": [
                 "TestHogQlParser#testUsesCanonicalGrammarForExpressionsAndWhereClause",
                 "TestHogQlCompiler#testLowersToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTuple",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.tuple",
+                "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
             ]
         },
         {
@@ -243,6 +288,15 @@
             "parseHandler": "AstBuilder#build",
             "testCaseIds": [
                 "TestHogQlParser#testUsesCanonicalGrammarForExpressionsAndWhereClause"
+            ]
+        },
+        {
+            "id": "rule:columnExprList",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpressions",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.array",
+                "TestHogQlCompatibilityCorpus#expr.accept.tuple"
             ]
         },
         {

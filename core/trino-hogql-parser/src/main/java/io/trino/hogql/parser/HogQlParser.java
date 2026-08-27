@@ -16,6 +16,8 @@ package io.trino.hogql.parser;
 import io.trino.hogql.parser.canonical.HogQLLexer;
 import io.trino.hogql.parser.canonical.HogQLParser;
 import io.trino.hogql.parser.tree.HogQlQuery;
+import io.trino.hogql.parser.tree.HogQlQuery.ArrayExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.BetweenExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
@@ -23,11 +25,14 @@ import io.trino.hogql.parser.tree.HogQlQuery.Expression;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
+import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
+import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
 import org.antlr.v4.runtime.ANTLRErrorListener;
 import org.antlr.v4.runtime.BailErrorStrategy;
@@ -267,6 +272,13 @@ public final class HogQlParser
             if (context instanceof HogQLParser.ColumnExprParensContext parens) {
                 return buildExpression(parens.columnExpr());
             }
+            if (context instanceof HogQLParser.ColumnExprArrayContext array) {
+                List<Expression> values = array.columnExprList() == null ? List.of() : buildExpressions(array.columnExprList());
+                return new ArrayExpression(values, sourceSpan(array));
+            }
+            if (context instanceof HogQLParser.ColumnExprTupleContext tuple) {
+                return new TupleExpression(buildExpressions(tuple.columnExprList()), sourceSpan(tuple));
+            }
             if (context instanceof HogQLParser.ColumnExprNegateContext negate) {
                 return new UnaryExpression(NEGATE, buildExpression(negate.columnExprValue()), sourceSpan(negate));
             }
@@ -291,6 +303,14 @@ public final class HogQlParser
                 return binary(operator, binary.left, binary.right, binary);
             }
             if (context instanceof HogQLParser.ColumnExprPrecedence3Context binary) {
+                if (binary.IN() != null && binary.COHORT() == null) {
+                    return new InExpression(
+                            buildExpression(binary.left),
+                            buildInValues(binary.right),
+                            binary.NOT() != null,
+                            sourceSpan(binary.NOT() == null ? binary.IN().getSymbol() : binary.NOT().getSymbol(), binary.getStop()),
+                            sourceSpan(binary));
+                }
                 if (binary.operator == null) {
                     throw unsupported(binary, "comparison operator");
                 }
@@ -305,10 +325,44 @@ public final class HogQlParser
                 };
                 return binary(operator, binary.left, binary.right, binary);
             }
+            if (context instanceof HogQLParser.ColumnExprIsNullContext isNull) {
+                return new IsNullExpression(
+                        buildExpression(isNull.columnExprValue()),
+                        isNull.NOT() != null,
+                        sourceSpan(isNull.IS().getSymbol(), isNull.getStop()),
+                        sourceSpan(isNull));
+            }
+            if (context instanceof HogQLParser.ColumnExprBetweenContext between) {
+                return new BetweenExpression(
+                        buildExpression(between.columnExprValue(0)),
+                        buildExpression(between.columnExprValue(1)),
+                        buildExpression(between.columnExprValue(2)),
+                        between.NOT() != null,
+                        sourceSpan(between.NOT() == null ? between.BETWEEN().getSymbol() : between.NOT().getSymbol(), between.getStop()),
+                        sourceSpan(between));
+            }
             if (context instanceof HogQLParser.ColumnExprFunctionContext function) {
                 return buildFunction(function);
             }
             throw unsupported(context, "expression " + context.getClass().getSimpleName());
+        }
+
+        private List<Expression> buildExpressions(HogQLParser.ColumnExprListContext context)
+        {
+            return context.columnExpr().stream()
+                    .map(this::buildExpression)
+                    .toList();
+        }
+
+        private List<Expression> buildInValues(HogQLParser.ColumnExprValueContext context)
+        {
+            if (context instanceof HogQLParser.ColumnExprTupleContext tuple) {
+                return buildExpressions(tuple.columnExprList());
+            }
+            if (context instanceof HogQLParser.ColumnExprParensContext parens) {
+                return List.of(buildExpression(parens.columnExpr()));
+            }
+            throw unsupported(context, "IN value list");
         }
 
         private BinaryExpression binary(BinaryOperator operator, HogQLParser.ColumnExprContext left, HogQLParser.ColumnExprContext right, ParserRuleContext context)
@@ -414,8 +468,11 @@ public final class HogQlParser
 
         private SourceSpan sourceSpan(ParserRuleContext context)
         {
-            Token start = context.getStart();
-            Token stop = context.getStop();
+            return sourceSpan(context.getStart(), context.getStop());
+        }
+
+        private SourceSpan sourceSpan(Token start, Token stop)
+        {
             int startOffset = start.getStartIndex();
             int endOffset = stop.getStopIndex() + 1;
             return new SourceSpan(

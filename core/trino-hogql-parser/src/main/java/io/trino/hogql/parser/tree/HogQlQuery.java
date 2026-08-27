@@ -60,13 +60,80 @@ public record HogQlQuery(List<Projection> projections, Optional<TableReference> 
     }
 
     public sealed interface Expression
-            permits BinaryExpression,
+            permits ArrayExpression,
+                    BetweenExpression,
+                    BinaryExpression,
                     ColumnReference,
                     FunctionCall,
+                    InExpression,
+                    IsNullExpression,
                     Literal,
+                    TupleExpression,
                     UnaryExpression
     {
         SourceSpan span();
+    }
+
+    public record ArrayExpression(List<Expression> values, SourceSpan span)
+            implements Expression
+    {
+        public ArrayExpression
+        {
+            values = List.copyOf(requireNonNull(values, "values is null"));
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record TupleExpression(List<Expression> values, SourceSpan span)
+            implements Expression
+    {
+        public TupleExpression
+        {
+            values = List.copyOf(requireNonNull(values, "values is null"));
+            if (values.isEmpty()) {
+                throw new IllegalArgumentException("values is empty");
+            }
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record BetweenExpression(Expression value, Expression min, Expression max, boolean negated, SourceSpan predicateSpan, SourceSpan span)
+            implements Expression
+    {
+        public BetweenExpression
+        {
+            value = requireNonNull(value, "value is null");
+            min = requireNonNull(min, "min is null");
+            max = requireNonNull(max, "max is null");
+            predicateSpan = requireNonNull(predicateSpan, "predicateSpan is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record InExpression(Expression value, List<Expression> values, boolean negated, SourceSpan predicateSpan, SourceSpan span)
+            implements Expression
+    {
+        public InExpression
+        {
+            value = requireNonNull(value, "value is null");
+            values = List.copyOf(requireNonNull(values, "values is null"));
+            if (values.isEmpty()) {
+                throw new IllegalArgumentException("values is empty");
+            }
+            predicateSpan = requireNonNull(predicateSpan, "predicateSpan is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record IsNullExpression(Expression value, boolean negated, SourceSpan predicateSpan, SourceSpan span)
+            implements Expression
+    {
+        public IsNullExpression
+        {
+            value = requireNonNull(value, "value is null");
+            predicateSpan = requireNonNull(predicateSpan, "predicateSpan is null");
+            span = requireNonNull(span, "span is null");
+        }
     }
 
     public record UnaryExpression(UnaryOperator operator, Expression operand, SourceSpan span)
