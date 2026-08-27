@@ -22,6 +22,9 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FieldReferen
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionCallRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionCapabilityDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionImplementation;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.JoinKey;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LazyProjectionDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LazyTableDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LiteralRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalTableDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.MaterializedViewReference;
@@ -32,6 +35,8 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyLook
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ReferencedField;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationKind;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationReference;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipJoinSide;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.SavedQueryReference;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ScopedFieldReferenceRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.SemanticOperator;
@@ -84,6 +89,7 @@ import io.trino.spi.TrinoException;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -98,8 +104,11 @@ final class HogQlSemanticResolver
 {
     private final PinnedSnapshot snapshot;
     private final ExpansionBudget expansionBudget;
+    private final Map<RelationshipPathKey, TableBinding> relationshipPaths = new LinkedHashMap<>();
     private List<TableBinding> bindings = List.of();
     private boolean allRelationsLogical;
+    private Optional<Relation> expandedRelation = Optional.empty();
+    private int generatedRelationId;
 
     private HogQlSemanticResolver(PinnedSnapshot snapshot)
     {
@@ -146,6 +155,7 @@ final class HogQlSemanticResolver
         Optional<ResolvedRelation> relation = select.from().map(this::resolveRelation);
         bindings = relation.map(ResolvedRelation::bindings).orElse(List.of());
         allRelationsLogical = relation.map(ResolvedRelation::allLogical).orElse(false);
+        expandedRelation = relation.map(ResolvedRelation::relation);
         if (bindings.isEmpty()) {
             return new HogQlQuery(
                     commonTables,
@@ -161,27 +171,33 @@ final class HogQlSemanticResolver
                     query.offset(),
                     query.span());
         }
-        return resolveQuery(query, commonTables, relation.orElseThrow().relation());
+        return resolveQuery(query, commonTables);
     }
 
-    private HogQlQuery resolveQuery(HogQlQuery query, List<CommonTableExpression> commonTables, Relation relation)
+    private HogQlQuery resolveQuery(HogQlQuery query, List<CommonTableExpression> commonTables)
     {
         List<Projection> projections = new ArrayList<>();
         query.projections().forEach(projection -> projections.addAll(resolveProjection(projection)));
-        HogQlQuery resolved = new HogQlQuery(
+        Optional<Expression> where = query.where().map(this::resolveExpression);
+        List<Expression> groupBy = query.groupBy().stream().map(this::resolveExpression).toList();
+        Optional<Expression> having = query.having().map(this::resolveExpression);
+        List<WindowDefinition> windows = query.windows().stream().map(this::resolveWindowDefinition).toList();
+        List<SortItem> orderBy = resolveSortItems(query.orderBy());
+        Optional<Expression> limit = query.limit().map(this::resolveExpression);
+        Optional<Expression> offset = query.offset().map(this::resolveExpression);
+        return new HogQlQuery(
                 commonTables,
                 query.distinct(),
                 projections,
-                Optional.of(relation),
-                query.where().map(this::resolveExpression),
-                query.groupBy().stream().map(this::resolveExpression).toList(),
-                query.having().map(this::resolveExpression),
-                query.windows().stream().map(this::resolveWindowDefinition).toList(),
-                resolveSortItems(query.orderBy()),
-                query.limit().map(this::resolveExpression),
-                query.offset().map(this::resolveExpression),
+                expandedRelation,
+                where,
+                groupBy,
+                having,
+                windows,
+                orderBy,
+                limit,
+                offset,
                 query.span());
-        return resolved;
     }
 
     private List<Projection> resolveProjection(Projection projection)
@@ -572,6 +588,10 @@ final class HogQlSemanticResolver
     private Expression resolveColumn(ColumnReference reference)
     {
         List<Identifier> parts = reference.parts();
+        Optional<Expression> semanticPath = resolveSemanticPath(reference);
+        if (semanticPath.isPresent()) {
+            return semanticPath.orElseThrow();
+        }
         Optional<Expression> propertyAccess = resolveDottedPropertyAccess(reference);
         if (propertyAccess.isPresent()) {
             return propertyAccess.orElseThrow();
@@ -615,6 +635,214 @@ final class HogQlSemanticResolver
             throw resolutionError(reference, logicalName);
         }
         return reference;
+    }
+
+    private Optional<Expression> resolveSemanticPath(ColumnReference reference)
+    {
+        List<Identifier> parts = reference.parts();
+        if (parts.size() < 2) {
+            return Optional.empty();
+        }
+
+        List<PathCandidate> candidates = new ArrayList<>();
+        List<TableBinding> qualifiedBindings = bindings.stream()
+                .filter(binding -> binding.qualifier().equals(canonical(parts.getFirst().value())))
+                .toList();
+        if (!qualifiedBindings.isEmpty()) {
+            if (qualifiedBindings.size() == 1 && isSemanticPathMember(qualifiedBindings.getFirst(), parts.get(1).value())) {
+                candidates.add(new PathCandidate(qualifiedBindings.getFirst(), parts.subList(1, parts.size())));
+            }
+        }
+        else {
+            bindings.stream()
+                    .filter(binding -> isSemanticPathMember(binding, parts.getFirst().value()))
+                    .map(binding -> new PathCandidate(binding, parts))
+                    .forEach(candidates::add);
+        }
+        if (candidates.isEmpty()) {
+            return Optional.empty();
+        }
+        if (candidates.size() > 1) {
+            throw ambiguousResolutionError(reference, parts.getFirst().value());
+        }
+        if (expandedRelation.isEmpty()) {
+            throw unsupportedExpansion(reference.span(), "HogQL relationship paths are not supported inside explicit join criteria");
+        }
+        return Optional.of(resolveSemanticPath(reference, candidates.getFirst()));
+    }
+
+    private boolean isSemanticPathMember(TableBinding binding, String name)
+    {
+        return relationship(binding, name).isPresent() || lazyTable(binding, name).isPresent();
+    }
+
+    private Expression resolveSemanticPath(ColumnReference reference, PathCandidate candidate)
+    {
+        TableBinding owner = candidate.owner();
+        List<Identifier> path = candidate.path();
+        Optional<LazyTableDefinition> lazyTable = lazyTable(owner, path.getFirst().value());
+        if (lazyTable.isPresent()) {
+            if (path.size() != 2) {
+                throw resolutionError(reference, path.getLast().value());
+            }
+            LazyTableDefinition definition = lazyTable.orElseThrow();
+            LazyProjectionDefinition projection = definition.projections().stream()
+                    .filter(candidateProjection -> canonical(candidateProjection.name()).equals(canonical(path.getLast().value())))
+                    .findFirst()
+                    .orElseThrow(() -> resolutionError(reference, path.getLast().value()));
+            TableBinding terminal = ensureRelationshipPath(owner, definition.relationshipPath(), reference.span());
+            return expandRecipe(
+                    terminal,
+                    projection.recipe(),
+                    Optional.of(terminal.outputQualifier()),
+                    reference.span(),
+                    expansionBudget);
+        }
+
+        LogicalTableDefinition currentTable = snapshot.logicalTable(owner.relationName()).orElseThrow();
+        List<String> relationshipPath = new ArrayList<>();
+        int index = 0;
+        while (index < path.size() - 1) {
+            Optional<RelationshipDefinition> relationship = relationship(currentTable, path.get(index).value());
+            if (relationship.isEmpty()) {
+                break;
+            }
+            RelationshipDefinition definition = relationship.orElseThrow();
+            relationshipPath.add(definition.name());
+            currentTable = snapshot.logicalTable(definition.targetTable())
+                    .orElseThrow(() -> expansionError(reference.span(), "HogQL relationship references an unavailable target table"));
+            index++;
+        }
+        if (relationshipPath.isEmpty()) {
+            return reference;
+        }
+
+        TableBinding terminal = ensureRelationshipPath(owner, relationshipPath, reference.span());
+        List<Identifier> remaining = path.subList(index, path.size());
+        if (remaining.size() == 1) {
+            BoundField field = terminal.fields().get(canonical(remaining.getFirst().value()));
+            if (field == null) {
+                throw resolutionError(reference, remaining.getFirst().value());
+            }
+            return resolveBoundField(terminal, field, Optional.of(terminal.outputQualifier()), reference.span(), expansionBudget);
+        }
+        if (remaining.size() == 2) {
+            Optional<PropertyDefinition> property = properties(terminal).stream()
+                    .filter(candidateProperty -> canonical(candidateProperty.name()).equals(canonical(remaining.getFirst().value())))
+                    .findFirst();
+            if (property.isPresent()) {
+                return expandProperty(
+                        terminal,
+                        property.orElseThrow(),
+                        new Literal(HogQlQuery.LiteralKind.STRING, remaining.getLast().value(), remaining.getLast().span()),
+                        Optional.of(terminal.outputQualifier()),
+                        reference.span(),
+                        expansionBudget);
+            }
+        }
+        throw resolutionError(reference, remaining.getLast().value());
+    }
+
+    private TableBinding ensureRelationshipPath(TableBinding owner, List<String> path, HogQlQuery.SourceSpan span)
+    {
+        TableBinding source = owner;
+        List<String> prefix = new ArrayList<>();
+        for (String relationshipName : path) {
+            prefix.add(canonical(relationshipName));
+            RelationshipPathKey key = new RelationshipPathKey(owner.qualifier(), prefix);
+            TableBinding cached = relationshipPaths.get(key);
+            if (cached != null) {
+                source = cached;
+                continue;
+            }
+            RelationshipDefinition relationship = relationship(source, relationshipName)
+                    .orElseThrow(() -> expansionError(span, "HogQL lazy table references an unavailable relationship"));
+            LogicalTableDefinition target = snapshot.logicalTable(relationship.targetTable())
+                    .orElseThrow(() -> expansionError(span, "HogQL relationship references an unavailable target table"));
+            source = addRelationshipJoin(source, target, relationship, span);
+            relationshipPaths.put(key, source);
+        }
+        return source;
+    }
+
+    private TableBinding addRelationshipJoin(
+            TableBinding source,
+            LogicalTableDefinition target,
+            RelationshipDefinition relationship,
+            HogQlQuery.SourceSpan span)
+    {
+        expansionBudget.add(span);
+        ResolvedRelation targetRelation = resolveLogicalTable(target, span);
+        Identifier alias = nextGeneratedRelationAlias(span);
+        TableBinding targetBinding = targetRelation.bindings().getFirst().withAlias(alias);
+        Relation aliasedTarget = new AliasedRelation(targetRelation.relation(), alias, span);
+
+        List<Expression> predicates = relationship.joinKeys().stream()
+                .map(joinKey -> joinKeyPredicate(source, targetBinding, joinKey, span))
+                .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+        relationship.joinPredicate().ifPresent(predicate -> predicates.add(expandRecipe(
+                source,
+                predicate,
+                Optional.of(source.outputQualifier()),
+                span,
+                expansionBudget,
+                Map.of(),
+                Map.of(RelationshipJoinSide.SOURCE, source, RelationshipJoinSide.TARGET, targetBinding))));
+        Expression criteria = predicates.stream()
+                .reduce((left, right) -> new BinaryExpression(HogQlQuery.BinaryOperator.AND, left, right, span))
+                .orElseThrow();
+        expandedRelation = Optional.of(new JoinRelation(
+                HogQlQuery.JoinType.LEFT,
+                expandedRelation.orElseThrow(),
+                aliasedTarget,
+                Optional.of(new JoinOn(criteria, span)),
+                span));
+        return targetBinding;
+    }
+
+    private Expression joinKeyPredicate(TableBinding source, TableBinding target, JoinKey joinKey, HogQlQuery.SourceSpan span)
+    {
+        BoundField sourceField = Optional.ofNullable(source.fields().get(canonical(joinKey.sourceField())))
+                .orElseThrow(() -> expansionError(span, "HogQL relationship references an unavailable source field"));
+        BoundField targetField = Optional.ofNullable(target.fields().get(canonical(joinKey.targetField())))
+                .orElseThrow(() -> expansionError(span, "HogQL relationship references an unavailable target field"));
+        return new BinaryExpression(
+                HogQlQuery.BinaryOperator.EQUAL,
+                physicalColumn(sourceField, Optional.of(source.outputQualifier()), span),
+                physicalColumn(targetField, Optional.of(target.outputQualifier()), span),
+                span);
+    }
+
+    private Identifier nextGeneratedRelationAlias(HogQlQuery.SourceSpan span)
+    {
+        while (true) {
+            Identifier candidate = new Identifier("__hogql_lazy_" + ++generatedRelationId, true, span);
+            boolean used = bindings.stream().anyMatch(binding -> binding.qualifier().equals(canonical(candidate.value()))) ||
+                    relationshipPaths.values().stream().anyMatch(binding -> binding.qualifier().equals(canonical(candidate.value())));
+            if (!used) {
+                return candidate;
+            }
+        }
+    }
+
+    private Optional<RelationshipDefinition> relationship(TableBinding binding, String name)
+    {
+        return snapshot.logicalTable(binding.relationName()).flatMap(table -> relationship(table, name));
+    }
+
+    private static Optional<RelationshipDefinition> relationship(LogicalTableDefinition table, String name)
+    {
+        return table.relationships().stream()
+                .filter(candidate -> canonical(candidate.name()).equals(canonical(name)))
+                .findFirst();
+    }
+
+    private Optional<LazyTableDefinition> lazyTable(TableBinding binding, String name)
+    {
+        return snapshot.snapshot().lazyTables().stream()
+                .filter(candidate -> canonical(candidate.table()).equals(canonical(binding.relationName())))
+                .filter(candidate -> canonical(candidate.name()).equals(canonical(name)))
+                .findFirst();
     }
 
     private Expression resolveMemberAccess(MemberAccessExpression memberAccess)
@@ -753,7 +981,7 @@ final class HogQlSemanticResolver
             HogQlQuery.SourceSpan span,
             ExpansionBudget budget)
     {
-        return expandRecipe(binding, recipe, qualifier, span, budget, Map.of());
+        return expandRecipe(binding, recipe, qualifier, span, budget, Map.of(), Map.of());
     }
 
     private Expression expandRecipe(
@@ -763,6 +991,18 @@ final class HogQlSemanticResolver
             HogQlQuery.SourceSpan span,
             ExpansionBudget budget,
             Map<ExpressionArgument, Expression> arguments)
+    {
+        return expandRecipe(binding, recipe, qualifier, span, budget, arguments, Map.of());
+    }
+
+    private Expression expandRecipe(
+            TableBinding binding,
+            ExpressionRecipe recipe,
+            Optional<PhysicalIdentifier> qualifier,
+            HogQlQuery.SourceSpan span,
+            ExpansionBudget budget,
+            Map<ExpressionArgument, Expression> arguments,
+            Map<RelationshipJoinSide, TableBinding> scopedBindings)
     {
         budget.enter(span);
         try {
@@ -775,10 +1015,10 @@ final class HogQlSemanticResolver
                     yield resolveBoundField(binding, field, qualifier, span, budget);
                 }
                 case LiteralRecipe literal -> typedLiteral(literal.literal(), span);
-                case FunctionCallRecipe function -> expandFunction(binding, function, qualifier, span, budget, arguments);
-                case OperatorRecipe operator -> expandOperator(binding, operator, qualifier, span, budget, arguments);
+                case FunctionCallRecipe function -> expandFunction(binding, function, qualifier, span, budget, arguments, scopedBindings);
+                case OperatorRecipe operator -> expandOperator(binding, operator, qualifier, span, budget, arguments, scopedBindings);
                 case CastRecipe cast -> new CastExpression(
-                        expandRecipe(binding, cast.expression(), qualifier, span, budget, arguments),
+                        expandRecipe(binding, cast.expression(), qualifier, span, budget, arguments, scopedBindings),
                         new Identifier(cast.targetTypeSignature(), false, span),
                         false,
                         span);
@@ -789,8 +1029,23 @@ final class HogQlSemanticResolver
                     }
                     yield argument;
                 }
-                case ScopedFieldReferenceRecipe _ -> throw unsupportedExpansion(span, "HogQL scoped field recipe is only valid inside a relationship predicate");
-                case PropertyLookupRecipe lookup -> expandPropertyLookup(binding, lookup, qualifier, span, budget, arguments);
+                case ScopedFieldReferenceRecipe reference -> {
+                    TableBinding scopedBinding = scopedBindings.get(reference.side());
+                    if (scopedBinding == null) {
+                        throw unsupportedExpansion(span, "HogQL scoped field recipe is only valid inside a relationship predicate");
+                    }
+                    BoundField field = scopedBinding.fields().get(canonical(reference.field()));
+                    if (field == null) {
+                        throw expansionError(span, "HogQL relationship predicate references an unavailable field");
+                    }
+                    yield resolveBoundField(
+                            scopedBinding,
+                            field,
+                            Optional.of(scopedBinding.outputQualifier()),
+                            span,
+                            budget);
+                }
+                case PropertyLookupRecipe lookup -> expandPropertyLookup(binding, lookup, qualifier, span, budget, arguments, scopedBindings);
             };
         }
         finally {
@@ -804,7 +1059,8 @@ final class HogQlSemanticResolver
             Optional<PhysicalIdentifier> qualifier,
             HogQlQuery.SourceSpan span,
             ExpansionBudget budget,
-            Map<ExpressionArgument, Expression> arguments)
+            Map<ExpressionArgument, Expression> arguments,
+            Map<RelationshipJoinSide, TableBinding> scopedBindings)
     {
         FunctionCapabilityDefinition capability = snapshot.snapshot().functions().stream()
                 .filter(candidate -> canonical(candidate.name()).equals(canonical(function.name())))
@@ -825,7 +1081,7 @@ final class HogQlSemanticResolver
                         .map(name -> new Identifier(name.value(), name.delimited(), span))
                         .toList(),
                 function.arguments().stream()
-                        .map(argument -> expandRecipe(binding, argument, qualifier, span, budget, arguments))
+                        .map(argument -> expandRecipe(binding, argument, qualifier, span, budget, arguments, scopedBindings))
                         .toList(),
                 false,
                 List.of(),
@@ -839,10 +1095,11 @@ final class HogQlSemanticResolver
             Optional<PhysicalIdentifier> qualifier,
             HogQlQuery.SourceSpan span,
             ExpansionBudget budget,
-            Map<ExpressionArgument, Expression> recipeArguments)
+            Map<ExpressionArgument, Expression> recipeArguments,
+            Map<RelationshipJoinSide, TableBinding> scopedBindings)
     {
         List<Expression> arguments = operator.arguments().stream()
-                .map(argument -> expandRecipe(binding, argument, qualifier, span, budget, recipeArguments))
+                .map(argument -> expandRecipe(binding, argument, qualifier, span, budget, recipeArguments, scopedBindings))
                 .toList();
         return switch (operator.operator()) {
             case NOT -> new UnaryExpression(HogQlQuery.UnaryOperator.NOT, arguments.getFirst(), span);
@@ -860,17 +1117,24 @@ final class HogQlSemanticResolver
             Optional<PhysicalIdentifier> qualifier,
             HogQlQuery.SourceSpan span,
             ExpansionBudget budget,
-            Map<ExpressionArgument, Expression> arguments)
+            Map<ExpressionArgument, Expression> arguments,
+            Map<RelationshipJoinSide, TableBinding> scopedBindings)
     {
-        if (!canonical(binding.relationName()).equals(canonical(lookup.table()))) {
-            throw expansionError(span, "HogQL property lookup recipe references an unavailable table");
-        }
-        PropertyDefinition property = properties(binding).stream()
+        TableBinding lookupBinding = canonical(binding.relationName()).equals(canonical(lookup.table()))
+                ? binding
+                : scopedBindings.values().stream()
+                  .filter(candidate -> canonical(candidate.relationName()).equals(canonical(lookup.table())))
+                  .findFirst()
+                  .orElseThrow(() -> expansionError(span, "HogQL property lookup recipe references an unavailable table"));
+        Optional<PhysicalIdentifier> lookupQualifier = lookupBinding == binding
+                ? qualifier
+                : Optional.of(lookupBinding.outputQualifier());
+        PropertyDefinition property = properties(lookupBinding).stream()
                 .filter(candidate -> canonical(candidate.name()).equals(canonical(lookup.property())))
                 .findFirst()
                 .orElseThrow(() -> expansionError(span, "HogQL property lookup recipe references an unavailable property"));
-        Expression key = expandRecipe(binding, lookup.key(), qualifier, span, budget, arguments);
-        return expandProperty(binding, property, key, qualifier, span, budget);
+        Expression key = expandRecipe(binding, lookup.key(), qualifier, span, budget, arguments, scopedBindings);
+        return expandProperty(lookupBinding, property, key, lookupQualifier, span, budget);
     }
 
     private Expression expandProperty(
@@ -1118,6 +1382,24 @@ final class HogQlSemanticResolver
     private record FieldMatch(TableBinding binding, BoundField field) {}
 
     private record PropertyMatch(TableBinding binding, PropertyDefinition property) {}
+
+    private record PathCandidate(TableBinding owner, List<Identifier> path)
+    {
+        private PathCandidate
+        {
+            owner = requireNonNull(owner, "owner is null");
+            path = List.copyOf(requireNonNull(path, "path is null"));
+        }
+    }
+
+    private record RelationshipPathKey(String ownerQualifier, List<String> path)
+    {
+        private RelationshipPathKey
+        {
+            ownerQualifier = requireNonNull(ownerQualifier, "ownerQualifier is null");
+            path = List.copyOf(requireNonNull(path, "path is null"));
+        }
+    }
 
     private record ProjectedField(String name, String sourceField, boolean starVisible)
     {
