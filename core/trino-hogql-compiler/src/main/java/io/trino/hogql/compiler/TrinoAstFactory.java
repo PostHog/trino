@@ -41,11 +41,13 @@ import io.trino.sql.tree.ArithmeticUnaryExpression;
 import io.trino.sql.tree.Array;
 import io.trino.sql.tree.BetweenPredicate;
 import io.trino.sql.tree.BooleanLiteral;
+import io.trino.sql.tree.CallArgument;
 import io.trino.sql.tree.Cast;
 import io.trino.sql.tree.ComparisonPredicate;
 import io.trino.sql.tree.DereferenceExpression;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.GenericDataType;
+import io.trino.sql.tree.GroupBy;
 import io.trino.sql.tree.InListExpression;
 import io.trino.sql.tree.InPredicate;
 import io.trino.sql.tree.IsNullPredicate;
@@ -67,6 +69,7 @@ import io.trino.sql.tree.SearchedCaseExpression;
 import io.trino.sql.tree.Select;
 import io.trino.sql.tree.SelectItem;
 import io.trino.sql.tree.SimpleCaseExpression;
+import io.trino.sql.tree.SimpleGroupBy;
 import io.trino.sql.tree.SingleColumn;
 import io.trino.sql.tree.SortItem.NullOrdering;
 import io.trino.sql.tree.SortItem.Ordering;
@@ -93,8 +96,8 @@ final class TrinoAstFactory
                         .toList()),
                 query.from().map(TrinoAstFactory::createRelation),
                 query.where().map(expression -> createExpression(expression, parameterIds)),
-                Optional.empty(),
-                Optional.empty(),
+                createGroupBy(query, parameterIds),
+                query.having().map(expression -> createExpression(expression, parameterIds)),
                 List.of(),
                 createOrderBy(query, parameterIds),
                 query.offset().map(offset -> new Offset(location(offset.span()), createExpression(offset, parameterIds))),
@@ -112,12 +115,17 @@ final class TrinoAstFactory
 
     private static Optional<OrderBy> createOrderBy(HogQlQuery query, Map<SourceSpan, Integer> parameterIds)
     {
-        if (query.orderBy().isEmpty()) {
+        return createOrderBy(query.orderBy(), parameterIds);
+    }
+
+    private static Optional<OrderBy> createOrderBy(List<HogQlQuery.SortItem> sortItems, Map<SourceSpan, Integer> parameterIds)
+    {
+        if (sortItems.isEmpty()) {
             return Optional.empty();
         }
         return Optional.of(new OrderBy(
-                location(query.orderBy().getFirst().span()),
-                query.orderBy().stream()
+                location(sortItems.getFirst().span()),
+                sortItems.stream()
                         .map(sortItem -> new io.trino.sql.tree.SortItem(
                                 location(sortItem.span()),
                                 createExpression(sortItem.expression(), parameterIds),
@@ -131,6 +139,22 @@ final class TrinoAstFactory
                                     case UNDEFINED -> NullOrdering.UNDEFINED;
                                 }))
                         .toList()));
+    }
+
+    private static Optional<GroupBy> createGroupBy(HogQlQuery query, Map<SourceSpan, Integer> parameterIds)
+    {
+        if (query.groupBy().isEmpty()) {
+            return Optional.empty();
+        }
+        NodeLocation location = location(query.groupBy().getFirst().span());
+        return Optional.of(new GroupBy(
+                location,
+                false,
+                List.of(new SimpleGroupBy(
+                        location,
+                        query.groupBy().stream()
+                                .map(expression -> createExpression(expression, parameterIds))
+                                .toList()))));
     }
 
     private static SelectItem createSelectItem(Projection projection, Map<SourceSpan, Integer> parameterIds)
@@ -161,12 +185,7 @@ final class TrinoAstFactory
                     new GenericDataType(location(cast.type().span()), createIdentifier(cast.type()), List.of()),
                     cast.safe());
             case ColumnReference reference -> createColumnReference(reference);
-            case FunctionCall function -> new io.trino.sql.tree.FunctionCall(
-                    location(function.span()),
-                    QualifiedName.of(List.of(createIdentifier(function.name()))),
-                    function.arguments().stream()
-                            .map(argument -> createExpression(argument, parameterIds))
-                            .toList());
+            case FunctionCall function -> createFunctionCall(function, parameterIds);
             case InExpression in -> createInExpression(in, parameterIds);
             case IsNullExpression isNull -> new Predicated(
                     location(isNull.predicateSpan()),
@@ -185,6 +204,25 @@ final class TrinoAstFactory
                 case POSITIVE -> ArithmeticUnaryExpression.positive(location(unary.span()), createExpression(unary.operand(), parameterIds));
             };
         };
+    }
+
+    private static Expression createFunctionCall(FunctionCall function, Map<SourceSpan, Integer> parameterIds)
+    {
+        return new io.trino.sql.tree.FunctionCall(
+                location(function.span()),
+                QualifiedName.of(List.of(createIdentifier(function.name()))),
+                Optional.empty(),
+                function.filter().map(filter -> createExpression(filter, parameterIds)),
+                createOrderBy(function.orderBy(), parameterIds),
+                function.distinct(),
+                Optional.empty(),
+                Optional.empty(),
+                function.arguments().stream()
+                        .map(argument -> new CallArgument(
+                                location(argument.span()),
+                                Optional.empty(),
+                                createExpression(argument, parameterIds)))
+                        .toList());
     }
 
     private static Expression createCaseExpression(CaseExpression caseExpression, Map<SourceSpan, Integer> parameterIds)

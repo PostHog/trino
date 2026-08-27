@@ -117,6 +117,42 @@ public class TestHogQlCompiler
 
     @ParameterizedTest
     @ValueSource(strings = {
+            "SELECT event, count(*) AS total FROM events GROUP BY event HAVING count(*) > 1",
+            "SELECT lower(event), count(DISTINCT person_id), sum(revenue) FROM events GROUP BY lower(event) HAVING sum(revenue) > 10",
+            "SELECT count(*) FILTER (WHERE enabled) FROM events",
+            "SELECT array_agg(event ORDER BY timestamp DESC) FROM events",
+    })
+    public void testLowersOrdinaryGroupingHavingAndAggregateFunctions(String hogql)
+    {
+        Statement statement = compiler.compile(hogql);
+
+        assertThat(statement).isEqualTo(sqlParser.createStatement(hogql));
+        assertThat(sqlParser.createStatement(SqlFormatter.formatSql(statement))).isEqualTo(statement);
+    }
+
+    @Test
+    public void testBindsPlaceholdersAcrossGroupingHavingAndAggregateModifiers()
+    {
+        String hogql = "SELECT array_agg({value} ORDER BY {sort}) FILTER (WHERE {filter}) FROM events " +
+                "GROUP BY {group} HAVING sum({having}) > {threshold}";
+        Map<String, HogQlTypedValue> bindings = Map.of(
+                "value", typedValue("value"),
+                "sort", typedValue("sort"),
+                "filter", typedValue("filter"),
+                "group", typedValue("group"),
+                "having", typedValue("having"),
+                "threshold", typedValue("threshold"));
+
+        HogQlCompilationResult result = compiler.compile(hogql, bindings);
+
+        assertThat(result.parameterNames()).containsExactly("value", "sort", "filter", "group", "having", "threshold");
+        assertThat(parameters(result.statement()))
+                .extracting(Parameter::getId)
+                .containsExactly(0, 1, 2, 3, 4, 5);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
             "SELECT value BETWEEN 1 AND 10",
             "SELECT value NOT BETWEEN 1 AND 10",
             "SELECT value IS NULL",
@@ -234,7 +270,7 @@ public class TestHogQlCompiler
     {
         TrinoException exception = catchThrowableOfType(
                 TrinoException.class,
-                () -> compiler.compile("SELECT 1\nGROUP BY 1"));
+                () -> compiler.compile("SELECT 1\nGROUP BY ALL"));
 
         assertThat(exception.getErrorCode()).isEqualTo(HogQlErrorCode.HOGQL_SYNTAX_ERROR.toErrorCode());
         assertThat(exception.getLocation()).contains(new Location(2, 1));

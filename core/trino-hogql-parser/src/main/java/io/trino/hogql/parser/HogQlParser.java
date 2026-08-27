@@ -456,6 +456,10 @@ public final class HogQlParser
             Optional<Expression> where = Optional.ofNullable(select.whereClause())
                     .map(HogQLParser.WhereClauseContext::columnExpr)
                     .map(this::buildExpression);
+            List<Expression> groupBy = buildGroupBy(select);
+            Optional<Expression> having = Optional.ofNullable(select.havingClause())
+                    .map(HogQLParser.HavingClauseContext::columnExpr)
+                    .map(this::buildExpression);
             List<SortItem> orderBy = buildOrderBy(selectedQuery.orderBy() != null ? selectedQuery.orderBy() : select.orderByClause());
             Pagination pagination = mergePagination(
                     buildPagination(select.limitAndOffsetClause(), select.offsetOnlyClause()),
@@ -466,6 +470,8 @@ public final class HogQlParser
                     projections,
                     from,
                     where,
+                    groupBy,
+                    having,
                     orderBy,
                     pagination.limit(),
                     pagination.offset(),
@@ -512,8 +518,6 @@ public final class HogQlParser
             clauses.add(context.arrayJoinClause());
             clauses.add(context.prewhereClause());
             clauses.addAll(context.sampleClause());
-            clauses.add(context.groupByClause());
-            clauses.add(context.havingClause());
             clauses.add(context.qualifyClause());
             clauses.add(context.windowClause());
             clauses.add(context.limitByClause());
@@ -534,9 +538,33 @@ public final class HogQlParser
             if (context.interpolateClause() != null) {
                 throw unsupported(context.interpolateClause(), "ORDER BY interpolation");
             }
-            return context.orderExprList().orderExpr().stream()
+            return buildSortItems(context.orderExprList());
+        }
+
+        private List<SortItem> buildSortItems(HogQLParser.OrderExprListContext context)
+        {
+            return context.orderExpr().stream()
                     .map(this::buildSortItem)
                     .toList();
+        }
+
+        private List<Expression> buildGroupBy(HogQLParser.SelectStmtContext select)
+        {
+            HogQLParser.GroupByClauseContext groupBy = select.groupByClause();
+            if (groupBy == null) {
+                return List.of();
+            }
+            if (groupBy.columnExprList() == null ||
+                    groupBy.ALL() != null ||
+                    groupBy.CUBE() != null ||
+                    groupBy.ROLLUP() != null ||
+                    groupBy.GROUPING() != null ||
+                    select.CUBE() != null ||
+                    select.ROLLUP() != null ||
+                    select.TOTALS() != null) {
+                throw unsupported(groupBy, "advanced grouping");
+            }
+            return buildExpressions(groupBy.columnExprList());
         }
 
         private SortItem buildSortItem(HogQLParser.OrderExprContext context)
@@ -822,13 +850,44 @@ public final class HogQlParser
 
         private FunctionCall buildFunction(HogQLParser.ColumnExprFunctionContext context)
         {
-            if (context.columnExprs != null || context.DISTINCT() != null || context.orderExprList() != null || context.filterExpr != null) {
-                throw unsupported(context, "parametric, distinct, ordered, or filtered function");
+            if (context.columnExprs != null) {
+                throw unsupported(context, "parametric function");
             }
-            List<Expression> arguments = context.columnArgList == null ? List.of() : context.columnArgList.columnExpr().stream()
-                                                                                     .map(this::buildExpression)
-                                                                                     .toList();
-            return new FunctionCall(buildIdentifier(context.identifier()), arguments, sourceSpan(context));
+            List<Expression> arguments = buildFunctionArguments(context);
+            List<SortItem> orderBy = context.orderExprList() == null ? List.of() : buildSortItems(context.orderExprList());
+            Optional<Expression> filter = Optional.ofNullable(context.filterExpr).map(this::buildExpression);
+            return new FunctionCall(
+                    buildIdentifier(context.identifier()),
+                    arguments,
+                    context.DISTINCT() != null,
+                    orderBy,
+                    filter,
+                    sourceSpan(context));
+        }
+
+        private List<Expression> buildFunctionArguments(HogQLParser.ColumnExprFunctionContext context)
+        {
+            if (context.columnArgList == null) {
+                return List.of();
+            }
+            List<HogQLParser.ColumnExprContext> arguments = context.columnArgList.columnExpr();
+            if (arguments.size() == 1 && isUnqualifiedStar(arguments.getFirst())) {
+                if (context.DISTINCT() != null) {
+                    throw unsupported(context, "DISTINCT star function");
+                }
+                return List.of();
+            }
+            return arguments.stream()
+                    .map(this::buildExpression)
+                    .toList();
+        }
+
+        private static boolean isUnqualifiedStar(HogQLParser.ColumnExprContext context)
+        {
+            return context instanceof HogQLParser.ColumnExprValuePassthroughContext passthrough &&
+                    passthrough.columnExprValue() instanceof HogQLParser.ColumnExprAsteriskContext asterisk &&
+                    asterisk.tableIdentifier() == null &&
+                    asterisk.EXCLUDE() == null;
         }
 
         private Expression buildLiteral(HogQLParser.LiteralContext context)

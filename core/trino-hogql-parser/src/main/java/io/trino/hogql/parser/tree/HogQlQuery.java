@@ -23,6 +23,8 @@ public record HogQlQuery(
         List<Projection> projections,
         Optional<Relation> from,
         Optional<Expression> where,
+        List<Expression> groupBy,
+        Optional<Expression> having,
         List<SortItem> orderBy,
         Optional<Expression> limit,
         Optional<Expression> offset,
@@ -33,6 +35,8 @@ public record HogQlQuery(
         projections = List.copyOf(requireNonNull(projections, "projections is null"));
         from = requireNonNull(from, "from is null");
         where = requireNonNull(where, "where is null");
+        groupBy = List.copyOf(requireNonNull(groupBy, "groupBy is null"));
+        having = requireNonNull(having, "having is null");
         orderBy = List.copyOf(requireNonNull(orderBy, "orderBy is null"));
         limit = requireNonNull(limit, "limit is null");
         offset = requireNonNull(offset, "offset is null");
@@ -233,13 +237,21 @@ public record HogQlQuery(
         }
     }
 
-    public record FunctionCall(Identifier name, List<Expression> arguments, SourceSpan span)
+    public record FunctionCall(
+            Identifier name,
+            List<Expression> arguments,
+            boolean distinct,
+            List<SortItem> orderBy,
+            Optional<Expression> filter,
+            SourceSpan span)
             implements Expression
     {
         public FunctionCall
         {
             name = requireNonNull(name, "name is null");
             arguments = List.copyOf(requireNonNull(arguments, "arguments is null"));
+            orderBy = List.copyOf(requireNonNull(orderBy, "orderBy is null"));
+            filter = requireNonNull(filter, "filter is null");
             span = requireNonNull(span, "span is null");
         }
     }

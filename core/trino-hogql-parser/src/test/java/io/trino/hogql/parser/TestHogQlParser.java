@@ -17,6 +17,7 @@ import io.trino.hogql.parser.tree.HogQlQuery;
 import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
+import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.NullPlacement;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.SortDirection;
@@ -39,13 +40,14 @@ public class TestHogQlParser
     @ParameterizedTest
     @ValueSource(strings = {
             "SELECT",
-            "SELECT count(*)",
             "SELECT * FROM first JOIN second",
+            "SELECT count(*) OVER ()",
+            "SELECT function(1)(value)",
             "DROP TABLE events",
             "SELECT 1; SELECT 2",
             "SELECT * FROM",
             "SELECT {1 + 2}",
-            "SELECT 1 GROUP BY 1",
+            "SELECT 1 GROUP BY ALL",
     })
     public void testRejectsSyntaxWithoutAnAstMapping(String hogql)
     {
@@ -93,6 +95,19 @@ public class TestHogQlParser
         });
         assertThat(query.limit()).get().extracting(HogQlQuery.Literal.class::cast).extracting(HogQlQuery.Literal::value).isEqualTo("10");
         assertThat(query.offset()).get().extracting(HogQlQuery.Literal.class::cast).extracting(HogQlQuery.Literal::value).isEqualTo("2");
+    }
+
+    @Test
+    public void testBuildsOrdinaryGroupingHavingAndAggregateFunctionAst()
+    {
+        HogQlQuery query = parser.parseStatement("SELECT country, count(DISTINCT person_id) FROM events GROUP BY country, lower(source) HAVING count(*) > 1");
+
+        assertThat(query.groupBy()).hasSize(2);
+        assertThat(query.having()).isPresent();
+        FunctionCall count = (FunctionCall) ((ExpressionProjection) query.projections().get(1)).expression();
+        assertThat(count.name().value()).isEqualTo("count");
+        assertThat(count.distinct()).isTrue();
+        assertThat(count.arguments()).singleElement().isInstanceOf(ColumnReference.class);
     }
 
     @Test

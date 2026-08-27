@@ -104,6 +104,8 @@ public final class HogQlCompiler
             }
         });
         query.where().ifPresent(expression -> collectPlaceholders(expression, placeholders));
+        query.groupBy().forEach(expression -> collectPlaceholders(expression, placeholders));
+        query.having().ifPresent(expression -> collectPlaceholders(expression, placeholders));
         query.orderBy().forEach(sortItem -> collectPlaceholders(sortItem.expression(), placeholders));
         query.limit().ifPresent(expression -> collectPlaceholders(expression, placeholders));
         query.offset().ifPresent(expression -> collectPlaceholders(expression, placeholders));
@@ -179,7 +181,11 @@ public final class HogQlCompiler
             }
             case CastExpression cast -> collectPlaceholders(cast.value(), placeholders);
             case ColumnReference _ -> {}
-            case FunctionCall function -> function.arguments().forEach(argument -> collectPlaceholders(argument, placeholders));
+            case FunctionCall function -> {
+                function.arguments().forEach(argument -> collectPlaceholders(argument, placeholders));
+                function.orderBy().forEach(sortItem -> collectPlaceholders(sortItem.expression(), placeholders));
+                function.filter().ifPresent(filter -> collectPlaceholders(filter, placeholders));
+            }
             case InExpression in -> {
                 collectPlaceholders(in.value(), placeholders);
                 in.values().forEach(value -> collectPlaceholders(value, placeholders));

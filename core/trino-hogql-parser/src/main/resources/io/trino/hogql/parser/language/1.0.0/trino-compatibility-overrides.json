@@ -74,7 +74,7 @@
         },
         {
             "id": "query.accept.aggregate",
-            "status": "explicitCurrentError"
+            "status": "supported"
         },
         {
             "id": "query.accept.constant",
@@ -86,7 +86,7 @@
         },
         {
             "id": "query.accept.order-limit-offset",
-            "status": "explicitCurrentError"
+            "status": "supported"
         },
         {
             "id": "query.accept.projection-from",
