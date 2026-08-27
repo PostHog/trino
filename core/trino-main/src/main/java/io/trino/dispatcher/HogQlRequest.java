@@ -14,6 +14,7 @@
 package io.trino.dispatcher;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.google.common.base.Utf8;
 import io.airlift.json.JsonCodec;
 import io.trino.hogql.compiler.HogQlCompileEnvelope;
 import io.trino.hogql.compiler.HogQlTypedValue;
@@ -59,7 +60,9 @@ record HogQlRequest(
             "catalogGeneration");
     private static final Set<String> TYPED_VALUE_FIELDS = Set.of("type", "value");
     private static final int MAX_VALUE_DEPTH = 64;
+    private static final int MAX_REQUEST_BYTES = 2 * 1024 * 1024;
     private static final int MAX_BINDINGS_PER_FIELD = 1_000;
+    private static final int MAX_TOTAL_BINDINGS = 1_000;
 
     HogQlRequest
     {
@@ -70,11 +73,18 @@ record HogQlRequest(
         filters = Map.copyOf(requireNonNull(filters, "filters is null"));
         modifiers = Map.copyOf(requireNonNull(modifiers, "modifiers is null"));
         catalogGeneration = requireNonNull(catalogGeneration, "catalogGeneration is null");
+        if (parameters.size() + variables.size() + filters.size() + modifiers.size() > MAX_TOTAL_BINDINGS) {
+            throw new IllegalArgumentException("HogQL request has too many bindings");
+        }
     }
 
     static HogQlRequest fromJson(String requestBody)
     {
-        JsonNode root = JSON_CODEC.fromJson(requireNonNull(requestBody, "requestBody is null"));
+        requestBody = requireNonNull(requestBody, "requestBody is null");
+        if (Utf8.encodedLength(requestBody) > MAX_REQUEST_BYTES) {
+            throw new IllegalArgumentException("HogQL request is too large");
+        }
+        JsonNode root = JSON_CODEC.fromJson(requestBody);
         if (root == null || !root.isObject()) {
             throw new IllegalArgumentException("HogQL request must be an object");
         }

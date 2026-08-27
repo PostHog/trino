@@ -177,26 +177,35 @@ class TestHogQlStatementResource
     {
         String languageVersion = HogQlLanguageContract.current().languageVersion().toString();
         return Stream.of(
-                Arguments.of("unsupported protocol version", """
+                Arguments.of("unsupported protocol version",
+                        """
                         {"query":"SELECT '%s'","protocolVersion":2,"languageVersion":"%s"}
                         """.formatted(SECRET, languageVersion)),
-                Arguments.of("unsupported language version", """
+                Arguments.of("unsupported language version",
+                        """
                         {"query":"SELECT '%s'","protocolVersion":1,"languageVersion":"999.0.0"}
                         """.formatted(SECRET)),
-                Arguments.of("unknown top-level field", """
+                Arguments.of("unknown top-level field",
+                        """
                         {"query":"SELECT 1","protocolVersion":1,"languageVersion":"%s","unknown":"%s"}
                         """.formatted(languageVersion, SECRET)),
-                Arguments.of("unknown typed-value field", """
+                Arguments.of("unknown typed-value field",
+                        """
                         {"query":"SELECT 1","protocolVersion":1,"languageVersion":"%s","parameters":{"p":{"type":"string","value":"%s","unknown":true}}}
                         """.formatted(languageVersion, SECRET)),
-                Arguments.of("ambiguous typed value", """
+                Arguments.of("ambiguous typed value",
+                        """
                         {"query":"SELECT 1","protocolVersion":1,"languageVersion":"%s","parameters":{"p":{"type":"string","unknown":"%s"}}}
                         """.formatted(languageVersion, SECRET)),
-                Arguments.of("nonpositive catalog generation", """
+                Arguments.of("nonpositive catalog generation",
+                        """
                         {"query":"SELECT '%s'","protocolVersion":1,"languageVersion":"%s","catalogGeneration":0}
                         """.formatted(SECRET, languageVersion)),
                 Arguments.of("too many parameter bindings", requestWithParameterCount(languageVersion, 1_001)),
-                Arguments.of("malformed JSON", """
+                Arguments.of("too many total bindings", requestWithTotalBindingCount(languageVersion)),
+                Arguments.of("request exceeds byte limit", oversizedRequest(languageVersion)),
+                Arguments.of("malformed JSON",
+                        """
                         {"query":"SELECT 1","protocolVersion":1,"languageVersion":"%s","parameters":{"p":{"type":"string","value":"%s"}}
                         """.formatted(languageVersion, SECRET)));
     }
@@ -207,8 +216,25 @@ class TestHogQlStatementResource
                 .mapToObj(index -> "\"p%s\":{\"type\":\"integer\",\"value\":%s}".formatted(index, index))
                 .collect(joining(","));
         return """
-                {"query":"SELECT 1","protocolVersion":1,"languageVersion":"%s","parameters":{%s}}
-                """.formatted(languageVersion, parameters);
+               {"query":"SELECT 1","protocolVersion":1,"languageVersion":"%s","parameters":{%s}}
+               """.formatted(languageVersion, parameters);
+    }
+
+    private static String requestWithTotalBindingCount(String languageVersion)
+    {
+        String parameters = range(0, 1_000)
+                .mapToObj(index -> "\"p%s\":{\"type\":\"integer\",\"value\":%s}".formatted(index, index))
+                .collect(joining(","));
+        return """
+               {"query":"SELECT 1","protocolVersion":1,"languageVersion":"%s","parameters":{%s},"variables":{"extra":{"type":"integer","value":1}}}
+               """.formatted(languageVersion, parameters);
+    }
+
+    private static String oversizedRequest(String languageVersion)
+    {
+        return """
+               {"query":"SELECT '%s%s'","protocolVersion":1,"languageVersion":"%s"}
+               """.formatted(SECRET, "x".repeat(2 * 1024 * 1024), languageVersion);
     }
 
     private static List<QueryResults> runHogQlToCompletion(String request)
@@ -268,24 +294,24 @@ class TestHogQlStatementResource
     private static String hogQlRequest(String query)
     {
         return """
-                {"query":%s,"protocolVersion":1,"languageVersion":"%s"}
-                """.formatted(STRING_CODEC.toJson(query), HogQlLanguageContract.current().languageVersion());
+               {"query":%s,"protocolVersion":1,"languageVersion":"%s"}
+               """.formatted(STRING_CODEC.toJson(query), HogQlLanguageContract.current().languageVersion());
     }
 
     private static String hogQlRequestWithTypedValues(String query)
     {
         return """
-                {
-                  "query": %s,
-                  "protocolVersion": 1,
-                  "languageVersion": "%s",
-                  "parameters": {},
-                  "variables": {"array": {"type": "array", "value": [true, "value", null]}},
-                  "filters": {"object": {"type": "object", "value": {"nested": 2.5}}},
-                  "modifiers": {"missing": {"type": "nullable", "value": null}},
-                  "catalogGeneration": 1
-                }
-                """.formatted(STRING_CODEC.toJson(query), HogQlLanguageContract.current().languageVersion());
+               {
+                 "query": %s,
+                 "protocolVersion": 1,
+                 "languageVersion": "%s",
+                 "parameters": {},
+                 "variables": {"array": {"type": "array", "value": [true, "value", null]}},
+                 "filters": {"object": {"type": "object", "value": {"nested": 2.5}}},
+                 "modifiers": {"missing": {"type": "nullable", "value": null}},
+                 "catalogGeneration": 1
+               }
+               """.formatted(STRING_CODEC.toJson(query), HogQlLanguageContract.current().languageVersion());
     }
 
     private static List<List<Object>> rows(List<QueryResults> results)
