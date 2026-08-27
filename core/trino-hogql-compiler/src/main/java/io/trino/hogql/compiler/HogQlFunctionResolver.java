@@ -35,7 +35,9 @@ import io.trino.hogql.parser.tree.HogQlQuery.Expression;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
+import io.trino.hogql.parser.tree.HogQlQuery.InCohortExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.InSubqueryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
@@ -77,6 +79,8 @@ import static java.util.Objects.requireNonNull;
 
 final class HogQlFunctionResolver
 {
+    private static final String MATCHES_ACTION = "matchesaction";
+
     private final Map<String, FunctionCapabilityDefinition> functions;
 
     private HogQlFunctionResolver(PinnedSnapshot snapshot)
@@ -196,9 +200,21 @@ final class HogQlFunctionResolver
             case CastExpression cast -> new CastExpression(resolveExpression(cast.value()), cast.type(), cast.safe(), cast.span());
             case ColumnReference reference -> reference;
             case FunctionCall function -> resolveFunction(function, function.window().isPresent());
+            case InCohortExpression in -> new InCohortExpression(
+                    resolveExpression(in.value()),
+                    resolveExpression(in.cohort()),
+                    in.negated(),
+                    in.predicateSpan(),
+                    in.span());
             case InExpression in -> new InExpression(
                     resolveExpression(in.value()),
                     in.values().stream().map(this::resolveExpression).toList(),
+                    in.negated(),
+                    in.predicateSpan(),
+                    in.span());
+            case InSubqueryExpression in -> new InSubqueryExpression(
+                    resolveExpression(in.value()),
+                    resolveQuery(in.query()),
                     in.negated(),
                     in.predicateSpan(),
                     in.span());
@@ -225,6 +241,17 @@ final class HogQlFunctionResolver
     private Expression resolveFunction(FunctionCall function, boolean windowInvocation)
     {
         String name = function.name().value();
+        if (function.nameParts().size() == 1 && canonical(name).equals(MATCHES_ACTION)) {
+            return new FunctionCall(
+                    function.nameParts(),
+                    function.arguments().stream().map(this::resolveExpression).toList(),
+                    function.distinct(),
+                    resolveSortItems(function.orderBy()),
+                    function.filter().map(this::resolveExpression),
+                    function.nullTreatment(),
+                    function.window().map(this::resolveWindow),
+                    function.span());
+        }
         FunctionCapabilityDefinition capability = functions.get(canonical(name));
         if (capability == null) {
             throw resolutionError(function, "Unknown HogQL function: " + name);

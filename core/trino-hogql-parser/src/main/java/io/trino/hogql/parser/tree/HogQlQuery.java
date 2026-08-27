@@ -255,7 +255,9 @@ public record HogQlQuery(
                     CastExpression,
                     ColumnReference,
                     FunctionCall,
+                    InCohortExpression,
                     InExpression,
+                    InSubqueryExpression,
                     IsNullExpression,
                     Literal,
                     MemberAccessExpression,
@@ -371,6 +373,30 @@ public record HogQlQuery(
             if (values.isEmpty()) {
                 throw new IllegalArgumentException("values is empty");
             }
+            predicateSpan = requireNonNull(predicateSpan, "predicateSpan is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record InCohortExpression(Expression value, Expression cohort, boolean negated, SourceSpan predicateSpan, SourceSpan span)
+            implements Expression
+    {
+        public InCohortExpression
+        {
+            value = requireNonNull(value, "value is null");
+            cohort = requireNonNull(cohort, "cohort is null");
+            predicateSpan = requireNonNull(predicateSpan, "predicateSpan is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record InSubqueryExpression(Expression value, HogQlQuery query, boolean negated, SourceSpan predicateSpan, SourceSpan span)
+            implements Expression
+    {
+        public InSubqueryExpression
+        {
+            value = requireNonNull(value, "value is null");
+            query = requireNonNull(query, "query is null");
             predicateSpan = requireNonNull(predicateSpan, "predicateSpan is null");
             span = requireNonNull(span, "span is null");
         }

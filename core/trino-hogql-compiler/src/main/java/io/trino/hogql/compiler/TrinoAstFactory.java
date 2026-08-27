@@ -27,7 +27,9 @@ import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
 import io.trino.hogql.parser.tree.HogQlQuery.FrameBound;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
+import io.trino.hogql.parser.tree.HogQlQuery.InCohortExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.InSubqueryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
@@ -53,6 +55,8 @@ import io.trino.hogql.parser.tree.HogQlQuery.WindowDefinition;
 import io.trino.hogql.parser.tree.HogQlQuery.WindowFrame;
 import io.trino.hogql.parser.tree.HogQlQuery.WindowReference;
 import io.trino.hogql.parser.tree.HogQlQuery.WindowSpecification;
+import io.trino.spi.Location;
+import io.trino.spi.TrinoException;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.AllColumns;
 import io.trino.sql.tree.ArithmeticBinaryExpression;
@@ -107,6 +111,8 @@ import io.trino.sql.tree.WithQuery;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+
+import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_UNSUPPORTED_FEATURE;
 
 final class TrinoAstFactory
 {
@@ -289,7 +295,9 @@ final class TrinoAstFactory
                     cast.safe());
             case ColumnReference reference -> createColumnReference(reference);
             case FunctionCall function -> createFunctionCall(function, parameterIds);
+            case InCohortExpression in -> throw unsupportedSemanticExpression(in.span(), "HogQL IN COHORT requires a semantic catalog snapshot");
             case InExpression in -> createInExpression(in, parameterIds);
+            case InSubqueryExpression in -> createInSubqueryExpression(in, parameterIds);
             case IsNullExpression isNull -> new Predicated(
                     location(isNull.predicateSpan()),
                     createExpression(isNull.value(), parameterIds),
@@ -319,6 +327,9 @@ final class TrinoAstFactory
 
     private static Expression createFunctionCall(FunctionCall function, Map<SourceSpan, Integer> parameterIds)
     {
+        if (function.nameParts().size() == 1 && function.name().value().equalsIgnoreCase("matchesAction")) {
+            throw unsupportedSemanticExpression(function.span(), "HogQL matchesAction requires a semantic catalog snapshot and events relation");
+        }
         return new io.trino.sql.tree.FunctionCall(
                 location(function.span()),
                 QualifiedName.of(function.nameParts().stream()
@@ -447,6 +458,18 @@ final class TrinoAstFactory
                                 in.values().stream()
                                         .map(value -> createExpression(value, parameterIds))
                                         .toList())));
+    }
+
+    private static Expression createInSubqueryExpression(InSubqueryExpression in, Map<SourceSpan, Integer> parameterIds)
+    {
+        NodeLocation location = location(in.predicateSpan());
+        return new Predicated(
+                location,
+                createExpression(in.value(), parameterIds),
+                new InPredicate(
+                        location,
+                        in.negated(),
+                        new io.trino.sql.tree.SubqueryExpression(location, createQuery(in.query(), parameterIds))));
     }
 
     private static Expression createBinaryExpression(BinaryExpression binary, Map<SourceSpan, Integer> parameterIds)
@@ -584,5 +607,14 @@ final class TrinoAstFactory
     private static NodeLocation location(SourceSpan span)
     {
         return new NodeLocation(span.startLine(), span.startColumn());
+    }
+
+    private static TrinoException unsupportedSemanticExpression(SourceSpan span, String message)
+    {
+        return new TrinoException(
+                HOGQL_UNSUPPORTED_FEATURE,
+                Optional.of(new Location(span.startLine(), span.startColumn())),
+                message,
+                null);
     }
 }

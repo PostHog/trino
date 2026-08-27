@@ -34,7 +34,9 @@ import io.trino.hogql.parser.tree.HogQlQuery.FrameBoundType;
 import io.trino.hogql.parser.tree.HogQlQuery.FrameType;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
+import io.trino.hogql.parser.tree.HogQlQuery.InCohortExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.InSubqueryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinCriteria;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
@@ -1075,7 +1077,15 @@ public final class HogQlParser
                 return binary(operator, binary.left, binary.right, binary);
             }
             if (context instanceof HogQLParser.ColumnExprPrecedence3Context binary) {
-                if (binary.IN() != null && binary.COHORT() == null) {
+                if (binary.IN() != null) {
+                    if (binary.COHORT() != null) {
+                        return new InCohortExpression(
+                                buildExpression(binary.left),
+                                buildExpression(binary.right),
+                                binary.NOT() != null,
+                                sourceSpan(binary.NOT() == null ? binary.IN().getSymbol() : binary.NOT().getSymbol(), binary.getStop()),
+                                sourceSpan(binary));
+                    }
                     return new InExpression(
                             buildExpression(binary.left),
                             buildInValues(binary.right),
@@ -1647,6 +1657,16 @@ public final class HogQlParser
                 case InExpression in -> {
                     validateExpressionScope(in.value(), forbiddenOuterRelations, localRelations);
                     in.values().forEach(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations));
+                }
+                case InCohortExpression in -> {
+                    validateExpressionScope(in.value(), forbiddenOuterRelations, localRelations);
+                    validateExpressionScope(in.cohort(), forbiddenOuterRelations, localRelations);
+                }
+                case InSubqueryExpression in -> {
+                    validateExpressionScope(in.value(), forbiddenOuterRelations, localRelations);
+                    Set<String> nestedForbiddenRelations = new LinkedHashSet<>(forbiddenOuterRelations);
+                    nestedForbiddenRelations.addAll(localRelations);
+                    validateQueryScope(in.query(), Set.copyOf(nestedForbiddenRelations));
                 }
                 case IsNullExpression isNull -> validateExpressionScope(isNull.value(), forbiddenOuterRelations, localRelations);
                 case Literal _, Placeholder _ -> {}

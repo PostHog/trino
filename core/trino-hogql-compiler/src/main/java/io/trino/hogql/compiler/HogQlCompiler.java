@@ -33,7 +33,9 @@ import io.trino.hogql.parser.tree.HogQlQuery.CommonTableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.Expression;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
+import io.trino.hogql.parser.tree.HogQlQuery.InCohortExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.InSubqueryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
@@ -322,7 +324,9 @@ public final class HogQlCompiler
             case CastExpression cast -> containsFunctionCall(cast.value());
             case ColumnReference _, Literal _, Placeholder _ -> false;
             case FunctionCall _ -> true;
+            case InCohortExpression _ -> true;
             case InExpression in -> containsFunctionCall(in.value()) || in.values().stream().anyMatch(HogQlCompiler::containsFunctionCall);
+            case InSubqueryExpression in -> containsFunctionCall(in.value()) || containsFunctionCall(in.query());
             case IsNullExpression isNull -> containsFunctionCall(isNull.value());
             case MemberAccessExpression memberAccess -> containsFunctionCall(memberAccess.base());
             case SubscriptExpression subscript -> containsFunctionCall(subscript.base()) || containsFunctionCall(subscript.index());
@@ -416,9 +420,17 @@ public final class HogQlCompiler
                 function.filter().ifPresent(filter -> collectPlaceholders(filter, placeholders));
                 function.window().ifPresent(window -> collectPlaceholders(window, placeholders));
             }
+            case InCohortExpression in -> {
+                collectPlaceholders(in.value(), placeholders);
+                collectPlaceholders(in.cohort(), placeholders);
+            }
             case InExpression in -> {
                 collectPlaceholders(in.value(), placeholders);
                 in.values().forEach(value -> collectPlaceholders(value, placeholders));
+            }
+            case InSubqueryExpression in -> {
+                collectPlaceholders(in.value(), placeholders);
+                collectPlaceholders(in.query(), placeholders);
             }
             case IsNullExpression isNull -> collectPlaceholders(isNull.value(), placeholders);
             case Literal _ -> {}

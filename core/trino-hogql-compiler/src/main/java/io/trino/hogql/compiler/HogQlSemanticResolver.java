@@ -13,8 +13,10 @@
  */
 package io.trino.hogql.compiler;
 
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ActionReference;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ArgumentReferenceRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.CastRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.CohortReference;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionArgument;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionFieldDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionRecipe;
@@ -30,10 +32,13 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalTable
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.MaterializedViewReference;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.OperatorRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PredicateRepresentation;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyLookupRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ReferencedField;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationKind;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationMembershipRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationMembershipRepresentation;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationReference;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipJoinSide;
@@ -58,7 +63,9 @@ import io.trino.hogql.parser.tree.HogQlQuery.Expression;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
+import io.trino.hogql.parser.tree.HogQlQuery.InCohortExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.InSubqueryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
@@ -102,6 +109,8 @@ import static java.util.Objects.requireNonNull;
 
 final class HogQlSemanticResolver
 {
+    private static final String MATCHES_ACTION = "matchesaction";
+
     private final PinnedSnapshot snapshot;
     private final ExpansionBudget expansionBudget;
     private final Map<RelationshipPathKey, TableBinding> relationshipPaths = new LinkedHashMap<>();
@@ -524,18 +533,17 @@ final class HogQlSemanticResolver
                     caseExpression.span());
             case CastExpression cast -> new CastExpression(resolveExpression(cast.value()), cast.type(), cast.safe(), cast.span());
             case ColumnReference reference -> resolveColumn(reference);
-            case FunctionCall function -> new FunctionCall(
-                    function.nameParts(),
-                    function.arguments().stream().map(this::resolveExpression).toList(),
-                    function.distinct(),
-                    resolveSortItems(function.orderBy()),
-                    function.filter().map(this::resolveExpression),
-                    function.nullTreatment(),
-                    function.window().map(this::resolveWindow),
-                    function.span());
+            case FunctionCall function -> resolveFunctionExpression(function);
+            case InCohortExpression in -> resolveCohortExpression(in);
             case InExpression in -> new InExpression(
                     resolveExpression(in.value()),
                     in.values().stream().map(this::resolveExpression).toList(),
+                    in.negated(),
+                    in.predicateSpan(),
+                    in.span());
+            case InSubqueryExpression in -> new InSubqueryExpression(
+                    resolveExpression(in.value()),
+                    new HogQlSemanticResolver(snapshot, expansionBudget).resolveNestedQuery(in.query()),
                     in.negated(),
                     in.predicateSpan(),
                     in.span());
@@ -551,6 +559,187 @@ final class HogQlSemanticResolver
             case TupleExpression tuple -> new TupleExpression(tuple.values().stream().map(this::resolveExpression).toList(), tuple.span());
             case UnaryExpression unary -> new UnaryExpression(unary.operator(), resolveExpression(unary.operand()), unary.span());
         };
+    }
+
+    private Expression resolveFunctionExpression(FunctionCall function)
+    {
+        if (function.nameParts().size() == 1 && canonical(function.name().value()).equals(MATCHES_ACTION)) {
+            return resolveActionExpression(function);
+        }
+        return new FunctionCall(
+                function.nameParts(),
+                function.arguments().stream().map(this::resolveExpression).toList(),
+                function.distinct(),
+                resolveSortItems(function.orderBy()),
+                function.filter().map(this::resolveExpression),
+                function.nullTreatment(),
+                function.window().map(this::resolveWindow),
+                function.span());
+    }
+
+    private Expression resolveActionExpression(FunctionCall function)
+    {
+        if (function.arguments().size() != 1) {
+            throw semanticEntityError(HOGQL_RESOLUTION_ERROR, function.span(), "HogQL matchesAction requires exactly one argument");
+        }
+        if (function.distinct() || !function.orderBy().isEmpty() || function.filter().isPresent() || function.nullTreatment().isPresent() || function.window().isPresent()) {
+            throw semanticEntityError(HOGQL_UNSUPPORTED_FEATURE, function.span(), "HogQL matchesAction does not support invocation modifiers");
+        }
+        EntityLookup lookup = entityLookup(function.arguments().getFirst(), "action");
+        List<ActionReference> matches = snapshot.snapshot().actions().stream()
+                .filter(action -> lookup.matches(action.name(), action.actionId()))
+                .toList();
+        ActionReference action = requireEntity(matches, "action", function.span());
+        TableBinding binding = requireEntityBinding(action.table(), "action", function.span());
+        return switch (action.representation()) {
+            case PredicateRepresentation predicate -> expandRecipe(
+                    binding,
+                    predicate.predicate(),
+                    Optional.of(binding.outputQualifier()),
+                    function.span(),
+                    expansionBudget);
+            case RelationMembershipRepresentation membership -> membershipExpression(binding, membership.relation(), false, function.span());
+        };
+    }
+
+    private Expression resolveCohortExpression(InCohortExpression in)
+    {
+        EntityLookup lookup = entityLookup(in.cohort(), "cohort");
+        List<CohortReference> matches = snapshot.snapshot().cohorts().stream()
+                .filter(cohort -> lookup.matches(cohort.name(), cohort.cohortId()))
+                .toList();
+        CohortReference cohort = requireEntity(matches, "cohort", in.span());
+        TableBinding binding = requireEntityBinding(cohort.table(), "cohort", in.span());
+        return switch (cohort.representation()) {
+            case PredicateRepresentation predicate -> {
+                requireCohortSource(in.value(), binding, in.span());
+                Expression expanded = expandRecipe(
+                        binding,
+                        predicate.predicate(),
+                        Optional.of(binding.outputQualifier()),
+                        in.span(),
+                        expansionBudget);
+                yield in.negated() ? new UnaryExpression(HogQlQuery.UnaryOperator.NOT, expanded, in.span()) : expanded;
+            }
+            case RelationMembershipRepresentation membership -> {
+                requireMembershipSource(in.value(), binding, membership.relation(), in.span());
+                yield membershipExpression(binding, membership.relation(), in.negated(), in.span());
+            }
+        };
+    }
+
+    private void requireCohortSource(Expression value, TableBinding binding, HogQlQuery.SourceSpan span)
+    {
+        if (!(value instanceof ColumnReference reference)) {
+            throw unsupportedExpansion(span, "HogQL cohort membership source must be a declared field reference");
+        }
+        List<Identifier> parts = reference.parts();
+        boolean qualified = parts.size() == 2 && binding.qualifier().equals(canonical(parts.getFirst().value()));
+        boolean matches = (parts.size() == 1 || qualified) && binding.fields().containsKey(canonical(parts.getLast().value()));
+        if (!matches) {
+            throw unsupportedExpansion(span, "HogQL cohort membership source does not match the catalog table");
+        }
+    }
+
+    private InSubqueryExpression membershipExpression(
+            TableBinding sourceBinding,
+            RelationMembershipRecipe membership,
+            boolean negated,
+            HogQlQuery.SourceSpan span)
+    {
+        expansionBudget.enter(span);
+        try {
+            BoundField sourceField = Optional.ofNullable(sourceBinding.fields().get(canonical(membership.sourceField())))
+                    .orElseThrow(() -> expansionError(span, "HogQL semantic entity references an unavailable source field"));
+            Expression source = resolveBoundField(
+                    sourceBinding,
+                    sourceField,
+                    sourceBinding.starQualifier(bindings.size()),
+                    span,
+                    expansionBudget);
+            ResolvedRelation target = resolveRelationReference(membership.relation(), span, new RelationExpansionBudget());
+            if (target.bindings().size() != 1) {
+                throw unsupportedExpansion(span, "HogQL semantic entity membership requires a single target relation");
+            }
+            TableBinding targetBinding = target.bindings().getFirst();
+            BoundField targetField = Optional.ofNullable(targetBinding.fields().get(canonical(membership.targetField())))
+                    .orElseThrow(() -> expansionError(span, "HogQL semantic entity references an unavailable target field"));
+            Expression targetValue = resolveBoundField(
+                    targetBinding,
+                    targetField,
+                    targetBinding.starQualifier(1),
+                    span,
+                    expansionBudget);
+            HogQlQuery membershipQuery = new HogQlQuery(
+                    List.of(),
+                    true,
+                    List.of(new ExpressionProjection(targetValue, Optional.empty())),
+                    Optional.of(target.relation()),
+                    Optional.empty(),
+                    List.of(),
+                    Optional.empty(),
+                    List.of(),
+                    Optional.empty(),
+                    Optional.empty(),
+                    span);
+            return new InSubqueryExpression(source, membershipQuery, negated, span, span);
+        }
+        finally {
+            expansionBudget.exit();
+        }
+    }
+
+    private void requireMembershipSource(Expression value, TableBinding binding, RelationMembershipRecipe membership, HogQlQuery.SourceSpan span)
+    {
+        if (!(value instanceof ColumnReference reference)) {
+            throw unsupportedExpansion(span, "HogQL cohort membership source must be a declared field reference");
+        }
+        List<Identifier> parts = reference.parts();
+        boolean matches = switch (parts.size()) {
+            case 1 -> canonical(parts.getFirst().value()).equals(canonical(membership.sourceField()));
+            case 2 -> binding.qualifier().equals(canonical(parts.getFirst().value())) &&
+                    canonical(parts.getLast().value()).equals(canonical(membership.sourceField()));
+            default -> false;
+        };
+        if (!matches) {
+            throw unsupportedExpansion(span, "HogQL cohort membership source does not match the catalog");
+        }
+    }
+
+    private TableBinding requireEntityBinding(String tableName, String kind, HogQlQuery.SourceSpan span)
+    {
+        List<TableBinding> matches = bindings.stream()
+                .filter(binding -> canonical(binding.relationName()).equals(canonical(tableName)))
+                .toList();
+        if (matches.size() != 1) {
+            throw semanticEntityError(
+                    HOGQL_RESOLUTION_ERROR,
+                    span,
+                    "HogQL " + kind + " requires exactly one " + tableName + " relation in scope");
+        }
+        return matches.getFirst();
+    }
+
+    private EntityLookup entityLookup(Expression expression, String kind)
+    {
+        if (!(expression instanceof Literal literal) || (literal.kind() != HogQlQuery.LiteralKind.STRING && literal.kind() != HogQlQuery.LiteralKind.INTEGER)) {
+            throw semanticEntityError(
+                    HOGQL_UNSUPPORTED_FEATURE,
+                    expression.span(),
+                    "HogQL " + kind + " reference must be a string or integer literal");
+        }
+        return new EntityLookup(literal.value(), literal.kind() == HogQlQuery.LiteralKind.INTEGER);
+    }
+
+    private static <T> T requireEntity(List<T> matches, String kind, HogQlQuery.SourceSpan span)
+    {
+        if (matches.isEmpty()) {
+            throw semanticEntityError(HOGQL_RESOLUTION_ERROR, span, "Unknown HogQL " + kind);
+        }
+        if (matches.size() > 1) {
+            throw semanticEntityError(HOGQL_RESOLUTION_ERROR, span, "Ambiguous HogQL " + kind);
+        }
+        return matches.getFirst();
     }
 
     private WindowDefinition resolveWindowDefinition(WindowDefinition definition)
@@ -1231,6 +1420,15 @@ final class HogQlSemanticResolver
                 null);
     }
 
+    private static TrinoException semanticEntityError(HogQlErrorCode errorCode, HogQlQuery.SourceSpan span, String message)
+    {
+        return new TrinoException(
+                errorCode,
+                Optional.of(new Location(span.startLine(), span.startColumn())),
+                message,
+                null);
+    }
+
     private static TrinoException limitError(HogQlQuery.SourceSpan span, String message)
     {
         return new TrinoException(
@@ -1407,6 +1605,19 @@ final class HogQlSemanticResolver
         {
             name = requireNonNull(name, "name is null");
             sourceField = requireNonNull(sourceField, "sourceField is null");
+        }
+    }
+
+    private record EntityLookup(String value, boolean id)
+    {
+        private EntityLookup
+        {
+            value = requireNonNull(value, "value is null");
+        }
+
+        private boolean matches(String name, String entityId)
+        {
+            return id ? value.equals(entityId) : canonical(value).equals(canonical(name));
         }
     }
 
