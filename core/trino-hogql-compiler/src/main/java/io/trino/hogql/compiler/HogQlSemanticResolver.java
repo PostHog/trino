@@ -258,17 +258,16 @@ final class HogQlSemanticResolver
         List<CommonTableExpression> resolvedCommonTables = new ArrayList<>();
         for (CteAnalysis analysis : analyses) {
             CommonTableExpression commonTable = analysis.commonTable();
-            RequiredOutputs demand = commonTable.columnAliases().isEmpty()
-                    ? demands.getOrDefault(canonical(commonTable.name().value()), new RequiredOutputs(false, Set.of()))
-                    : RequiredOutputs.allOutputs();
+            RequiredOutputs externalDemand = demands.getOrDefault(canonical(commonTable.name().value()), new RequiredOutputs(false, Set.of()));
+            AliasedOutputDemand demand = remapAliasedOutputDemand(analysis.outputs(), commonTable.columnAliases(), externalDemand);
             HogQlQuery resolved = new HogQlSemanticResolver(
                     snapshot,
                     expansionBudget,
-                    Optional.of(demand),
+                    Optional.of(demand.sourceOutputs()),
                     List.of(),
                     resolvedBindings)
                     .resolveNestedQuery(commonTable.query());
-            resolvedCommonTables.add(new CommonTableExpression(commonTable.name(), commonTable.columnAliases(), resolved, commonTable.span()));
+            resolvedCommonTables.add(new CommonTableExpression(commonTable.name(), demand.outputAliases(), resolved, commonTable.span()));
             resolvedBindings.put(canonical(commonTable.name().value()), analysis.binding());
         }
 
@@ -316,7 +315,8 @@ final class HogQlSemanticResolver
                 throw cteInferenceError(span, "HogQL inferred relation column alias count does not match its output count");
             }
             for (int index = 0; index < outputs.size(); index++) {
-                outputs.set(index, new CteOutput(columnAliases.get(index).value(), outputs.get(index).sourceDemand()));
+                CteOutput output = outputs.get(index);
+                outputs.set(index, new CteOutput(columnAliases.get(index).value(), output.sourceName(), output.sourceDemand()));
             }
         }
         Set<String> names = new HashSet<>();
@@ -326,6 +326,39 @@ final class HogQlSemanticResolver
             }
         }
         return List.copyOf(outputs);
+    }
+
+    private static AliasedOutputDemand remapAliasedOutputDemand(
+            List<CteOutput> outputs,
+            List<Identifier> columnAliases,
+            RequiredOutputs demand)
+    {
+        if (columnAliases.isEmpty() || demand.all()) {
+            return new AliasedOutputDemand(demand, columnAliases);
+        }
+        List<Integer> selectedIndexes = java.util.stream.IntStream.range(0, outputs.size())
+                .filter(index -> demand.includes(outputs.get(index).name()))
+                .boxed()
+                .toList();
+        if (selectedIndexes.stream().anyMatch(index -> outputs.get(index).sourceName().isEmpty())) {
+            return new AliasedOutputDemand(RequiredOutputs.allOutputs(), columnAliases);
+        }
+        Set<String> sourceNames = selectedIndexes.stream()
+                .map(index -> canonical(outputs.get(index).sourceName().orElseThrow()))
+                .collect(java.util.stream.Collectors.toSet());
+        boolean overlapsUnselectedOutput = java.util.stream.IntStream.range(0, outputs.size())
+                .filter(index -> !selectedIndexes.contains(index))
+                .mapToObj(index -> outputs.get(index).sourceName())
+                .flatMap(Optional::stream)
+                .map(HogQlSemanticResolver::canonical)
+                .anyMatch(sourceNames::contains);
+        if (overlapsUnselectedOutput) {
+            return new AliasedOutputDemand(RequiredOutputs.allOutputs(), columnAliases);
+        }
+        List<Identifier> selectedAliases = selectedIndexes.stream()
+                .map(columnAliases::get)
+                .toList();
+        return new AliasedOutputDemand(new RequiredOutputs(false, sourceNames), selectedAliases);
     }
 
     private static TableBinding inferredBinding(String relationPrefix, Identifier name, List<CteOutput> outputs)
@@ -383,14 +416,15 @@ final class HogQlSemanticResolver
                 if (name.isEmpty() && !hasColumnAliases) {
                     throw cteInferenceError(expression.span(), "Cannot infer HogQL CTE output name; add a projection alias or CTE column alias list");
                 }
-                yield List.of(new CteOutput(name.orElse("__hogql_cte_output"), HogQlProjectionDemand.collect(expression.expression())));
+                yield List.of(new CteOutput(name.orElse("__hogql_cte_output"), name, HogQlProjectionDemand.collect(expression.expression())));
             }
             case ColumnsList columns -> columns.expressions().stream()
                     .map(expression -> {
                         if (!(expression instanceof ColumnReference reference)) {
                             throw cteInferenceError(expression.span(), "Cannot infer HogQL CTE COLUMNS output name");
                         }
-                        return new CteOutput(reference.parts().getLast().value(), HogQlProjectionDemand.collect(expression));
+                        String name = reference.parts().getLast().value();
+                        return new CteOutput(name, Optional.of(name), HogQlProjectionDemand.collect(expression));
                     })
                     .toList();
             case ColumnsRegex columns -> inferRegexOutputs(columns, sourceBindings);
@@ -411,7 +445,7 @@ final class HogQlSemanticResolver
                 .flatMap(binding -> binding.orderedFields().stream()
                         .filter(BoundField::starVisible)
                         .filter(field -> pattern.find(utf8Slice(field.name())))
-                        .map(field -> new CteOutput(field.name(), HogQlProjectionDemand.column(binding.qualifier(), field.name()))))
+                        .map(field -> new CteOutput(field.name(), Optional.of(field.name()), HogQlProjectionDemand.column(binding.qualifier(), field.name()))))
                 .toList();
         if (outputs.isEmpty()) {
             throw cteInferenceError(columns.patternSpan(), "No HogQL CTE fields matched COLUMNS regex: " + columns.pattern());
@@ -428,6 +462,7 @@ final class HogQlSemanticResolver
                     .filter(projection -> star.exclusions().stream().noneMatch(exclusion -> matchesIdentifier(exclusion.parts().getLast(), projection.name())))
                     .map(projection -> new CteOutput(
                             projection.name(),
+                            Optional.of(projection.name()),
                             star.replacements().stream()
                                     .filter(replacement -> matchesIdentifier(replacement.target(), projection.name()))
                                     .findFirst()
@@ -452,7 +487,7 @@ final class HogQlSemanticResolver
                             HogQlProjectionDemand demand = replacement == null
                                     ? HogQlProjectionDemand.column(binding.qualifier(), field.name())
                                     : HogQlProjectionDemand.collect(replacement.expression());
-                            return new CteOutput(field.name(), demand);
+                            return new CteOutput(field.name(), Optional.of(field.name()), demand);
                         }))
                 .toList();
     }
@@ -906,12 +941,10 @@ final class HogQlSemanticResolver
                 ResolvedRelation child;
                 if (alias.relation() instanceof SubqueryRelation subquery) {
                     List<CteOutput> outputs = inferQueryOutputs(subquery.query(), alias.columnAliases(), alias.span(), commonTableBindings);
-                    RequiredOutputs demand = alias.columnAliases().isEmpty()
-                            ? projectionDemand.forAlias(alias.alias())
-                            : RequiredOutputs.allOutputs();
-                    child = resolveSubquery(subquery, demand);
+                    AliasedOutputDemand demand = remapAliasedOutputDemand(outputs, alias.columnAliases(), projectionDemand.forAlias(alias.alias()));
+                    child = resolveSubquery(subquery, demand.sourceOutputs());
                     yield new ResolvedRelation(
-                            new AliasedRelation(child.relation(), alias.alias(), alias.columnAliases(), alias.span()),
+                            new AliasedRelation(child.relation(), alias.alias(), demand.outputAliases(), alias.span()),
                             List.of(inferredBinding(DERIVED_RELATION_PREFIX, alias.alias(), outputs)),
                             true);
                 }
@@ -2324,12 +2357,22 @@ final class HogQlSemanticResolver
         }
     }
 
-    private record CteOutput(String name, HogQlProjectionDemand sourceDemand)
+    private record CteOutput(String name, Optional<String> sourceName, HogQlProjectionDemand sourceDemand)
     {
         private CteOutput
         {
             name = requireNonNull(name, "name is null");
+            sourceName = requireNonNull(sourceName, "sourceName is null");
             sourceDemand = requireNonNull(sourceDemand, "sourceDemand is null");
+        }
+    }
+
+    private record AliasedOutputDemand(RequiredOutputs sourceOutputs, List<Identifier> outputAliases)
+    {
+        private AliasedOutputDemand
+        {
+            sourceOutputs = requireNonNull(sourceOutputs, "sourceOutputs is null");
+            outputAliases = List.copyOf(requireNonNull(outputAliases, "outputAliases is null"));
         }
     }
 

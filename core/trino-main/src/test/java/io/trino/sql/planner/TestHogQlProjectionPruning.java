@@ -97,9 +97,9 @@ public class TestHogQlProjectionPruning
     public void testUnusedLazyProjectionIsPrunedThroughChainedCtes()
     {
         Plan plan = plan(compile(
-                "WITH first_source AS (SELECT e.personProfile.*, e.* FROM events e), " +
+                "WITH first_source(aliasedName, aliasedEvent, aliasedPersonId) AS (SELECT e.personProfile.*, e.* FROM events e), " +
                         "second_source AS (SELECT * FROM first_source) " +
-                        "SELECT event FROM second_source"));
+                        "SELECT aliasedEvent FROM second_source"));
 
         assertThat(nodes(plan, TableScanNode.class)).hasSize(1);
         assertThat(nodes(plan, JoinNode.class)).isEmpty();
@@ -109,9 +109,9 @@ public class TestHogQlProjectionPruning
     public void testDemandedLazyProjectionRemainsInPlanThroughChainedCtes()
     {
         Plan plan = plan(compile(
-                "WITH first_source AS (SELECT e.personProfile.*, e.* FROM events e), " +
+                "WITH first_source(aliasedName, aliasedEvent, aliasedPersonId) AS (SELECT e.personProfile.*, e.* FROM events e), " +
                         "second_source AS (SELECT * FROM first_source) " +
-                        "SELECT name FROM second_source WHERE name = 'Customer#000000001'"));
+                        "SELECT aliasedName FROM second_source WHERE aliasedName = 'Customer#000000001'"));
 
         assertThat(nodes(plan, TableScanNode.class)).hasSize(2);
         assertThat(nodes(plan, JoinNode.class)).hasSize(1);
@@ -122,8 +122,9 @@ public class TestHogQlProjectionPruning
     {
         Plan plan = plan(compile(
                 "WITH first_source AS (SELECT e.personProfile.*, e.* FROM events e), " +
-                        "second_source AS (SELECT derived.* FROM (SELECT * FROM first_source) derived) " +
-                        "SELECT event FROM second_source"));
+                        "second_source AS (SELECT derived.* FROM (SELECT * FROM first_source) " +
+                        "derived(aliasedName, aliasedEvent, aliasedPersonId)) " +
+                        "SELECT aliasedEvent FROM second_source"));
 
         assertThat(nodes(plan, TableScanNode.class)).hasSize(1);
         assertThat(nodes(plan, JoinNode.class)).isEmpty();
@@ -134,8 +135,9 @@ public class TestHogQlProjectionPruning
     {
         Plan plan = plan(compile(
                 "WITH first_source AS (SELECT e.personProfile.*, e.* FROM events e), " +
-                        "second_source AS (SELECT derived.* FROM (SELECT * FROM first_source) derived) " +
-                        "SELECT name FROM second_source WHERE name = 'Customer#000000001'"));
+                        "second_source AS (SELECT derived.* FROM (SELECT * FROM first_source) " +
+                        "derived(aliasedName, aliasedEvent, aliasedPersonId)) " +
+                        "SELECT aliasedName FROM second_source WHERE aliasedName = 'Customer#000000001'"));
 
         assertThat(nodes(plan, TableScanNode.class)).hasSize(2);
         assertThat(nodes(plan, JoinNode.class)).hasSize(1);

@@ -444,7 +444,7 @@ public class TestHogQlSemanticResolution
         HogQlCompilationResult columnAliases = compiler.compile(
                 envelope(
                         "WITH source(renamedEvent, renamedPerson) AS (SELECT event, personId FROM events) " +
-                                "SELECT renamedEvent FROM source",
+                                "SELECT renamedPerson FROM source",
                         OptionalLong.of(7)),
                 Optional.of(context));
 
@@ -455,9 +455,9 @@ public class TestHogQlSemanticResolution
                 "WITH source AS (SELECT event_name AS eventName, \"Person ID\" AS person FROM analytics.\"Hog Data\".\"raw-events\") " +
                         "SELECT \"person\" AS \"eventName\" FROM source"));
         assertThat(columnAliases.statement()).isEqualTo(sqlParser.createStatement(
-                "WITH source(renamedEvent, renamedPerson) AS (" +
-                        "SELECT event_name AS event, \"Person ID\" AS personId FROM analytics.\"Hog Data\".\"raw-events\") " +
-                        "SELECT \"renamedEvent\" AS renamedEvent FROM source"));
+                "WITH source(renamedPerson) AS (" +
+                        "SELECT \"Person ID\" AS personId FROM analytics.\"Hog Data\".\"raw-events\") " +
+                        "SELECT \"renamedPerson\" AS renamedPerson FROM source"));
     }
 
     @Test
@@ -494,7 +494,7 @@ public class TestHogQlSemanticResolution
                 Optional.of(context));
         HogQlCompilationResult columnAliases = compiler.compile(
                 envelope(
-                        "SELECT renamedEvent FROM (SELECT event, personId FROM events) source(renamedEvent, renamedPerson)",
+                        "SELECT renamedPerson FROM (SELECT event, personId FROM events) source(renamedEvent, renamedPerson)",
                         OptionalLong.of(7)),
                 Optional.of(context));
 
@@ -505,9 +505,9 @@ public class TestHogQlSemanticResolution
                 "SELECT \"person\" AS \"eventName\" FROM (" +
                         "SELECT event_name AS eventName, \"Person ID\" AS person FROM analytics.\"Hog Data\".\"raw-events\") source"));
         assertThat(columnAliases.statement()).isEqualTo(sqlParser.createStatement(
-                "SELECT \"renamedEvent\" AS renamedEvent FROM (" +
-                        "SELECT event_name AS event, \"Person ID\" AS personId FROM analytics.\"Hog Data\".\"raw-events\") " +
-                        "source(renamedEvent, renamedPerson)"));
+                "SELECT \"renamedPerson\" AS renamedPerson FROM (" +
+                        "SELECT \"Person ID\" AS personId FROM analytics.\"Hog Data\".\"raw-events\") " +
+                        "source(renamedPerson)"));
     }
 
     @Test
