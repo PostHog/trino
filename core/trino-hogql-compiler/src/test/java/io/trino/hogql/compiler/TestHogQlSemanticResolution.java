@@ -455,6 +455,64 @@ public class TestHogQlSemanticResolution
     }
 
     @Test
+    public void testResolvesCorrelatedLogicalFieldsInExpressionSubqueries()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+
+        HogQlCompilationResult inSubquery = compiler.compile(
+                envelope(
+                        "SELECT e.event FROM events e WHERE e.personId IN " +
+                                "(SELECT p.personId FROM persons p WHERE p.personId = e.personId)",
+                        OptionalLong.of(7)),
+                Optional.of(context));
+        HogQlCompilationResult scalarSubquery = compiler.compile(
+                envelope(
+                        "SELECT e.event, (SELECT p.name FROM persons p WHERE p.personId = e.personId) FROM events e",
+                        OptionalLong.of(7)),
+                Optional.of(context));
+
+        assertThat(inSubquery.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT e.event_name AS event FROM analytics.\"Hog Data\".\"raw-events\" e " +
+                        "WHERE e.\"Person ID\" IN (" +
+                        "SELECT p.person_id AS personId FROM analytics.\"Hog Data\".\"raw-persons\" p " +
+                        "WHERE p.person_id = e.\"Person ID\")"));
+        assertThat(scalarSubquery.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT e.event_name AS event, (" +
+                        "SELECT p.full_name AS name FROM analytics.\"Hog Data\".\"raw-persons\" p " +
+                        "WHERE p.person_id = e.\"Person ID\") FROM analytics.\"Hog Data\".\"raw-events\" e"));
+    }
+
+    @Test
+    public void testInnerLogicalQualifierShadowsCorrelatedOuterQualifier()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+
+        HogQlCompilationResult result = compiler.compile(
+                envelope("SELECT (SELECT e.name FROM persons e) FROM events e", OptionalLong.of(7)),
+                Optional.of(context));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT (SELECT e.full_name AS name FROM analytics.\"Hog Data\".\"raw-persons\" e) " +
+                        "FROM analytics.\"Hog Data\".\"raw-events\" e"));
+    }
+
+    @Test
+    public void testRejectsUnknownQualifierInCorrelatedLogicalSubquery()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+        String hogql = "SELECT e.event FROM events e WHERE e.personId IN " +
+                "(SELECT p.personId FROM persons p WHERE p.personId = missing.personId)";
+
+        TrinoException exception = catchThrowableOfType(
+                TrinoException.class,
+                () -> compiler.compile(envelope(hogql, OptionalLong.of(7)), Optional.of(context)));
+
+        assertThat(exception.getErrorCode()).isEqualTo(HOGQL_RESOLUTION_ERROR.toErrorCode());
+        assertThat(exception.getLocation()).contains(new Location(1, hogql.indexOf("missing.personId") + 1));
+        assertThat(exception).hasMessageContaining("Unknown HogQL field: personId");
+    }
+
+    @Test
     public void testRejectsLogicalUsingWhenPhysicalColumnNamesDiffer()
     {
         HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));

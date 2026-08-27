@@ -56,7 +56,7 @@ public class TestHogQlProjectionPruning
         extends BasePlanTest
 {
     private static final PhysicalIdentifier CATALOG = new PhysicalIdentifier(TEST_CATALOG_NAME, false);
-    private static final HogQlSemanticCatalogSnapshot SNAPSHOT = snapshot();
+    private static final HogQlSemanticCatalogSnapshot SNAPSHOT = testingSnapshot();
 
     private final HogQlCompiler compiler = new HogQlCompiler();
 
@@ -117,7 +117,7 @@ public class TestHogQlProjectionPruning
                 .toList();
     }
 
-    private static HogQlSemanticCatalogSnapshot snapshot()
+    static HogQlSemanticCatalogSnapshot testingSnapshot()
     {
         LogicalTableDefinition events = new LogicalTableDefinition(
                 "events",

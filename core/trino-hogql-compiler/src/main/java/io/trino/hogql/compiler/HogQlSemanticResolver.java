@@ -125,8 +125,10 @@ final class HogQlSemanticResolver
     private final PinnedSnapshot snapshot;
     private final ExpansionBudget expansionBudget;
     private final Optional<RequiredOutputs> requiredOutputs;
+    private final List<BindingScope> outerBindingScopes;
     private final Map<RelationshipPathKey, TableBinding> relationshipPaths = new LinkedHashMap<>();
     private List<TableBinding> bindings = List.of();
+    private Set<String> localRelationQualifiers = Set.of();
     private boolean allRelationsLogical;
     private Optional<Relation> expandedRelation = Optional.empty();
     private int generatedRelationId;
@@ -143,9 +145,19 @@ final class HogQlSemanticResolver
 
     private HogQlSemanticResolver(PinnedSnapshot snapshot, ExpansionBudget expansionBudget, Optional<RequiredOutputs> requiredOutputs)
     {
+        this(snapshot, expansionBudget, requiredOutputs, List.of());
+    }
+
+    private HogQlSemanticResolver(
+            PinnedSnapshot snapshot,
+            ExpansionBudget expansionBudget,
+            Optional<RequiredOutputs> requiredOutputs,
+            List<BindingScope> outerBindingScopes)
+    {
         this.snapshot = requireNonNull(snapshot, "snapshot is null");
         this.expansionBudget = requireNonNull(expansionBudget, "expansionBudget is null");
         this.requiredOutputs = requireNonNull(requiredOutputs, "requiredOutputs is null");
+        this.outerBindingScopes = List.copyOf(requireNonNull(outerBindingScopes, "outerBindingScopes is null"));
     }
 
     public static Optional<ResolvedQuery> resolve(PinnedSnapshot snapshot, HogQlQuery query)
@@ -170,8 +182,8 @@ final class HogQlSemanticResolver
             SetOperation resolved = new SetOperation(
                     setOperation.type(),
                     setOperation.distinct(),
-                    new HogQlSemanticResolver(snapshot, expansionBudget).resolveNestedQuery(setOperation.left()),
-                    new HogQlSemanticResolver(snapshot, expansionBudget).resolveNestedQuery(setOperation.right()),
+                    new HogQlSemanticResolver(snapshot, expansionBudget, Optional.empty(), outerBindingScopes).resolveNestedQuery(setOperation.left()),
+                    new HogQlSemanticResolver(snapshot, expansionBudget, Optional.empty(), outerBindingScopes).resolveNestedQuery(setOperation.right()),
                     setOperation.leftParenthesized(),
                     setOperation.rightParenthesized(),
                     setOperation.operatorSpan(),
@@ -179,12 +191,13 @@ final class HogQlSemanticResolver
             return new HogQlQuery(commonTables, resolved, query.orderBy(), query.limit(), query.offset(), query.span());
         }
         SelectQueryBody select = (SelectQueryBody) query.body();
+        localRelationQualifiers = select.from().map(HogQlSemanticResolver::relationQualifiers).orElse(Set.of());
         HogQlProjectionDemand projectionDemand = HogQlProjectionDemand.collect(query);
         Optional<ResolvedRelation> relation = select.from().map(value -> resolveRelation(value, projectionDemand));
         bindings = relation.map(ResolvedRelation::bindings).orElse(List.of());
         allRelationsLogical = relation.map(ResolvedRelation::allLogical).orElse(false);
         expandedRelation = relation.map(ResolvedRelation::relation);
-        if (bindings.isEmpty()) {
+        if (bindings.isEmpty() && outerBindingScopes.isEmpty()) {
             return new HogQlQuery(
                     commonTables,
                     select.distinct(),
@@ -528,6 +541,23 @@ final class HogQlSemanticResolver
         return String.join(".", identifiers.stream().map(Identifier::value).toList());
     }
 
+    private static Set<String> relationQualifiers(Relation relation)
+    {
+        return switch (relation) {
+            case AliasedRelation alias -> Set.of(canonical(alias.alias().value()));
+            case CommonTableReference commonTable -> Set.of(canonical(commonTable.name().value()));
+            case JoinRelation join -> {
+                Set<String> qualifiers = new HashSet<>(relationQualifiers(join.left()));
+                qualifiers.addAll(relationQualifiers(join.right()));
+                yield Set.copyOf(qualifiers);
+            }
+            case SubqueryRelation _ -> Set.of();
+            case TablePlaceholder _ -> Set.of();
+            case TableReference table -> Set.of(canonical(table.parts().getLast().value()));
+            case ValuesRelation _ -> Set.of();
+        };
+    }
+
     private ResolvedRelation resolveRelation(Relation relation)
     {
         return resolveRelation(relation, HogQlProjectionDemand.preserveAll());
@@ -821,6 +851,30 @@ final class HogQlSemanticResolver
                 .toList();
     }
 
+    private HogQlSemanticResolver correlatedSubqueryResolver()
+    {
+        List<BindingScope> visibleOuterScopes = new ArrayList<>();
+        currentBindingScope().ifPresent(visibleOuterScopes::add);
+        visibleOuterScopes.addAll(outerBindingScopes);
+        return new HogQlSemanticResolver(snapshot, expansionBudget, Optional.empty(), visibleOuterScopes);
+    }
+
+    private Optional<BindingScope> currentBindingScope()
+    {
+        if (bindings.isEmpty() && localRelationQualifiers.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(new BindingScope(bindings, localRelationQualifiers, allRelationsLogical));
+    }
+
+    private List<BindingScope> visibleBindingScopes()
+    {
+        List<BindingScope> scopes = new ArrayList<>();
+        currentBindingScope().ifPresent(scopes::add);
+        scopes.addAll(outerBindingScopes);
+        return List.copyOf(scopes);
+    }
+
     private Expression resolveExpression(Expression expression)
     {
         return switch (expression) {
@@ -856,7 +910,7 @@ final class HogQlSemanticResolver
                     in.span());
             case InSubqueryExpression in -> new InSubqueryExpression(
                     resolveExpression(in.value()),
-                    new HogQlSemanticResolver(snapshot, expansionBudget).resolveNestedQuery(in.query()),
+                    correlatedSubqueryResolver().resolveNestedQuery(in.query()),
                     in.negated(),
                     in.predicateSpan(),
                     in.span());
@@ -870,7 +924,7 @@ final class HogQlSemanticResolver
             case MemberAccessExpression memberAccess -> resolveMemberAccess(memberAccess);
             case Placeholder placeholder -> placeholder;
             case ScalarSubqueryExpression subquery -> new ScalarSubqueryExpression(
-                    new HogQlSemanticResolver(snapshot, expansionBudget).resolveNestedQuery(subquery.query()),
+                    correlatedSubqueryResolver().resolveNestedQuery(subquery.query()),
                     subquery.span());
             case SubscriptExpression subscript -> resolveSubscript(subscript);
             case TupleExpression tuple -> new TupleExpression(tuple.values().stream().map(this::resolveExpression).toList(), tuple.span());
@@ -1103,44 +1157,75 @@ final class HogQlSemanticResolver
             return propertyAccess.orElseThrow();
         }
         if (parts.size() == 2) {
-            Optional<TableBinding> binding = bindings.stream()
-                    .filter(candidate -> candidate.qualifier().equals(canonical(parts.getFirst().value())))
-                    .findFirst();
-            if (binding.isEmpty()) {
-                if (allRelationsLogical) {
-                    throw resolutionError(reference, parts.getLast().value());
+            String qualifier = canonical(parts.getFirst().value());
+            for (BindingScope scope : visibleBindingScopes()) {
+                List<TableBinding> qualifiedBindings = scope.bindings().stream()
+                        .filter(candidate -> candidate.qualifier().equals(qualifier))
+                        .toList();
+                if (!qualifiedBindings.isEmpty()) {
+                    TableBinding binding = qualifiedBindings.getFirst();
+                    BoundField field = binding.fields().get(canonical(parts.getLast().value()));
+                    if (field == null) {
+                        throw resolutionError(reference, parts.getLast().value());
+                    }
+                    return resolveBoundField(binding, field, Optional.of(binding.outputQualifier()), reference.span(), expansionBudget);
                 }
-                return reference;
+                if (scope.relationQualifiers().contains(qualifier)) {
+                    return reference;
+                }
             }
-            BoundField field = binding.orElseThrow().fields().get(canonical(parts.getLast().value()));
-            if (field == null) {
+            if (innermostScopeIsFullyLogical()) {
                 throw resolutionError(reference, parts.getLast().value());
             }
-            return resolveBoundField(binding.orElseThrow(), field, Optional.of(binding.orElseThrow().outputQualifier()), reference.span(), expansionBudget);
+            return reference;
         }
         if (parts.size() > 2) {
-            if (allRelationsLogical) {
+            String qualifier = canonical(parts.getFirst().value());
+            if (visibleBindingScopes().stream().anyMatch(scope -> scope.bindings().stream().anyMatch(binding -> binding.qualifier().equals(qualifier))) ||
+                    innermostScopeIsFullyLogical()) {
                 throw resolutionError(reference, parts.getLast().value());
             }
             return reference;
         }
         String logicalName = parts.getLast().value();
-        List<FieldMatch> matches = bindings.stream()
-                .map(binding -> new FieldMatch(binding, binding.fields().get(canonical(logicalName))))
-                .filter(match -> match.field() != null)
-                .toList();
-        if (matches.size() == 1 && (allRelationsLogical || bindings.size() == 1)) {
-            FieldMatch match = matches.getFirst();
-            Optional<PhysicalIdentifier> qualifier = bindings.size() > 1 ? Optional.of(match.binding().outputQualifier()) : Optional.empty();
-            return resolveBoundField(match.binding(), match.field(), qualifier, reference.span(), expansionBudget);
+        Optional<BindingScope> currentScope = currentBindingScope();
+        List<BindingScope> scopes = visibleBindingScopes();
+        for (int scopeIndex = 0; scopeIndex < scopes.size(); scopeIndex++) {
+            BindingScope scope = scopes.get(scopeIndex);
+            List<FieldMatch> matches = scope.bindings().stream()
+                    .map(binding -> new FieldMatch(binding, binding.fields().get(canonical(logicalName))))
+                    .filter(match -> match.field() != null)
+                    .toList();
+            if (matches.size() > 1) {
+                throw ambiguousResolutionError(reference, logicalName);
+            }
+            if (matches.size() == 1) {
+                if (!scope.allRelationsLogical() && scope.bindings().size() > 1) {
+                    return reference;
+                }
+                FieldMatch match = matches.getFirst();
+                boolean outer = currentScope.isEmpty() || scopeIndex > 0;
+                Optional<PhysicalIdentifier> qualifier = outer || scope.bindings().size() > 1
+                        ? Optional.of(match.binding().outputQualifier())
+                        : Optional.empty();
+                return resolveBoundField(match.binding(), match.field(), qualifier, reference.span(), expansionBudget);
+            }
+            if (!scope.allRelationsLogical() && !scope.relationQualifiers().isEmpty()) {
+                return reference;
+            }
         }
-        if (matches.size() > 1) {
-            throw ambiguousResolutionError(reference, logicalName);
-        }
-        if (allRelationsLogical) {
+        if (scopes.stream().anyMatch(BindingScope::allRelationsLogical)) {
             throw resolutionError(reference, logicalName);
         }
         return reference;
+    }
+
+    private boolean innermostScopeIsFullyLogical()
+    {
+        return visibleBindingScopes().stream()
+                .findFirst()
+                .map(BindingScope::allRelationsLogical)
+                .orElse(false);
     }
 
     private Optional<Expression> resolveSemanticPath(ColumnReference reference)
@@ -1852,6 +1937,15 @@ final class HogQlSemanticResolver
         {
             relation = requireNonNull(relation, "relation is null");
             bindings = List.copyOf(requireNonNull(bindings, "bindings is null"));
+        }
+    }
+
+    private record BindingScope(List<TableBinding> bindings, Set<String> relationQualifiers, boolean allRelationsLogical)
+    {
+        private BindingScope
+        {
+            bindings = List.copyOf(requireNonNull(bindings, "bindings is null"));
+            relationQualifiers = Set.copyOf(requireNonNull(relationQualifiers, "relationQualifiers is null"));
         }
     }
 

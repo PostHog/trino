@@ -13,13 +13,24 @@
  */
 package io.trino.sql.planner;
 
+import io.trino.hogql.compiler.HogQlCompilationResult;
+import io.trino.hogql.compiler.HogQlCompileEnvelope;
 import io.trino.hogql.compiler.HogQlCompiler;
+import io.trino.hogql.compiler.HogQlSemanticCatalogContext;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider.PinnedSnapshot;
+import io.trino.hogql.parser.HogQlLanguageContract;
 import io.trino.spi.TrinoException;
 import io.trino.sql.SqlFormatter;
 import io.trino.sql.planner.assertions.BasePlanTest;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalLong;
+
 import static io.trino.spi.StandardErrorCode.COLUMN_NOT_FOUND;
+import static io.trino.testing.TestingHandles.TEST_CATALOG_NAME;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
@@ -50,6 +61,15 @@ public class TestHogQlCorrelatedSubquery
     }
 
     @Test
+    public void testAnalyzerBindsResolvedCorrelatedLogicalField()
+    {
+        assertThatCode(() -> plan(compileSemantic(
+                "SELECT e.event FROM events e WHERE e.personId IN (" +
+                        "SELECT p.personId FROM persons p WHERE p.personId = e.personId)")))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
     public void testAnalyzerRejectsMissingCorrelatedOuterColumn()
     {
         AssertionError failure = catchThrowableOfType(
@@ -69,5 +89,25 @@ public class TestHogQlCorrelatedSubquery
     private String compile(String hogql)
     {
         return SqlFormatter.formatSql(compiler.compile(hogql));
+    }
+
+    private String compileSemantic(String hogql)
+    {
+        PhysicalIdentifier catalog = new PhysicalIdentifier(TEST_CATALOG_NAME, false);
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(
+                catalog,
+                _ -> new PinnedSnapshot(TestHogQlProjectionPruning.testingSnapshot()));
+        HogQlCompilationResult result = compiler.compile(
+                new HogQlCompileEnvelope(
+                        hogql,
+                        HogQlCompileEnvelope.PROTOCOL_VERSION,
+                        HogQlLanguageContract.current().languageVersion(),
+                        Map.of(),
+                        Map.of(),
+                        Map.of(),
+                        Map.of(),
+                        OptionalLong.of(1)),
+                Optional.of(context));
+        return SqlFormatter.formatSql(result.statement());
     }
 }
