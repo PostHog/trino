@@ -114,22 +114,27 @@ public class TestHogQlCompatibilityCorpus
 
     private void assertSyntaxDisposition(CorpusCase corpusCase)
     {
-        String query = switch (corpusCase.entryPoint()) {
-            case "expression" -> "SELECT " + corpusCase.source();
-            case "query" -> corpusCase.source();
-            default -> throw new IllegalArgumentException("unknown corpus entry point: " + corpusCase.entryPoint());
-        };
         if (!corpusCase.accepted()) {
-            assertThatThrownBy(() -> parser.parseSyntax(query))
+            assertThatThrownBy(() -> parseSyntax(corpusCase))
                     .isInstanceOf(HogQlParsingException.class)
                     .hasMessageStartingWith("line ");
             return;
         }
 
-        HogQlSyntaxTree syntaxTree = parser.parseSyntax(query);
-        int sourceLength = query.codePointCount(0, query.length());
-        assertThat(syntaxTree.root().span()).isEqualTo(new SourceSpan(0, sourceLength, 1, 1, lineCount(query), finalColumn(query)));
+        HogQlSyntaxTree syntaxTree = parseSyntax(corpusCase);
+        String source = corpusCase.source();
+        int sourceLength = source.codePointCount(0, source.length());
+        assertThat(syntaxTree.root().span()).isEqualTo(new SourceSpan(0, sourceLength, 1, 1, lineCount(source), finalColumn(source)));
         assertContainedSpans(syntaxTree.root(), sourceLength);
+    }
+
+    private HogQlSyntaxTree parseSyntax(CorpusCase corpusCase)
+    {
+        return switch (corpusCase.entryPoint()) {
+            case "expression" -> parser.parseExpressionSyntax(corpusCase.source());
+            case "query" -> parser.parseSyntax(corpusCase.source());
+            default -> throw new IllegalArgumentException("unknown corpus entry point: " + corpusCase.entryPoint());
+        };
     }
 
     private static void assertContainedSpans(Element element, int sourceLength)

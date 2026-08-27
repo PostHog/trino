@@ -117,8 +117,8 @@ public final class HogQlParser
     public HogQlQuery parseStatement(String hogql, HogQlLanguageVersion languageVersion)
     {
         try {
-            ParsedQuery parsed = parseQuery(hogql, languageVersion);
-            return new AstBuilder(parsed.source()).build(parsed.tree());
+            ParsedSyntax parsed = parse(hogql, languageVersion, EntryPoint.QUERY);
+            return new AstBuilder(parsed.source()).build((HogQLParser.SelectContext) parsed.tree());
         }
         catch (StackOverflowError _) {
             throw new HogQlParsingException("statement is too large", null, 1, 1);
@@ -133,15 +133,31 @@ public final class HogQlParser
     public HogQlSyntaxTree parseSyntax(String hogql, HogQlLanguageVersion languageVersion)
     {
         try {
-            ParsedQuery parsed = parseQuery(hogql, languageVersion);
-            return new SyntaxTreeBuilder(parsed.source()).build(parsed.tree());
+            ParsedSyntax parsed = parse(hogql, languageVersion, EntryPoint.QUERY);
+            return new SyntaxTreeBuilder(parsed.source()).build((HogQLParser.SelectContext) parsed.tree());
         }
         catch (StackOverflowError _) {
             throw new HogQlParsingException("statement is too large", null, 1, 1);
         }
     }
 
-    private ParsedQuery parseQuery(String hogql, HogQlLanguageVersion languageVersion)
+    public HogQlSyntaxTree parseExpressionSyntax(String hogql)
+    {
+        return parseExpressionSyntax(hogql, CURRENT_LANGUAGE_VERSION);
+    }
+
+    public HogQlSyntaxTree parseExpressionSyntax(String hogql, HogQlLanguageVersion languageVersion)
+    {
+        try {
+            ParsedSyntax parsed = parse(hogql, languageVersion, EntryPoint.EXPRESSION);
+            return new SyntaxTreeBuilder(parsed.source()).build(parsed.tree());
+        }
+        catch (StackOverflowError _) {
+            throw new HogQlParsingException("expression is too large", null, 1, 1);
+        }
+    }
+
+    private ParsedSyntax parse(String hogql, HogQlLanguageVersion languageVersion, EntryPoint entryPoint)
     {
         requireNonNull(hogql, "hogql is null");
         requireNonNull(languageVersion, "languageVersion is null");
@@ -157,12 +173,12 @@ public final class HogQlParser
         lexer.addErrorListener(ERROR_LISTENER);
         parser.removeErrorListeners();
 
-        HogQLParser.SelectContext tree;
+        ParserRuleContext tree;
         try {
             parser.getInterpreter().setPredictionMode(PredictionMode.SLL);
             parser.setErrorHandler(new BailErrorStrategy());
             parser.addParseListener(new ParseBudgetListener(limits));
-            tree = parser.select();
+            tree = entryPoint.parse(parser);
         }
         catch (ParseCancellationException _) {
             parser.reset();
@@ -171,12 +187,36 @@ public final class HogQlParser
             parser.addErrorListener(ERROR_LISTENER);
             parser.removeParseListeners();
             parser.addParseListener(new ParseBudgetListener(limits));
-            tree = parser.select();
+            tree = entryPoint.parse(parser);
         }
-        return new ParsedQuery(hogql, tree);
+        if (parser.getCurrentToken().getType() != Token.EOF) {
+            Token trailing = parser.getCurrentToken();
+            throw new HogQlParsingException("unexpected trailing input", null, trailing.getLine(), trailing.getCharPositionInLine() + 1);
+        }
+        return new ParsedSyntax(hogql, tree);
     }
 
-    private record ParsedQuery(String source, HogQLParser.SelectContext tree) {}
+    private record ParsedSyntax(String source, ParserRuleContext tree) {}
+
+    private enum EntryPoint
+    {
+        QUERY {
+            @Override
+            public ParserRuleContext parse(HogQLParser parser)
+            {
+                return parser.select();
+            }
+        },
+        EXPRESSION {
+            @Override
+            public ParserRuleContext parse(HogQLParser parser)
+            {
+                return parser.expression();
+            }
+        };
+
+        public abstract ParserRuleContext parse(HogQLParser parser);
+    }
 
     private static final class BoundedTokenSource
             implements TokenSource
@@ -312,6 +352,14 @@ public final class HogQlParser
             else {
                 languageClass = HogQlSyntaxTree.LanguageClass.READ_ONLY_QUERY;
             }
+            return new HogQlSyntaxTree(languageClass, buildNode(context));
+        }
+
+        public HogQlSyntaxTree build(ParserRuleContext context)
+        {
+            HogQlSyntaxTree.LanguageClass languageClass = containsRule(context, HogQLParser.RULE_block) ?
+                    HogQlSyntaxTree.LanguageClass.PROCEDURAL :
+                    HogQlSyntaxTree.LanguageClass.READ_ONLY_QUERY;
             return new HogQlSyntaxTree(languageClass, buildNode(context));
         }
 

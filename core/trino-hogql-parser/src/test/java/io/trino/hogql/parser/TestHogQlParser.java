@@ -110,6 +110,18 @@ public class TestHogQlParser
                 .contains("block", "returnStmt");
     }
 
+    @Test
+    public void testParsesCanonicalExpressionEntryPointWithoutAQueryWrapper()
+    {
+        HogQlSyntaxTree syntaxTree = parser.parseExpressionSyntax("value + 1");
+
+        assertThat(syntaxTree.root().rule()).isEqualTo("expression");
+        assertThat(syntaxTree.root().span()).isEqualTo(new HogQlQuery.SourceSpan(0, 9, 1, 1, 1, 10));
+        assertThatThrownBy(() -> parser.parseExpressionSyntax("value + 1 trailing"))
+                .isInstanceOf(HogQlParsingException.class)
+                .hasMessageContaining("unexpected trailing input");
+    }
+
     private static Stream<Node> nodes(Element element)
     {
         if (!(element instanceof Node node)) {
