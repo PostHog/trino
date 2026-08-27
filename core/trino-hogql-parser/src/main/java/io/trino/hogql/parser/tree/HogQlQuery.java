@@ -63,6 +63,8 @@ public record HogQlQuery(List<Projection> projections, Optional<TableReference> 
             permits ArrayExpression,
                     BetweenExpression,
                     BinaryExpression,
+                    CaseExpression,
+                    CastExpression,
                     ColumnReference,
                     FunctionCall,
                     InExpression,
@@ -72,6 +74,42 @@ public record HogQlQuery(List<Projection> projections, Optional<TableReference> 
                     UnaryExpression
     {
         SourceSpan span();
+    }
+
+    public record CaseExpression(Optional<Expression> operand, List<CaseWhen> whenClauses, Optional<Expression> defaultValue, SourceSpan span)
+            implements Expression
+    {
+        public CaseExpression
+        {
+            operand = requireNonNull(operand, "operand is null");
+            whenClauses = List.copyOf(requireNonNull(whenClauses, "whenClauses is null"));
+            if (whenClauses.isEmpty()) {
+                throw new IllegalArgumentException("whenClauses is empty");
+            }
+            defaultValue = requireNonNull(defaultValue, "defaultValue is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record CaseWhen(Expression operand, Expression result, SourceSpan span)
+    {
+        public CaseWhen
+        {
+            operand = requireNonNull(operand, "operand is null");
+            result = requireNonNull(result, "result is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record CastExpression(Expression value, Identifier type, boolean safe, SourceSpan span)
+            implements Expression
+    {
+        public CastExpression
+        {
+            value = requireNonNull(value, "value is null");
+            type = requireNonNull(type, "type is null");
+            span = requireNonNull(span, "span is null");
+        }
     }
 
     public record ArrayExpression(List<Expression> values, SourceSpan span)

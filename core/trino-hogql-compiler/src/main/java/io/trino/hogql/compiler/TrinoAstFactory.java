@@ -17,6 +17,8 @@ import io.trino.hogql.parser.tree.HogQlQuery;
 import io.trino.hogql.parser.tree.HogQlQuery.ArrayExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.BetweenExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.CaseExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.CastExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
@@ -36,9 +38,11 @@ import io.trino.sql.tree.ArithmeticUnaryExpression;
 import io.trino.sql.tree.Array;
 import io.trino.sql.tree.BetweenPredicate;
 import io.trino.sql.tree.BooleanLiteral;
+import io.trino.sql.tree.Cast;
 import io.trino.sql.tree.ComparisonPredicate;
 import io.trino.sql.tree.DereferenceExpression;
 import io.trino.sql.tree.Expression;
+import io.trino.sql.tree.GenericDataType;
 import io.trino.sql.tree.InListExpression;
 import io.trino.sql.tree.InPredicate;
 import io.trino.sql.tree.IsNullPredicate;
@@ -52,12 +56,15 @@ import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.Query;
 import io.trino.sql.tree.QuerySpecification;
 import io.trino.sql.tree.Row;
+import io.trino.sql.tree.SearchedCaseExpression;
 import io.trino.sql.tree.Select;
 import io.trino.sql.tree.SelectItem;
+import io.trino.sql.tree.SimpleCaseExpression;
 import io.trino.sql.tree.SingleColumn;
 import io.trino.sql.tree.Statement;
 import io.trino.sql.tree.StringLiteral;
 import io.trino.sql.tree.Table;
+import io.trino.sql.tree.WhenClause;
 
 import java.util.List;
 import java.util.Optional;
@@ -114,6 +121,12 @@ final class TrinoAstFactory
                             .toList());
             case BetweenExpression between -> createBetweenExpression(between);
             case BinaryExpression binary -> createBinaryExpression(binary);
+            case CaseExpression caseExpression -> createCaseExpression(caseExpression);
+            case CastExpression cast -> new Cast(
+                    location(cast.span()),
+                    createExpression(cast.value()),
+                    new GenericDataType(location(cast.type().span()), createIdentifier(cast.type()), List.of()),
+                    cast.safe());
             case ColumnReference reference -> createColumnReference(reference);
             case FunctionCall function -> new io.trino.sql.tree.FunctionCall(
                     location(function.span()),
@@ -138,6 +151,21 @@ final class TrinoAstFactory
                 case POSITIVE -> ArithmeticUnaryExpression.positive(location(unary.span()), createExpression(unary.operand()));
             };
         };
+    }
+
+    private static Expression createCaseExpression(CaseExpression caseExpression)
+    {
+        NodeLocation location = location(caseExpression.span());
+        List<WhenClause> whenClauses = caseExpression.whenClauses().stream()
+                .map(when -> new WhenClause(
+                        location(when.span()),
+                        createExpression(when.operand()),
+                        createExpression(when.result())))
+                .toList();
+        Optional<Expression> defaultValue = caseExpression.defaultValue().map(TrinoAstFactory::createExpression);
+        return caseExpression.operand()
+                .<Expression>map(operand -> new SimpleCaseExpression(location, createExpression(operand), whenClauses, defaultValue))
+                .orElseGet(() -> new SearchedCaseExpression(location, whenClauses, defaultValue));
     }
 
     private static Expression createBetweenExpression(BetweenExpression between)

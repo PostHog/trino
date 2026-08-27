@@ -18,11 +18,11 @@
         },
         {
             "id": "expr.accept.case",
-            "status": "explicitCurrentError"
+            "status": "supported"
         },
         {
             "id": "expr.accept.cast",
-            "status": "explicitCurrentError"
+            "status": "supported"
         },
         {
             "id": "expr.accept.dotted-field",
@@ -167,6 +167,24 @@
             ]
         },
         {
+            "id": "alternative:columnExprValue:ColumnExprCase",
+            "loweringHandler": "TrinoAstFactory#createCaseExpression",
+            "parseHandler": "AstBuilder#buildCaseExpression",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.case",
+                "TestHogQlCompiler#testLowersCaseAndCastExpressions"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprCast",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.cast",
+                "TestHogQlCompiler#testLowersCaseAndCastExpressions"
+            ]
+        },
+        {
             "id": "alternative:columnExprValue:ColumnExprIsNull",
             "loweringHandler": "TrinoAstFactory#createExpression",
             "parseHandler": "AstBuilder#buildExpression",
@@ -210,12 +228,29 @@
             ]
         },
         {
+            "id": "alternative:columnExprValue:ColumnExprTryCast",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCaseAndCastExpressions"
+            ]
+        },
+        {
             "id": "alternative:columnExprValue:ColumnExprTuple",
             "loweringHandler": "TrinoAstFactory#createExpression",
             "parseHandler": "AstBuilder#buildExpression",
             "testCaseIds": [
                 "TestHogQlCompatibilityCorpus#expr.accept.tuple",
                 "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
+            ]
+        },
+        {
+            "id": "alternative:columnTypeExpr:ColumnTypeExprSimple",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildSimpleType",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.cast",
+                "TestHogQlCompiler#testLowersCaseAndCastExpressions"
             ]
         },
         {

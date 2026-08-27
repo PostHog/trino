@@ -84,6 +84,18 @@ public class TestHogQlCompiler
 
     @ParameterizedTest
     @ValueSource(strings = {
+            "SELECT CASE WHEN enabled THEN 1 ELSE 0 END",
+            "SELECT CASE value WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'other' END",
+            "SELECT CAST(value AS INT)",
+            "SELECT TRY_CAST(value AS VARCHAR)",
+    })
+    public void testLowersCaseAndCastExpressions(String hogql)
+    {
+        assertThat(compiler.compile(hogql)).isEqualTo(sqlParser.createStatement(hogql));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
             "SELECT value BETWEEN 1 AND 10",
             "SELECT value NOT BETWEEN 1 AND 10",
             "SELECT value IS NULL",
