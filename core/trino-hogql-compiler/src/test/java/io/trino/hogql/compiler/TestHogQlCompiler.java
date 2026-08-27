@@ -21,6 +21,7 @@ import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.AliasedRelation;
 import io.trino.sql.tree.AllColumns;
 import io.trino.sql.tree.Identifier;
+import io.trino.sql.tree.InPredicate;
 import io.trino.sql.tree.Join;
 import io.trino.sql.tree.JoinOn;
 import io.trino.sql.tree.Node;
@@ -31,6 +32,7 @@ import io.trino.sql.tree.Query;
 import io.trino.sql.tree.QuerySpecification;
 import io.trino.sql.tree.SingleColumn;
 import io.trino.sql.tree.Statement;
+import io.trino.sql.tree.SubqueryExpression;
 import io.trino.sql.tree.SubscriptExpression;
 import io.trino.sql.tree.Table;
 import io.trino.sql.tree.TableSubquery;
@@ -277,6 +279,31 @@ public class TestHogQlCompiler
 
         assertThat(statement).isEqualTo(sqlParser.createStatement(hogql));
         assertThat(sqlParser.createStatement(SqlFormatter.formatSql(statement))).isEqualTo(statement);
+    }
+
+    @Test
+    public void testLowersCorrelatedInSubqueryWithSourceLocations()
+    {
+        String hogql =
+                """
+                SELECT o.orderkey
+                FROM orders o
+                WHERE o.custkey IN (
+                    SELECT c.custkey
+                    FROM customer c
+                    WHERE c.custkey = o.custkey
+                )
+                """;
+
+        Query query = (Query) compiler.compile(hogql);
+        Predicated where = (Predicated) ((QuerySpecification) query.getQueryBody()).getWhere().orElseThrow();
+        InPredicate predicate = (InPredicate) where.getPredicate();
+        SubqueryExpression subquery = (SubqueryExpression) predicate.getValueList();
+
+        assertThat(query).isEqualTo(sqlParser.createStatement(hogql));
+        assertThat(where.getLocation()).contains(new NodeLocation(3, 17));
+        assertThat(subquery.getLocation()).contains(new NodeLocation(4, 5));
+        assertThat(subquery.getQuery().getLocation()).contains(new NodeLocation(4, 5));
     }
 
     @Test

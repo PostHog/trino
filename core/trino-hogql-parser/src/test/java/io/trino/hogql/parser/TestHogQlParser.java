@@ -23,6 +23,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.ColumnsRegex;
 import io.trino.hogql.parser.tree.HogQlQuery.CommonTableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
+import io.trino.hogql.parser.tree.HogQlQuery.InSubqueryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IntervalExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IntervalUnit;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
@@ -329,6 +330,30 @@ public class TestHogQlParser
         SubqueryRelation subquery = (SubqueryRelation) derived.relation();
         assertThat(subquery.query().from()).get().isInstanceOf(CommonTableReference.class);
         assertThat(subquery.span()).isEqualTo(new HogQlQuery.SourceSpan(80, 120, 2, 18, 2, 58));
+    }
+
+    @Test
+    public void testBuildsCorrelatedInSubqueryWithSourceSpans()
+    {
+        HogQlQuery query = parser.parseStatement(
+                """
+                SELECT o.orderkey
+                FROM orders o
+                WHERE o.custkey IN (
+                    SELECT c.custkey
+                    FROM customer c
+                    WHERE c.custkey = o.custkey
+                )
+                """);
+
+        InSubqueryExpression predicate = (InSubqueryExpression) query.where().orElseThrow();
+        BinaryExpression correlation = (BinaryExpression) predicate.query().where().orElseThrow();
+        ColumnReference outerReference = (ColumnReference) correlation.right();
+
+        assertThat(predicate.predicateSpan()).isEqualTo(new HogQlQuery.SourceSpan(48, 127, 3, 17, 7, 2));
+        assertThat(predicate.query().span()).isEqualTo(new HogQlQuery.SourceSpan(57, 125, 4, 5, 6, 32));
+        assertThat(outerReference.parts()).extracting(HogQlQuery.Identifier::value).containsExactly("o", "custkey");
+        assertThat(outerReference.span()).isEqualTo(new HogQlQuery.SourceSpan(116, 125, 6, 23, 6, 32));
     }
 
     @Test

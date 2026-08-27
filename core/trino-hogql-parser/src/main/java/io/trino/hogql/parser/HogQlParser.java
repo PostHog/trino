@@ -1173,6 +1173,17 @@ public final class HogQlParser
             }
             if (context instanceof HogQLParser.ColumnExprPrecedence3Context binary) {
                 if (binary.IN() != null) {
+                    if (binary.right instanceof HogQLParser.ColumnExprSubqueryContext subquery) {
+                        if (binary.COHORT() != null) {
+                            throw unsupported(binary, "IN COHORT subquery");
+                        }
+                        return new InSubqueryExpression(
+                                buildExpression(binary.left),
+                                buildSetQuery(subquery.selectSetStmt()),
+                                binary.NOT() != null,
+                                sourceSpan(binary.NOT() == null ? binary.IN().getSymbol() : binary.NOT().getSymbol(), binary.getStop()),
+                                sourceSpan(binary));
+                    }
                     if (binary.COHORT() != null) {
                         return new InCohortExpression(
                                 buildExpression(binary.left),
@@ -1807,9 +1818,7 @@ public final class HogQlParser
                 }
                 case InSubqueryExpression in -> {
                     validateExpressionScope(in.value(), forbiddenOuterRelations, localRelations);
-                    Set<String> nestedForbiddenRelations = new LinkedHashSet<>(forbiddenOuterRelations);
-                    nestedForbiddenRelations.addAll(localRelations);
-                    validateQueryScope(in.query(), Set.copyOf(nestedForbiddenRelations));
+                    validateQueryScope(in.query(), Set.of());
                 }
                 case IntervalExpression interval -> validateExpressionScope(interval.value(), forbiddenOuterRelations, localRelations);
                 case IsNullExpression isNull -> validateExpressionScope(isNull.value(), forbiddenOuterRelations, localRelations);

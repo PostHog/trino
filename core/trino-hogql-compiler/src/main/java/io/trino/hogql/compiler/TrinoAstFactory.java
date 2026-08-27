@@ -555,7 +555,7 @@ final class TrinoAstFactory
                 new InPredicate(
                         location,
                         in.negated(),
-                        new io.trino.sql.tree.SubqueryExpression(location, createQuery(in.query(), parameterIds))));
+                        new io.trino.sql.tree.SubqueryExpression(location(in.query().span()), createQuery(in.query(), parameterIds))));
     }
 
     private static Expression createBinaryExpression(BinaryExpression binary, Map<SourceSpan, Integer> parameterIds)
