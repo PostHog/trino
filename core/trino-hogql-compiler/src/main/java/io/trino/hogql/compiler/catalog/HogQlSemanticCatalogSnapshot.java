@@ -441,6 +441,9 @@ public record HogQlSemanticCatalogSnapshot(
             if (modifier.behavior() == ModifierBehavior.TRINO_SESSION_PROPERTY && modifier.sessionProperty().isEmpty()) {
                 throw new IllegalArgumentException("modifier must name a session property");
             }
+            if (modifier.behavior() == ModifierBehavior.TRINO_SESSION_PROPERTY && modifier.sessionProperty().size() > 2) {
+                throw new IllegalArgumentException("modifier has an invalid session property name");
+            }
             if (modifier.behavior() != ModifierBehavior.TRINO_SESSION_PROPERTY && !modifier.sessionProperty().isEmpty()) {
                 throw new IllegalArgumentException("modifier cannot name a session property");
             }

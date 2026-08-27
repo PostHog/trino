@@ -78,6 +78,8 @@ public class TestQueryPreparer
         PreparedQuery submittedQuery = QUERY_PREPARER.prepareQuery(TEST_SESSION, trino("SELECT * FROM foo"));
         assertThat(preparedQuery.getStatement()).isEqualTo(simpleQuery(selectList(new AllColumns()), table(QualifiedName.of("foo"))));
         assertThat(submittedQuery.getStatement()).isEqualTo(preparedQuery.getStatement());
+        assertThat(preparedQuery.getSessionPropertyOverrides()).isEmpty();
+        assertThat(submittedQuery.getSessionPropertyOverrides()).isEmpty();
     }
 
     @Test
@@ -87,6 +89,7 @@ public class TestQueryPreparer
         QuerySubmission submission = hogQl(envelope);
         PreparedQuery preparedQuery = HOGQL_QUERY_PREPARER.prepareQuery(TEST_SESSION, submission);
         assertThat(preparedQuery.getStatement()).isInstanceOf(Query.class);
+        assertThat(preparedQuery.getSessionPropertyOverrides()).isEmpty();
         assertThat(submission.hogQlEnvelope()).containsSame(envelope);
     }
 

@@ -34,6 +34,7 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LiteralRecip
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalFieldDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalTableDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalType;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ModifierBehavior;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.OperatorRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalQualifiedName;
@@ -49,6 +50,7 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.Relationship
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipJoinSide;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ScopedFieldReferenceRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.SemanticModifierDefault;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.SemanticOperator;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.TypedLiteral;
 import io.trino.hogql.parser.HogQlLanguageVersion;
@@ -208,6 +210,21 @@ public class TestHogQlSemanticCatalogSnapshot
         assertInvalidRewrite(rewriteFunction(true, false, false, true, false, "boolean"), "cannot support FILTER");
         assertInvalidRewrite(rewriteFunction(true, false, false, false, true, "boolean"), "cannot support window invocation");
         assertInvalidRewrite(rewriteFunction(true, false, false, false, false, "varchar"), "must return boolean");
+    }
+
+    @Test
+    public void testRejectsOverqualifiedModifierSessionProperty()
+    {
+        assertThatThrownBy(() -> semanticSnapshotWithModifiers(List.of(new SemanticModifierDefault(
+                "sampling",
+                ModifierBehavior.TRINO_SESSION_PROPERTY,
+                new TypedLiteral("boolean", LiteralEncoding.BOOLEAN, "false"),
+                List.of(
+                        new PhysicalIdentifier("catalog", false),
+                        new PhysicalIdentifier("schema", false),
+                        new PhysicalIdentifier("property", false))))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("invalid session property name");
     }
 
     @Test
@@ -467,6 +484,23 @@ public class TestHogQlSemanticCatalogSnapshot
                 List.of(),
                 functions,
                 List.of());
+    }
+
+    private static HogQlSemanticCatalogSnapshot semanticSnapshotWithModifiers(List<SemanticModifierDefault> modifiers)
+    {
+        return new HogQlSemanticCatalogSnapshot(
+                1,
+                2,
+                LANGUAGE_VERSION,
+                CATALOG,
+                7,
+                List.of(table("events")),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(),
+                modifiers);
     }
 
     private static LiteralRecipe literal()

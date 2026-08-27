@@ -20,12 +20,22 @@ import java.util.OptionalLong;
 
 import static java.util.Objects.requireNonNull;
 
-public record HogQlCompilationResult(Statement statement, List<String> parameterNames, OptionalLong catalogGeneration)
+public record HogQlCompilationResult(
+        Statement statement,
+        List<String> parameterNames,
+        List<HogQlModifierBinding> modifierBindings,
+        OptionalLong catalogGeneration)
 {
     public HogQlCompilationResult
     {
         statement = requireNonNull(statement, "statement is null");
         parameterNames = List.copyOf(requireNonNull(parameterNames, "parameterNames is null"));
+        modifierBindings = List.copyOf(requireNonNull(modifierBindings, "modifierBindings is null"));
         catalogGeneration = requireNonNull(catalogGeneration, "catalogGeneration is null");
+    }
+
+    public HogQlCompilationResult(Statement statement, List<String> parameterNames, OptionalLong catalogGeneration)
+    {
+        this(statement, parameterNames, List.of(), catalogGeneration);
     }
 }

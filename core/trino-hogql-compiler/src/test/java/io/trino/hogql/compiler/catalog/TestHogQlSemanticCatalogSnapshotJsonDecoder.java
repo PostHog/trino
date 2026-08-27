@@ -255,6 +255,11 @@ public class TestHogQlSemanticCatalogSnapshotJsonDecoder
                         validSnapshotJson().replace(
                                 "\"sessionProperty\": [",
                                 "\"unknown\": true,\n                     \"sessionProperty\": [")),
+                Arguments.of(
+                        "overqualified modifier session property",
+                        validSnapshotJson().replace(
+                                "{\"value\": \"hogql\", \"delimited\": false},",
+                                "{\"value\": \"catalog\", \"delimited\": false},\n                       {\"value\": \"schema\", \"delimited\": false},")),
                 Arguments.of("duplicate field", validSnapshotJson().replace("\"protocolVersion\": 1", "\"protocolVersion\": 1, \"protocolVersion\": 1")),
                 Arguments.of("missing field", validSnapshotJson().replace("\"generation\": 7,", "")),
                 Arguments.of("wrong field type", validSnapshotJson().replace("\"nullable\": true", "\"nullable\": \"true\"")),

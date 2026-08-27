@@ -34,6 +34,26 @@ paging and cancellation. The coordinator rejects request bodies larger than 2
 MiB and more than 1,000 total entries across `parameters`, `variables`,
 `filters`, and `modifiers`.
 
+## Modifiers
+
+Modifiers are defined by the pinned semantic catalog manifest. An explicit
+modifier causes the coordinator to pin a manifest even when the query does not
+otherwise use semantic catalog definitions. Unknown modifiers and values whose
+type does not exactly match the declared type are rejected before execution.
+
+Each declared modifier has one behavior:
+
+| Behavior | Result |
+| --- | --- |
+| `TRINO_SESSION_PROPERTY` | Applies the explicit value, or the manifest default when omitted, as a query-scoped Trino session property. Normal session-property validation and access control still apply. |
+| `COMPILER` | Uses the compiler's default behavior when omitted. Explicit values are rejected until that modifier has a compiler handler. |
+| `SAFE_NOOP` | Accepts a type-valid explicit value or default and does not change the query. |
+| `UNSUPPORTED` | Does nothing when omitted and rejects explicit use. |
+
+Modifier values stay outside the generated statement AST. The coordinator
+decodes them through the typed-value boundary and carries the resulting session
+overrides separately during query preparation.
+
 To return a native Trino plan instead of executing the query, add an `explain`
 object:
 

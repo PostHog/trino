@@ -13,6 +13,8 @@
  */
 package io.trino.hogql.compiler;
 
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogException;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogException.Failure;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider.PinRequest;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider.PinnedSnapshot;
 import io.trino.hogql.parser.HogQlLanguageContract;
@@ -101,6 +103,7 @@ public final class HogQlCompiler
         return compile(
                 parse(envelope.query()),
                 envelope.parameters(),
+                envelope.modifiers(),
                 catalogContext,
                 envelope.languageVersion(),
                 envelope.catalogGeneration());
@@ -110,7 +113,7 @@ public final class HogQlCompiler
     {
         requireNonNull(hogql, "hogql is null");
         requireNonNull(parameters, "parameters is null");
-        return compile(parse(hogql), parameters, Optional.empty(), HogQlLanguageContract.current().languageVersion(), OptionalLong.empty());
+        return compile(parse(hogql), parameters, Map.of(), Optional.empty(), HogQlLanguageContract.current().languageVersion(), OptionalLong.empty());
     }
 
     private HogQlQuery parse(String hogql)
@@ -131,6 +134,7 @@ public final class HogQlCompiler
     private static HogQlCompilationResult compile(
             HogQlQuery query,
             Map<String, HogQlTypedValue> parameters,
+            Map<String, HogQlTypedValue> modifiers,
             Optional<HogQlSemanticCatalogContext> catalogContext,
             HogQlLanguageVersion languageVersion,
             OptionalLong expectedCatalogGeneration)
@@ -171,11 +175,18 @@ public final class HogQlCompiler
         for (int index = 0; index < placeholders.size(); index++) {
             parameterIds.put(placeholders.get(index).span(), index);
         }
-        ResolvedQuery resolved = resolveQuery(query, catalogContext, languageVersion, expectedCatalogGeneration);
+        ResolvedQuery resolved = resolveQuery(query, catalogContext, languageVersion, expectedCatalogGeneration, !modifiers.isEmpty());
         Statement statement = TrinoAstFactory.createStatement(resolved.query(), parameterIds);
-        return new HogQlCompilationResult(statement, placeholders.stream()
-                .map(Placeholder::name)
-                .toList(), resolved.catalogGeneration());
+        List<HogQlModifierBinding> modifierBindings = resolved.pinnedSnapshot()
+                .map(snapshot -> HogQlModifierResolver.resolve(snapshot, modifiers, query.span()))
+                .orElseGet(List::of);
+        return new HogQlCompilationResult(
+                statement,
+                placeholders.stream()
+                        .map(Placeholder::name)
+                        .toList(),
+                modifierBindings,
+                resolved.catalogGeneration());
     }
 
     private static void collectPlaceholders(HogQlQuery query, List<Placeholder> placeholders)
@@ -208,21 +219,32 @@ public final class HogQlCompiler
             HogQlQuery query,
             Optional<HogQlSemanticCatalogContext> catalogContext,
             HogQlLanguageVersion languageVersion,
-            OptionalLong expectedCatalogGeneration)
+            OptionalLong expectedCatalogGeneration,
+            boolean modifiersRequireSnapshot)
     {
-        if (!containsSemanticCandidate(query) || catalogContext.isEmpty()) {
-            return new ResolvedQuery(query, OptionalLong.empty());
+        boolean semanticCandidate = containsSemanticCandidate(query);
+        if (!semanticCandidate && !modifiersRequireSnapshot) {
+            return new ResolvedQuery(query, Optional.empty());
+        }
+        if (catalogContext.isEmpty()) {
+            if (modifiersRequireSnapshot) {
+                throw new HogQlSemanticCatalogException(Failure.UNAVAILABLE, "HogQL semantic catalog snapshot is required for modifiers");
+            }
+            return new ResolvedQuery(query, Optional.empty());
         }
         HogQlSemanticCatalogContext context = catalogContext.orElseThrow();
         PinnedSnapshot pinned = context.snapshotProvider().pin(new PinRequest(
                 context.catalog(),
                 requireNonNull(languageVersion, "languageVersion is null"),
                 expectedCatalogGeneration));
-        HogQlQuery functionsResolved = HogQlFunctionResolver.resolve(pinned, query);
-        HogQlQuery resolved = HogQlSemanticResolver.resolve(pinned, functionsResolved)
-                .map(HogQlSemanticResolver.ResolvedQuery::query)
-                .orElse(functionsResolved);
-        return new ResolvedQuery(resolved, OptionalLong.of(pinned.generation()));
+        HogQlQuery resolved = query;
+        if (semanticCandidate) {
+            HogQlQuery functionsResolved = HogQlFunctionResolver.resolve(pinned, query);
+            resolved = HogQlSemanticResolver.resolve(pinned, functionsResolved)
+                    .map(HogQlSemanticResolver.ResolvedQuery::query)
+                    .orElse(functionsResolved);
+        }
+        return new ResolvedQuery(resolved, Optional.of(pinned));
     }
 
     private static boolean containsSemanticCandidate(HogQlQuery query)
@@ -325,12 +347,19 @@ public final class HogQlCompiler
         return expression.map(HogQlCompiler::containsFunctionCall).orElse(false);
     }
 
-    private record ResolvedQuery(HogQlQuery query, OptionalLong catalogGeneration)
+    private record ResolvedQuery(HogQlQuery query, Optional<PinnedSnapshot> pinnedSnapshot)
     {
         private ResolvedQuery
         {
             query = requireNonNull(query, "query is null");
-            catalogGeneration = requireNonNull(catalogGeneration, "catalogGeneration is null");
+            pinnedSnapshot = requireNonNull(pinnedSnapshot, "pinnedSnapshot is null");
+        }
+
+        public OptionalLong catalogGeneration()
+        {
+            return pinnedSnapshot
+                    .map(snapshot -> OptionalLong.of(snapshot.generation()))
+                    .orElseGet(OptionalLong::empty);
         }
     }
 

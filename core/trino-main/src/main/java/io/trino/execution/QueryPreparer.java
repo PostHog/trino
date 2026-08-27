@@ -22,6 +22,7 @@ import io.trino.hogql.HogQlCompilationTracker;
 import io.trino.hogql.compiler.HogQlCompilationResult;
 import io.trino.hogql.compiler.HogQlCompileEnvelope;
 import io.trino.hogql.compiler.HogQlCompiler;
+import io.trino.hogql.compiler.HogQlModifierBinding;
 import io.trino.hogql.compiler.HogQlSemanticCatalogContext;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider;
 import io.trino.spi.TrinoException;
@@ -35,7 +36,10 @@ import io.trino.sql.tree.ExplainAnalyze;
 import io.trino.sql.tree.ExplainFormat;
 import io.trino.sql.tree.ExplainType;
 import io.trino.sql.tree.Expression;
+import io.trino.sql.tree.Identifier;
 import io.trino.sql.tree.NodeLocation;
+import io.trino.sql.tree.QualifiedName;
+import io.trino.sql.tree.SessionProperty;
 import io.trino.sql.tree.Statement;
 
 import java.util.List;
@@ -145,7 +149,8 @@ public class QueryPreparer
                     preparedQuery = tracker.observe(PARAMETER_BINDING, () -> prepareQuery(
                             session,
                             statement,
-                            Optional.of(hogQlParameterDecoder.decode(result, envelope.parameters()))));
+                            Optional.of(hogQlParameterDecoder.decode(result, envelope.parameters())),
+                            sessionPropertyOverrides(result, statement)));
                 }
                 catch (RuntimeException | Error failure) {
                     tracker.failed(failure);
@@ -191,6 +196,16 @@ public class QueryPreparer
     private PreparedQuery prepareQuery(Session session, Statement wrappedStatement, Optional<List<Expression>> suppliedParameters)
             throws ParsingException, TrinoException
     {
+        return prepareQuery(session, wrappedStatement, suppliedParameters, List.of());
+    }
+
+    private PreparedQuery prepareQuery(
+            Session session,
+            Statement wrappedStatement,
+            Optional<List<Expression>> suppliedParameters,
+            List<SessionProperty> sessionPropertyOverrides)
+            throws ParsingException, TrinoException
+    {
         Statement statement = wrappedStatement;
         Optional<String> prepareSql = Optional.empty();
         if (statement instanceof Execute executeStatement) {
@@ -225,7 +240,27 @@ public class QueryPreparer
         }
         validateParameters(statement, parameters);
 
-        return new PreparedQuery(statement, parameters, prepareSql);
+        return new PreparedQuery(statement, parameters, prepareSql, sessionPropertyOverrides);
+    }
+
+    private List<SessionProperty> sessionPropertyOverrides(HogQlCompilationResult result, Statement statement)
+    {
+        NodeLocation location = statement.getLocation().orElseThrow();
+        return result.modifierBindings().stream()
+                .map(binding -> modifierBinding(binding, location))
+                .flatMap(Optional::stream)
+                .toList();
+    }
+
+    private Optional<SessionProperty> modifierBinding(HogQlModifierBinding binding, NodeLocation location)
+    {
+        Expression value = hogQlParameterDecoder.decode(binding, location);
+        return binding.sessionProperty().map(property -> {
+            QualifiedName name = QualifiedName.of(property.stream()
+                    .map(part -> new Identifier(location, part.value(), part.delimited()))
+                    .toList());
+            return new SessionProperty(location, name, value);
+        });
     }
 
     private static void validateParameters(Statement node, List<Expression> parameterValues)
@@ -244,12 +279,19 @@ public class QueryPreparer
         private final Statement statement;
         private final List<Expression> parameters;
         private final Optional<String> prepareSql;
+        private final List<SessionProperty> sessionPropertyOverrides;
 
         public PreparedQuery(Statement statement, List<Expression> parameters, Optional<String> prepareSql)
+        {
+            this(statement, parameters, prepareSql, List.of());
+        }
+
+        public PreparedQuery(Statement statement, List<Expression> parameters, Optional<String> prepareSql, List<SessionProperty> sessionPropertyOverrides)
         {
             this.statement = requireNonNull(statement, "statement is null");
             this.parameters = ImmutableList.copyOf(requireNonNull(parameters, "parameters is null"));
             this.prepareSql = requireNonNull(prepareSql, "prepareSql is null");
+            this.sessionPropertyOverrides = ImmutableList.copyOf(requireNonNull(sessionPropertyOverrides, "sessionPropertyOverrides is null"));
         }
 
         public Statement getStatement()
@@ -265,6 +307,11 @@ public class QueryPreparer
         public Optional<String> getPrepareSql()
         {
             return prepareSql;
+        }
+
+        public List<SessionProperty> getSessionPropertyOverrides()
+        {
+            return sessionPropertyOverrides;
         }
     }
 }

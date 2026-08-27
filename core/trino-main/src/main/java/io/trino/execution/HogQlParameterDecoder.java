@@ -23,6 +23,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import com.google.common.collect.ImmutableList;
 import io.trino.hogql.compiler.HogQlCompilationResult;
+import io.trino.hogql.compiler.HogQlModifierBinding;
 import io.trino.hogql.compiler.HogQlTypedValue;
 import io.trino.hogql.compiler.HogQlTypedValue.ArrayValue;
 import io.trino.hogql.compiler.HogQlTypedValue.BooleanValue;
@@ -112,14 +113,32 @@ final class HogQlParameterDecoder
             NodeLocation location = parameters.get(index).getLocation().orElseThrow();
             try {
                 HogQlTypedValue binding = requireNonNull(bindings.get(name), "binding is null");
-                DataType type = sqlParser.createType(binding.type());
-                values.add(decode(binding.value(), type, location));
+                values.add(decode(binding, location));
             }
             catch (RuntimeException _) {
                 throw bindingError(name, location);
             }
         }
         return values.build();
+    }
+
+    Expression decode(HogQlTypedValue binding, NodeLocation location)
+    {
+        requireNonNull(binding, "binding is null");
+        requireNonNull(location, "location is null");
+        DataType type = sqlParser.createType(binding.type());
+        return decode(binding.value(), type, location);
+    }
+
+    Expression decode(HogQlModifierBinding binding, NodeLocation location)
+    {
+        requireNonNull(binding, "binding is null");
+        try {
+            return decode(binding.value(), location);
+        }
+        catch (RuntimeException _) {
+            throw modifierBindingError(binding.modifierName(), location);
+        }
     }
 
     private static Expression decode(Value value, DataType type, NodeLocation location)
@@ -540,6 +559,15 @@ final class HogQlParameterDecoder
                 HOGQL_BINDING_ERROR,
                 Optional.of(new Location(location.getLineNumber(), location.getColumnNumber())),
                 "Invalid HogQL parameter binding: " + name,
+                null);
+    }
+
+    private static TrinoException modifierBindingError(String name, NodeLocation location)
+    {
+        return new TrinoException(
+                HOGQL_BINDING_ERROR,
+                Optional.of(new Location(location.getLineNumber(), location.getColumnNumber())),
+                "Invalid HogQL modifier binding: " + name,
                 null);
     }
 }
