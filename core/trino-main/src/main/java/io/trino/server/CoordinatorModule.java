@@ -99,6 +99,8 @@ import io.trino.execution.scheduler.policy.AllAtOnceExecutionPolicy;
 import io.trino.execution.scheduler.policy.ExecutionPolicy;
 import io.trino.execution.scheduler.policy.PhasedExecutionPolicy;
 import io.trino.hogql.HogQlConfig;
+import io.trino.hogql.HogQlSemanticCatalogConfig;
+import io.trino.hogql.HogQlSemanticCatalogModule;
 import io.trino.hogql.compiler.HogQlCompiler;
 import io.trino.memory.ClusterMemoryManager;
 import io.trino.memory.ForMemoryManager;
@@ -179,9 +181,13 @@ public class CoordinatorModule
         jaxrsBinder(binder).bind(QueuedStatementResource.class);
         jaxrsBinder(binder).bind(ExecutingStatementResource.class);
         configBinder(binder).bindConfig(HogQlConfig.class);
+        configBinder(binder).bindConfig(HogQlSemanticCatalogConfig.class);
         binder.bind(HogQlCompiler.class).in(Scopes.SINGLETON);
         if (buildConfigObject(HogQlConfig.class).isEnabled()) {
             jaxrsBinder(binder).bind(HogQlStatementResource.class);
+            if (buildConfigObject(HogQlSemanticCatalogConfig.class).getUri() != null) {
+                install(new HogQlSemanticCatalogModule());
+            }
         }
         binder.bind(StatementHttpExecutionMBean.class).in(Scopes.SINGLETON);
         newExporter(binder).export(StatementHttpExecutionMBean.class).withGeneratedName();

@@ -46,9 +46,10 @@ import static java.util.Objects.requireNonNull;
 public final class HogQlSemanticCatalogSnapshotJsonDecoder
 {
     public static final int PROTOCOL_VERSION = 1;
+    public static final int MAXIMUM_PAYLOAD_BYTES = 8 * 1024 * 1024;
 
     private static final int SCHEMA_VERSION = 1;
-    private static final Limits DEFAULT_LIMITS = new Limits(8 * 1024 * 1024, 64, 100_000);
+    private static final Limits DEFAULT_LIMITS = new Limits(MAXIMUM_PAYLOAD_BYTES, 64, 100_000);
 
     private static final Set<String> SNAPSHOT_FIELDS = Set.of(
             "protocolVersion",
