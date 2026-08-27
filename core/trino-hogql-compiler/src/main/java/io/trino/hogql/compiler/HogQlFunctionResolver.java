@@ -50,6 +50,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
+import io.trino.hogql.parser.tree.HogQlQuery.ScalarSubqueryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.SelectQueryBody;
 import io.trino.hogql.parser.tree.HogQlQuery.SetOperation;
 import io.trino.hogql.parser.tree.HogQlQuery.SortItem;
@@ -242,6 +243,7 @@ final class HogQlFunctionResolver
                     memberAccess.member(),
                     memberAccess.span());
             case Placeholder placeholder -> placeholder;
+            case ScalarSubqueryExpression subquery -> new ScalarSubqueryExpression(resolveQuery(subquery.query()), subquery.span());
             case SubscriptExpression subscript -> new SubscriptExpression(
                     resolveExpression(subscript.base()),
                     resolveExpression(subscript.index()),

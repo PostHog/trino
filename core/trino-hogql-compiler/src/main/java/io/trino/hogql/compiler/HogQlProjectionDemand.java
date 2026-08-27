@@ -39,6 +39,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
+import io.trino.hogql.parser.tree.HogQlQuery.ScalarSubqueryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.SelectQueryBody;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
 import io.trino.hogql.parser.tree.HogQlQuery.SubscriptExpression;
@@ -193,6 +194,7 @@ final class HogQlProjectionDemand
             case IsNullExpression isNull -> collect(isNull.value(), builder);
             case Literal _, Placeholder _ -> {}
             case MemberAccessExpression member -> collect(member.base(), builder);
+            case ScalarSubqueryExpression _ -> builder.all = true;
             case SubscriptExpression subscript -> {
                 collect(subscript.base(), builder);
                 collect(subscript.index(), builder);

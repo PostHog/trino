@@ -55,6 +55,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.NullTreatment;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
+import io.trino.hogql.parser.tree.HogQlQuery.ScalarSubqueryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.SetOperation;
 import io.trino.hogql.parser.tree.HogQlQuery.SetOperationType;
 import io.trino.hogql.parser.tree.HogQlQuery.SortDirection;
@@ -1117,6 +1118,9 @@ public final class HogQlParser
             if (context instanceof HogQLParser.ColumnExprIdentifierContext identifier) {
                 return buildColumnReference(identifier.columnIdentifier());
             }
+            if (context instanceof HogQLParser.ColumnExprSubqueryContext subquery) {
+                return new ScalarSubqueryExpression(buildSetQuery(subquery.selectSetStmt()), sourceSpan(subquery));
+            }
             if (context instanceof HogQLParser.ColumnExprParensContext parens) {
                 return buildExpression(parens.columnExpr());
             }
@@ -1824,6 +1828,7 @@ public final class HogQlParser
                 case IsNullExpression isNull -> validateExpressionScope(isNull.value(), forbiddenOuterRelations, localRelations);
                 case Literal _, Placeholder _ -> {}
                 case MemberAccessExpression memberAccess -> validateExpressionScope(memberAccess.base(), forbiddenOuterRelations, localRelations);
+                case ScalarSubqueryExpression subquery -> validateQueryScope(subquery.query(), Set.of());
                 case SubscriptExpression subscript -> {
                     validateExpressionScope(subscript.base(), forbiddenOuterRelations, localRelations);
                     validateExpressionScope(subscript.index(), forbiddenOuterRelations, localRelations);

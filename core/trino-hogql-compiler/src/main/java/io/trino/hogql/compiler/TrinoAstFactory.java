@@ -43,6 +43,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
+import io.trino.hogql.parser.tree.HogQlQuery.ScalarSubqueryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.SelectQueryBody;
 import io.trino.hogql.parser.tree.HogQlQuery.SetOperation;
 import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
@@ -351,6 +352,9 @@ final class TrinoAstFactory
                     createExpression(memberAccess.base(), parameterIds),
                     createIdentifier(memberAccess.member()));
             case Placeholder placeholder -> new Parameter(location(placeholder.span()), parameterIds.get(placeholder.span()));
+            case ScalarSubqueryExpression subquery -> new io.trino.sql.tree.SubqueryExpression(
+                    location(subquery.span()),
+                    createQuery(subquery.query(), parameterIds));
             case SubscriptExpression subscript -> new io.trino.sql.tree.SubscriptExpression(
                     location(subscript.span()),
                     createExpression(subscript.base(), parameterIds),

@@ -33,6 +33,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.NullPlacement;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
+import io.trino.hogql.parser.tree.HogQlQuery.ScalarSubqueryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.SetOperation;
 import io.trino.hogql.parser.tree.HogQlQuery.SetOperationType;
 import io.trino.hogql.parser.tree.HogQlQuery.SortDirection;
@@ -354,6 +355,22 @@ public class TestHogQlParser
         assertThat(predicate.query().span()).isEqualTo(new HogQlQuery.SourceSpan(57, 125, 4, 5, 6, 32));
         assertThat(outerReference.parts()).extracting(HogQlQuery.Identifier::value).containsExactly("o", "custkey");
         assertThat(outerReference.span()).isEqualTo(new HogQlQuery.SourceSpan(116, 125, 6, 23, 6, 32));
+    }
+
+    @Test
+    public void testBuildsCorrelatedScalarSubqueryWithSourceSpans()
+    {
+        HogQlQuery query = parser.parseStatement(
+                "SELECT o.orderkey, (SELECT c.custkey FROM customer c WHERE c.custkey = o.custkey) AS matched FROM orders o");
+
+        ScalarSubqueryExpression subquery = (ScalarSubqueryExpression) ((ExpressionProjection) query.projections().get(1)).expression();
+        BinaryExpression correlation = (BinaryExpression) subquery.query().where().orElseThrow();
+        ColumnReference outerReference = (ColumnReference) correlation.right();
+
+        assertThat(subquery.span()).isEqualTo(new HogQlQuery.SourceSpan(19, 81, 1, 20, 1, 82));
+        assertThat(subquery.query().span()).isEqualTo(new HogQlQuery.SourceSpan(20, 80, 1, 21, 1, 81));
+        assertThat(outerReference.parts()).extracting(HogQlQuery.Identifier::value).containsExactly("o", "custkey");
+        assertThat(outerReference.span()).isEqualTo(new HogQlQuery.SourceSpan(71, 80, 1, 72, 1, 81));
     }
 
     @Test

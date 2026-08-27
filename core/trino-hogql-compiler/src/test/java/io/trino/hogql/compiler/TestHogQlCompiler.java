@@ -307,6 +307,20 @@ public class TestHogQlCompiler
     }
 
     @Test
+    public void testLowersCorrelatedScalarSubqueryWithSourceLocations()
+    {
+        String hogql = "SELECT o.orderkey, (SELECT c.custkey FROM customer c WHERE c.custkey = o.custkey) AS matched FROM orders o";
+
+        Query query = (Query) compiler.compile(hogql);
+        SingleColumn projection = (SingleColumn) ((QuerySpecification) query.getQueryBody()).getSelect().getSelectItems().get(1);
+        SubqueryExpression subquery = (SubqueryExpression) projection.getExpression();
+
+        assertThat(query).isEqualTo(sqlParser.createStatement(hogql));
+        assertThat(subquery.getLocation()).contains(new NodeLocation(1, 20));
+        assertThat(subquery.getQuery().getLocation()).contains(new NodeLocation(1, 21));
+    }
+
+    @Test
     public void testBindsPlaceholdersAcrossCteAndDerivedQueryScopes()
     {
         HogQlCompilationResult result = compiler.compile(

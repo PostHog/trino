@@ -310,6 +310,7 @@ public record HogQlQuery(
                     Literal,
                     MemberAccessExpression,
                     Placeholder,
+                    ScalarSubqueryExpression,
                     SubscriptExpression,
                     TupleExpression,
                     UnaryExpression
@@ -481,6 +482,16 @@ public record HogQlQuery(
             value = requireNonNull(value, "value is null");
             query = requireNonNull(query, "query is null");
             predicateSpan = requireNonNull(predicateSpan, "predicateSpan is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record ScalarSubqueryExpression(HogQlQuery query, SourceSpan span)
+            implements Expression
+    {
+        public ScalarSubqueryExpression
+        {
+            query = requireNonNull(query, "query is null");
             span = requireNonNull(span, "span is null");
         }
     }

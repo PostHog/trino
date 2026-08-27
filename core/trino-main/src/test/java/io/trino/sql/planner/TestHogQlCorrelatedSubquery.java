@@ -40,6 +40,16 @@ public class TestHogQlCorrelatedSubquery
     }
 
     @Test
+    public void testAnalyzerBindsCorrelatedOuterColumnInScalarSubquery()
+    {
+        assertThatCode(() -> plan(compile(
+                "SELECT o.orderkey, (" +
+                        "SELECT c.custkey FROM customer c WHERE c.custkey = o.custkey) " +
+                        "FROM orders o")))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
     public void testAnalyzerRejectsMissingCorrelatedOuterColumn()
     {
         AssertionError failure = catchThrowableOfType(
