@@ -48,6 +48,10 @@ public class TestHogQlCompiler
             "SELECT * FROM events",
             "SELECT event, properties FROM ducklake.default.events",
             "SELECT * FROM \"MiXeD\".\"Event Table\"",
+            "SELECT event + 1 * 2 FROM events WHERE event >= 3 AND NOT false",
+            "SELECT lower(event) AS lowered FROM events",
+            "SELECT 01",
+            "SELECT -1, +2",
     })
     public void testLowersToEquivalentStockTrinoAst(String hogql)
     {
@@ -106,7 +110,7 @@ public class TestHogQlCompiler
     @Test
     public void testReportsParsingFailureAsTrinoSyntaxError()
     {
-        assertThatThrownBy(() -> compiler.compile("SELECT 1\nWHERE TRUE"))
+        assertThatThrownBy(() -> compiler.compile("SELECT 1\nGROUP BY 1"))
                 .isInstanceOf(ParsingException.class)
                 .hasMessageStartingWith("line 2:1:");
     }

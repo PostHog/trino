@@ -13,20 +13,22 @@
  */
 package io.trino.hogql.parser;
 
-import io.trino.hogql.parser.antlr.HogQlBaseBaseVisitor;
-import io.trino.hogql.parser.antlr.HogQlBaseLexer;
-import io.trino.hogql.parser.antlr.HogQlBaseParser;
+import io.trino.hogql.parser.canonical.HogQLLexer;
+import io.trino.hogql.parser.canonical.HogQLParser;
 import io.trino.hogql.parser.tree.HogQlQuery;
+import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
 import io.trino.hogql.parser.tree.HogQlQuery.Expression;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
+import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
-import io.trino.hogql.parser.tree.HogQlQuery.LiteralKind;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
+import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
 import org.antlr.v4.runtime.ANTLRErrorListener;
 import org.antlr.v4.runtime.BailErrorStrategy;
 import org.antlr.v4.runtime.BaseErrorListener;
@@ -40,13 +42,30 @@ import org.antlr.v4.runtime.Token;
 import org.antlr.v4.runtime.atn.PredictionMode;
 import org.antlr.v4.runtime.misc.ParseCancellationException;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
-import static io.trino.hogql.parser.tree.HogQlQuery.LiteralKind.BOOLEAN;
+import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.ADD;
+import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.AND;
+import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.DIVIDE;
+import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.EQUAL;
+import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.GREATER_THAN;
+import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.GREATER_THAN_OR_EQUAL;
+import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.LESS_THAN;
+import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.LESS_THAN_OR_EQUAL;
+import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.MODULO;
+import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.MULTIPLY;
+import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.NOT_EQUAL;
+import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.OR;
+import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.SUBTRACT;
 import static io.trino.hogql.parser.tree.HogQlQuery.LiteralKind.INTEGER;
 import static io.trino.hogql.parser.tree.HogQlQuery.LiteralKind.NULL;
 import static io.trino.hogql.parser.tree.HogQlQuery.LiteralKind.STRING;
+import static io.trino.hogql.parser.tree.HogQlQuery.UnaryOperator.NEGATE;
+import static io.trino.hogql.parser.tree.HogQlQuery.UnaryOperator.NOT;
+import static io.trino.hogql.parser.tree.HogQlQuery.UnaryOperator.POSITIVE;
+import static java.lang.Character.digit;
 import static java.util.Objects.requireNonNull;
 
 public final class HogQlParser
@@ -76,29 +95,29 @@ public final class HogQlParser
         }
 
         try {
-            HogQlBaseLexer lexer = new HogQlBaseLexer(CharStreams.fromString(hogql));
+            HogQLLexer lexer = new HogQLLexer(CharStreams.fromString(hogql));
             CommonTokenStream tokenStream = new CommonTokenStream(lexer);
-            HogQlBaseParser parser = new HogQlBaseParser(tokenStream);
+            HogQLParser parser = new HogQLParser(tokenStream);
 
             lexer.removeErrorListeners();
             lexer.addErrorListener(ERROR_LISTENER);
             parser.removeErrorListeners();
 
-            HogQlBaseParser.SingleStatementContext tree;
+            HogQLParser.SelectContext tree;
             try {
                 parser.getInterpreter().setPredictionMode(PredictionMode.SLL);
                 parser.setErrorHandler(new BailErrorStrategy());
-                tree = parser.singleStatement();
+                tree = parser.select();
             }
             catch (ParseCancellationException _) {
                 parser.reset();
                 parser.getInterpreter().setPredictionMode(PredictionMode.LL);
                 parser.setErrorHandler(new DefaultErrorStrategy());
                 parser.addErrorListener(ERROR_LISTENER);
-                tree = parser.singleStatement();
+                tree = parser.select();
             }
 
-            return new AstBuilder().build(tree.query());
+            return new AstBuilder(hogql).build(tree);
         }
         catch (StackOverflowError _) {
             throw new HogQlParsingException("statement is too large", null, 1, 1);
@@ -106,95 +125,403 @@ public final class HogQlParser
     }
 
     private static final class AstBuilder
-            extends HogQlBaseBaseVisitor<Object>
     {
-        public HogQlQuery build(HogQlBaseParser.QueryContext context)
+        private final SourcePositions sourcePositions;
+
+        private AstBuilder(String source)
         {
-            List<Projection> projections = context.projection().stream()
+            sourcePositions = new SourcePositions(source);
+        }
+
+        public HogQlQuery build(HogQLParser.SelectContext context)
+        {
+            HogQLParser.SelectStmtContext select = extractPlainSelect(context);
+            rejectUnsupportedClauses(select);
+
+            List<Projection> projections = selectColumns(select.selectColumnExprListBeforeFrom()).stream()
                     .map(this::buildProjection)
                     .toList();
-            Optional<TableReference> from = Optional.ofNullable(context.qualifiedName())
+            Optional<TableReference> from = Optional.ofNullable(select.fromClause())
+                    .map(HogQLParser.FromClauseContext::joinExpr)
                     .map(this::buildTableReference);
-            return new HogQlQuery(projections, from, sourceSpan(context));
+            Optional<Expression> where = Optional.ofNullable(select.whereClause())
+                    .map(HogQLParser.WhereClauseContext::columnExpr)
+                    .map(this::buildExpression);
+            return new HogQlQuery(projections, from, where, sourceSpan(select));
         }
 
-        private Projection buildProjection(HogQlBaseParser.ProjectionContext context)
+        private List<HogQLParser.SelectColumnExprContext> selectColumns(HogQLParser.SelectColumnExprListBeforeFromContext context)
         {
-            if (context.ASTERISK() != null) {
-                return new Star(sourceSpan(context));
+            if (context instanceof HogQLParser.SelectColumnExprListBeforeFromTrailingCommaContext trailingComma) {
+                return trailingComma.selectColumnExpr();
             }
-            return new ExpressionProjection(buildExpression(context.expression()));
+            if (context instanceof HogQLParser.SelectColumnExprListBeforeFromPlainContext plain) {
+                return plain.selectColumnExprList().selectColumnExpr();
+            }
+            throw unsupported(context, "select list");
         }
 
-        private Expression buildExpression(HogQlBaseParser.ExpressionContext context)
+        private HogQLParser.SelectStmtContext extractPlainSelect(HogQLParser.SelectContext context)
         {
-            if (context.literal() != null) {
-                return buildLiteral(context.literal());
+            if (context.selectStmt() != null) {
+                return context.selectStmt();
             }
-            return new ColumnReference(buildIdentifiers(context.qualifiedName()), sourceSpan(context));
+            HogQLParser.SelectSetStmtContext set = context.selectSetStmt();
+            if (set == null || !set.subsequentSelectSetClause().isEmpty() || set.orderByClause() != null || set.limitAndOffsetClauseOptional() != null) {
+                throw unsupported(context, "set query");
+            }
+            HogQLParser.SelectStmtWithParensContext wrapped = set.selectStmtWithParens();
+            if (wrapped.selectStmt() == null) {
+                throw unsupported(wrapped, "parenthesized or placeholder query");
+            }
+            return wrapped.selectStmt();
         }
 
-        private Literal buildLiteral(HogQlBaseParser.LiteralContext context)
+        private void rejectUnsupportedClauses(HogQLParser.SelectStmtContext context)
         {
-            String value = context.getText();
-            LiteralKind kind;
-            if (context.INTEGER_VALUE() != null) {
-                kind = INTEGER;
+            List<ParserRuleContext> clauses = new ArrayList<>();
+            clauses.add(context.withClause());
+            clauses.add(context.topClause());
+            clauses.add(context.arrayJoinClause());
+            clauses.add(context.prewhereClause());
+            clauses.addAll(context.sampleClause());
+            clauses.add(context.groupByClause());
+            clauses.add(context.havingClause());
+            clauses.add(context.qualifyClause());
+            clauses.add(context.windowClause());
+            clauses.add(context.orderByClause());
+            clauses.add(context.limitByClause());
+            clauses.add(context.limitAndOffsetClause());
+            clauses.add(context.offsetOnlyClause());
+            clauses.add(context.settingsClause());
+            Optional<ParserRuleContext> firstClause = clauses.stream()
+                    .filter(requireNonNullClause -> requireNonNullClause != null)
+                    .min((left, right) -> Integer.compare(left.getStart().getStartIndex(), right.getStart().getStartIndex()));
+            if (firstClause.isPresent()) {
+                throw unsupported(firstClause.orElseThrow(), "query clause");
             }
-            else if (context.STRING() != null) {
-                kind = STRING;
-                value = decodeString(value);
+            if (context.DISTINCT() != null) {
+                throw unsupported(context, "distinct query");
             }
-            else if (context.NULL() != null) {
-                kind = NULL;
+        }
+
+        private Projection buildProjection(HogQLParser.SelectColumnExprContext context)
+        {
+            HogQLParser.ColumnExprContext expression;
+            Optional<Identifier> alias = Optional.empty();
+            if (context instanceof HogQLParser.ColumnExprAliasBeforeContext aliased) {
+                expression = aliased.columnExpr();
+                alias = Optional.of(buildIdentifier(aliased.identifier()));
+            }
+            else if (context instanceof HogQLParser.ColumnExprAliasImplicitContext aliased) {
+                expression = aliased.columnExpr();
+                alias = Optional.of(buildIdentifier(aliased.implicitAlias().getText(), aliased.implicitAlias()));
+            }
+            else if (context instanceof HogQLParser.ColumnExprSelectValueContext selected) {
+                expression = selected.columnExpr();
+                if (expression instanceof HogQLParser.ColumnExprAliasContext aliased) {
+                    expression = aliased.columnExpr();
+                    if (aliased.identifier() != null) {
+                        alias = Optional.of(buildIdentifier(aliased.identifier()));
+                    }
+                    else {
+                        alias = Optional.of(new Identifier(decodeQuoted(aliased.STRING_LITERAL().getText()), true, sourceSpan(aliased)));
+                    }
+                }
             }
             else {
-                kind = BOOLEAN;
+                throw unsupported(context, "projection");
             }
-            return new Literal(kind, value, sourceSpan(context));
+
+            if (expression instanceof HogQLParser.ColumnExprValuePassthroughContext passthrough && passthrough.columnExprValue() instanceof HogQLParser.ColumnExprAsteriskContext asterisk) {
+                if (alias.isPresent() || asterisk.tableIdentifier() != null || asterisk.EXCLUDE() != null) {
+                    throw unsupported(asterisk, "qualified or transformed star");
+                }
+                return new Star(sourceSpan(context));
+            }
+            return new ExpressionProjection(buildExpression(expression), alias);
         }
 
-        private TableReference buildTableReference(HogQlBaseParser.QualifiedNameContext context)
+        private Expression buildExpression(HogQLParser.ColumnExprContext context)
         {
-            return new TableReference(buildIdentifiers(context), sourceSpan(context));
+            if (context instanceof HogQLParser.ColumnExprValuePassthroughContext passthrough) {
+                return buildExpression(passthrough.columnExprValue());
+            }
+            if (context instanceof HogQLParser.ColumnExprAndContext binary) {
+                return binary(AND, binary.columnExpr(0), binary.columnExpr(1), binary);
+            }
+            if (context instanceof HogQLParser.ColumnExprOrContext binary) {
+                return binary(OR, binary.columnExpr(0), binary.columnExpr(1), binary);
+            }
+            throw unsupported(context, "expression " + context.getClass().getSimpleName());
         }
 
-        private List<Identifier> buildIdentifiers(HogQlBaseParser.QualifiedNameContext context)
+        private Expression buildExpression(HogQLParser.ColumnExprValueContext context)
+        {
+            if (context instanceof HogQLParser.ColumnExprLiteralContext literal) {
+                return buildLiteral(literal.literal());
+            }
+            if (context instanceof HogQLParser.ColumnExprIdentifierContext identifier) {
+                return buildColumnReference(identifier.columnIdentifier());
+            }
+            if (context instanceof HogQLParser.ColumnExprParensContext parens) {
+                return buildExpression(parens.columnExpr());
+            }
+            if (context instanceof HogQLParser.ColumnExprNegateContext negate) {
+                return new UnaryExpression(NEGATE, buildExpression(negate.columnExprValue()), sourceSpan(negate));
+            }
+            if (context instanceof HogQLParser.ColumnExprNotContext not) {
+                return new UnaryExpression(NOT, buildExpression(not.columnExprValue()), sourceSpan(not));
+            }
+            if (context instanceof HogQLParser.ColumnExprPrecedence1Context binary) {
+                BinaryOperator operator = switch (binary.operator.getType()) {
+                    case HogQLParser.ASTERISK -> MULTIPLY;
+                    case HogQLParser.SLASH -> DIVIDE;
+                    case HogQLParser.PERCENT -> MODULO;
+                    default -> throw unsupported(binary, "multiplicative operator");
+                };
+                return binary(operator, binary.left, binary.right, binary);
+            }
+            if (context instanceof HogQLParser.ColumnExprPrecedence2Context binary) {
+                BinaryOperator operator = switch (binary.operator.getType()) {
+                    case HogQLParser.PLUS -> ADD;
+                    case HogQLParser.DASH -> SUBTRACT;
+                    default -> throw unsupported(binary, "additive operator");
+                };
+                return binary(operator, binary.left, binary.right, binary);
+            }
+            if (context instanceof HogQLParser.ColumnExprPrecedence3Context binary) {
+                BinaryOperator operator = switch (binary.operator.getType()) {
+                    case HogQLParser.EQ_DOUBLE, HogQLParser.EQ_SINGLE -> EQUAL;
+                    case HogQLParser.NOT_EQ -> NOT_EQUAL;
+                    case HogQLParser.LT -> LESS_THAN;
+                    case HogQLParser.LT_EQ -> LESS_THAN_OR_EQUAL;
+                    case HogQLParser.GT -> GREATER_THAN;
+                    case HogQLParser.GT_EQ -> GREATER_THAN_OR_EQUAL;
+                    default -> throw unsupported(binary, "comparison operator");
+                };
+                return binary(operator, binary.left, binary.right, binary);
+            }
+            if (context instanceof HogQLParser.ColumnExprFunctionContext function) {
+                return buildFunction(function);
+            }
+            throw unsupported(context, "expression " + context.getClass().getSimpleName());
+        }
+
+        private BinaryExpression binary(BinaryOperator operator, HogQLParser.ColumnExprContext left, HogQLParser.ColumnExprContext right, ParserRuleContext context)
+        {
+            return new BinaryExpression(operator, buildExpression(left), buildExpression(right), sourceSpan(context));
+        }
+
+        private BinaryExpression binary(BinaryOperator operator, HogQLParser.ColumnExprValueContext left, HogQLParser.ColumnExprValueContext right, ParserRuleContext context)
+        {
+            return new BinaryExpression(operator, buildExpression(left), buildExpression(right), sourceSpan(context));
+        }
+
+        private FunctionCall buildFunction(HogQLParser.ColumnExprFunctionContext context)
+        {
+            if (context.columnExprs != null || context.DISTINCT() != null || context.orderExprList() != null || context.filterExpr != null) {
+                throw unsupported(context, "parametric, distinct, ordered, or filtered function");
+            }
+            List<Expression> arguments = context.columnArgList == null ? List.of() : context.columnArgList.columnExpr().stream()
+                                                                                     .map(this::buildExpression)
+                                                                                     .toList();
+            return new FunctionCall(buildIdentifier(context.identifier()), arguments, sourceSpan(context));
+        }
+
+        private Expression buildLiteral(HogQLParser.LiteralContext context)
+        {
+            if (context.NULL_SQL() != null) {
+                return new Literal(NULL, "null", sourceSpan(context));
+            }
+            if (context.STRING_LITERAL() != null) {
+                return new Literal(STRING, decodeQuoted(context.getText()), sourceSpan(context));
+            }
+
+            String value = context.numberLiteral().getText();
+            if (!value.matches("[+-]?[0-9]+")) {
+                throw unsupported(context, "numeric literal");
+            }
+            if (value.startsWith("-")) {
+                return new Literal(INTEGER, "-" + normalizeInteger(value.substring(1)), sourceSpan(context));
+            }
+            if (value.startsWith("+")) {
+                Literal magnitude = new Literal(INTEGER, normalizeInteger(value.substring(1)), sourceSpan(context));
+                return new UnaryExpression(POSITIVE, magnitude, sourceSpan(context));
+            }
+            return new Literal(INTEGER, normalizeInteger(value), sourceSpan(context));
+        }
+
+        private Expression buildColumnReference(HogQLParser.ColumnIdentifierContext context)
+        {
+            if (context.placeholder() != null) {
+                throw unsupported(context, "placeholder");
+            }
+            List<Identifier> parts = new ArrayList<>();
+            if (context.tableIdentifier() != null) {
+                parts.addAll(buildIdentifiers(context.tableIdentifier()));
+            }
+            parts.addAll(buildIdentifiers(context.nestedIdentifier()));
+            if (parts.size() == 1 && !parts.getFirst().delimited()) {
+                if (parts.getFirst().value().equalsIgnoreCase("true")) {
+                    return new Literal(HogQlQuery.LiteralKind.BOOLEAN, "true", sourceSpan(context));
+                }
+                if (parts.getFirst().value().equalsIgnoreCase("false")) {
+                    return new Literal(HogQlQuery.LiteralKind.BOOLEAN, "false", sourceSpan(context));
+                }
+            }
+            return new ColumnReference(parts, sourceSpan(context));
+        }
+
+        private TableReference buildTableReference(HogQLParser.JoinExprContext context)
+        {
+            if (!(context instanceof HogQLParser.JoinExprTableContext table) || table.FINAL() != null || table.sampleClause() != null || !(table.tableExpr() instanceof HogQLParser.TableExprIdentifierContext identifier)) {
+                throw unsupported(context, "table expression or join");
+            }
+            return new TableReference(buildIdentifiers(identifier.tableIdentifier()), sourceSpan(context));
+        }
+
+        private List<Identifier> buildIdentifiers(HogQLParser.TableIdentifierContext context)
+        {
+            List<Identifier> parts = new ArrayList<>();
+            if (context.databaseIdentifier() != null) {
+                parts.add(buildIdentifier(context.databaseIdentifier().identifier()));
+            }
+            parts.addAll(buildIdentifiers(context.nestedIdentifier()));
+            return List.copyOf(parts);
+        }
+
+        private List<Identifier> buildIdentifiers(HogQLParser.NestedIdentifierContext context)
         {
             return context.identifier().stream()
                     .map(this::buildIdentifier)
                     .toList();
         }
 
-        private Identifier buildIdentifier(HogQlBaseParser.IdentifierContext context)
+        private Identifier buildIdentifier(HogQLParser.IdentifierContext context)
         {
-            String value = context.getText();
-            boolean delimited = context.IDENTIFIER() == null;
-            if (context.QUOTED_IDENTIFIER() != null) {
-                value = unquoteAndUnescape(value, '"');
-            }
-            else if (context.BACKQUOTED_IDENTIFIER() != null) {
-                value = unquoteAndUnescape(value, '`');
-            }
-            return new Identifier(value, delimited, sourceSpan(context));
+            return buildIdentifier(context.getText(), context);
         }
 
-        private static String decodeString(String value)
+        private Identifier buildIdentifier(String text, ParserRuleContext context)
         {
-            return value.substring(1, value.length() - 1).replace("''", "'");
+            boolean delimited = text.startsWith("`") || text.startsWith("\"");
+            return new Identifier(delimited ? decodeQuoted(text) : text, delimited, sourceSpan(context));
         }
 
-        private static String unquoteAndUnescape(String value, char quote)
-        {
-            String quoted = value.substring(1, value.length() - 1);
-            return quoted.replace(String.valueOf(quote).repeat(2), String.valueOf(quote));
-        }
-
-        private static SourceSpan sourceSpan(ParserRuleContext context)
+        private SourceSpan sourceSpan(ParserRuleContext context)
         {
             Token start = context.getStart();
             Token stop = context.getStop();
-            return new SourceSpan(start.getStartIndex(), stop.getStopIndex() + 1, start.getLine(), start.getCharPositionInLine() + 1);
+            int startOffset = start.getStartIndex();
+            int endOffset = stop.getStopIndex() + 1;
+            return new SourceSpan(
+                    startOffset,
+                    endOffset,
+                    sourcePositions.line(startOffset),
+                    sourcePositions.column(startOffset),
+                    sourcePositions.line(endOffset),
+                    sourcePositions.column(endOffset));
+        }
+
+        private HogQlParsingException unsupported(ParserRuleContext context, String feature)
+        {
+            SourceSpan span = sourceSpan(context);
+            return new HogQlParsingException("HogQL feature is not lowered yet: " + feature, null, span.startLine(), span.startColumn());
+        }
+
+        private static String normalizeInteger(String value)
+        {
+            int firstNonZero = 0;
+            while (firstNonZero < value.length() - 1 && value.charAt(firstNonZero) == '0') {
+                firstNonZero++;
+            }
+            return value.substring(firstNonZero);
+        }
+
+        private static String decodeQuoted(String text)
+        {
+            char quote = text.charAt(0);
+            StringBuilder decoded = new StringBuilder(text.length() - 2);
+            for (int index = 1; index < text.length() - 1; index++) {
+                char character = text.charAt(index);
+                if (character == quote && text.charAt(index + 1) == quote) {
+                    decoded.append(quote);
+                    index++;
+                }
+                else if (character != '\\') {
+                    decoded.append(character);
+                }
+                else {
+                    char escaped = text.charAt(++index);
+                    if (escaped == 'x') {
+                        decoded.append((char) ((digit(text.charAt(++index), 16) << 4) | digit(text.charAt(++index), 16)));
+                    }
+                    else {
+                        decoded.append(switch (escaped) {
+                            case '0' -> '\0';
+                            case 'a' -> '\u0007';
+                            case 'b' -> '\b';
+                            case 'f' -> '\f';
+                            case 'n' -> '\n';
+                            case 'r' -> '\r';
+                            case 't' -> '\t';
+                            case 'v' -> '\u000B';
+                            default -> escaped;
+                        });
+                    }
+                }
+            }
+            return decoded.toString();
+        }
+    }
+
+    private static final class SourcePositions
+    {
+        private final int[] lines;
+        private final int[] columns;
+
+        private SourcePositions(String source)
+        {
+            int length = source.codePointCount(0, source.length());
+            lines = new int[length + 1];
+            columns = new int[length + 1];
+            lines[0] = 1;
+            columns[0] = 1;
+
+            int line = 1;
+            int column = 1;
+            int codePointOffset = 0;
+            boolean previousWasCarriageReturn = false;
+            for (int charOffset = 0; charOffset < source.length(); ) {
+                int codePoint = source.codePointAt(charOffset);
+                charOffset += Character.charCount(codePoint);
+                codePointOffset++;
+                if (codePoint == '\n' && previousWasCarriageReturn) {
+                    previousWasCarriageReturn = false;
+                }
+                else if (codePoint == '\n' || codePoint == '\r') {
+                    line++;
+                    column = 1;
+                    previousWasCarriageReturn = codePoint == '\r';
+                }
+                else {
+                    column++;
+                    previousWasCarriageReturn = false;
+                }
+                lines[codePointOffset] = line;
+                columns[codePointOffset] = column;
+            }
+        }
+
+        public int line(int offset)
+        {
+            return lines[offset];
+        }
+
+        public int column(int offset)
+        {
+            return columns[offset];
         }
     }
 }

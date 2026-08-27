@@ -13,9 +13,14 @@
  */
 package io.trino.hogql.parser;
 
+import io.trino.hogql.parser.tree.HogQlQuery;
+import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
+import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestHogQlParser
@@ -25,19 +30,39 @@ public class TestHogQlParser
     @ParameterizedTest
     @ValueSource(strings = {
             "SELECT",
-            "SELECT 1 WHERE TRUE",
             "SELECT count(*)",
             "SELECT * FROM first JOIN second",
             "DROP TABLE events",
             "SELECT 1; SELECT 2",
-            "SELECT 'unsupported\\nescape'",
             "SELECT * FROM",
-            "SELECT 01",
+            "SELECT {value}",
+            "SELECT 1 GROUP BY 1",
     })
-    public void testRejectsSyntaxOutsideM0(String hogql)
+    public void testRejectsSyntaxWithoutAnAstMapping(String hogql)
     {
         assertThatThrownBy(() -> parser.parseStatement(hogql))
                 .isInstanceOf(HogQlParsingException.class)
                 .hasMessageStartingWith("line ");
+    }
+
+    @Test
+    public void testUsesCanonicalGrammarForExpressionsAndWhereClause()
+    {
+        HogQlQuery query = parser.parseStatement("SELECT event + 1 * 2 FROM events WHERE event >= 3 AND NOT false");
+
+        assertThat(query.projections()).hasSize(1);
+        assertThat(query.from()).isPresent();
+        assertThat(query.where()).isPresent();
+    }
+
+    @Test
+    public void testSourceSpansUseUnicodeCodePointOffsetsAndEndPositions()
+    {
+        HogQlQuery query = parser.parseStatement("SELECT '😀',\n event");
+        ExpressionProjection projection = (ExpressionProjection) query.projections().get(1);
+        ColumnReference reference = (ColumnReference) projection.expression();
+
+        assertThat(query.span()).isEqualTo(new HogQlQuery.SourceSpan(0, 18, 1, 1, 2, 7));
+        assertThat(reference.span()).isEqualTo(new HogQlQuery.SourceSpan(13, 18, 2, 2, 2, 7));
     }
 }

@@ -18,12 +18,13 @@ import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
-public record HogQlQuery(List<Projection> projections, Optional<TableReference> from, SourceSpan span)
+public record HogQlQuery(List<Projection> projections, Optional<TableReference> from, Optional<Expression> where, SourceSpan span)
 {
     public HogQlQuery
     {
         projections = List.copyOf(requireNonNull(projections, "projections is null"));
         from = requireNonNull(from, "from is null");
+        where = requireNonNull(where, "where is null");
         span = requireNonNull(span, "span is null");
     }
 
@@ -42,12 +43,13 @@ public record HogQlQuery(List<Projection> projections, Optional<TableReference> 
         }
     }
 
-    public record ExpressionProjection(Expression expression)
+    public record ExpressionProjection(Expression expression, Optional<Identifier> alias)
             implements Projection
     {
         public ExpressionProjection
         {
             expression = requireNonNull(expression, "expression is null");
+            alias = requireNonNull(alias, "alias is null");
         }
 
         @Override
@@ -58,9 +60,71 @@ public record HogQlQuery(List<Projection> projections, Optional<TableReference> 
     }
 
     public sealed interface Expression
-            permits ColumnReference, Literal
+            permits BinaryExpression,
+                    ColumnReference,
+                    FunctionCall,
+                    Literal,
+                    UnaryExpression
     {
         SourceSpan span();
+    }
+
+    public record UnaryExpression(UnaryOperator operator, Expression operand, SourceSpan span)
+            implements Expression
+    {
+        public UnaryExpression
+        {
+            operator = requireNonNull(operator, "operator is null");
+            operand = requireNonNull(operand, "operand is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record BinaryExpression(BinaryOperator operator, Expression left, Expression right, SourceSpan span)
+            implements Expression
+    {
+        public BinaryExpression
+        {
+            operator = requireNonNull(operator, "operator is null");
+            left = requireNonNull(left, "left is null");
+            right = requireNonNull(right, "right is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record FunctionCall(Identifier name, List<Expression> arguments, SourceSpan span)
+            implements Expression
+    {
+        public FunctionCall
+        {
+            name = requireNonNull(name, "name is null");
+            arguments = List.copyOf(requireNonNull(arguments, "arguments is null"));
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public enum UnaryOperator
+    {
+        NEGATE,
+        NOT,
+        POSITIVE,
+    }
+
+    public enum BinaryOperator
+    {
+        ADD,
+        AND,
+        DIVIDE,
+        EQUAL,
+        GREATER_THAN,
+        GREATER_THAN_OR_EQUAL,
+        LESS_THAN,
+        LESS_THAN_OR_EQUAL,
+        MODULO,
+        MULTIPLY,
+        NOT_EQUAL,
+        OR,
+        SUBTRACT,
     }
 
     public record ColumnReference(List<Identifier> parts, SourceSpan span)
@@ -119,7 +183,7 @@ public record HogQlQuery(List<Projection> projections, Optional<TableReference> 
         }
     }
 
-    public record SourceSpan(int startOffset, int endOffset, int line, int column)
+    public record SourceSpan(int startOffset, int endOffset, int startLine, int startColumn, int endLine, int endColumn)
     {
         public SourceSpan
         {
@@ -129,11 +193,17 @@ public record HogQlQuery(List<Projection> projections, Optional<TableReference> 
             if (endOffset < startOffset) {
                 throw new IllegalArgumentException("endOffset is before startOffset");
             }
-            if (line < 1) {
-                throw new IllegalArgumentException("line must be positive");
+            if (startLine < 1) {
+                throw new IllegalArgumentException("startLine must be positive");
             }
-            if (column < 1) {
-                throw new IllegalArgumentException("column must be positive");
+            if (startColumn < 1) {
+                throw new IllegalArgumentException("startColumn must be positive");
+            }
+            if (endLine < startLine) {
+                throw new IllegalArgumentException("endLine is before startLine");
+            }
+            if (endColumn < 1) {
+                throw new IllegalArgumentException("endColumn must be positive");
             }
         }
     }
