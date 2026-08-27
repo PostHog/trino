@@ -983,10 +983,14 @@ public final class HogQlParser
             }
 
             if (expression instanceof HogQLParser.ColumnExprValuePassthroughContext passthrough && passthrough.columnExprValue() instanceof HogQLParser.ColumnExprAsteriskContext asterisk) {
-                if (alias.isPresent() || asterisk.tableIdentifier() != null || asterisk.EXCLUDE() != null) {
-                    throw unsupported(asterisk, "qualified or transformed star");
+                if (alias.isPresent()) {
+                    throw unsupported(asterisk, "aliased star");
                 }
-                return new Star(sourceSpan(context));
+                List<Identifier> qualifier = asterisk.tableIdentifier() == null ? List.of() : buildIdentifiers(asterisk.tableIdentifier());
+                List<ColumnReference> exclusions = asterisk.identifierList() == null ? List.of() : asterisk.identifierList().nestedIdentifier().stream()
+                                                                                                   .map(identifier -> new ColumnReference(buildIdentifiers(identifier), sourceSpan(identifier)))
+                                                                                                   .toList();
+                return new Star(qualifier, exclusions, sourceSpan(asterisk));
             }
             return new ExpressionProjection(buildExpression(expression), alias);
         }

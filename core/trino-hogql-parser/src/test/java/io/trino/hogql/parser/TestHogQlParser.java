@@ -29,6 +29,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.SetOperation;
 import io.trino.hogql.parser.tree.HogQlQuery.SetOperationType;
 import io.trino.hogql.parser.tree.HogQlQuery.SortDirection;
+import io.trino.hogql.parser.tree.HogQlQuery.Star;
 import io.trino.hogql.parser.tree.HogQlQuery.SubqueryRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.SubscriptExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
@@ -118,6 +119,33 @@ public class TestHogQlParser
         assertThat(first.span()).isEqualTo(new HogQlQuery.SourceSpan(17, 24, 2, 2, 2, 9));
         assertThat(repeated.name()).isEqualTo("later");
         assertThat(repeated.span()).isEqualTo(new HogQlQuery.SourceSpan(27, 34, 2, 12, 2, 19));
+    }
+
+    @Test
+    public void testBuildsQualifiedStarWithExclusionsAndSourceSpans()
+    {
+        HogQlQuery query = parser.parseStatement("SELECT \"Event Alias\".* EXCLUDE (\"event\", personId) FROM events AS \"Event Alias\"");
+
+        Star star = (Star) query.projections().getFirst();
+        assertThat(star.qualifier()).singleElement().satisfies(qualifier -> {
+            assertThat(qualifier.value()).isEqualTo("Event Alias");
+            assertThat(qualifier.delimited()).isTrue();
+            assertThat(qualifier.span()).isEqualTo(new HogQlQuery.SourceSpan(7, 20, 1, 8, 1, 21));
+        });
+        assertThat(star.exclusions()).extracting(exclusion -> exclusion.parts().getFirst().value()).containsExactly("event", "personId");
+        assertThat(star.exclusions()).extracting(exclusion -> exclusion.parts().getFirst().delimited()).containsExactly(true, false);
+        assertThat(star.exclusions().getFirst().span()).isEqualTo(new HogQlQuery.SourceSpan(32, 39, 1, 33, 1, 40));
+        assertThat(star.exclusions().get(1).span()).isEqualTo(new HogQlQuery.SourceSpan(41, 49, 1, 42, 1, 50));
+        assertThat(star.span()).isEqualTo(new HogQlQuery.SourceSpan(7, 50, 1, 8, 1, 51));
+    }
+
+    @Test
+    public void testPreservesQualifiedStarExclusionPath()
+    {
+        Star star = (Star) parser.parseStatement("SELECT * EXCLUDE (analytics.events.event) FROM events").projections().getFirst();
+
+        assertThat(star.exclusions()).singleElement().satisfies(exclusion ->
+                assertThat(exclusion.parts()).extracting(HogQlQuery.Identifier::value).containsExactly("analytics", "events", "event"));
     }
 
     @Test

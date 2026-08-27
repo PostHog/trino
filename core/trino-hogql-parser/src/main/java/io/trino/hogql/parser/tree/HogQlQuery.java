@@ -222,12 +222,19 @@ public record HogQlQuery(
         SourceSpan span();
     }
 
-    public record Star(SourceSpan span)
+    public record Star(List<Identifier> qualifier, List<ColumnReference> exclusions, SourceSpan span)
             implements Projection
     {
         public Star
         {
+            qualifier = List.copyOf(requireNonNull(qualifier, "qualifier is null"));
+            exclusions = List.copyOf(requireNonNull(exclusions, "exclusions is null"));
             span = requireNonNull(span, "span is null");
+        }
+
+        public Star(SourceSpan span)
+        {
+            this(List.of(), List.of(), span);
         }
     }
 

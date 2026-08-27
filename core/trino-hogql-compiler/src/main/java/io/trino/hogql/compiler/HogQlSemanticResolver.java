@@ -96,11 +96,13 @@ import io.trino.spi.TrinoException;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_COMPILER_LIMIT_EXCEEDED;
 import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_RESOLUTION_ERROR;
@@ -212,19 +214,7 @@ final class HogQlSemanticResolver
     private List<Projection> resolveProjection(Projection projection)
     {
         return switch (projection) {
-            case Star star -> {
-                if (!allRelationsLogical) {
-                    yield List.of(star);
-                }
-                yield bindings.stream()
-                        .flatMap(binding -> binding.orderedFields().stream()
-                                .filter(BoundField::starVisible)
-                                .map(field -> new ExpressionProjection(
-                                        resolveBoundField(binding, field, binding.starQualifier(bindings.size()), star.span(), expansionBudget),
-                                        Optional.of(new Identifier(field.name(), true, star.span())))))
-                        .map(Projection.class::cast)
-                        .toList();
-            }
+            case Star star -> resolveStar(star);
             case ExpressionProjection expressionProjection -> {
                 Expression resolved = resolveExpression(expressionProjection.expression());
                 Optional<Identifier> alias = expressionProjection.alias();
@@ -234,6 +224,123 @@ final class HogQlSemanticResolver
                 yield List.of(new ExpressionProjection(resolved, alias));
             }
         };
+    }
+
+    private List<Projection> resolveStar(Star star)
+    {
+        List<TableBinding> starBindings;
+        boolean qualified = !star.qualifier().isEmpty();
+        if (qualified) {
+            starBindings = bindings.stream()
+                    .filter(binding -> matchesStarQualifier(binding, star.qualifier()))
+                    .toList();
+            if (starBindings.size() > 1) {
+                throw starResolutionError(star.qualifier().getFirst(), "Ambiguous HogQL star qualifier: " + starQualifier(star));
+            }
+            if (starBindings.isEmpty()) {
+                if (allRelationsLogical) {
+                    throw starResolutionError(star.qualifier().getFirst(), "Unknown HogQL star qualifier: " + starQualifier(star));
+                }
+                return List.of(star);
+            }
+        }
+        else {
+            if (!allRelationsLogical) {
+                return List.of(star);
+            }
+            starBindings = bindings;
+        }
+
+        Set<StarField> exclusions = resolveStarExclusions(star, starBindings);
+        return starBindings.stream()
+                .flatMap(binding -> binding.orderedFields().stream()
+                        .filter(BoundField::starVisible)
+                        .filter(field -> !exclusions.contains(new StarField(binding, field)))
+                        .map(field -> new ExpressionProjection(
+                                resolveBoundField(
+                                        binding,
+                                        field,
+                                        qualified ? Optional.of(binding.outputQualifier()) : binding.starQualifier(bindings.size()),
+                                        star.span(),
+                                        expansionBudget),
+                                Optional.of(new Identifier(field.name(), true, star.span())))))
+                .map(Projection.class::cast)
+                .toList();
+    }
+
+    private static Set<StarField> resolveStarExclusions(Star star, List<TableBinding> starBindings)
+    {
+        Set<StarField> exclusions = new HashSet<>();
+        for (ColumnReference exclusion : star.exclusions()) {
+            List<Identifier> parts = exclusion.parts();
+            Identifier fieldName = parts.getLast();
+            List<TableBinding> exclusionBindings = parts.size() == 1 ? starBindings : starBindings.stream()
+                                                                                      .filter(binding -> matchesStarQualifier(binding, parts.subList(0, parts.size() - 1)))
+                                                                                      .toList();
+            if (parts.size() > 1 && exclusionBindings.size() > 1) {
+                throw starResolutionError(exclusion.span(), "Ambiguous HogQL star exclusion qualifier: " + identifierPath(parts.subList(0, parts.size() - 1)));
+            }
+            List<StarField> matchedFields = exclusionBindings.stream()
+                    .flatMap(binding -> binding.orderedFields().stream()
+                            .filter(BoundField::starVisible)
+                            .filter(field -> matchesIdentifier(fieldName, field.name()))
+                            .map(field -> new StarField(binding, field)))
+                    .distinct()
+                    .toList();
+            if (matchedFields.isEmpty()) {
+                throw starResolutionError(exclusion.span(), "Unknown HogQL star exclusion: " + identifierPath(parts));
+            }
+            if (matchedFields.stream().anyMatch(exclusions::contains)) {
+                throw starResolutionError(exclusion.span(), "Duplicate HogQL star exclusion: " + identifierPath(parts));
+            }
+            exclusions.addAll(matchedFields);
+        }
+        return exclusions;
+    }
+
+    private static boolean matchesStarQualifier(TableBinding binding, List<Identifier> qualifier)
+    {
+        if (binding.aliased()) {
+            return qualifier.size() == 1 && matchesIdentifier(qualifier.getFirst(), binding.outputQualifier());
+        }
+        if (qualifier.size() == 1 && canonicalIdentifier(qualifier.getFirst().value(), qualifier.getFirst().delimited()).equals(canonical(binding.relationName()))) {
+            return true;
+        }
+        if (qualifier.size() > binding.physicalQualifier().size()) {
+            return false;
+        }
+        int offset = binding.physicalQualifier().size() - qualifier.size();
+        for (int index = 0; index < qualifier.size(); index++) {
+            if (!matchesIdentifier(qualifier.get(index), binding.physicalQualifier().get(offset + index))) {
+                return false;
+            }
+        }
+        return !qualifier.isEmpty();
+    }
+
+    private static boolean matchesIdentifier(Identifier identifier, String value)
+    {
+        return identifier.delimited() ? identifier.value().equals(value) : canonical(identifier.value()).equals(canonical(value));
+    }
+
+    private static boolean matchesIdentifier(Identifier identifier, PhysicalIdentifier value)
+    {
+        return canonicalIdentifier(identifier.value(), identifier.delimited()).equals(canonicalIdentifier(value.value(), value.delimited()));
+    }
+
+    private static String canonicalIdentifier(String value, boolean delimited)
+    {
+        return delimited ? value : canonical(value);
+    }
+
+    private static String starQualifier(Star star)
+    {
+        return identifierPath(star.qualifier());
+    }
+
+    private static String identifierPath(List<Identifier> identifiers)
+    {
+        return String.join(".", identifiers.stream().map(Identifier::value).toList());
     }
 
     private ResolvedRelation resolveRelation(Relation relation)
@@ -375,6 +482,7 @@ final class HogQlSemanticResolver
                         definition,
                         canonical(definition.name()),
                         definition.physicalTable().table(),
+                        List.of(definition.physicalTable().catalog(), definition.physicalTable().schema(), definition.physicalTable().table()),
                         false,
                         fields)),
                 true);
@@ -397,6 +505,7 @@ final class HogQlSemanticResolver
                         definition.name(),
                         canonical(definition.name()),
                         new PhysicalIdentifier(definition.physicalView().table().value(), definition.physicalView().table().delimited()),
+                        List.of(definition.physicalView().catalog(), definition.physicalView().schema(), definition.physicalView().table()),
                         false,
                         fields,
                         TableBinding.fieldMap(fields))),
@@ -490,6 +599,7 @@ final class HogQlSemanticResolver
                         relationName,
                         canonical(relationName),
                         new PhysicalIdentifier(relationName, true),
+                        List.of(),
                         false,
                         fields,
                         TableBinding.fieldMap(fields))),
@@ -1452,6 +1562,7 @@ final class HogQlSemanticResolver
             LogicalTableDefinition definition,
             String qualifier,
             PhysicalIdentifier outputQualifier,
+            List<PhysicalIdentifier> physicalQualifier,
             boolean aliased,
             List<BoundField> fields)
     {
@@ -1459,6 +1570,7 @@ final class HogQlSemanticResolver
                 definition.name(),
                 qualifier,
                 outputQualifier,
+                physicalQualifier,
                 aliased,
                 fields,
                 TableBinding.fieldMap(fields));
@@ -1496,6 +1608,20 @@ final class HogQlSemanticResolver
                 null);
     }
 
+    private static TrinoException starResolutionError(Identifier identifier, String message)
+    {
+        return starResolutionError(identifier.span(), message);
+    }
+
+    private static TrinoException starResolutionError(HogQlQuery.SourceSpan span, String message)
+    {
+        return new TrinoException(
+                HOGQL_RESOLUTION_ERROR,
+                Optional.of(new Location(span.startLine(), span.startColumn())),
+                message,
+                null);
+    }
+
     private static TrinoException incompatibleUsingResolutionError(Identifier identifier)
     {
         return new TrinoException(
@@ -1518,13 +1644,14 @@ final class HogQlSemanticResolver
             String relationName,
             String qualifier,
             PhysicalIdentifier outputQualifier,
+            List<PhysicalIdentifier> physicalQualifier,
             boolean aliased,
             List<BoundField> orderedFields,
             Map<String, BoundField> fields)
     {
-        private TableBinding(LogicalTableDefinition logicalTable, String qualifier, PhysicalIdentifier outputQualifier, boolean aliased)
+        private TableBinding(LogicalTableDefinition logicalTable, String qualifier, PhysicalIdentifier outputQualifier, List<PhysicalIdentifier> physicalQualifier, boolean aliased)
         {
-            this(logicalTable.name(), qualifier, outputQualifier, aliased, boundFields(logicalTable), fieldMap(boundFields(logicalTable)));
+            this(logicalTable.name(), qualifier, outputQualifier, physicalQualifier, aliased, boundFields(logicalTable), fieldMap(boundFields(logicalTable)));
         }
 
         private TableBinding
@@ -1532,6 +1659,7 @@ final class HogQlSemanticResolver
             relationName = requireNonNull(relationName, "relationName is null");
             qualifier = requireNonNull(qualifier, "qualifier is null");
             outputQualifier = requireNonNull(outputQualifier, "outputQualifier is null");
+            physicalQualifier = List.copyOf(requireNonNull(physicalQualifier, "physicalQualifier is null"));
             orderedFields = List.copyOf(requireNonNull(orderedFields, "orderedFields is null"));
             fields = Map.copyOf(requireNonNull(fields, "fields is null"));
         }
@@ -1542,6 +1670,7 @@ final class HogQlSemanticResolver
                     relationName,
                     canonical(alias.value()),
                     new PhysicalIdentifier(alias.value(), alias.delimited()),
+                    physicalQualifier,
                     true,
                     orderedFields,
                     fields);
@@ -1578,6 +1707,8 @@ final class HogQlSemanticResolver
     }
 
     private record FieldMatch(TableBinding binding, BoundField field) {}
+
+    private record StarField(TableBinding binding, BoundField field) {}
 
     private record PropertyMatch(TableBinding binding, PropertyDefinition property) {}
 

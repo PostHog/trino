@@ -269,12 +269,27 @@ final class TrinoAstFactory
     private static SelectItem createSelectItem(Projection projection, Map<SourceSpan, Integer> parameterIds)
     {
         return switch (projection) {
-            case Star star -> new AllColumns(location(star.span()));
+            case Star star -> createAllColumns(star);
             case ExpressionProjection expression -> new SingleColumn(
                     location(expression.span()),
                     createExpression(expression.expression(), parameterIds),
                     expression.alias().map(TrinoAstFactory::createIdentifier));
         };
+    }
+
+    private static AllColumns createAllColumns(Star star)
+    {
+        if (!star.exclusions().isEmpty()) {
+            ColumnReference exclusion = star.exclusions().getFirst();
+            throw unsupportedSemanticExpression(
+                    exclusion.span(),
+                    "HogQL star exclusions require a logical relation from the semantic catalog: " +
+                            String.join(".", exclusion.parts().stream().map(Identifier::value).toList()));
+        }
+        Optional<Expression> target = star.qualifier().isEmpty()
+                ? Optional.empty()
+                : Optional.of(createColumnReference(new ColumnReference(star.qualifier(), star.span())));
+        return new AllColumns(location(star.span()), target, List.of());
     }
 
     private static Expression createExpression(HogQlQuery.Expression expression, Map<SourceSpan, Integer> parameterIds)

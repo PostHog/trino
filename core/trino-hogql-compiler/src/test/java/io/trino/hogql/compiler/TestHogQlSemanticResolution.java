@@ -44,6 +44,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_RESOLUTION_ERROR;
+import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_UNSUPPORTED_FEATURE;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
 
@@ -131,6 +132,142 @@ public class TestHogQlSemanticResolution
         assertThat(query.getSelect().getSelectItems().subList(0, 2))
                 .extracting(item -> ((Identifier) ((SingleColumn) item).getExpression()).getValue())
                 .containsExactly("event_name", "Person ID");
+    }
+
+    @Test
+    public void testExpandsQualifiedLogicalStarsWithExclusionsInManifestOrder()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+
+        HogQlCompilationResult result = compiler.compile(
+                envelope(
+                        "SELECT e.* EXCLUDE (event), p.* EXCLUDE (personId) " +
+                                "FROM events e JOIN persons p ON e.personId = p.personId",
+                        OptionalLong.of(7)),
+                Optional.of(context));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT e.\"Person ID\" AS \"personId\", p.full_name AS \"name\" " +
+                        "FROM analytics.\"Hog Data\".\"raw-events\" e " +
+                        "JOIN analytics.\"Hog Data\".\"raw-persons\" p ON e.\"Person ID\" = p.person_id"));
+    }
+
+    @Test
+    public void testExpandsQuotedLogicalStarAndUnqualifiedExclusion()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+
+        HogQlCompilationResult quoted = compiler.compile(
+                envelope("SELECT \"E\".* EXCLUDE (\"event\") FROM events AS \"E\"", OptionalLong.of(7)),
+                Optional.of(context));
+        HogQlCompilationResult unqualified = compiler.compile(
+                envelope("SELECT * EXCLUDE (events.personId) FROM events", OptionalLong.of(7)),
+                Optional.of(context));
+
+        assertThat(quoted.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT \"E\".\"Person ID\" AS \"personId\" FROM analytics.\"Hog Data\".\"raw-events\" AS \"E\""));
+        assertThat(unqualified.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT event_name AS \"event\" FROM analytics.\"Hog Data\".\"raw-events\""));
+    }
+
+    @Test
+    public void testMatchesLogicalAndPhysicalQualifiedStarSuffixes()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+
+        HogQlCompilationResult result = compiler.compile(
+                envelope(
+                        "SELECT events.* EXCLUDE (personId), " +
+                                "\"raw-events\".* EXCLUDE (personId), " +
+                                "\"Hog Data\".\"raw-events\".* EXCLUDE (personId), " +
+                                "analytics.\"Hog Data\".\"raw-events\".* EXCLUDE (personId) FROM events",
+                        OptionalLong.of(7)),
+                Optional.of(context));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT \"raw-events\".event_name AS \"event\", " +
+                        "\"raw-events\".event_name AS \"event\", " +
+                        "\"raw-events\".event_name AS \"event\", " +
+                        "\"raw-events\".event_name AS \"event\" FROM analytics.\"Hog Data\".\"raw-events\""));
+    }
+
+    @Test
+    public void testRejectsInvalidLogicalStarQualifierAndExclusionsAtSource()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+
+        assertResolutionFailure(
+                context,
+                "SELECT e.* EXCLUDE (missing) FROM events e",
+                "missing",
+                "Unknown HogQL star exclusion: missing");
+        assertResolutionFailure(
+                context,
+                "SELECT e.* EXCLUDE (event, \"event\") FROM events e",
+                "\"event\"",
+                "Duplicate HogQL star exclusion: event");
+        assertResolutionFailure(
+                context,
+                "SELECT e.* FROM events e JOIN persons e ON e.personId = e.personId",
+                "e.*",
+                "Ambiguous HogQL star qualifier: e");
+        assertResolutionFailure(
+                context,
+                "SELECT e.* FROM events AS \"E\"",
+                "e.*",
+                "Unknown HogQL star qualifier: e");
+        assertResolutionFailure(
+                context,
+                "SELECT events.* FROM events e",
+                "events.*",
+                "Unknown HogQL star qualifier: events");
+        assertResolutionFailure(
+                context,
+                "SELECT analytics.\"hog data\".\"raw-events\".* FROM events",
+                "analytics",
+                "Unknown HogQL star qualifier: analytics.hog data.raw-events");
+    }
+
+    @Test
+    public void testLowersQualifiedPhysicalStarWithoutFetchingSemanticMetadata()
+    {
+        AtomicInteger pins = new AtomicInteger();
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> {
+            pins.incrementAndGet();
+            return new PinnedSnapshot(SNAPSHOT);
+        });
+
+        HogQlCompilationResult result = compiler.compile(
+                envelope("SELECT p.* FROM analytics.default.raw_events p", OptionalLong.empty()),
+                Optional.of(context));
+
+        assertThat(pins).hasValue(0);
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT p.* FROM analytics.default.raw_events p"));
+    }
+
+    @Test
+    public void testRejectsStarExclusionsWhenRelationSchemaIsUnavailable()
+    {
+        AtomicInteger pins = new AtomicInteger();
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> {
+            pins.incrementAndGet();
+            return new PinnedSnapshot(SNAPSHOT);
+        });
+        List<String> queries = List.of(
+                "SELECT p.* EXCLUDE (event_name) FROM analytics.default.raw_events p",
+                "WITH source AS (SELECT 1 AS event_name) SELECT s.* EXCLUDE (event_name) FROM source s");
+
+        for (String hogql : queries) {
+            TrinoException exception = catchThrowableOfType(
+                    TrinoException.class,
+                    () -> compiler.compile(envelope(hogql, OptionalLong.empty()), Optional.of(context)));
+
+            assertThat(exception.getErrorCode()).isEqualTo(HOGQL_UNSUPPORTED_FEATURE.toErrorCode());
+            assertThat(exception.getLocation()).contains(new Location(1, hogql.lastIndexOf("event_name") + 1));
+            assertThat(exception).hasMessageContaining("HogQL star exclusions require a logical relation from the semantic catalog: event_name");
+        }
+        assertThat(pins).hasValue(0);
     }
 
     @Test
@@ -248,6 +385,17 @@ public class TestHogQlSemanticResolution
     private static QuerySpecification querySpecification(HogQlCompilationResult result)
     {
         return (QuerySpecification) ((Query) result.statement()).getQueryBody();
+    }
+
+    private void assertResolutionFailure(HogQlSemanticCatalogContext context, String hogql, String errorToken, String message)
+    {
+        TrinoException exception = catchThrowableOfType(
+                TrinoException.class,
+                () -> compiler.compile(envelope(hogql, OptionalLong.empty()), Optional.of(context)));
+
+        assertThat(exception.getErrorCode()).isEqualTo(HOGQL_RESOLUTION_ERROR.toErrorCode());
+        assertThat(exception.getLocation()).contains(new Location(1, hogql.indexOf(errorToken) + 1));
+        assertThat(exception).hasMessage("line %s:%s: %s", 1, hogql.indexOf(errorToken) + 1, message);
     }
 
     private static HogQlCompileEnvelope envelope(String query, OptionalLong generation)
