@@ -711,7 +711,7 @@ final class HogQlSemanticResolver
                             .toList(),
                     caseExpression.defaultValue().map(this::resolveExpression),
                     caseExpression.span());
-            case CastExpression cast -> new CastExpression(resolveExpression(cast.value()), cast.type(), cast.safe(), cast.span());
+            case CastExpression cast -> new CastExpression(resolveExpression(cast.value()), cast.type(), cast.safe(), cast.typeDialect(), cast.span());
             case ColumnReference reference -> resolveColumn(reference);
             case FunctionCall function -> resolveFunctionExpression(function);
             case InCohortExpression in -> resolveCohortExpression(in);

@@ -86,6 +86,18 @@ public class TestHogQlSemanticExpansion
     }
 
     @Test
+    public void testPreservesCatalogProvidedTrinoCastTypes()
+    {
+        HogQlCompilationResult result = compile("SELECT castReal, castInteger, castBigint FROM events");
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT CAST(event_name AS real) AS castReal, " +
+                        "CAST(event_name AS integer) AS castInteger, " +
+                        "CAST(event_name AS bigint) AS castBigint " +
+                        "FROM analytics.data.raw_events"));
+    }
+
+    @Test
     public void testExpandsVirtualSavedAndMaterializedRelationsWithDeclaredOutputs()
     {
         assertThat(compile("SELECT * FROM event_view").statement()).isEqualTo(sqlParser.createStatement(
@@ -243,6 +255,9 @@ public class TestHogQlSemanticExpansion
                         new FieldReferenceRecipe("events", "constant"),
                         new LiteralRecipe(new TypedLiteral("bigint", LiteralEncoding.INTEGER, "1"))))),
                 expression("castEvent", new CastRecipe(new FieldReferenceRecipe("events", "event"), "varchar")),
+                expression("castReal", new CastRecipe(new FieldReferenceRecipe("events", "event"), "real")),
+                expression("castInteger", new CastRecipe(new FieldReferenceRecipe("events", "event"), "integer")),
+                expression("castBigint", new CastRecipe(new FieldReferenceRecipe("events", "event"), "bigint")),
                 expression("missingEvent", new OperatorRecipe(SemanticOperator.IS_NULL, List.of(new FieldReferenceRecipe("events", "event")))),
                 expression("browserProperty", new PropertyLookupRecipe(
                         "events",

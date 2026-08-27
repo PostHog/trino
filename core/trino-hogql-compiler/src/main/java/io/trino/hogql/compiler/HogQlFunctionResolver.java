@@ -208,7 +208,7 @@ final class HogQlFunctionResolver
                             .toList(),
                     caseExpression.defaultValue().map(this::resolveExpression),
                     caseExpression.span());
-            case CastExpression cast -> new CastExpression(resolveExpression(cast.value()), cast.type(), cast.safe(), cast.span());
+            case CastExpression cast -> new CastExpression(resolveExpression(cast.value()), cast.type(), cast.safe(), cast.typeDialect(), cast.span());
             case ColumnReference reference -> reference;
             case FunctionCall function -> resolveFunction(function, function.window().isPresent());
             case InCohortExpression in -> new InCohortExpression(

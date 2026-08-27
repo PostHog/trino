@@ -152,12 +152,32 @@ public class TestHogQlCompiler
     @ValueSource(strings = {
             "SELECT CASE WHEN enabled THEN 1 ELSE 0 END",
             "SELECT CASE value WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'other' END",
-            "SELECT CAST(value AS INT)",
-            "SELECT TRY_CAST(value AS VARCHAR)",
     })
     public void testLowersCaseAndCastExpressions(String hogql)
     {
         assertThat(compiler.compile(hogql)).isEqualTo(sqlParser.createStatement(hogql));
+    }
+
+    @ParameterizedTest
+    @MethodSource("representableHogQlCastTypes")
+    public void testLowersRepresentableHogQlCastTypes(String hogql, String trinoSql)
+    {
+        assertThat(compiler.compile(hogql)).isEqualTo(sqlParser.createStatement(trinoSql));
+    }
+
+    @ParameterizedTest
+    @MethodSource("unsupportedHogQlCastTypes")
+    public void testRejectsHogQlCastTypesWithoutExactTrinoRepresentation(String type, String reason)
+    {
+        String hogql = "SELECT CAST(value AS " + type + ")";
+
+        TrinoException exception = catchThrowableOfType(TrinoException.class, () -> compiler.compile(hogql));
+
+        assertThat(exception.getErrorCode()).isEqualTo(HogQlErrorCode.HOGQL_UNSUPPORTED_FEATURE.toErrorCode());
+        assertThat(exception.getLocation()).contains(new Location(1, hogql.indexOf(type) + 1));
+        assertThat(exception)
+                .hasMessageContaining("HogQL cast type cannot be represented exactly in Trino")
+                .hasMessageContaining(reason);
     }
 
     @ParameterizedTest
@@ -517,6 +537,68 @@ public class TestHogQlCompiler
                         "line 2:6: HogQL parameter placeholders are not supported in table positions: source",
                         new Location(2, 6),
                         "sensitive-table-value"));
+    }
+
+    private static Stream<Arguments> representableHogQlCastTypes()
+    {
+        return Stream.of(
+                arguments("SELECT CAST(value AS Int8)", "SELECT CAST(value AS tinyint)"),
+                arguments("SELECT CAST(value AS Int16)", "SELECT CAST(value AS smallint)"),
+                arguments("SELECT CAST(value AS Int32)", "SELECT CAST(value AS integer)"),
+                arguments("SELECT CAST(value AS Int64)", "SELECT CAST(value AS bigint)"),
+                arguments("SELECT CAST(value AS Int)", "SELECT CAST(value AS integer)"),
+                arguments("SELECT CAST(value AS Integer)", "SELECT CAST(value AS integer)"),
+                arguments("SELECT CAST(value AS Float32)", "SELECT CAST(value AS real)"),
+                arguments("SELECT CAST(value AS Float64)", "SELECT CAST(value AS double)"),
+                arguments("SELECT CAST(value AS Float)", "SELECT CAST(value AS real)"),
+                arguments("SELECT CAST(value AS Real)", "SELECT CAST(value AS real)"),
+                arguments("SELECT CAST(value AS String)", "SELECT CAST(value AS varchar)"),
+                arguments("SELECT TRY_CAST(value AS VARCHAR)", "SELECT TRY_CAST(value AS varchar)"),
+                arguments("SELECT CAST(value AS Bool)", "SELECT CAST(value AS boolean)"),
+                arguments("SELECT CAST(value AS Date)", "SELECT CAST(value AS date)"),
+                arguments("SELECT CAST(value AS UUID)", "SELECT CAST(value AS uuid)"),
+                arguments("SELECT CAST(value AS JSON)", "SELECT CAST(value AS json)"),
+                arguments("SELECT CAST(value AS Decimal(18, 4))", "SELECT CAST(value AS decimal(18, 4))"),
+                arguments("SELECT CAST(value AS Decimal32(2))", "SELECT CAST(value AS decimal(9, 2))"),
+                arguments("SELECT CAST(value AS Decimal64(4))", "SELECT CAST(value AS decimal(18, 4))"),
+                arguments("SELECT CAST(value AS Decimal128(8))", "SELECT CAST(value AS decimal(38, 8))"),
+                arguments("SELECT TRY_CAST(value AS Nullable(Decimal(18, 4)))", "SELECT TRY_CAST(value AS decimal(18, 4))"),
+                arguments("SELECT CAST(value AS Array(Nullable(Int32)))", "SELECT CAST(value AS array(integer))"),
+                arguments("SELECT CAST(value AS Map(String, Float64))", "SELECT CAST(value AS map(varchar, double))"),
+                arguments("SELECT CAST(value AS Tuple(Int64, String))", "SELECT CAST(value AS row(bigint, varchar))"),
+                arguments("SELECT CAST(value AS Tuple(id Int64, label String))", "SELECT CAST(value AS row(id bigint, label varchar))"),
+                arguments("SELECT CAST(value AS Timestamp(6))", "SELECT CAST(value AS timestamp(6))"),
+                arguments("SELECT CAST(value AS Timestamp WITH TIME ZONE)", "SELECT CAST(value AS timestamp(3) with time zone)"),
+                arguments("SELECT CAST(value AS Time(12))", "SELECT CAST(value AS time(12))"),
+                arguments("SELECT CAST(value AS Interval Day To Second)", "SELECT CAST(value AS interval day to second)"),
+                arguments("SELECT CAST(value AS Interval Year To Month)", "SELECT CAST(value AS interval year to month)"));
+    }
+
+    private static Stream<Arguments> unsupportedHogQlCastTypes()
+    {
+        return Stream.of(
+                arguments("UInt8", "unsigned integer range"),
+                arguments("UInt16", "unsigned integer range"),
+                arguments("UInt32", "unsigned integer range"),
+                arguments("UInt64", "unsigned integer range"),
+                arguments("UInt128", "unsigned integer range"),
+                arguments("UInt256", "unsigned integer range"),
+                arguments("Int128", "integer width exceeds Trino bigint"),
+                arguments("Int256", "integer width exceeds Trino bigint"),
+                arguments("Decimal256(2)", "decimal precision exceeds Trino"),
+                arguments("Decimal(39, 2)", "precision <= 38"),
+                arguments("Decimal(4, 5)", "scale <= precision"),
+                arguments("Nullable(Array(Int32))", "Nullable cannot wrap"),
+                arguments("Nullable(Map(String, Int32))", "Nullable cannot wrap"),
+                arguments("Nullable(Tuple(Int32))", "Nullable cannot wrap"),
+                arguments("FixedString(16)", "padding semantics"),
+                arguments("Date32", "Date32 range"),
+                arguments("DateTime", "time-zone and range semantics"),
+                arguments("DateTime64(3, 'UTC')", "time-zone and range semantics"),
+                arguments("Timestamp(13)", "precision exceeds 12"),
+                arguments("Time(13)", "precision exceeds 12"),
+                arguments("Timestamp WITH LOCAL TIME ZONE", "WITH LOCAL TIME ZONE semantics"),
+                arguments("Interval", "interval qualifier is required"));
     }
 
     private static HogQlTypedValue typedValue(String value)

@@ -16,6 +16,7 @@ package io.trino.hogql.parser;
 import io.trino.hogql.parser.tree.HogQlQuery;
 import io.trino.hogql.parser.tree.HogQlQuery.AliasedRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.CastExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnsList;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnsRegex;
@@ -173,6 +174,24 @@ public class TestHogQlParser
         assertThat(star.replacements()).extracting(replacement -> replacement.target().delimited()).containsExactly(false, true);
         assertThat(star.replacements()).extracting(StarReplacement::expression).allSatisfy(expression ->
                 assertThat(expression).isInstanceOf(ColumnReference.class));
+    }
+
+    @Test
+    public void testPreservesParameterizedAndNestedCastTypeSyntax()
+    {
+        HogQlQuery query = parser.parseStatement(
+                "SELECT CAST(value AS Nullable(Decimal(18, 4))), " +
+                        "TRY_CAST(value AS Tuple(id Int64, payload Array(String)))");
+
+        CastExpression decimal = (CastExpression) ((ExpressionProjection) query.projections().getFirst()).expression();
+        CastExpression tuple = (CastExpression) ((ExpressionProjection) query.projections().get(1)).expression();
+
+        assertThat(decimal.type().value()).isEqualTo("Nullable(Decimal(18, 4))");
+        assertThat(decimal.type().span()).isEqualTo(new HogQlQuery.SourceSpan(21, 45, 1, 22, 1, 46));
+        assertThat(decimal.safe()).isFalse();
+        assertThat(decimal.typeDialect()).isEqualTo(HogQlQuery.CastTypeDialect.HOGQL);
+        assertThat(tuple.type().value()).isEqualTo("Tuple(id Int64, payload Array(String))");
+        assertThat(tuple.safe()).isTrue();
     }
 
     @Test

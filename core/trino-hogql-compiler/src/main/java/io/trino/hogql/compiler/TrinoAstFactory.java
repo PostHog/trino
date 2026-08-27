@@ -20,6 +20,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.BetweenExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CaseExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CastExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.CastTypeDialect;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnsList;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnsRegex;
@@ -327,7 +328,7 @@ final class TrinoAstFactory
             case CastExpression cast -> new Cast(
                     location(cast.span()),
                     createExpression(cast.value(), parameterIds),
-                    SQL_PARSER.createType(cast.type().value()),
+                    createCastType(cast.type(), cast.typeDialect()),
                     cast.safe());
             case ColumnReference reference -> createColumnReference(reference);
             case FunctionCall function -> createFunctionCall(function, parameterIds);
@@ -359,6 +360,21 @@ final class TrinoAstFactory
                 case POSITIVE -> ArithmeticUnaryExpression.positive(location(unary.span()), createExpression(unary.operand(), parameterIds));
             };
         };
+    }
+
+    private static io.trino.sql.tree.DataType createCastType(Identifier type, CastTypeDialect typeDialect)
+    {
+        if (typeDialect == CastTypeDialect.TRINO) {
+            return SQL_PARSER.createType(type.value());
+        }
+        try {
+            return SQL_PARSER.createType(HogQlCastTypeTranslator.translate(type.value()));
+        }
+        catch (IllegalArgumentException exception) {
+            throw unsupportedSemanticExpression(
+                    type.span(),
+                    "HogQL cast type cannot be represented exactly in Trino: " + type.value() + " (" + exception.getMessage() + ")");
+        }
     }
 
     private static Expression createFunctionCall(FunctionCall function, Map<SourceSpan, Integer> parameterIds)

@@ -24,6 +24,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator;
 import io.trino.hogql.parser.tree.HogQlQuery.CaseExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CaseWhen;
 import io.trino.hogql.parser.tree.HogQlQuery.CastExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.CastTypeDialect;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnsList;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnsRegex;
@@ -468,12 +469,14 @@ public final class HogQlParser
 
     private static final class AstBuilder
     {
+        private final String source;
         private final SourcePositions sourcePositions;
         private final Deque<Set<String>> commonTableScopes = new ArrayDeque<>();
         private final Deque<Set<String>> prohibitedCommonTableScopes = new ArrayDeque<>();
 
         private AstBuilder(String source)
         {
+            this.source = requireNonNull(source, "source is null");
             sourcePositions = new SourcePositions(source);
         }
 
@@ -1095,10 +1098,10 @@ public final class HogQlParser
                 return buildCaseExpression(caseExpression);
             }
             if (context instanceof HogQLParser.ColumnExprCastContext cast) {
-                return new CastExpression(buildExpression(cast.columnExpr()), buildSimpleType(cast.columnTypeExpr()), false, sourceSpan(cast));
+                return new CastExpression(buildExpression(cast.columnExpr()), buildType(cast.columnTypeExpr()), false, CastTypeDialect.HOGQL, sourceSpan(cast));
             }
             if (context instanceof HogQLParser.ColumnExprTryCastContext cast) {
-                return new CastExpression(buildExpression(cast.columnExpr()), buildSimpleType(cast.columnTypeExpr()), true, sourceSpan(cast));
+                return new CastExpression(buildExpression(cast.columnExpr()), buildType(cast.columnTypeExpr()), true, CastTypeDialect.HOGQL, sourceSpan(cast));
             }
             if (context instanceof HogQLParser.ColumnExprIdentifierContext identifier) {
                 return buildColumnReference(identifier.columnIdentifier());
@@ -1268,12 +1271,10 @@ public final class HogQlParser
             return new CaseExpression(operand, whenClauses, defaultValue, sourceSpan(context));
         }
 
-        private Identifier buildSimpleType(HogQLParser.ColumnTypeExprContext context)
+        private Identifier buildType(HogQLParser.ColumnTypeExprContext context)
         {
-            if (context instanceof HogQLParser.ColumnTypeExprSimpleContext simple) {
-                return buildIdentifier(simple.identifier());
-            }
-            throw unsupported(context, "complex cast type");
+            SourceSpan span = sourceSpan(context);
+            return new Identifier(source.substring(span.startOffset(), span.endOffset()), false, span);
         }
 
         private List<Expression> buildExpressions(HogQLParser.ColumnExprListContext context)

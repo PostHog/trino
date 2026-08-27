@@ -341,14 +341,26 @@ public record HogQlQuery(
         }
     }
 
-    public record CastExpression(Expression value, Identifier type, boolean safe, SourceSpan span)
+    public enum CastTypeDialect
+    {
+        HOGQL,
+        TRINO,
+    }
+
+    public record CastExpression(Expression value, Identifier type, boolean safe, CastTypeDialect typeDialect, SourceSpan span)
             implements Expression
     {
         public CastExpression
         {
             value = requireNonNull(value, "value is null");
             type = requireNonNull(type, "type is null");
+            typeDialect = requireNonNull(typeDialect, "typeDialect is null");
             span = requireNonNull(span, "span is null");
+        }
+
+        public CastExpression(Expression value, Identifier type, boolean safe, SourceSpan span)
+        {
+            this(value, type, safe, CastTypeDialect.TRINO, span);
         }
     }
 
