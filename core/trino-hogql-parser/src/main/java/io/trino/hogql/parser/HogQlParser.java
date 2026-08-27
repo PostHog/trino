@@ -25,6 +25,8 @@ import io.trino.hogql.parser.tree.HogQlQuery.CaseExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CaseWhen;
 import io.trino.hogql.parser.tree.HogQlQuery.CastExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
+import io.trino.hogql.parser.tree.HogQlQuery.ColumnsList;
+import io.trino.hogql.parser.tree.HogQlQuery.ColumnsRegex;
 import io.trino.hogql.parser.tree.HogQlQuery.CommonTableExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CommonTableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.Expression;
@@ -56,6 +58,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.SortDirection;
 import io.trino.hogql.parser.tree.HogQlQuery.SortItem;
 import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
+import io.trino.hogql.parser.tree.HogQlQuery.StarReplacement;
 import io.trino.hogql.parser.tree.HogQlQuery.SubqueryRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.SubscriptExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
@@ -982,17 +985,91 @@ public final class HogQlParser
                 throw unsupported(context, "projection");
             }
 
-            if (expression instanceof HogQLParser.ColumnExprValuePassthroughContext passthrough && passthrough.columnExprValue() instanceof HogQLParser.ColumnExprAsteriskContext asterisk) {
-                if (alias.isPresent()) {
-                    throw unsupported(asterisk, "aliased star");
+            if (expression instanceof HogQLParser.ColumnExprValuePassthroughContext passthrough) {
+                Projection columns = buildColumnsProjection(passthrough.columnExprValue(), alias);
+                if (columns != null) {
+                    return columns;
                 }
-                List<Identifier> qualifier = asterisk.tableIdentifier() == null ? List.of() : buildIdentifiers(asterisk.tableIdentifier());
-                List<ColumnReference> exclusions = asterisk.identifierList() == null ? List.of() : asterisk.identifierList().nestedIdentifier().stream()
-                                                                                                   .map(identifier -> new ColumnReference(buildIdentifiers(identifier), sourceSpan(identifier)))
-                                                                                                   .toList();
-                return new Star(qualifier, exclusions, sourceSpan(asterisk));
             }
             return new ExpressionProjection(buildExpression(expression), alias);
+        }
+
+        private Projection buildColumnsProjection(HogQLParser.ColumnExprValueContext context, Optional<Identifier> alias)
+        {
+            if (context instanceof HogQLParser.ColumnExprAsteriskContext asterisk) {
+                requireUnaliasedColumnsProjection(alias, asterisk);
+                List<Identifier> qualifier = asterisk.tableIdentifier() == null ? List.of() : buildIdentifiers(asterisk.tableIdentifier());
+                return new Star(qualifier, buildStarExclusions(asterisk.identifierList()), List.of(), sourceSpan(asterisk));
+            }
+            if (context instanceof HogQLParser.ColumnExprColumnsRegexContext regex) {
+                requireUnaliasedColumnsProjection(alias, regex);
+                return new ColumnsRegex(decodeQuoted(regex.STRING_LITERAL().getText()), sourceSpan(regex.STRING_LITERAL().getSymbol(), regex.STRING_LITERAL().getSymbol()), sourceSpan(regex));
+            }
+            if (context instanceof HogQLParser.ColumnExprColumnsListContext columns) {
+                requireUnaliasedColumnsProjection(alias, columns);
+                return new ColumnsList(buildExpressions(columns.columnExprList()), sourceSpan(columns));
+            }
+            if (context instanceof HogQLParser.ColumnExprColumnsAllContext columns) {
+                requireUnaliasedColumnsProjection(alias, columns);
+                return new Star(List.of(), List.of(), List.of(), sourceSpan(columns));
+            }
+            if (context instanceof HogQLParser.ColumnExprColumnsExcludeContext columns) {
+                requireUnaliasedColumnsProjection(alias, columns);
+                return new Star(List.of(), buildStarExclusions(columns.identifierList()), List.of(), sourceSpan(columns));
+            }
+            if (context instanceof HogQLParser.ColumnExprColumnsReplaceContext columns) {
+                requireUnaliasedColumnsProjection(alias, columns);
+                return new Star(List.of(), List.of(), buildStarReplacements(columns.columnsReplaceList()), sourceSpan(columns));
+            }
+            if (context instanceof HogQLParser.ColumnExprColumnsExcludeReplaceContext columns) {
+                requireUnaliasedColumnsProjection(alias, columns);
+                return new Star(List.of(), buildStarExclusions(columns.identifierList()), buildStarReplacements(columns.columnsReplaceList()), sourceSpan(columns));
+            }
+            if (context instanceof HogQLParser.ColumnExprColumnsQualifiedAllContext columns) {
+                requireUnaliasedColumnsProjection(alias, columns);
+                return new Star(List.of(buildIdentifier(columns.identifier())), List.of(), List.of(), sourceSpan(columns));
+            }
+            if (context instanceof HogQLParser.ColumnExprColumnsQualifiedExcludeContext columns) {
+                requireUnaliasedColumnsProjection(alias, columns);
+                return new Star(List.of(buildIdentifier(columns.identifier())), buildStarExclusions(columns.identifierList()), List.of(), sourceSpan(columns));
+            }
+            if (context instanceof HogQLParser.ColumnExprColumnsQualifiedReplaceContext columns) {
+                requireUnaliasedColumnsProjection(alias, columns);
+                return new Star(List.of(buildIdentifier(columns.identifier())), List.of(), buildStarReplacements(columns.columnsReplaceList()), sourceSpan(columns));
+            }
+            if (context instanceof HogQLParser.ColumnExprColumnsQualifiedExcludeReplaceContext columns) {
+                requireUnaliasedColumnsProjection(alias, columns);
+                return new Star(
+                        List.of(buildIdentifier(columns.identifier())),
+                        buildStarExclusions(columns.identifierList()),
+                        buildStarReplacements(columns.columnsReplaceList()),
+                        sourceSpan(columns));
+            }
+            return null;
+        }
+
+        private void requireUnaliasedColumnsProjection(Optional<Identifier> alias, ParserRuleContext context)
+        {
+            if (alias.isPresent()) {
+                throw unsupported(context, "aliased columns projection");
+            }
+        }
+
+        private List<ColumnReference> buildStarExclusions(HogQLParser.IdentifierListContext exclusions)
+        {
+            return exclusions == null ? List.of() : exclusions.nestedIdentifier().stream()
+                                                    .map(identifier -> new ColumnReference(buildIdentifiers(identifier), sourceSpan(identifier)))
+                                                    .toList();
+        }
+
+        private List<StarReplacement> buildStarReplacements(HogQLParser.ColumnsReplaceListContext replacements)
+        {
+            return replacements.columnsReplaceItem().stream()
+                    .map(replacement -> new StarReplacement(
+                            buildExpression(replacement.columnExpr()),
+                            buildIdentifier(replacement.identifier()),
+                            sourceSpan(replacement)))
+                    .toList();
         }
 
         private Expression buildExpression(HogQLParser.ColumnExprContext context)

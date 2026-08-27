@@ -57,6 +57,8 @@ import io.trino.hogql.parser.tree.HogQlQuery.CaseExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CaseWhen;
 import io.trino.hogql.parser.tree.HogQlQuery.CastExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
+import io.trino.hogql.parser.tree.HogQlQuery.ColumnsList;
+import io.trino.hogql.parser.tree.HogQlQuery.ColumnsRegex;
 import io.trino.hogql.parser.tree.HogQlQuery.CommonTableExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CommonTableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.Expression;
@@ -79,6 +81,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.SelectQueryBody;
 import io.trino.hogql.parser.tree.HogQlQuery.SetOperation;
 import io.trino.hogql.parser.tree.HogQlQuery.SortItem;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
+import io.trino.hogql.parser.tree.HogQlQuery.StarReplacement;
 import io.trino.hogql.parser.tree.HogQlQuery.SubqueryRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.SubscriptExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
@@ -91,6 +94,8 @@ import io.trino.hogql.parser.tree.HogQlQuery.WindowDefinition;
 import io.trino.hogql.parser.tree.HogQlQuery.WindowFrame;
 import io.trino.hogql.parser.tree.HogQlQuery.WindowReference;
 import io.trino.hogql.parser.tree.HogQlQuery.WindowSpecification;
+import io.trino.re2j.Pattern;
+import io.trino.re2j.PatternSyntaxException;
 import io.trino.spi.Location;
 import io.trino.spi.TrinoException;
 
@@ -104,6 +109,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_COMPILER_LIMIT_EXCEEDED;
 import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_RESOLUTION_ERROR;
 import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_UNSUPPORTED_FEATURE;
@@ -214,6 +220,8 @@ final class HogQlSemanticResolver
     private List<Projection> resolveProjection(Projection projection)
     {
         return switch (projection) {
+            case ColumnsList columns -> resolveColumnsList(columns);
+            case ColumnsRegex columns -> resolveColumnsRegex(columns);
             case Star star -> resolveStar(star);
             case ExpressionProjection expressionProjection -> {
                 Expression resolved = resolveExpression(expressionProjection.expression());
@@ -224,6 +232,40 @@ final class HogQlSemanticResolver
                 yield List.of(new ExpressionProjection(resolved, alias));
             }
         };
+    }
+
+    private List<Projection> resolveColumnsList(ColumnsList columns)
+    {
+        return columns.expressions().stream()
+                .flatMap(expression -> resolveProjection(new ExpressionProjection(expression, Optional.empty())).stream())
+                .toList();
+    }
+
+    private List<Projection> resolveColumnsRegex(ColumnsRegex columns)
+    {
+        if (!allRelationsLogical) {
+            throw unsupportedColumns(columns.span());
+        }
+        Pattern pattern;
+        try {
+            pattern = Pattern.compile(columns.pattern());
+        }
+        catch (PatternSyntaxException _) {
+            throw semanticEntityError(HOGQL_RESOLUTION_ERROR, columns.patternSpan(), "Invalid HogQL COLUMNS regex: " + columns.pattern());
+        }
+        List<Projection> projections = bindings.stream()
+                .flatMap(binding -> binding.orderedFields().stream()
+                        .filter(BoundField::starVisible)
+                        .filter(field -> pattern.find(utf8Slice(field.name())))
+                        .map(field -> new ExpressionProjection(
+                                resolveBoundField(binding, field, binding.starQualifier(bindings.size()), columns.span(), expansionBudget),
+                                Optional.of(new Identifier(field.name(), true, columns.span())))))
+                .map(Projection.class::cast)
+                .toList();
+        if (projections.isEmpty()) {
+            throw semanticEntityError(HOGQL_RESOLUTION_ERROR, columns.patternSpan(), "No HogQL fields matched COLUMNS regex: " + columns.pattern());
+        }
+        return projections;
     }
 
     private List<Projection> resolveStar(Star star)
@@ -252,20 +294,48 @@ final class HogQlSemanticResolver
         }
 
         Set<StarField> exclusions = resolveStarExclusions(star, starBindings);
+        Map<StarField, StarReplacement> replacements = resolveStarReplacements(star, starBindings, exclusions);
         return starBindings.stream()
                 .flatMap(binding -> binding.orderedFields().stream()
                         .filter(BoundField::starVisible)
                         .filter(field -> !exclusions.contains(new StarField(binding, field)))
-                        .map(field -> new ExpressionProjection(
-                                resolveBoundField(
-                                        binding,
-                                        field,
-                                        qualified ? Optional.of(binding.outputQualifier()) : binding.starQualifier(bindings.size()),
-                                        star.span(),
-                                        expansionBudget),
-                                Optional.of(new Identifier(field.name(), true, star.span())))))
+                        .map(field -> {
+                            StarReplacement replacement = replacements.get(new StarField(binding, field));
+                            Expression expression = replacement == null
+                                    ? resolveBoundField(
+                                    binding,
+                                    field,
+                                    qualified ? Optional.of(binding.outputQualifier()) : binding.starQualifier(bindings.size()),
+                                    star.span(),
+                                    expansionBudget)
+                                    : resolveExpression(replacement.expression());
+                            return new ExpressionProjection(expression, Optional.of(new Identifier(field.name(), true, star.span())));
+                        }))
                 .map(Projection.class::cast)
                 .toList();
+    }
+
+    private static Map<StarField, StarReplacement> resolveStarReplacements(Star star, List<TableBinding> starBindings, Set<StarField> exclusions)
+    {
+        Map<StarField, StarReplacement> replacements = new HashMap<>();
+        for (StarReplacement replacement : star.replacements()) {
+            List<StarField> matchedFields = starBindings.stream()
+                    .flatMap(binding -> binding.orderedFields().stream()
+                            .filter(BoundField::starVisible)
+                            .map(field -> new StarField(binding, field)))
+                    .filter(field -> !exclusions.contains(field))
+                    .filter(field -> matchesIdentifier(replacement.target(), field.field().name()))
+                    .distinct()
+                    .toList();
+            if (matchedFields.isEmpty()) {
+                throw starResolutionError(replacement.target(), "Unknown HogQL star replacement: " + replacement.target().value());
+            }
+            if (matchedFields.stream().anyMatch(replacements::containsKey)) {
+                throw starResolutionError(replacement.target(), "Duplicate HogQL star replacement: " + replacement.target().value());
+            }
+            matchedFields.forEach(field -> replacements.put(field, replacement));
+        }
+        return replacements;
     }
 
     private static Set<StarField> resolveStarExclusions(Star star, List<TableBinding> starBindings)
@@ -1537,6 +1607,14 @@ final class HogQlSemanticResolver
                 Optional.of(new Location(span.startLine(), span.startColumn())),
                 message,
                 null);
+    }
+
+    private static TrinoException unsupportedColumns(HogQlQuery.SourceSpan span)
+    {
+        return semanticEntityError(
+                HOGQL_UNSUPPORTED_FEATURE,
+                span,
+                "HogQL COLUMNS requires a logical relation from the semantic catalog");
     }
 
     private static TrinoException limitError(HogQlQuery.SourceSpan span, String message)

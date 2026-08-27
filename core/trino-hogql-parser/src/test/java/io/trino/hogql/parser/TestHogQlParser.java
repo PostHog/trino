@@ -17,6 +17,8 @@ import io.trino.hogql.parser.tree.HogQlQuery;
 import io.trino.hogql.parser.tree.HogQlQuery.AliasedRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
+import io.trino.hogql.parser.tree.HogQlQuery.ColumnsList;
+import io.trino.hogql.parser.tree.HogQlQuery.ColumnsRegex;
 import io.trino.hogql.parser.tree.HogQlQuery.CommonTableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
@@ -30,6 +32,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.SetOperation;
 import io.trino.hogql.parser.tree.HogQlQuery.SetOperationType;
 import io.trino.hogql.parser.tree.HogQlQuery.SortDirection;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
+import io.trino.hogql.parser.tree.HogQlQuery.StarReplacement;
 import io.trino.hogql.parser.tree.HogQlQuery.SubqueryRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.SubscriptExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
@@ -146,6 +149,30 @@ public class TestHogQlParser
 
         assertThat(star.exclusions()).singleElement().satisfies(exclusion ->
                 assertThat(exclusion.parts()).extracting(HogQlQuery.Identifier::value).containsExactly("analytics", "events", "event"));
+    }
+
+    @Test
+    public void testBuildsColumnsSelectorsAndReplacementAst()
+    {
+        HogQlQuery query = parser.parseStatement(
+                "SELECT COLUMNS('^(event|person)'), COLUMNS(event, personId + 1), " +
+                        "COLUMNS(events.* REPLACE (personId AS event, event AS \"personId\")) FROM events");
+
+        ColumnsRegex regex = (ColumnsRegex) query.projections().getFirst();
+        assertThat(regex.pattern()).isEqualTo("^(event|person)");
+        assertThat(regex.patternSpan()).isEqualTo(new HogQlQuery.SourceSpan(15, 32, 1, 16, 1, 33));
+
+        ColumnsList explicit = (ColumnsList) query.projections().get(1);
+        assertThat(explicit.expressions()).hasSize(2);
+        assertThat(explicit.expressions().getFirst()).isInstanceOf(ColumnReference.class);
+        assertThat(explicit.expressions().get(1)).isInstanceOf(BinaryExpression.class);
+
+        Star star = (Star) query.projections().get(2);
+        assertThat(star.qualifier()).extracting(HogQlQuery.Identifier::value).containsExactly("events");
+        assertThat(star.replacements()).extracting(replacement -> replacement.target().value()).containsExactly("event", "personId");
+        assertThat(star.replacements()).extracting(replacement -> replacement.target().delimited()).containsExactly(false, true);
+        assertThat(star.replacements()).extracting(StarReplacement::expression).allSatisfy(expression ->
+                assertThat(expression).isInstanceOf(ColumnReference.class));
     }
 
     @Test

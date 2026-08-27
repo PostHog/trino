@@ -29,6 +29,8 @@ import io.trino.hogql.parser.tree.HogQlQuery.CaseExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CaseWhen;
 import io.trino.hogql.parser.tree.HogQlQuery.CastExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
+import io.trino.hogql.parser.tree.HogQlQuery.ColumnsList;
+import io.trino.hogql.parser.tree.HogQlQuery.ColumnsRegex;
 import io.trino.hogql.parser.tree.HogQlQuery.CommonTableExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CommonTableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.Expression;
@@ -51,6 +53,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.SelectQueryBody;
 import io.trino.hogql.parser.tree.HogQlQuery.SetOperation;
 import io.trino.hogql.parser.tree.HogQlQuery.SortItem;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
+import io.trino.hogql.parser.tree.HogQlQuery.StarReplacement;
 import io.trino.hogql.parser.tree.HogQlQuery.SubqueryRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.SubscriptExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
@@ -137,8 +140,16 @@ final class HogQlFunctionResolver
     private Projection resolveProjection(Projection projection)
     {
         return switch (projection) {
+            case ColumnsList columns -> new ColumnsList(columns.expressions().stream().map(this::resolveExpression).toList(), columns.span());
+            case ColumnsRegex columns -> columns;
             case ExpressionProjection expression -> new ExpressionProjection(resolveExpression(expression.expression()), expression.alias());
-            case Star star -> star;
+            case Star star -> new Star(
+                    star.qualifier(),
+                    star.exclusions(),
+                    star.replacements().stream()
+                            .map(replacement -> new StarReplacement(resolveExpression(replacement.expression()), replacement.target(), replacement.span()))
+                            .toList(),
+                    star.span());
         };
     }
 

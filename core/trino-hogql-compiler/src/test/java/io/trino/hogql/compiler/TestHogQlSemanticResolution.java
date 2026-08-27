@@ -192,6 +192,93 @@ public class TestHogQlSemanticResolution
     }
 
     @Test
+    public void testExpandsColumnsSelectorsAndReplacements()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+
+        HogQlCompilationResult regex = compiler.compile(
+                envelope("SELECT COLUMNS('event|person') FROM events", OptionalLong.of(7)),
+                Optional.of(context));
+        HogQlCompilationResult explicit = compiler.compile(
+                envelope("SELECT COLUMNS(personId, event) FROM events", OptionalLong.of(7)),
+                Optional.of(context));
+        HogQlCompilationResult replaced = compiler.compile(
+                envelope("SELECT COLUMNS(events.* REPLACE (personId AS event)) FROM events", OptionalLong.of(7)),
+                Optional.of(context));
+
+        assertThat(regex.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT event_name AS \"event\", \"Person ID\" AS \"personId\" FROM analytics.\"Hog Data\".\"raw-events\""));
+        assertThat(explicit.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT \"Person ID\" AS personId, event_name AS event FROM analytics.\"Hog Data\".\"raw-events\""));
+        assertThat(replaced.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT \"Person ID\" AS \"event\", \"raw-events\".\"Person ID\" AS \"personId\" FROM analytics.\"Hog Data\".\"raw-events\""));
+    }
+
+    @Test
+    public void testRejectsInvalidColumnsSelectorsAndReplacementsAtSource()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+
+        assertResolutionFailure(
+                context,
+                "SELECT COLUMNS('^missing$') FROM events",
+                "'^missing$'",
+                "No HogQL fields matched COLUMNS regex: ^missing$");
+        assertResolutionFailure(
+                context,
+                "SELECT COLUMNS('(') FROM events",
+                "'('",
+                "Invalid HogQL COLUMNS regex: (");
+        assertResolutionFailure(
+                context,
+                "SELECT COLUMNS(* REPLACE (personId AS event, event AS \"event\")) FROM events",
+                "\"event\"",
+                "Duplicate HogQL star replacement: event");
+        assertResolutionFailure(
+                context,
+                "SELECT COLUMNS(* REPLACE (personId AS \"Event\")) FROM events",
+                "\"Event\"",
+                "Unknown HogQL star replacement: Event");
+    }
+
+    @Test
+    public void testFlattensExplicitColumnsWhenRelationSchemaIsUnavailable()
+    {
+        List<String> queries = List.of(
+                "SELECT COLUMNS(event_name, abs(event_id)) FROM analytics.default.raw_events",
+                "WITH source AS (SELECT event_name FROM analytics.default.raw_events) SELECT COLUMNS(event_name) FROM source",
+                "SELECT COLUMNS(source.event_name) FROM (SELECT event_name FROM analytics.default.raw_events) source");
+        List<String> expected = List.of(
+                "SELECT event_name, abs(event_id) FROM analytics.default.raw_events",
+                "WITH source AS (SELECT event_name FROM analytics.default.raw_events) SELECT event_name FROM source",
+                "SELECT source.event_name FROM (SELECT event_name FROM analytics.default.raw_events) source");
+
+        for (int index = 0; index < queries.size(); index++) {
+            HogQlCompilationResult result = compiler.compile(envelope(queries.get(index), OptionalLong.empty()), Optional.empty());
+
+            assertThat(result.statement()).isEqualTo(sqlParser.createStatement(expected.get(index)));
+        }
+    }
+
+    @Test
+    public void testRejectsSchemaDependentColumnsWhenRelationSchemaIsUnavailable()
+    {
+        List<String> queries = List.of(
+                "SELECT COLUMNS('event') FROM analytics.default.raw_events",
+                "SELECT COLUMNS(* REPLACE (event_name AS event_name)) FROM analytics.default.raw_events");
+
+        for (String hogql : queries) {
+            TrinoException exception = catchThrowableOfType(
+                    TrinoException.class,
+                    () -> compiler.compile(envelope(hogql, OptionalLong.empty()), Optional.empty()));
+
+            assertThat(exception.getErrorCode()).isEqualTo(HOGQL_UNSUPPORTED_FEATURE.toErrorCode());
+            assertThat(exception.getLocation()).isPresent();
+            assertThat(exception).hasMessageContaining("requires a logical relation from the semantic catalog");
+        }
+    }
+
+    @Test
     public void testRejectsInvalidLogicalStarQualifierAndExclusionsAtSource()
     {
         HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));

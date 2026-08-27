@@ -21,6 +21,8 @@ import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CaseExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CastExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
+import io.trino.hogql.parser.tree.HogQlQuery.ColumnsList;
+import io.trino.hogql.parser.tree.HogQlQuery.ColumnsRegex;
 import io.trino.hogql.parser.tree.HogQlQuery.CommonTableExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CommonTableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
@@ -158,7 +160,7 @@ final class TrinoAstFactory
         QuerySpecification querySpecification = new QuerySpecification(
                 location,
                 new Select(location, select.distinct(), select.projections().stream()
-                        .map(projection -> createSelectItem(projection, parameterIds))
+                        .flatMap(projection -> createSelectItems(projection, parameterIds).stream())
                         .toList()),
                 select.from().map(relation -> createRelation(relation, parameterIds)),
                 select.where().map(expression -> createExpression(expression, parameterIds)),
@@ -266,19 +268,33 @@ final class TrinoAstFactory
                                 .toList()))));
     }
 
-    private static SelectItem createSelectItem(Projection projection, Map<SourceSpan, Integer> parameterIds)
+    private static List<SelectItem> createSelectItems(Projection projection, Map<SourceSpan, Integer> parameterIds)
     {
         return switch (projection) {
-            case Star star -> createAllColumns(star);
-            case ExpressionProjection expression -> new SingleColumn(
+            case ColumnsList columns -> columns.expressions().stream()
+                    .map(expression -> new SingleColumn(
+                            location(expression.span()),
+                            createExpression(expression, parameterIds),
+                            Optional.empty()))
+                    .map(SelectItem.class::cast)
+                    .toList();
+            case ColumnsRegex columns -> throw unsupportedColumns(columns.span());
+            case Star star -> List.of(createAllColumns(star));
+            case ExpressionProjection expression -> List.of(new SingleColumn(
                     location(expression.span()),
                     createExpression(expression.expression(), parameterIds),
-                    expression.alias().map(TrinoAstFactory::createIdentifier));
+                    expression.alias().map(TrinoAstFactory::createIdentifier)));
         };
     }
 
     private static AllColumns createAllColumns(Star star)
     {
+        if (!star.replacements().isEmpty()) {
+            Identifier target = star.replacements().getFirst().target();
+            throw unsupportedSemanticExpression(
+                    target.span(),
+                    "HogQL star replacement requires a logical relation from the semantic catalog: " + target.value());
+        }
         if (!star.exclusions().isEmpty()) {
             ColumnReference exclusion = star.exclusions().getFirst();
             throw unsupportedSemanticExpression(
@@ -290,6 +306,11 @@ final class TrinoAstFactory
                 ? Optional.empty()
                 : Optional.of(createColumnReference(new ColumnReference(star.qualifier(), star.span())));
         return new AllColumns(location(star.span()), target, List.of());
+    }
+
+    private static TrinoException unsupportedColumns(SourceSpan span)
+    {
+        return unsupportedSemanticExpression(span, "HogQL COLUMNS requires a logical relation from the semantic catalog");
     }
 
     private static Expression createExpression(HogQlQuery.Expression expression, Map<SourceSpan, Integer> parameterIds)

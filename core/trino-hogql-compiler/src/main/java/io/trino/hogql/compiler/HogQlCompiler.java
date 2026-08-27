@@ -29,6 +29,8 @@ import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CaseExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CastExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
+import io.trino.hogql.parser.tree.HogQlQuery.ColumnsList;
+import io.trino.hogql.parser.tree.HogQlQuery.ColumnsRegex;
 import io.trino.hogql.parser.tree.HogQlQuery.CommonTableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.Expression;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
@@ -42,10 +44,12 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
+import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
 import io.trino.hogql.parser.tree.HogQlQuery.SelectQueryBody;
 import io.trino.hogql.parser.tree.HogQlQuery.SetOperation;
 import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
+import io.trino.hogql.parser.tree.HogQlQuery.Star;
 import io.trino.hogql.parser.tree.HogQlQuery.SubqueryRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.SubscriptExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
@@ -197,8 +201,11 @@ public final class HogQlCompiler
         switch (query.body()) {
             case SelectQueryBody select -> {
                 select.projections().forEach(projection -> {
-                    if (projection instanceof HogQlQuery.ExpressionProjection expressionProjection) {
-                        collectPlaceholders(expressionProjection.expression(), placeholders);
+                    switch (projection) {
+                        case ColumnsList columns -> columns.expressions().forEach(expression -> collectPlaceholders(expression, placeholders));
+                        case ColumnsRegex _ -> {}
+                        case ExpressionProjection expression -> collectPlaceholders(expression.expression(), placeholders);
+                        case Star star -> star.replacements().forEach(replacement -> collectPlaceholders(replacement.expression(), placeholders));
                     }
                 });
                 select.from().ifPresent(relation -> collectPlaceholders(relation, placeholders));
@@ -276,10 +283,7 @@ public final class HogQlCompiler
     {
         return query.with().stream().anyMatch(commonTable -> containsFunctionCall(commonTable.query())) ||
                 switch (query.body()) {
-                    case SelectQueryBody select -> select.projections().stream()
-                            .filter(ExpressionProjection.class::isInstance)
-                            .map(ExpressionProjection.class::cast)
-                            .anyMatch(projection -> containsFunctionCall(projection.expression())) ||
+                    case SelectQueryBody select -> select.projections().stream().anyMatch(HogQlCompiler::containsFunctionCall) ||
                             select.from().map(HogQlCompiler::containsFunctionCall).orElse(false) ||
                             select.where().map(HogQlCompiler::containsFunctionCall).orElse(false) ||
                             select.groupBy().stream().anyMatch(HogQlCompiler::containsFunctionCall) ||
@@ -309,6 +313,16 @@ public final class HogQlCompiler
             case ValuesRelation values -> values.rows().stream()
                     .flatMap(List::stream)
                     .anyMatch(HogQlCompiler::containsFunctionCall);
+        };
+    }
+
+    private static boolean containsFunctionCall(Projection projection)
+    {
+        return switch (projection) {
+            case ColumnsList columns -> columns.expressions().stream().anyMatch(HogQlCompiler::containsFunctionCall);
+            case ColumnsRegex _ -> false;
+            case ExpressionProjection expression -> containsFunctionCall(expression.expression());
+            case Star star -> star.replacements().stream().anyMatch(replacement -> containsFunctionCall(replacement.expression()));
         };
     }
 

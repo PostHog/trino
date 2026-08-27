@@ -217,24 +217,64 @@ public record HogQlQuery(
     }
 
     public sealed interface Projection
-            permits ExpressionProjection, Star
+            permits ColumnsList,
+                    ColumnsRegex,
+                    ExpressionProjection,
+                    Star
     {
         SourceSpan span();
     }
 
-    public record Star(List<Identifier> qualifier, List<ColumnReference> exclusions, SourceSpan span)
+    public record ColumnsRegex(String pattern, SourceSpan patternSpan, SourceSpan span)
+            implements Projection
+    {
+        public ColumnsRegex
+        {
+            pattern = requireNonNull(pattern, "pattern is null");
+            patternSpan = requireNonNull(patternSpan, "patternSpan is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record ColumnsList(List<Expression> expressions, SourceSpan span)
+            implements Projection
+    {
+        public ColumnsList
+        {
+            expressions = List.copyOf(requireNonNull(expressions, "expressions is null"));
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record Star(List<Identifier> qualifier, List<ColumnReference> exclusions, List<StarReplacement> replacements, SourceSpan span)
             implements Projection
     {
         public Star
         {
             qualifier = List.copyOf(requireNonNull(qualifier, "qualifier is null"));
             exclusions = List.copyOf(requireNonNull(exclusions, "exclusions is null"));
+            replacements = List.copyOf(requireNonNull(replacements, "replacements is null"));
             span = requireNonNull(span, "span is null");
+        }
+
+        public Star(List<Identifier> qualifier, List<ColumnReference> exclusions, SourceSpan span)
+        {
+            this(qualifier, exclusions, List.of(), span);
         }
 
         public Star(SourceSpan span)
         {
-            this(List.of(), List.of(), span);
+            this(List.of(), List.of(), List.of(), span);
+        }
+    }
+
+    public record StarReplacement(Expression expression, Identifier target, SourceSpan span)
+    {
+        public StarReplacement
+        {
+            expression = requireNonNull(expression, "expression is null");
+            target = requireNonNull(target, "target is null");
+            span = requireNonNull(span, "span is null");
         }
     }
 
