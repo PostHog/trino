@@ -75,7 +75,8 @@ public class QueryPreparer
             case TRINO -> sqlParser.createStatement(submission.originalText());
             case HOGQL -> hogQlCompiler
                     .orElseThrow(() -> new TrinoException(NOT_SUPPORTED, "HogQL query submission is disabled"))
-                    .compile(submission.originalText());
+                    .compile(submission.hogQlEnvelope().orElseThrow())
+                    .statement();
         };
         return prepareQuery(session, wrappedStatement);
     }

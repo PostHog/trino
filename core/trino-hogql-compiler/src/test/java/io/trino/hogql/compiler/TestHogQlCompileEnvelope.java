@@ -29,7 +29,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 
@@ -81,7 +81,7 @@ public class TestHogQlCompileEnvelope
                 HogQlCompileEnvelope.PROTOCOL_VERSION,
                 LANGUAGE_VERSION,
                 fields,
-                Optional.empty()))
+                OptionalLong.empty()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("unknown HogQL semantic field");
     }
@@ -108,10 +108,10 @@ public class TestHogQlCompileEnvelope
                 HogQlCompileEnvelope.PROTOCOL_VERSION,
                 LANGUAGE_VERSION,
                 fields,
-                Optional.of("sensitive-generation"));
+                OptionalLong.of(42));
 
         assertThat(envelope.toString())
-                .doesNotContain(sensitiveValue, "sensitive-query", "sensitive-generation")
+                .doesNotContain(sensitiveValue, "sensitive-query")
                 .contains("query=<redacted>");
     }
 
@@ -157,6 +157,6 @@ public class TestHogQlCompileEnvelope
                 variables,
                 filters,
                 modifiers,
-                Optional.empty());
+                OptionalLong.empty());
     }
 }

@@ -17,7 +17,7 @@ import io.trino.hogql.parser.HogQlLanguageContract;
 import io.trino.hogql.parser.HogQlLanguageVersion;
 
 import java.util.Map;
-import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 
 import static java.util.Objects.requireNonNull;
@@ -30,7 +30,7 @@ public record HogQlCompileEnvelope(
         Map<String, HogQlTypedValue> variables,
         Map<String, HogQlTypedValue> filters,
         Map<String, HogQlTypedValue> modifiers,
-        Optional<String> catalogGeneration)
+        OptionalLong catalogGeneration)
 {
     public static final int PROTOCOL_VERSION = 1;
 
@@ -54,9 +54,11 @@ public record HogQlCompileEnvelope(
         filters = immutableValues("filters", filters);
         modifiers = immutableValues("modifiers", modifiers);
         catalogGeneration = requireNonNull(catalogGeneration, "catalogGeneration is null");
-        if (catalogGeneration.stream().anyMatch(String::isBlank)) {
-            throw new IllegalArgumentException("catalog generation is empty");
-        }
+        catalogGeneration.ifPresent(generation -> {
+            if (generation <= 0) {
+                throw new IllegalArgumentException("catalog generation must be positive");
+            }
+        });
     }
 
     public static HogQlCompileEnvelope fromSemanticFields(
@@ -64,7 +66,7 @@ public record HogQlCompileEnvelope(
             int protocolVersion,
             HogQlLanguageVersion languageVersion,
             Map<String, Map<String, HogQlTypedValue>> semanticFields,
-            Optional<String> catalogGeneration)
+            OptionalLong catalogGeneration)
     {
         requireNonNull(semanticFields, "semanticFields is null");
         if (!SEMANTIC_FIELDS.containsAll(semanticFields.keySet())) {

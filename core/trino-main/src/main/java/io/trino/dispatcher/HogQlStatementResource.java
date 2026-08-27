@@ -14,10 +14,13 @@
 package io.trino.dispatcher;
 
 import com.google.inject.Inject;
+import io.trino.hogql.compiler.HogQlCompileEnvelope;
 import io.trino.server.ExternalUriInfo;
 import io.trino.server.security.ResourceSecurity;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.ws.rs.BeanParam;
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
@@ -43,13 +46,21 @@ public class HogQlStatementResource
 
     @ResourceSecurity(AUTHENTICATED_USER)
     @POST
+    @Consumes(APPLICATION_JSON)
     @Produces(APPLICATION_JSON)
     public Response postStatement(
-            String statement,
+            String requestBody,
             @Context HttpServletRequest servletRequest,
             @Context HttpHeaders httpHeaders,
             @BeanParam ExternalUriInfo externalUriInfo)
     {
-        return queuedStatementResource.postStatement(hogQl(statement), servletRequest, httpHeaders, externalUriInfo);
+        HogQlCompileEnvelope envelope;
+        try {
+            envelope = HogQlRequest.fromJson(requestBody).toCompileEnvelope();
+        }
+        catch (RuntimeException _) {
+            throw new BadRequestException("Invalid HogQL request");
+        }
+        return queuedStatementResource.postStatement(hogQl(envelope), servletRequest, httpHeaders, externalUriInfo);
     }
 }

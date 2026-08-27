@@ -13,25 +13,37 @@
  */
 package io.trino.execution;
 
+import io.trino.hogql.compiler.HogQlCompileEnvelope;
+
+import java.util.Optional;
+
 import static io.trino.execution.QueryLanguage.HOGQL;
 import static io.trino.execution.QueryLanguage.TRINO;
 import static java.util.Objects.requireNonNull;
 
-public record QuerySubmission(QueryLanguage language, String originalText)
+public record QuerySubmission(QueryLanguage language, String originalText, Optional<HogQlCompileEnvelope> hogQlEnvelope)
 {
     public QuerySubmission
     {
         requireNonNull(language, "language is null");
         requireNonNull(originalText, "originalText is null");
+        hogQlEnvelope = requireNonNull(hogQlEnvelope, "hogQlEnvelope is null");
+        if (language == TRINO && hogQlEnvelope.isPresent()) {
+            throw new IllegalArgumentException("Trino submission has a HogQL envelope");
+        }
+        if (language == HOGQL && (hogQlEnvelope.isEmpty() || !hogQlEnvelope.orElseThrow().query().equals(originalText))) {
+            throw new IllegalArgumentException("HogQL submission envelope does not match its query");
+        }
     }
 
     public static QuerySubmission trino(String originalText)
     {
-        return new QuerySubmission(TRINO, originalText);
+        return new QuerySubmission(TRINO, originalText, Optional.empty());
     }
 
-    public static QuerySubmission hogQl(String originalText)
+    public static QuerySubmission hogQl(HogQlCompileEnvelope envelope)
     {
-        return new QuerySubmission(HOGQL, originalText);
+        requireNonNull(envelope, "envelope is null");
+        return new QuerySubmission(HOGQL, envelope.query(), Optional.of(envelope));
     }
 }

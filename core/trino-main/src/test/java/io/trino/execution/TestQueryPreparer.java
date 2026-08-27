@@ -15,13 +15,19 @@ package io.trino.execution;
 
 import io.trino.Session;
 import io.trino.execution.QueryPreparer.PreparedQuery;
+import io.trino.hogql.compiler.HogQlCompileEnvelope;
 import io.trino.hogql.compiler.HogQlCompiler;
+import io.trino.hogql.parser.HogQlLanguageContract;
 import io.trino.sql.parser.ParsingException;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.AllColumns;
 import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.Query;
 import org.junit.jupiter.api.Test;
+
+import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalLong;
 
 import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.execution.QuerySubmission.hogQl;
@@ -55,16 +61,32 @@ public class TestQueryPreparer
     @Test
     public void testHogQlStatement()
     {
-        PreparedQuery preparedQuery = HOGQL_QUERY_PREPARER.prepareQuery(TEST_SESSION, hogQl("SELECT 1"));
+        HogQlCompileEnvelope envelope = envelope("SELECT 1");
+        QuerySubmission submission = hogQl(envelope);
+        PreparedQuery preparedQuery = HOGQL_QUERY_PREPARER.prepareQuery(TEST_SESSION, submission);
         assertThat(preparedQuery.getStatement()).isInstanceOf(Query.class);
+        assertThat(submission.hogQlEnvelope()).containsSame(envelope);
     }
 
     @Test
     public void testHogQlSubmissionFailsClosedWithoutCompiler()
     {
-        assertTrinoExceptionThrownBy(() -> QUERY_PREPARER.prepareQuery(TEST_SESSION, hogQl("SELECT 1")))
+        assertTrinoExceptionThrownBy(() -> QUERY_PREPARER.prepareQuery(TEST_SESSION, hogQl(envelope("SELECT 1"))))
                 .hasErrorCode(NOT_SUPPORTED)
                 .hasMessage("HogQL query submission is disabled");
+    }
+
+    private static HogQlCompileEnvelope envelope(String query)
+    {
+        return new HogQlCompileEnvelope(
+                query,
+                HogQlCompileEnvelope.PROTOCOL_VERSION,
+                HogQlLanguageContract.current().languageVersion(),
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                OptionalLong.empty());
     }
 
     @Test
