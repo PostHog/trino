@@ -92,9 +92,44 @@ final class HogQlProjectionDemand
         return builder.build();
     }
 
+    public static HogQlProjectionDemand collectNonProjection(HogQlQuery query)
+    {
+        Builder builder = new Builder();
+        if (query.body() instanceof SelectQueryBody select) {
+            select.where().ifPresent(expression -> collect(expression, builder));
+            select.groupBy().forEach(expression -> collect(expression, builder));
+            select.having().ifPresent(expression -> collect(expression, builder));
+            select.windows().forEach(window -> collect(window.specification(), builder));
+            select.from().ifPresent(relation -> collectJoinCriteria(relation, builder));
+        }
+        query.orderBy().forEach(sortItem -> collect(sortItem.expression(), builder));
+        query.limit().ifPresent(expression -> collect(expression, builder));
+        query.offset().ifPresent(expression -> collect(expression, builder));
+        return builder.build();
+    }
+
+    public static HogQlProjectionDemand collect(Expression expression)
+    {
+        Builder builder = new Builder();
+        collect(expression, builder);
+        return builder.build();
+    }
+
+    public static HogQlProjectionDemand column(String qualifier, String name)
+    {
+        Builder builder = new Builder();
+        builder.addQualified(qualifier, name);
+        return builder.build();
+    }
+
     public static HogQlProjectionDemand preserveAll()
     {
         return new HogQlProjectionDemand(true, Set.of(), Set.of(), Map.of());
+    }
+
+    public static HogQlProjectionDemand preserveNone()
+    {
+        return new HogQlProjectionDemand(false, Set.of(), Set.of(), Map.of());
     }
 
     public RequiredOutputs forAlias(Identifier alias)
@@ -114,6 +149,19 @@ final class HogQlProjectionDemand
             return RequiredOutputs.allOutputs();
         }
         return new RequiredOutputs(false, unqualified);
+    }
+
+    public HogQlProjectionDemand merge(HogQlProjectionDemand other)
+    {
+        requireNonNull(other, "other is null");
+        Map<String, Set<String>> mergedQualified = new HashMap<>();
+        qualified.forEach((key, value) -> mergedQualified.put(key, new HashSet<>(value)));
+        other.qualified.forEach((key, value) -> mergedQualified.computeIfAbsent(key, _ -> new HashSet<>()).addAll(value));
+        Set<String> mergedUnqualified = new HashSet<>(unqualified);
+        mergedUnqualified.addAll(other.unqualified);
+        Set<String> mergedAllQualifiers = new HashSet<>(allQualifiers);
+        mergedAllQualifiers.addAll(other.allQualifiers);
+        return new HogQlProjectionDemand(all || other.all, mergedUnqualified, mergedAllQualifiers, mergedQualified);
     }
 
     private static void collect(Projection projection, Builder builder)
@@ -243,6 +291,14 @@ final class HogQlProjectionDemand
         {
             return all || names.contains(canonical(name));
         }
+
+        public RequiredOutputs merge(RequiredOutputs other)
+        {
+            requireNonNull(other, "other is null");
+            Set<String> merged = new HashSet<>(names);
+            merged.addAll(other.names);
+            return new RequiredOutputs(all || other.all, merged);
+        }
     }
 
     private static final class Builder
@@ -266,6 +322,11 @@ final class HogQlProjectionDemand
         public void addUnqualified(Identifier identifier)
         {
             unqualified.add(canonical(identifier.value()));
+        }
+
+        public void addQualified(String qualifier, String name)
+        {
+            qualified.computeIfAbsent(canonical(qualifier), _ -> new HashSet<>()).add(canonical(name));
         }
 
         public HogQlProjectionDemand build()

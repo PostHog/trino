@@ -121,11 +121,13 @@ import static java.util.Objects.requireNonNull;
 final class HogQlSemanticResolver
 {
     private static final String MATCHES_ACTION = "matchesaction";
+    private static final String CTE_RELATION_PREFIX = "\0cte:";
 
     private final PinnedSnapshot snapshot;
     private final ExpansionBudget expansionBudget;
     private final Optional<RequiredOutputs> requiredOutputs;
     private final List<BindingScope> outerBindingScopes;
+    private final Map<String, TableBinding> commonTableBindings;
     private final Map<RelationshipPathKey, TableBinding> relationshipPaths = new LinkedHashMap<>();
     private List<TableBinding> bindings = List.of();
     private Set<String> localRelationQualifiers = Set.of();
@@ -154,10 +156,21 @@ final class HogQlSemanticResolver
             Optional<RequiredOutputs> requiredOutputs,
             List<BindingScope> outerBindingScopes)
     {
+        this(snapshot, expansionBudget, requiredOutputs, outerBindingScopes, Map.of());
+    }
+
+    private HogQlSemanticResolver(
+            PinnedSnapshot snapshot,
+            ExpansionBudget expansionBudget,
+            Optional<RequiredOutputs> requiredOutputs,
+            List<BindingScope> outerBindingScopes,
+            Map<String, TableBinding> commonTableBindings)
+    {
         this.snapshot = requireNonNull(snapshot, "snapshot is null");
         this.expansionBudget = requireNonNull(expansionBudget, "expansionBudget is null");
         this.requiredOutputs = requireNonNull(requiredOutputs, "requiredOutputs is null");
         this.outerBindingScopes = List.copyOf(requireNonNull(outerBindingScopes, "outerBindingScopes is null"));
+        this.commonTableBindings = Map.copyOf(requireNonNull(commonTableBindings, "commonTableBindings is null"));
     }
 
     public static Optional<ResolvedQuery> resolve(PinnedSnapshot snapshot, HogQlQuery query)
@@ -171,19 +184,16 @@ final class HogQlSemanticResolver
 
     private HogQlQuery resolveNestedQuery(HogQlQuery query)
     {
-        List<CommonTableExpression> commonTables = query.with().stream()
-                .map(commonTable -> new CommonTableExpression(
-                        commonTable.name(),
-                        commonTable.columnAliases(),
-                        new HogQlSemanticResolver(snapshot, expansionBudget).resolveNestedQuery(commonTable.query()),
-                        commonTable.span()))
-                .toList();
+        if (!query.with().isEmpty()) {
+            return resolveWithQuery(query);
+        }
+        List<CommonTableExpression> commonTables = List.of();
         if (query.body() instanceof SetOperation setOperation) {
             SetOperation resolved = new SetOperation(
                     setOperation.type(),
                     setOperation.distinct(),
-                    new HogQlSemanticResolver(snapshot, expansionBudget, Optional.empty(), outerBindingScopes).resolveNestedQuery(setOperation.left()),
-                    new HogQlSemanticResolver(snapshot, expansionBudget, Optional.empty(), outerBindingScopes).resolveNestedQuery(setOperation.right()),
+                    new HogQlSemanticResolver(snapshot, expansionBudget, Optional.empty(), outerBindingScopes, commonTableBindings).resolveNestedQuery(setOperation.left()),
+                    new HogQlSemanticResolver(snapshot, expansionBudget, Optional.empty(), outerBindingScopes, commonTableBindings).resolveNestedQuery(setOperation.right()),
                     setOperation.leftParenthesized(),
                     setOperation.rightParenthesized(),
                     setOperation.operatorSpan(),
@@ -213,6 +223,290 @@ final class HogQlSemanticResolver
                     query.span());
         }
         return resolveQuery(query, commonTables);
+    }
+
+    private HogQlQuery resolveWithQuery(HogQlQuery query)
+    {
+        Map<String, TableBinding> inferredBindings = new LinkedHashMap<>(commonTableBindings);
+        List<CteAnalysis> analyses = new ArrayList<>();
+        for (CommonTableExpression commonTable : query.with()) {
+            CteAnalysis analysis = inferCommonTable(commonTable, inferredBindings);
+            analyses.add(analysis);
+            inferredBindings.put(canonical(commonTable.name().value()), analysis.binding());
+        }
+
+        HogQlQuery body = new HogQlQuery(List.of(), query.body(), query.orderBy(), query.limit(), query.offset(), query.span());
+        Map<String, RequiredOutputs> demands = new HashMap<>();
+        collectCommonTableDemands(body, HogQlProjectionDemand.collect(body), inferredBindings, demands);
+        for (int index = analyses.size() - 1; index >= 0; index--) {
+            CteAnalysis analysis = analyses.get(index);
+            String name = canonical(analysis.commonTable().name().value());
+            RequiredOutputs demand = demands.getOrDefault(name, new RequiredOutputs(false, Set.of()));
+            HogQlProjectionDemand sourceDemand = HogQlProjectionDemand.collectNonProjection(analysis.commonTable().query());
+            for (CteOutput output : analysis.outputs()) {
+                if (demand.includes(output.name())) {
+                    sourceDemand = sourceDemand.merge(output.sourceDemand());
+                }
+            }
+            collectCommonTableDemands(analysis.commonTable().query(), sourceDemand, inferredBindings, demands);
+        }
+
+        Map<String, TableBinding> resolvedBindings = new LinkedHashMap<>(commonTableBindings);
+        List<CommonTableExpression> resolvedCommonTables = new ArrayList<>();
+        for (CteAnalysis analysis : analyses) {
+            CommonTableExpression commonTable = analysis.commonTable();
+            RequiredOutputs demand = commonTable.columnAliases().isEmpty()
+                    ? demands.getOrDefault(canonical(commonTable.name().value()), new RequiredOutputs(false, Set.of()))
+                    : RequiredOutputs.allOutputs();
+            HogQlQuery resolved = new HogQlSemanticResolver(
+                    snapshot,
+                    expansionBudget,
+                    Optional.of(demand),
+                    List.of(),
+                    resolvedBindings)
+                    .resolveNestedQuery(commonTable.query());
+            resolvedCommonTables.add(new CommonTableExpression(commonTable.name(), commonTable.columnAliases(), resolved, commonTable.span()));
+            resolvedBindings.put(canonical(commonTable.name().value()), analysis.binding());
+        }
+
+        HogQlQuery resolvedBody = new HogQlSemanticResolver(
+                snapshot,
+                expansionBudget,
+                requiredOutputs,
+                outerBindingScopes,
+                resolvedBindings)
+                .resolveNestedQuery(body);
+        return new HogQlQuery(
+                resolvedCommonTables,
+                resolvedBody.body(),
+                resolvedBody.orderBy(),
+                resolvedBody.limit(),
+                resolvedBody.offset(),
+                query.span());
+    }
+
+    private CteAnalysis inferCommonTable(CommonTableExpression commonTable, Map<String, TableBinding> availableBindings)
+    {
+        if (!(commonTable.query().body() instanceof SelectQueryBody select)) {
+            throw cteInferenceError(commonTable.span(), "HogQL CTE output inference does not support set operations");
+        }
+        List<TableBinding> sourceBindings = select.from()
+                .map(relation -> inferRelationBindings(relation, availableBindings))
+                .orElse(List.of());
+        List<CteOutput> outputs = new ArrayList<>();
+        for (Projection projection : select.projections()) {
+            outputs.addAll(inferProjectionOutputs(projection, sourceBindings, !commonTable.columnAliases().isEmpty()));
+        }
+        if (!commonTable.columnAliases().isEmpty()) {
+            if (commonTable.columnAliases().size() != outputs.size()) {
+                throw cteInferenceError(commonTable.span(), "HogQL CTE column alias count does not match its output count");
+            }
+            for (int index = 0; index < outputs.size(); index++) {
+                outputs.set(index, new CteOutput(commonTable.columnAliases().get(index).value(), outputs.get(index).sourceDemand()));
+            }
+        }
+        Set<String> names = new HashSet<>();
+        for (CteOutput output : outputs) {
+            if (!names.add(canonical(output.name()))) {
+                throw cteInferenceError(commonTable.span(), "HogQL CTE output names must be unique: " + output.name());
+            }
+        }
+        List<BoundField> fields = outputs.stream()
+                .map(output -> new BoundField(output.name(), new PhysicalIdentifier(output.name(), true), true, Optional.empty()))
+                .toList();
+        String name = commonTable.name().value();
+        TableBinding binding = new TableBinding(
+                CTE_RELATION_PREFIX + canonical(name),
+                canonical(name),
+                new PhysicalIdentifier(name, commonTable.name().delimited()),
+                List.of(new PhysicalIdentifier(name, commonTable.name().delimited())),
+                false,
+                fields,
+                TableBinding.fieldMap(fields));
+        return new CteAnalysis(commonTable, binding, outputs);
+    }
+
+    private List<TableBinding> inferRelationBindings(Relation relation, Map<String, TableBinding> availableBindings)
+    {
+        return switch (relation) {
+            case AliasedRelation alias -> inferRelationBindings(alias.relation(), availableBindings).stream()
+                    .map(binding -> binding.withAlias(alias.alias()))
+                    .toList();
+            case CommonTableReference commonTable -> Optional.ofNullable(availableBindings.get(canonical(commonTable.name().value())))
+                    .map(List::of)
+                    .orElse(List.of());
+            case JoinRelation join -> {
+                List<TableBinding> bindings = new ArrayList<>(inferRelationBindings(join.left(), availableBindings));
+                bindings.addAll(inferRelationBindings(join.right(), availableBindings));
+                yield List.copyOf(bindings);
+            }
+            case TableReference table -> table.parts().size() == 1
+                    ? snapshot.logicalTable(table.parts().getFirst().value())
+                      .map(definition -> resolveLogicalTable(definition, table.span()).bindings())
+                      .orElse(List.of())
+                    : List.of();
+            case SubqueryRelation _, TablePlaceholder _, ValuesRelation _ -> List.of();
+        };
+    }
+
+    private List<CteOutput> inferProjectionOutputs(Projection projection, List<TableBinding> sourceBindings, boolean hasColumnAliases)
+    {
+        return switch (projection) {
+            case ExpressionProjection expression -> {
+                Optional<String> name = expression.alias().map(Identifier::value);
+                if (name.isEmpty() && expression.expression() instanceof ColumnReference reference) {
+                    name = Optional.of(reference.parts().getLast().value());
+                }
+                if (name.isEmpty() && !hasColumnAliases) {
+                    throw cteInferenceError(expression.span(), "Cannot infer HogQL CTE output name; add a projection alias or CTE column alias list");
+                }
+                yield List.of(new CteOutput(name.orElse("__hogql_cte_output"), HogQlProjectionDemand.collect(expression.expression())));
+            }
+            case ColumnsList columns -> columns.expressions().stream()
+                    .map(expression -> {
+                        if (!(expression instanceof ColumnReference reference)) {
+                            throw cteInferenceError(expression.span(), "Cannot infer HogQL CTE COLUMNS output name");
+                        }
+                        return new CteOutput(reference.parts().getLast().value(), HogQlProjectionDemand.collect(expression));
+                    })
+                    .toList();
+            case ColumnsRegex columns -> inferRegexOutputs(columns, sourceBindings);
+            case Star star -> inferStarOutputs(star, sourceBindings);
+        };
+    }
+
+    private List<CteOutput> inferRegexOutputs(ColumnsRegex columns, List<TableBinding> sourceBindings)
+    {
+        Pattern pattern;
+        try {
+            pattern = Pattern.compile(columns.pattern());
+        }
+        catch (PatternSyntaxException _) {
+            throw semanticEntityError(HOGQL_RESOLUTION_ERROR, columns.patternSpan(), "Invalid HogQL COLUMNS regex: " + columns.pattern());
+        }
+        List<CteOutput> outputs = sourceBindings.stream()
+                .flatMap(binding -> binding.orderedFields().stream()
+                        .filter(BoundField::starVisible)
+                        .filter(field -> pattern.find(utf8Slice(field.name())))
+                        .map(field -> new CteOutput(field.name(), HogQlProjectionDemand.column(binding.qualifier(), field.name()))))
+                .toList();
+        if (outputs.isEmpty()) {
+            throw cteInferenceError(columns.patternSpan(), "No HogQL CTE fields matched COLUMNS regex: " + columns.pattern());
+        }
+        return outputs;
+    }
+
+    private List<CteOutput> inferStarOutputs(Star star, List<TableBinding> sourceBindings)
+    {
+        Optional<LazyStar> lazyStar = inferLazyStar(star, sourceBindings);
+        if (lazyStar.isPresent()) {
+            return lazyStar.orElseThrow().definition().projections().stream()
+                    .filter(LazyProjectionDefinition::starVisible)
+                    .filter(projection -> star.exclusions().stream().noneMatch(exclusion -> matchesIdentifier(exclusion.parts().getLast(), projection.name())))
+                    .map(projection -> new CteOutput(
+                            projection.name(),
+                            star.replacements().stream()
+                                    .filter(replacement -> matchesIdentifier(replacement.target(), projection.name()))
+                                    .findFirst()
+                                    .map(replacement -> HogQlProjectionDemand.collect(replacement.expression()))
+                                    .orElseGet(HogQlProjectionDemand::preserveNone)))
+                    .toList();
+        }
+        List<TableBinding> starBindings = star.qualifier().isEmpty()
+                ? sourceBindings
+                : sourceBindings.stream().filter(binding -> matchesStarQualifier(binding, star.qualifier())).toList();
+        if (starBindings.isEmpty()) {
+            throw cteInferenceError(star.span(), "Cannot infer HogQL CTE star outputs from an unknown relation schema");
+        }
+        Set<StarField> exclusions = resolveStarExclusions(star, starBindings);
+        Map<StarField, StarReplacement> replacements = resolveStarReplacements(star, starBindings, exclusions);
+        return starBindings.stream()
+                .flatMap(binding -> binding.orderedFields().stream()
+                        .filter(BoundField::starVisible)
+                        .filter(field -> !exclusions.contains(new StarField(binding, field)))
+                        .map(field -> {
+                            StarReplacement replacement = replacements.get(new StarField(binding, field));
+                            HogQlProjectionDemand demand = replacement == null
+                                    ? HogQlProjectionDemand.column(binding.qualifier(), field.name())
+                                    : HogQlProjectionDemand.collect(replacement.expression());
+                            return new CteOutput(field.name(), demand);
+                        }))
+                .toList();
+    }
+
+    private Optional<LazyStar> inferLazyStar(Star star, List<TableBinding> sourceBindings)
+    {
+        if (star.qualifier().isEmpty() || star.qualifier().size() > 2) {
+            return Optional.empty();
+        }
+        List<LazyStar> matches;
+        if (star.qualifier().size() == 1) {
+            String lazyName = star.qualifier().getFirst().value();
+            matches = sourceBindings.stream()
+                    .flatMap(binding -> lazyTable(binding, lazyName).stream().map(definition -> new LazyStar(binding, definition)))
+                    .toList();
+        }
+        else {
+            Identifier owner = star.qualifier().getFirst();
+            String lazyName = star.qualifier().getLast().value();
+            matches = sourceBindings.stream()
+                    .filter(binding -> matchesStarQualifier(binding, List.of(owner)))
+                    .flatMap(binding -> lazyTable(binding, lazyName).stream().map(definition -> new LazyStar(binding, definition)))
+                    .toList();
+        }
+        if (matches.size() > 1) {
+            throw cteInferenceError(star.span(), "Ambiguous HogQL CTE lazy star qualifier: " + starQualifier(star));
+        }
+        return matches.stream().findFirst();
+    }
+
+    private void collectCommonTableDemands(
+            HogQlQuery query,
+            HogQlProjectionDemand demand,
+            Map<String, TableBinding> availableBindings,
+            Map<String, RequiredOutputs> demands)
+    {
+        if (query.body() instanceof SelectQueryBody select) {
+            select.from().ifPresent(relation -> collectCommonTableDemands(relation, demand, availableBindings, demands));
+        }
+    }
+
+    private void collectCommonTableDemands(
+            Relation relation,
+            HogQlProjectionDemand demand,
+            Map<String, TableBinding> availableBindings,
+            Map<String, RequiredOutputs> demands)
+    {
+        switch (relation) {
+            case AliasedRelation alias -> {
+                if (alias.relation() instanceof CommonTableReference commonTable) {
+                    addCommonTableDemand(commonTable, demand.forAlias(alias.alias()), availableBindings, demands);
+                }
+                else {
+                    collectCommonTableDemands(alias.relation(), demand, availableBindings, demands);
+                }
+            }
+            case CommonTableReference commonTable -> addCommonTableDemand(commonTable, demand.forAlias(commonTable.name()), availableBindings, demands);
+            case JoinRelation join -> {
+                collectCommonTableDemands(join.left(), demand, availableBindings, demands);
+                collectCommonTableDemands(join.right(), demand, availableBindings, demands);
+            }
+            case SubqueryRelation _, TablePlaceholder _, TableReference _, ValuesRelation _ -> {}
+        }
+    }
+
+    private static void addCommonTableDemand(
+            CommonTableReference commonTable,
+            RequiredOutputs demand,
+            Map<String, TableBinding> availableBindings,
+            Map<String, RequiredOutputs> demands)
+    {
+        String name = canonical(commonTable.name().value());
+        TableBinding binding = availableBindings.get(name);
+        if (binding == null || !binding.relationName().startsWith(CTE_RELATION_PREFIX)) {
+            return;
+        }
+        demands.merge(name, demand, RequiredOutputs::merge);
     }
 
     private HogQlQuery resolveQuery(HogQlQuery query, List<CommonTableExpression> commonTables)
@@ -253,6 +547,13 @@ final class HogQlSemanticResolver
             case ColumnsRegex columns -> resolveColumnsRegex(columns);
             case Star star -> resolveStar(star);
             case ExpressionProjection expressionProjection -> {
+                Optional<String> outputName = expressionProjection.alias().map(Identifier::value);
+                if (outputName.isEmpty() && expressionProjection.expression() instanceof ColumnReference reference) {
+                    outputName = Optional.of(reference.parts().getLast().value());
+                }
+                if (outputName.isPresent() && !projectionDemanded(outputName.orElseThrow())) {
+                    yield List.of();
+                }
                 Expression resolved = resolveExpression(expressionProjection.expression());
                 Optional<Identifier> alias = expressionProjection.alias();
                 if (alias.isEmpty() && expressionProjection.expression() instanceof ColumnReference reference) {
@@ -286,6 +587,7 @@ final class HogQlSemanticResolver
                 .flatMap(binding -> binding.orderedFields().stream()
                         .filter(BoundField::starVisible)
                         .filter(field -> pattern.find(utf8Slice(field.name())))
+                        .filter(field -> projectionDemanded(field.name()))
                         .map(field -> new ExpressionProjection(
                                 resolveBoundField(binding, field, binding.starQualifier(bindings.size()), columns.span(), expansionBudget),
                                 Optional.of(new Identifier(field.name(), true, columns.span())))))
@@ -582,7 +884,9 @@ final class HogQlSemanticResolver
                         aliasedBindings,
                         child.allLogical());
             }
-            case CommonTableReference commonTable -> new ResolvedRelation(commonTable, List.of(), false);
+            case CommonTableReference commonTable -> Optional.ofNullable(commonTableBindings.get(canonical(commonTable.name().value())))
+                    .map(binding -> new ResolvedRelation(commonTable, List.of(binding), true))
+                    .orElseGet(() -> new ResolvedRelation(commonTable, List.of(), false));
             case JoinRelation join -> {
                 ResolvedRelation left = resolveRelation(join.left(), projectionDemand);
                 ResolvedRelation right = resolveRelation(join.right(), projectionDemand);
@@ -614,7 +918,7 @@ final class HogQlSemanticResolver
     {
         return new ResolvedRelation(
                 new SubqueryRelation(
-                        new HogQlSemanticResolver(snapshot, expansionBudget, Optional.of(requiredOutputs)).resolveNestedQuery(subquery.query()),
+                        new HogQlSemanticResolver(snapshot, expansionBudget, Optional.of(requiredOutputs), List.of(), commonTableBindings).resolveNestedQuery(subquery.query()),
                         subquery.span()),
                 List.of(),
                 false);
@@ -856,7 +1160,7 @@ final class HogQlSemanticResolver
         List<BindingScope> visibleOuterScopes = new ArrayList<>();
         currentBindingScope().ifPresent(visibleOuterScopes::add);
         visibleOuterScopes.addAll(outerBindingScopes);
-        return new HogQlSemanticResolver(snapshot, expansionBudget, Optional.empty(), visibleOuterScopes);
+        return new HogQlSemanticResolver(snapshot, expansionBudget, Optional.empty(), visibleOuterScopes, commonTableBindings);
     }
 
     private Optional<BindingScope> currentBindingScope()
@@ -1831,6 +2135,11 @@ final class HogQlSemanticResolver
                 null);
     }
 
+    private static TrinoException cteInferenceError(HogQlQuery.SourceSpan span, String message)
+    {
+        return semanticEntityError(HOGQL_RESOLUTION_ERROR, span, message);
+    }
+
     private static TrinoException unsupportedColumns(HogQlQuery.SourceSpan span)
     {
         return semanticEntityError(
@@ -1946,6 +2255,25 @@ final class HogQlSemanticResolver
         {
             bindings = List.copyOf(requireNonNull(bindings, "bindings is null"));
             relationQualifiers = Set.copyOf(requireNonNull(relationQualifiers, "relationQualifiers is null"));
+        }
+    }
+
+    private record CteAnalysis(CommonTableExpression commonTable, TableBinding binding, List<CteOutput> outputs)
+    {
+        private CteAnalysis
+        {
+            commonTable = requireNonNull(commonTable, "commonTable is null");
+            binding = requireNonNull(binding, "binding is null");
+            outputs = List.copyOf(requireNonNull(outputs, "outputs is null"));
+        }
+    }
+
+    private record CteOutput(String name, HogQlProjectionDemand sourceDemand)
+    {
+        private CteOutput
+        {
+            name = requireNonNull(name, "name is null");
+            sourceDemand = requireNonNull(sourceDemand, "sourceDemand is null");
         }
     }
 
