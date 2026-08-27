@@ -32,6 +32,8 @@ import io.trino.sql.tree.QuerySpecification;
 import io.trino.sql.tree.SingleColumn;
 import io.trino.sql.tree.Statement;
 import io.trino.sql.tree.Table;
+import io.trino.sql.tree.TableSubquery;
+import io.trino.sql.tree.WithQuery;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -179,6 +181,55 @@ public class TestHogQlCompiler
     {
         assertThat(compiler.compile("SELECT * FROM events JOIN persons USING id"))
                 .isEqualTo(sqlParser.createStatement("SELECT * FROM events JOIN persons USING (id)"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "WITH base AS (SELECT 1 AS id) SELECT id FROM base",
+            "WITH base(id) AS (SELECT 1), next AS (SELECT id FROM base) SELECT id FROM next",
+            "WITH base AS (WITH base AS (SELECT 1 AS id) SELECT id FROM base) SELECT id FROM base",
+            "SELECT derived.id FROM (SELECT id FROM events) AS derived",
+            "WITH base AS (SELECT id FROM events) SELECT derived.id FROM (SELECT id FROM base) derived",
+    })
+    public void testLowersCtesAndDerivedTables(String hogql)
+    {
+        Statement statement = compiler.compile(hogql);
+
+        assertThat(statement).isEqualTo(sqlParser.createStatement(hogql));
+        assertThat(sqlParser.createStatement(SqlFormatter.formatSql(statement))).isEqualTo(statement);
+    }
+
+    @Test
+    public void testBindsPlaceholdersAcrossCteAndDerivedQueryScopes()
+    {
+        HogQlCompilationResult result = compiler.compile(
+                "WITH base AS (SELECT {cte}) SELECT {outer} FROM (SELECT {derived} FROM base) nested WHERE {where}",
+                Map.of(
+                        "cte", typedValue("cte"),
+                        "outer", typedValue("outer"),
+                        "derived", typedValue("derived"),
+                        "where", typedValue("where")));
+
+        assertThat(result.parameterNames()).containsExactly("cte", "outer", "derived", "where");
+        assertThat(parameters(result.statement()))
+                .extracting(Parameter::getId)
+                .containsExactly(0, 1, 2, 3);
+    }
+
+    @Test
+    public void testPreservesCteAndDerivedTableSourceLocations()
+    {
+        Query query = (Query) compiler.compile("WITH base AS (SELECT id FROM events)\nSELECT d.id FROM (SELECT id FROM base) AS d");
+        WithQuery commonTable = query.getWith().orElseThrow().getQueries().getFirst();
+        AliasedRelation aliasedRelation = (AliasedRelation) ((QuerySpecification) query.getQueryBody()).getFrom().orElseThrow();
+        TableSubquery derivedTable = (TableSubquery) aliasedRelation.getRelation();
+
+        assertThat(query.getWith().orElseThrow().getLocation()).contains(new NodeLocation(1, 1));
+        assertThat(commonTable.getLocation()).contains(new NodeLocation(1, 6));
+        assertThat(commonTable.getQuery().getLocation()).contains(new NodeLocation(1, 15));
+        assertThat(aliasedRelation.getLocation()).contains(new NodeLocation(2, 18));
+        assertThat(derivedTable.getLocation()).contains(new NodeLocation(2, 18));
+        assertThat(derivedTable.getQuery().getLocation()).contains(new NodeLocation(2, 19));
     }
 
     @Test

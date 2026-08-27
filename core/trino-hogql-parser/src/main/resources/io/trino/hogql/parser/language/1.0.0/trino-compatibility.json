@@ -2137,23 +2137,23 @@
         {
             "id": "alternative:selectStmtWithParens:direct",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createQuery",
+            "parseHandler": "AstBuilder#extractPlainSelect",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
             ]
         },
         {
             "id": "alternative:selectStmtWithParens:parenthesized",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createQuery",
+            "parseHandler": "AstBuilder#extractPlainSelect",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
             ]
         },
         {
@@ -2428,7 +2428,8 @@
             "queryReachable": true,
             "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins",
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
             ]
         },
         {
@@ -2478,12 +2479,12 @@
         {
             "id": "alternative:tableExpr:TableExprSubquery",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
             ]
         },
         {
@@ -2764,12 +2765,12 @@
         {
             "id": "alternative:withClause",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWith",
+            "parseHandler": "AstBuilder#buildCommonTables",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
             ]
         },
         {
@@ -2786,34 +2787,34 @@
         {
             "id": "alternative:withExpr:WithExprSubquery",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWithQuery",
+            "parseHandler": "AstBuilder#buildCommonTables",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
             ]
         },
         {
             "id": "alternative:withExprColumnNameList",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWithQuery",
+            "parseHandler": "AstBuilder#buildCommonTables",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
             ]
         },
         {
             "id": "alternative:withExprList",
             "kind": "parserAlternative",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWith",
+            "parseHandler": "AstBuilder#buildCommonTables",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
             ]
         },
         {
@@ -4086,12 +4087,12 @@
         {
             "id": "rule:withClause",
             "kind": "parserRule",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWith",
+            "parseHandler": "AstBuilder#buildCommonTables",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
             ]
         },
         {
@@ -4108,23 +4109,23 @@
         {
             "id": "rule:withExprColumnNameList",
             "kind": "parserRule",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWithQuery",
+            "parseHandler": "AstBuilder#buildCommonTables",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
             ]
         },
         {
             "id": "rule:withExprList",
             "kind": "parserRule",
-            "loweringHandler": "UnsupportedFeature",
-            "parseHandler": "CanonicalAntlrParser",
+            "loweringHandler": "TrinoAstFactory#createWith",
+            "parseHandler": "AstBuilder#buildCommonTables",
             "queryReachable": true,
-            "status": "explicitCurrentError",
+            "status": "supported",
             "testCaseIds": [
-                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
             ]
         },
         {

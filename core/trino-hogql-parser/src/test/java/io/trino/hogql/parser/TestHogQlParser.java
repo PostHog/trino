@@ -17,6 +17,7 @@ import io.trino.hogql.parser.tree.HogQlQuery;
 import io.trino.hogql.parser.tree.HogQlQuery.AliasedRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
+import io.trino.hogql.parser.tree.HogQlQuery.CommonTableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
@@ -25,6 +26,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinType;
 import io.trino.hogql.parser.tree.HogQlQuery.NullPlacement;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.SortDirection;
+import io.trino.hogql.parser.tree.HogQlQuery.SubqueryRelation;
 import io.trino.hogql.parser.tree.HogQlSyntaxTree;
 import io.trino.hogql.parser.tree.HogQlSyntaxTree.Element;
 import io.trino.hogql.parser.tree.HogQlSyntaxTree.Node;
@@ -59,6 +61,16 @@ public class TestHogQlParser
             "SELECT * FROM",
             "SELECT {1 + 2}",
             "SELECT 1 GROUP BY ALL",
+            "WITH RECURSIVE x AS (SELECT 1) SELECT * FROM x",
+            "WITH x AS MATERIALIZED (SELECT 1) SELECT * FROM x",
+            "WITH x AS NOT MATERIALIZED (SELECT 1) SELECT * FROM x",
+            "WITH x USING KEY (id) AS (SELECT 1) SELECT * FROM x",
+            "WITH 1 AS x SELECT x",
+            "WITH x AS (SELECT * FROM x) SELECT * FROM x",
+            "WITH x AS (SELECT 1), y AS (WITH x AS (SELECT * FROM x) SELECT * FROM x) SELECT * FROM y",
+            "WITH x AS (SELECT 1), x AS (SELECT 2) SELECT * FROM x",
+            "SELECT * FROM events e JOIN (SELECT * FROM persons WHERE personId = e.person_id) p ON true",
+            "SELECT * FROM events e JOIN (SELECT person_id) p ON true",
     })
     public void testRejectsSyntaxWithoutAnAstMapping(String hogql)
     {
@@ -134,6 +146,26 @@ public class TestHogQlParser
         assertThat(left.span()).isEqualTo(new HogQlQuery.SourceSpan(17, 28, 2, 6, 2, 17));
         JoinOn criteria = (JoinOn) join.criteria().orElseThrow();
         assertThat(criteria.span()).isEqualTo(new HogQlQuery.SourceSpan(52, 73, 3, 24, 3, 45));
+    }
+
+    @Test
+    public void testBuildsCteAndDerivedTableAstWithSourceSpans()
+    {
+        String hogql = "WITH base(id) AS (SELECT {cte}), next AS (SELECT id FROM base)\n" +
+                "SELECT d.id FROM (SELECT id FROM next WHERE id = {inner}) AS d WHERE d.id = {outer}";
+
+        HogQlQuery query = parser.parseStatement(hogql);
+
+        assertThat(query.with()).hasSize(2);
+        assertThat(query.with().getFirst().name().value()).isEqualTo("base");
+        assertThat(query.with().getFirst().columnAliases()).singleElement().satisfies(alias -> assertThat(alias.value()).isEqualTo("id"));
+        assertThat(query.with().getFirst().span()).isEqualTo(new HogQlQuery.SourceSpan(5, 31, 1, 6, 1, 32));
+        assertThat(query.with().get(1).query().from()).get().isInstanceOf(CommonTableReference.class);
+        AliasedRelation derived = (AliasedRelation) query.from().orElseThrow();
+        assertThat(derived.alias().value()).isEqualTo("d");
+        SubqueryRelation subquery = (SubqueryRelation) derived.relation();
+        assertThat(subquery.query().from()).get().isInstanceOf(CommonTableReference.class);
+        assertThat(subquery.span()).isEqualTo(new HogQlQuery.SourceSpan(80, 120, 2, 18, 2, 58));
     }
 
     @Test

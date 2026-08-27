@@ -26,6 +26,8 @@ import io.trino.hogql.parser.tree.HogQlQuery.CaseExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CaseWhen;
 import io.trino.hogql.parser.tree.HogQlQuery.CastExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
+import io.trino.hogql.parser.tree.HogQlQuery.CommonTableExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.CommonTableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.Expression;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
@@ -41,6 +43,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
 import io.trino.hogql.parser.tree.HogQlQuery.SortItem;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
+import io.trino.hogql.parser.tree.HogQlQuery.SubqueryRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
@@ -73,24 +76,46 @@ final class HogQlSemanticResolver
     {
         requireNonNull(snapshot, "snapshot is null");
         requireNonNull(query, "query is null");
-        if (query.from().isEmpty()) {
-            return Optional.empty();
-        }
         HogQlSemanticResolver resolver = new HogQlSemanticResolver(snapshot);
-        ResolvedRelation relation = resolver.resolveRelation(query.from().orElseThrow());
-        if (relation.bindings().isEmpty()) {
-            return Optional.empty();
-        }
-        resolver.bindings = relation.bindings();
-        resolver.allRelationsLogical = relation.allLogical();
-        return Optional.of(resolver.resolveQuery(query, relation.relation()));
+        HogQlQuery resolved = resolver.resolveNestedQuery(query);
+        return resolved.equals(query) ? Optional.empty() : Optional.of(new ResolvedQuery(resolved));
     }
 
-    private ResolvedQuery resolveQuery(HogQlQuery query, Relation relation)
+    private HogQlQuery resolveNestedQuery(HogQlQuery query)
+    {
+        List<CommonTableExpression> commonTables = query.with().stream()
+                .map(commonTable -> new CommonTableExpression(
+                        commonTable.name(),
+                        commonTable.columnAliases(),
+                        new HogQlSemanticResolver(snapshot).resolveNestedQuery(commonTable.query()),
+                        commonTable.span()))
+                .toList();
+        Optional<ResolvedRelation> relation = query.from().map(this::resolveRelation);
+        bindings = relation.map(ResolvedRelation::bindings).orElse(List.of());
+        allRelationsLogical = relation.map(ResolvedRelation::allLogical).orElse(false);
+        if (bindings.isEmpty()) {
+            return new HogQlQuery(
+                    commonTables,
+                    query.distinct(),
+                    query.projections(),
+                    relation.map(ResolvedRelation::relation),
+                    query.where(),
+                    query.groupBy(),
+                    query.having(),
+                    query.orderBy(),
+                    query.limit(),
+                    query.offset(),
+                    query.span());
+        }
+        return resolveQuery(query, commonTables, relation.orElseThrow().relation());
+    }
+
+    private HogQlQuery resolveQuery(HogQlQuery query, List<CommonTableExpression> commonTables, Relation relation)
     {
         List<Projection> projections = new ArrayList<>();
         query.projections().forEach(projection -> projections.addAll(resolveProjection(projection)));
         HogQlQuery resolved = new HogQlQuery(
+                commonTables,
                 query.distinct(),
                 projections,
                 Optional.of(relation),
@@ -101,7 +126,7 @@ final class HogQlSemanticResolver
                 query.limit().map(this::resolveExpression),
                 query.offset().map(this::resolveExpression),
                 query.span());
-        return new ResolvedQuery(resolved);
+        return resolved;
     }
 
     private List<Projection> resolveProjection(Projection projection)
@@ -144,6 +169,7 @@ final class HogQlSemanticResolver
                         aliasedBindings,
                         child.allLogical());
             }
+            case CommonTableReference commonTable -> new ResolvedRelation(commonTable, List.of(), false);
             case JoinRelation join -> {
                 ResolvedRelation left = resolveRelation(join.left());
                 ResolvedRelation right = resolveRelation(join.right());
@@ -164,6 +190,10 @@ final class HogQlSemanticResolver
                         joinBindings,
                         left.allLogical() && right.allLogical());
             }
+            case SubqueryRelation subquery -> new ResolvedRelation(
+                    new SubqueryRelation(new HogQlSemanticResolver(snapshot).resolveNestedQuery(subquery.query()), subquery.span()),
+                    List.of(),
+                    false);
             case TablePlaceholder placeholder -> new ResolvedRelation(placeholder, List.of(), false);
             case TableReference table -> resolveTable(table);
         };

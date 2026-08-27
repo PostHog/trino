@@ -25,6 +25,8 @@ import io.trino.hogql.parser.tree.HogQlQuery.CaseExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CaseWhen;
 import io.trino.hogql.parser.tree.HogQlQuery.CastExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
+import io.trino.hogql.parser.tree.HogQlQuery.CommonTableExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.CommonTableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.Expression;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
@@ -45,6 +47,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.SortDirection;
 import io.trino.hogql.parser.tree.HogQlQuery.SortItem;
 import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
+import io.trino.hogql.parser.tree.HogQlQuery.SubqueryRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
@@ -70,9 +73,15 @@ import org.antlr.v4.runtime.tree.ParseTree;
 import org.antlr.v4.runtime.tree.ParseTreeListener;
 import org.antlr.v4.runtime.tree.TerminalNode;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 
 import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.ADD;
 import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.AND;
@@ -441,6 +450,8 @@ public final class HogQlParser
     private static final class AstBuilder
     {
         private final SourcePositions sourcePositions;
+        private final Deque<Set<String>> commonTableScopes = new ArrayDeque<>();
+        private final Deque<Set<String>> prohibitedCommonTableScopes = new ArrayDeque<>();
 
         private AstBuilder(String source)
         {
@@ -449,39 +460,100 @@ public final class HogQlParser
 
         public HogQlQuery build(HogQLParser.SelectContext context)
         {
-            SelectedQuery selectedQuery = extractPlainSelect(context);
+            HogQlQuery query = buildQuery(extractPlainSelect(context));
+            validateUncorrelatedSubqueries(query);
+            return query;
+        }
+
+        private HogQlQuery buildQuery(SelectedQuery selectedQuery)
+        {
             HogQLParser.SelectStmtContext select = selectedQuery.statement();
             rejectUnsupportedClauses(select);
+            commonTableScopes.push(new LinkedHashSet<>());
+            prohibitedCommonTableScopes.push(new LinkedHashSet<>());
+            try {
+                List<CommonTableExpression> with = buildCommonTables(select.withClause());
 
-            List<Projection> projections = selectColumns(select.selectColumnExprListBeforeFrom()).stream()
-                    .map(this::buildProjection)
-                    .toList();
-            Optional<Relation> from = Optional.ofNullable(select.fromClause())
-                    .map(HogQLParser.FromClauseContext::joinExpr)
-                    .map(this::buildRelation);
-            Optional<Expression> where = Optional.ofNullable(select.whereClause())
-                    .map(HogQLParser.WhereClauseContext::columnExpr)
-                    .map(this::buildExpression);
-            List<Expression> groupBy = buildGroupBy(select);
-            Optional<Expression> having = Optional.ofNullable(select.havingClause())
-                    .map(HogQLParser.HavingClauseContext::columnExpr)
-                    .map(this::buildExpression);
-            List<SortItem> orderBy = buildOrderBy(selectedQuery.orderBy() != null ? selectedQuery.orderBy() : select.orderByClause());
-            Pagination pagination = mergePagination(
-                    buildPagination(select.limitAndOffsetClause(), select.offsetOnlyClause()),
-                    selectedQuery.pagination() == null ? new Pagination(Optional.empty(), Optional.empty()) : buildPagination(selectedQuery.pagination()),
-                    select);
-            return new HogQlQuery(
-                    select.DISTINCT() != null,
-                    projections,
-                    from,
-                    where,
-                    groupBy,
-                    having,
-                    orderBy,
-                    pagination.limit(),
-                    pagination.offset(),
-                    sourceSpan(select));
+                List<Projection> projections = selectColumns(select.selectColumnExprListBeforeFrom()).stream()
+                        .map(this::buildProjection)
+                        .toList();
+                Optional<Relation> from = Optional.ofNullable(select.fromClause())
+                        .map(HogQLParser.FromClauseContext::joinExpr)
+                        .map(this::buildRelation);
+                Optional<Expression> where = Optional.ofNullable(select.whereClause())
+                        .map(HogQLParser.WhereClauseContext::columnExpr)
+                        .map(this::buildExpression);
+                List<Expression> groupBy = buildGroupBy(select);
+                Optional<Expression> having = Optional.ofNullable(select.havingClause())
+                        .map(HogQLParser.HavingClauseContext::columnExpr)
+                        .map(this::buildExpression);
+                List<SortItem> orderBy = buildOrderBy(selectedQuery.orderBy() != null ? selectedQuery.orderBy() : select.orderByClause());
+                Pagination pagination = mergePagination(
+                        buildPagination(select.limitAndOffsetClause(), select.offsetOnlyClause()),
+                        selectedQuery.pagination() == null ? new Pagination(Optional.empty(), Optional.empty()) : buildPagination(selectedQuery.pagination()),
+                        select);
+                return new HogQlQuery(
+                        with,
+                        select.DISTINCT() != null,
+                        projections,
+                        from,
+                        where,
+                        groupBy,
+                        having,
+                        orderBy,
+                        pagination.limit(),
+                        pagination.offset(),
+                        sourceSpan(select));
+            }
+            finally {
+                prohibitedCommonTableScopes.pop();
+                commonTableScopes.pop();
+            }
+        }
+
+        private List<CommonTableExpression> buildCommonTables(HogQLParser.WithClauseContext context)
+        {
+            if (context == null) {
+                return List.of();
+            }
+            if (context.RECURSIVE() != null) {
+                throw unsupported(context, "recursive CTE");
+            }
+            List<CommonTableExpression> commonTables = new ArrayList<>();
+            Set<String> localNames = commonTableScopes.getFirst();
+            for (HogQLParser.WithExprContext expression : context.withExprList().withExpr()) {
+                if (!(expression instanceof HogQLParser.WithExprSubqueryContext subquery)) {
+                    throw unsupported(expression, "non-query WITH expression");
+                }
+                if (subquery.USING() != null) {
+                    throw unsupported(subquery, "CTE USING KEY");
+                }
+                if (subquery.MATERIALIZED() != null) {
+                    throw unsupported(subquery, "materialized CTE");
+                }
+                Identifier name = buildIdentifier(subquery.identifier());
+                String canonicalName = canonicalName(name);
+                if (localNames.contains(canonicalName)) {
+                    throw unsupported(subquery, "duplicate CTE name");
+                }
+                Set<String> prohibitedNames = prohibitedCommonTableScopes.getFirst();
+                prohibitedNames.add(canonicalName);
+                HogQlQuery query;
+                try {
+                    query = buildQuery(extractPlainSelect(subquery.selectSetStmt()));
+                }
+                finally {
+                    prohibitedNames.remove(canonicalName);
+                }
+                List<Identifier> columnAliases = subquery.withExprColumnNameList().isEmpty()
+                        ? List.of()
+                        : subquery.withExprColumnNameList().getFirst().identifier().stream()
+                          .map(this::buildIdentifier)
+                          .toList();
+                commonTables.add(new CommonTableExpression(name, columnAliases, query, sourceSpan(subquery)));
+                localNames.add(canonicalName);
+            }
+            return List.copyOf(commonTables);
         }
 
         private List<HogQLParser.SelectColumnExprContext> selectColumns(HogQLParser.SelectColumnExprListBeforeFromContext context)
@@ -511,6 +583,24 @@ public final class HogQlParser
             return new SelectedQuery(wrapped.selectStmt(), set.orderByClause(), set.limitAndOffsetClauseOptional());
         }
 
+        private SelectedQuery extractPlainSelect(HogQLParser.SelectSetStmtContext context)
+        {
+            if (!context.subsequentSelectSetClause().isEmpty()) {
+                throw unsupported(context, "set query");
+            }
+            HogQLParser.SelectStmtWithParensContext wrapped = context.selectStmtWithParens();
+            if (wrapped.selectStmt() != null) {
+                return new SelectedQuery(wrapped.selectStmt(), context.orderByClause(), context.limitAndOffsetClauseOptional());
+            }
+            if (wrapped.withClause() != null) {
+                throw unsupported(wrapped, "non-standard WITH query wrapper");
+            }
+            if (wrapped.selectSetStmt() != null && context.orderByClause() == null && context.limitAndOffsetClauseOptional() == null) {
+                return extractPlainSelect(wrapped.selectSetStmt());
+            }
+            throw unsupported(wrapped, "parenthesized, placeholder, or decorated query");
+        }
+
         private record SelectedQuery(
                 HogQLParser.SelectStmtContext statement,
                 HogQLParser.OrderByClauseContext orderBy,
@@ -519,7 +609,6 @@ public final class HogQlParser
         private void rejectUnsupportedClauses(HogQLParser.SelectStmtContext context)
         {
             List<ParserRuleContext> clauses = new ArrayList<>();
-            clauses.add(context.withClause());
             clauses.add(context.topClause());
             clauses.add(context.arrayJoinClause());
             clauses.add(context.prewhereClause());
@@ -991,10 +1080,24 @@ public final class HogQlParser
         private Relation buildTableExpression(HogQLParser.TableExprContext context)
         {
             if (context instanceof HogQLParser.TableExprIdentifierContext identifier) {
-                return new TableReference(buildIdentifiers(identifier.tableIdentifier()), sourceSpan(context));
+                List<Identifier> parts = buildIdentifiers(identifier.tableIdentifier());
+                if (parts.size() == 1) {
+                    String name = canonicalName(parts.getFirst());
+                    switch (resolveCommonTableName(name)) {
+                        case PROHIBITED -> throw unsupported(context, "recursive CTE reference");
+                        case VISIBLE -> {
+                            return new CommonTableReference(parts.getFirst(), sourceSpan(context));
+                        }
+                        case ABSENT -> {}
+                    }
+                }
+                return new TableReference(parts, sourceSpan(context));
             }
             if (context instanceof HogQLParser.TableExprPlaceholderContext placeholder) {
                 return new TablePlaceholder(buildPlaceholder(placeholder.placeholder()));
+            }
+            if (context instanceof HogQLParser.TableExprSubqueryContext subquery) {
+                return new SubqueryRelation(buildQuery(extractPlainSelect(subquery.selectSetStmt())), sourceSpan(context));
             }
             if (context instanceof HogQLParser.TableExprAliasContext alias) {
                 if (alias.columnAliases() != null) {
@@ -1006,6 +1109,162 @@ public final class HogQlParser
                 return new AliasedRelation(buildTableExpression(alias.tableExpr()), identifier, sourceSpan(context));
             }
             throw unsupported(context, "table expression");
+        }
+
+        private CommonTableNameResolution resolveCommonTableName(String name)
+        {
+            Iterator<Set<String>> visibleScopes = commonTableScopes.iterator();
+            Iterator<Set<String>> prohibitedScopes = prohibitedCommonTableScopes.iterator();
+            while (visibleScopes.hasNext()) {
+                Set<String> visibleNames = visibleScopes.next();
+                Set<String> prohibitedNames = prohibitedScopes.next();
+                if (prohibitedNames.contains(name)) {
+                    return CommonTableNameResolution.PROHIBITED;
+                }
+                if (visibleNames.contains(name)) {
+                    return CommonTableNameResolution.VISIBLE;
+                }
+            }
+            return CommonTableNameResolution.ABSENT;
+        }
+
+        private enum CommonTableNameResolution
+        {
+            ABSENT,
+            PROHIBITED,
+            VISIBLE,
+        }
+
+        private static String canonicalName(Identifier identifier)
+        {
+            return identifier.delimited() ? identifier.value() : identifier.value().toLowerCase(Locale.ENGLISH);
+        }
+
+        private void validateUncorrelatedSubqueries(HogQlQuery query)
+        {
+            validateQueryScope(query, Set.of());
+        }
+
+        private void validateQueryScope(HogQlQuery query, Set<String> forbiddenOuterRelations)
+        {
+            Set<String> localRelations = relationNames(query.from());
+            query.projections().forEach(projection -> {
+                if (projection instanceof ExpressionProjection expression) {
+                    validateExpressionScope(expression.expression(), forbiddenOuterRelations, localRelations);
+                }
+            });
+            query.where().ifPresent(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations));
+            query.groupBy().forEach(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations));
+            query.having().ifPresent(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations));
+            query.orderBy().forEach(item -> validateExpressionScope(item.expression(), forbiddenOuterRelations, localRelations));
+            query.limit().ifPresent(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations));
+            query.offset().ifPresent(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations));
+            query.from().ifPresent(relation -> validateRelationExpressionScopes(relation, forbiddenOuterRelations, localRelations));
+
+            query.with().forEach(commonTable -> validateQueryScope(commonTable.query(), forbiddenOuterRelations));
+            Set<String> nestedForbiddenRelations = new LinkedHashSet<>(forbiddenOuterRelations);
+            nestedForbiddenRelations.addAll(localRelations);
+            query.from().ifPresent(relation -> validateNestedRelationScopes(relation, Set.copyOf(nestedForbiddenRelations)));
+        }
+
+        private void validateRelationExpressionScopes(Relation relation, Set<String> forbiddenOuterRelations, Set<String> localRelations)
+        {
+            switch (relation) {
+                case AliasedRelation alias -> validateRelationExpressionScopes(alias.relation(), forbiddenOuterRelations, localRelations);
+                case JoinRelation join -> {
+                    validateRelationExpressionScopes(join.left(), forbiddenOuterRelations, localRelations);
+                    validateRelationExpressionScopes(join.right(), forbiddenOuterRelations, localRelations);
+                    join.criteria().ifPresent(criteria -> {
+                        if (criteria instanceof JoinOn on) {
+                            validateExpressionScope(on.expression(), forbiddenOuterRelations, localRelations);
+                        }
+                    });
+                }
+                case CommonTableReference _, SubqueryRelation _, TablePlaceholder _, TableReference _ -> {}
+            }
+        }
+
+        private void validateNestedRelationScopes(Relation relation, Set<String> forbiddenOuterRelations)
+        {
+            switch (relation) {
+                case AliasedRelation alias -> validateNestedRelationScopes(alias.relation(), forbiddenOuterRelations);
+                case JoinRelation join -> {
+                    validateNestedRelationScopes(join.left(), forbiddenOuterRelations);
+                    validateNestedRelationScopes(join.right(), forbiddenOuterRelations);
+                }
+                case SubqueryRelation subquery -> validateQueryScope(subquery.query(), forbiddenOuterRelations);
+                case CommonTableReference _, TablePlaceholder _, TableReference _ -> {}
+            }
+        }
+
+        private Set<String> relationNames(Optional<Relation> relation)
+        {
+            Set<String> names = new LinkedHashSet<>();
+            relation.ifPresent(value -> collectRelationNames(value, names));
+            return Set.copyOf(names);
+        }
+
+        private void collectRelationNames(Relation relation, Set<String> names)
+        {
+            switch (relation) {
+                case AliasedRelation alias -> names.add(canonicalName(alias.alias()));
+                case CommonTableReference commonTable -> names.add(canonicalName(commonTable.name()));
+                case JoinRelation join -> {
+                    collectRelationNames(join.left(), names);
+                    collectRelationNames(join.right(), names);
+                }
+                case SubqueryRelation _, TablePlaceholder _ -> {}
+                case TableReference table -> names.add(canonicalName(table.parts().getLast()));
+            }
+        }
+
+        private void validateExpressionScope(Expression expression, Set<String> forbiddenOuterRelations, Set<String> localRelations)
+        {
+            switch (expression) {
+                case ArrayExpression array -> array.values().forEach(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations));
+                case BetweenExpression between -> {
+                    validateExpressionScope(between.value(), forbiddenOuterRelations, localRelations);
+                    validateExpressionScope(between.min(), forbiddenOuterRelations, localRelations);
+                    validateExpressionScope(between.max(), forbiddenOuterRelations, localRelations);
+                }
+                case BinaryExpression binary -> {
+                    validateExpressionScope(binary.left(), forbiddenOuterRelations, localRelations);
+                    validateExpressionScope(binary.right(), forbiddenOuterRelations, localRelations);
+                }
+                case CaseExpression caseExpression -> {
+                    caseExpression.operand().ifPresent(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations));
+                    caseExpression.whenClauses().forEach(when -> {
+                        validateExpressionScope(when.operand(), forbiddenOuterRelations, localRelations);
+                        validateExpressionScope(when.result(), forbiddenOuterRelations, localRelations);
+                    });
+                    caseExpression.defaultValue().ifPresent(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations));
+                }
+                case CastExpression cast -> validateExpressionScope(cast.value(), forbiddenOuterRelations, localRelations);
+                case ColumnReference reference -> {
+                    if (reference.parts().size() == 1 && !forbiddenOuterRelations.isEmpty() && localRelations.isEmpty()) {
+                        throw unsupported(reference.span(), "correlated relation subquery");
+                    }
+                    if (reference.parts().size() > 1) {
+                        String qualifier = canonicalName(reference.parts().getFirst());
+                        if (forbiddenOuterRelations.contains(qualifier) && !localRelations.contains(qualifier)) {
+                            throw unsupported(reference.span(), "correlated relation subquery");
+                        }
+                    }
+                }
+                case FunctionCall function -> {
+                    function.arguments().forEach(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations));
+                    function.orderBy().forEach(item -> validateExpressionScope(item.expression(), forbiddenOuterRelations, localRelations));
+                    function.filter().ifPresent(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations));
+                }
+                case InExpression in -> {
+                    validateExpressionScope(in.value(), forbiddenOuterRelations, localRelations);
+                    in.values().forEach(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations));
+                }
+                case IsNullExpression isNull -> validateExpressionScope(isNull.value(), forbiddenOuterRelations, localRelations);
+                case Literal _, Placeholder _ -> {}
+                case TupleExpression tuple -> tuple.values().forEach(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations));
+                case UnaryExpression unary -> validateExpressionScope(unary.operand(), forbiddenOuterRelations, localRelations);
+            }
         }
 
         private JoinType buildJoinType(HogQLParser.JoinOpContext context)
@@ -1103,7 +1362,11 @@ public final class HogQlParser
 
         private HogQlParsingException unsupported(ParserRuleContext context, String feature)
         {
-            SourceSpan span = sourceSpan(context);
+            return unsupported(sourceSpan(context), feature);
+        }
+
+        private HogQlParsingException unsupported(SourceSpan span, String feature)
+        {
             return new HogQlParsingException("HogQL feature is not lowered yet: " + feature, null, span.startLine(), span.startColumn());
         }
 

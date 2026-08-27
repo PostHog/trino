@@ -130,6 +130,25 @@ public class TestHogQlSemanticResolution
     }
 
     @Test
+    public void testCteScopeShadowsLogicalCatalogNamesWithoutFetchingMetadata()
+    {
+        AtomicInteger pins = new AtomicInteger();
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> {
+            pins.incrementAndGet();
+            return new PinnedSnapshot(SNAPSHOT);
+        });
+
+        HogQlCompilationResult result = compiler.compile(
+                envelope("WITH events AS (SELECT 1 AS event), next AS (SELECT event FROM events) SELECT event FROM next", OptionalLong.empty()),
+                Optional.of(context));
+
+        assertThat(pins).hasValue(0);
+        assertThat(result.catalogGeneration()).isEmpty();
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "WITH events AS (SELECT 1 AS event), next AS (SELECT event FROM events) SELECT event FROM next"));
+    }
+
+    @Test
     public void testUnknownLogicalFieldFailsAtOriginalLocation()
     {
         HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));

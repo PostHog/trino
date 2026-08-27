@@ -454,11 +454,28 @@
             ]
         },
         {
+            "id": "alternative:selectStmtWithParens:direct",
+            "loweringHandler": "TrinoAstFactory#createQuery",
+            "parseHandler": "AstBuilder#extractPlainSelect",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
+            ]
+        },
+        {
+            "id": "alternative:selectStmtWithParens:parenthesized",
+            "loweringHandler": "TrinoAstFactory#createQuery",
+            "parseHandler": "AstBuilder#extractPlainSelect",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
+            ]
+        },
+        {
             "id": "alternative:tableExpr:TableExprAlias",
             "loweringHandler": "TrinoAstFactory#createRelation",
             "parseHandler": "AstBuilder#buildTableExpression",
             "testCaseIds": [
-                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins",
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
             ]
         },
         {
@@ -467,6 +484,14 @@
             "parseHandler": "AstBuilder#buildTableExpression",
             "testCaseIds": [
                 "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "alternative:tableExpr:TableExprSubquery",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
             ]
         },
         {
@@ -483,6 +508,38 @@
             "parseHandler": "AstBuilder#build",
             "testCaseIds": [
                 "TestHogQlParser#testUsesCanonicalGrammarForExpressionsAndWhereClause"
+            ]
+        },
+        {
+            "id": "alternative:withClause",
+            "loweringHandler": "TrinoAstFactory#createWith",
+            "parseHandler": "AstBuilder#buildCommonTables",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
+            ]
+        },
+        {
+            "id": "alternative:withExpr:WithExprSubquery",
+            "loweringHandler": "TrinoAstFactory#createWithQuery",
+            "parseHandler": "AstBuilder#buildCommonTables",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
+            ]
+        },
+        {
+            "id": "alternative:withExprColumnNameList",
+            "loweringHandler": "TrinoAstFactory#createWithQuery",
+            "parseHandler": "AstBuilder#buildCommonTables",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
+            ]
+        },
+        {
+            "id": "alternative:withExprList",
+            "loweringHandler": "TrinoAstFactory#createWith",
+            "parseHandler": "AstBuilder#buildCommonTables",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
             ]
         },
         {
@@ -589,6 +646,30 @@
             "parseHandler": "AstBuilder#build",
             "testCaseIds": [
                 "TestHogQlParser#testUsesCanonicalGrammarForExpressionsAndWhereClause"
+            ]
+        },
+        {
+            "id": "rule:withClause",
+            "loweringHandler": "TrinoAstFactory#createWith",
+            "parseHandler": "AstBuilder#buildCommonTables",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
+            ]
+        },
+        {
+            "id": "rule:withExprColumnNameList",
+            "loweringHandler": "TrinoAstFactory#createWithQuery",
+            "parseHandler": "AstBuilder#buildCommonTables",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
+            ]
+        },
+        {
+            "id": "rule:withExprList",
+            "loweringHandler": "TrinoAstFactory#createWith",
+            "parseHandler": "AstBuilder#buildCommonTables",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
             ]
         }
     ],

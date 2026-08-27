@@ -19,6 +19,7 @@ import java.util.Optional;
 import static java.util.Objects.requireNonNull;
 
 public record HogQlQuery(
+        List<CommonTableExpression> with,
         boolean distinct,
         List<Projection> projections,
         Optional<Relation> from,
@@ -32,6 +33,7 @@ public record HogQlQuery(
 {
     public HogQlQuery
     {
+        with = List.copyOf(requireNonNull(with, "with is null"));
         projections = List.copyOf(requireNonNull(projections, "projections is null"));
         from = requireNonNull(from, "from is null");
         where = requireNonNull(where, "where is null");
@@ -41,6 +43,17 @@ public record HogQlQuery(
         limit = requireNonNull(limit, "limit is null");
         offset = requireNonNull(offset, "offset is null");
         span = requireNonNull(span, "span is null");
+    }
+
+    public record CommonTableExpression(Identifier name, List<Identifier> columnAliases, HogQlQuery query, SourceSpan span)
+    {
+        public CommonTableExpression
+        {
+            name = requireNonNull(name, "name is null");
+            columnAliases = List.copyOf(requireNonNull(columnAliases, "columnAliases is null"));
+            query = requireNonNull(query, "query is null");
+            span = requireNonNull(span, "span is null");
+        }
     }
 
     public record SortItem(Expression expression, SortDirection direction, NullPlacement nullPlacement, SourceSpan span)
@@ -327,7 +340,9 @@ public record HogQlQuery(
 
     public sealed interface Relation
             permits AliasedRelation,
+                    CommonTableReference,
                     JoinRelation,
+                    SubqueryRelation,
                     TablePlaceholder,
                     TableReference
     {
@@ -341,6 +356,26 @@ public record HogQlQuery(
         {
             relation = requireNonNull(relation, "relation is null");
             alias = requireNonNull(alias, "alias is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record CommonTableReference(Identifier name, SourceSpan span)
+            implements Relation
+    {
+        public CommonTableReference
+        {
+            name = requireNonNull(name, "name is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record SubqueryRelation(HogQlQuery query, SourceSpan span)
+            implements Relation
+    {
+        public SubqueryRelation
+        {
+            query = requireNonNull(query, "query is null");
             span = requireNonNull(span, "span is null");
         }
     }

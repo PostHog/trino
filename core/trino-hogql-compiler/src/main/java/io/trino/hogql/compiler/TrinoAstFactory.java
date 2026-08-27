@@ -21,6 +21,8 @@ import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CaseExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.CastExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
+import io.trino.hogql.parser.tree.HogQlQuery.CommonTableExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.CommonTableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
@@ -35,6 +37,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.Projection;
 import io.trino.hogql.parser.tree.HogQlQuery.Relation;
 import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
+import io.trino.hogql.parser.tree.HogQlQuery.SubqueryRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
@@ -80,7 +83,10 @@ import io.trino.sql.tree.SortItem.Ordering;
 import io.trino.sql.tree.Statement;
 import io.trino.sql.tree.StringLiteral;
 import io.trino.sql.tree.Table;
+import io.trino.sql.tree.TableSubquery;
 import io.trino.sql.tree.WhenClause;
+import io.trino.sql.tree.With;
+import io.trino.sql.tree.WithQuery;
 
 import java.util.List;
 import java.util.Map;
@@ -91,6 +97,11 @@ final class TrinoAstFactory
     private TrinoAstFactory() {}
 
     public static Statement createStatement(HogQlQuery query, Map<SourceSpan, Integer> parameterIds)
+    {
+        return createQuery(query, parameterIds);
+    }
+
+    private static Query createQuery(HogQlQuery query, Map<SourceSpan, Integer> parameterIds)
     {
         NodeLocation location = location(query.span());
         QuerySpecification querySpecification = new QuerySpecification(
@@ -110,11 +121,37 @@ final class TrinoAstFactory
                 location,
                 List.of(),
                 List.of(),
-                Optional.empty(),
+                createWith(query, parameterIds),
                 querySpecification,
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty());
+    }
+
+    private static Optional<With> createWith(HogQlQuery query, Map<SourceSpan, Integer> parameterIds)
+    {
+        if (query.with().isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(new With(
+                location(query.span()),
+                false,
+                query.with().stream()
+                        .map(commonTable -> createWithQuery(commonTable, parameterIds))
+                        .toList()));
+    }
+
+    private static WithQuery createWithQuery(CommonTableExpression commonTable, Map<SourceSpan, Integer> parameterIds)
+    {
+        return new WithQuery(
+                location(commonTable.span()),
+                createIdentifier(commonTable.name()),
+                createQuery(commonTable.query(), parameterIds),
+                commonTable.columnAliases().isEmpty()
+                        ? Optional.empty()
+                        : Optional.of(commonTable.columnAliases().stream()
+                                      .map(TrinoAstFactory::createIdentifier)
+                                      .toList()));
     }
 
     private static Optional<OrderBy> createOrderBy(HogQlQuery query, Map<SourceSpan, Integer> parameterIds)
@@ -330,6 +367,9 @@ final class TrinoAstFactory
                     createRelation(alias.relation(), parameterIds),
                     createIdentifier(alias.alias()),
                     null);
+            case CommonTableReference commonTable -> new Table(
+                    location(commonTable.span()),
+                    QualifiedName.of(List.of(createIdentifier(commonTable.name()))));
             case JoinRelation join -> new io.trino.sql.tree.Join(
                     location(join.span()),
                     switch (join.type()) {
@@ -347,6 +387,7 @@ final class TrinoAstFactory
                                 .map(TrinoAstFactory::createIdentifier)
                                 .toList());
                     }));
+            case SubqueryRelation subquery -> new TableSubquery(location(subquery.span()), createQuery(subquery.query(), parameterIds));
             case TablePlaceholder _ -> throw new IllegalArgumentException("table placeholder was not validated");
             case TableReference table -> createTable(table);
         };
