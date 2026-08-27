@@ -16,6 +16,9 @@ package io.trino.execution;
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Inject;
 import io.trino.Session;
+import io.trino.hogql.HogQlCompilationEvent.Dimensions;
+import io.trino.hogql.HogQlCompilationObserver;
+import io.trino.hogql.HogQlCompilationTracker;
 import io.trino.hogql.compiler.HogQlCompilationResult;
 import io.trino.hogql.compiler.HogQlCompileEnvelope;
 import io.trino.hogql.compiler.HogQlCompiler;
@@ -33,6 +36,9 @@ import java.util.List;
 import java.util.Optional;
 
 import static io.trino.execution.ParameterExtractor.getParameterCount;
+import static io.trino.hogql.HogQlCompilationEvent.Phase.COMPILATION;
+import static io.trino.hogql.HogQlCompilationEvent.Phase.PARAMETER_BINDING;
+import static io.trino.hogql.HogQlCompilationObserver.NOOP;
 import static io.trino.spi.StandardErrorCode.INVALID_PARAMETER_USAGE;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.sql.analyzer.ConstantExpressionVerifier.verifyExpressionIsConstant;
@@ -46,23 +52,30 @@ public class QueryPreparer
     private final SqlParser sqlParser;
     private final Optional<HogQlCompiler> hogQlCompiler;
     private final HogQlParameterDecoder hogQlParameterDecoder;
+    private final HogQlCompilationObserver hogQlCompilationObserver;
 
     public QueryPreparer(SqlParser sqlParser)
     {
-        this(sqlParser, Optional.empty());
+        this(sqlParser, Optional.empty(), NOOP);
+    }
+
+    public QueryPreparer(SqlParser sqlParser, HogQlCompiler hogQlCompiler)
+    {
+        this(sqlParser, Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")), NOOP);
     }
 
     @Inject
-    public QueryPreparer(SqlParser sqlParser, HogQlCompiler hogQlCompiler)
+    public QueryPreparer(SqlParser sqlParser, HogQlCompiler hogQlCompiler, HogQlCompilationObserver hogQlCompilationObserver)
     {
-        this(sqlParser, Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")));
+        this(sqlParser, Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")), hogQlCompilationObserver);
     }
 
-    private QueryPreparer(SqlParser sqlParser, Optional<HogQlCompiler> hogQlCompiler)
+    private QueryPreparer(SqlParser sqlParser, Optional<HogQlCompiler> hogQlCompiler, HogQlCompilationObserver hogQlCompilationObserver)
     {
         this.sqlParser = requireNonNull(sqlParser, "sqlParser is null");
         this.hogQlCompiler = requireNonNull(hogQlCompiler, "hogQlCompiler is null");
         this.hogQlParameterDecoder = new HogQlParameterDecoder(sqlParser);
+        this.hogQlCompilationObserver = requireNonNull(hogQlCompilationObserver, "hogQlCompilationObserver is null");
     }
 
     public PreparedQuery prepareQuery(Session session, String query)
@@ -79,10 +92,23 @@ public class QueryPreparer
             case TRINO -> prepareQuery(session, sqlParser.createStatement(submission.originalText()));
             case HOGQL -> {
                 HogQlCompileEnvelope envelope = submission.hogQlEnvelope().orElseThrow();
-                HogQlCompilationResult result = hogQlCompiler
-                        .orElseThrow(() -> new TrinoException(NOT_SUPPORTED, "HogQL query submission is disabled"))
-                        .compile(envelope);
-                yield prepareQuery(session, result.statement(), Optional.of(hogQlParameterDecoder.decode(result, envelope.parameters())));
+                HogQlCompilationTracker tracker = new HogQlCompilationTracker(hogQlCompilationObserver, Dimensions.fromEnvelope(envelope));
+                PreparedQuery preparedQuery;
+                try {
+                    HogQlCompilationResult result = tracker.observe(COMPILATION, () -> hogQlCompiler
+                            .orElseThrow(() -> new TrinoException(NOT_SUPPORTED, "HogQL query submission is disabled"))
+                            .compile(envelope));
+                    preparedQuery = tracker.observe(PARAMETER_BINDING, () -> prepareQuery(
+                            session,
+                            result.statement(),
+                            Optional.of(hogQlParameterDecoder.decode(result, envelope.parameters()))));
+                }
+                catch (RuntimeException | Error failure) {
+                    tracker.failed(failure);
+                    throw failure;
+                }
+                tracker.succeeded();
+                yield preparedQuery;
             }
         };
     }

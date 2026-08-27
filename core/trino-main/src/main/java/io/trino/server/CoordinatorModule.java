@@ -98,6 +98,8 @@ import io.trino.execution.scheduler.faulttolerant.TaskDescriptorStorage;
 import io.trino.execution.scheduler.policy.AllAtOnceExecutionPolicy;
 import io.trino.execution.scheduler.policy.ExecutionPolicy;
 import io.trino.execution.scheduler.policy.PhasedExecutionPolicy;
+import io.trino.hogql.HogQlCompilationObserver;
+import io.trino.hogql.HogQlCompilationStats;
 import io.trino.hogql.HogQlConfig;
 import io.trino.hogql.HogQlSemanticCatalogConfig;
 import io.trino.hogql.HogQlSemanticCatalogModule;
@@ -183,6 +185,9 @@ public class CoordinatorModule
         configBinder(binder).bindConfig(HogQlConfig.class);
         configBinder(binder).bindConfig(HogQlSemanticCatalogConfig.class);
         binder.bind(HogQlCompiler.class).in(Scopes.SINGLETON);
+        binder.bind(HogQlCompilationStats.class).in(Scopes.SINGLETON);
+        binder.bind(HogQlCompilationObserver.class).to(HogQlCompilationStats.class);
+        newExporter(binder).export(HogQlCompilationStats.class).withGeneratedName();
         if (buildConfigObject(HogQlConfig.class).isEnabled()) {
             jaxrsBinder(binder).bind(HogQlStatementResource.class);
             if (buildConfigObject(HogQlSemanticCatalogConfig.class).getUri() != null) {
