@@ -15,6 +15,7 @@ package io.trino.hogql;
 
 import com.google.inject.Key;
 import com.google.inject.TypeLiteral;
+import io.trino.connector.CatalogLifecycleListener;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotCache;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider;
 import io.trino.server.testing.TestingTrinoServer;
@@ -23,12 +24,15 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestHogQlSemanticCatalogGuiceWiring
 {
     private static final Key<Optional<HogQlSemanticCatalogSnapshotProvider>> OPTIONAL_PROVIDER_KEY =
+            Key.get(new TypeLiteral<>() {});
+    private static final Key<Set<CatalogLifecycleListener>> CATALOG_LISTENERS_KEY =
             Key.get(new TypeLiteral<>() {});
 
     @Test
@@ -39,6 +43,7 @@ public class TestHogQlSemanticCatalogGuiceWiring
                 .setProperties(Map.of("hogql.enabled", "false"))
                 .build()) {
             assertThat(server.getInstance(OPTIONAL_PROVIDER_KEY)).isEmpty();
+            assertThat(server.getInstance(CATALOG_LISTENERS_KEY)).isEmpty();
         }
 
         try (TestingTrinoServer server = TestingTrinoServer.builder()
@@ -51,6 +56,7 @@ public class TestHogQlSemanticCatalogGuiceWiring
             HogQlSemanticCatalogSnapshotCache cache = server.getInstance(Key.get(HogQlSemanticCatalogSnapshotCache.class));
 
             assertThat(provider).isPresent();
+            assertThat(server.getInstance(CATALOG_LISTENERS_KEY)).hasOnlyElementsOfType(HogQlSemanticCatalogPrewarmListener.class);
             assertThat(server.getInstance(OPTIONAL_PROVIDER_KEY)).containsSame(provider.orElseThrow());
             assertThat(cache).isSameAs(manager.cache());
         }

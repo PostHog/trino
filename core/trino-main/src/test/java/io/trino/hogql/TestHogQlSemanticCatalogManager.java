@@ -18,6 +18,7 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotLoader;
 import io.trino.hogql.parser.HogQlLanguageVersion;
+import io.trino.spi.catalog.CatalogName;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -90,6 +91,38 @@ public class TestHogQlSemanticCatalogManager
         assertThat(manager.isLoaderExecutorShutdown()).isFalse();
         manager.shutdown();
         assertThat(manager.isLoaderExecutorShutdown()).isTrue();
+    }
+
+    @Test
+    public void testCatalogLifecyclePrewarmsWithoutWaitingForMetadata()
+    {
+        PhysicalIdentifier unusualCatalog = new PhysicalIdentifier("sales-data", true);
+        AtomicInteger loads = new AtomicInteger();
+        CompletableFuture<Void> loadStarted = new CompletableFuture<>();
+        CompletableFuture<HogQlSemanticCatalogSnapshot> metadata = new CompletableFuture<>();
+        HogQlSemanticCatalogManager manager = new HogQlSemanticCatalogManager(
+                config(),
+                request -> {
+                    assertThat(request.catalog()).isEqualTo(unusualCatalog);
+                    loads.incrementAndGet();
+                    loadStarted.complete(null);
+                    return metadata;
+                },
+                LANGUAGE_VERSION,
+                System::nanoTime);
+        try {
+            CompletableFuture<Void> listenerInvocation = CompletableFuture.runAsync(
+                    () -> new HogQlSemanticCatalogPrewarmListener(manager).catalogLoaded(new CatalogName("sales-data")));
+
+            assertThat(listenerInvocation).succeedsWithin(10, SECONDS);
+            loadStarted.join();
+            assertThat(loads).hasValue(1);
+            assertThat(manager.cache().currentSnapshot(unusualCatalog)).isEmpty();
+        }
+        finally {
+            metadata.complete(new HogQlSemanticCatalogSnapshot(1, LANGUAGE_VERSION, unusualCatalog, 1, List.of()));
+            manager.shutdown();
+        }
     }
 
     private static HogQlSemanticCatalogConfig config()

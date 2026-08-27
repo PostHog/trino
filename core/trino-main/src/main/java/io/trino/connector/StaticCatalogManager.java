@@ -69,6 +69,7 @@ public class StaticCatalogManager
     }
 
     private final CatalogFactory catalogFactory;
+    private final CatalogLifecycleListeners catalogLifecycleListeners;
     private final List<CatalogProperties> catalogProperties;
     private final Executor executor;
 
@@ -77,9 +78,10 @@ public class StaticCatalogManager
     private final AtomicReference<State> state = new AtomicReference<>(State.CREATED);
 
     @Inject
-    public StaticCatalogManager(CatalogFactory catalogFactory, StaticCatalogManagerConfig config, @ForStartup Executor executor)
+    public StaticCatalogManager(CatalogFactory catalogFactory, StaticCatalogManagerConfig config, @ForStartup Executor executor, CatalogLifecycleListeners catalogLifecycleListeners)
     {
         this.catalogFactory = requireNonNull(catalogFactory, "catalogFactory is null");
+        this.catalogLifecycleListeners = requireNonNull(catalogLifecycleListeners, "catalogLifecycleListeners is null");
         List<String> disabledCatalogs = requireNonNullElse(config.getDisabledCatalogs(), ImmutableList.of());
 
         ImmutableList.Builder<CatalogProperties> catalogProperties = ImmutableList.builder();
@@ -161,6 +163,7 @@ public class StaticCatalogManager
                             log.info("-- Loading catalog %s --", catalogName);
                             CatalogConnector newCatalog = catalogFactory.createCatalog(catalog);
                             catalogs.put(catalogName, newCatalog);
+                            catalogLifecycleListeners.catalogLoaded(catalogName);
                             log.info("-- Added catalog %s using connector %s --", catalogName, catalog.connectorName());
                             return null;
                         })

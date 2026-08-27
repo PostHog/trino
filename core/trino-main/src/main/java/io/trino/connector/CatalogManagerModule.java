@@ -17,6 +17,7 @@ import com.google.inject.Binder;
 import com.google.inject.Scopes;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
 
+import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
 
 public class CatalogManagerModule
@@ -28,6 +29,8 @@ public class CatalogManagerModule
         binder.bind(DefaultCatalogFactory.class).in(Scopes.SINGLETON);
         binder.bind(LazyCatalogFactory.class).in(Scopes.SINGLETON);
         binder.bind(CatalogFactory.class).to(LazyCatalogFactory.class).in(Scopes.SINGLETON);
+        binder.bind(CatalogLifecycleListeners.class).in(Scopes.SINGLETON);
+        newSetBinder(binder, CatalogLifecycleListener.class);
         newOptionalBinder(binder, CatalogStoreManager.class);
 
         CatalogManagerConfig config = buildConfigObject(CatalogManagerConfig.class);

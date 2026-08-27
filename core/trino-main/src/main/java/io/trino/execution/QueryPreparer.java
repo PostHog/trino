@@ -23,7 +23,6 @@ import io.trino.hogql.compiler.HogQlCompilationResult;
 import io.trino.hogql.compiler.HogQlCompileEnvelope;
 import io.trino.hogql.compiler.HogQlCompiler;
 import io.trino.hogql.compiler.HogQlSemanticCatalogContext;
-import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider;
 import io.trino.spi.TrinoException;
 import io.trino.spi.resourcegroups.QueryType;
@@ -36,11 +35,10 @@ import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.Statement;
 
 import java.util.List;
-import java.util.Locale;
 import java.util.Optional;
-import java.util.regex.Pattern;
 
 import static io.trino.execution.ParameterExtractor.getParameterCount;
+import static io.trino.hogql.HogQlCatalogIdentifiers.physicalCatalog;
 import static io.trino.hogql.HogQlCompilationEvent.Phase.COMPILATION;
 import static io.trino.hogql.HogQlCompilationEvent.Phase.PARAMETER_BINDING;
 import static io.trino.hogql.HogQlCompilationObserver.NOOP;
@@ -54,8 +52,6 @@ import static java.util.Objects.requireNonNull;
 
 public class QueryPreparer
 {
-    private static final Pattern UNDELIMITED_IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
-
     private final SqlParser sqlParser;
     private final Optional<HogQlCompiler> hogQlCompiler;
     private final HogQlParameterDecoder hogQlParameterDecoder;
@@ -143,10 +139,8 @@ public class QueryPreparer
         if (hogQlSemanticCatalogSnapshotProvider.isEmpty() || session.getCatalog().isEmpty()) {
             return Optional.empty();
         }
-        String catalog = session.getCatalog().orElseThrow();
-        boolean delimited = !UNDELIMITED_IDENTIFIER.matcher(catalog).matches() || !catalog.equals(catalog.toLowerCase(Locale.ENGLISH));
         return Optional.of(new HogQlSemanticCatalogContext(
-                new PhysicalIdentifier(catalog, delimited),
+                physicalCatalog(session.getCatalog().orElseThrow()),
                 hogQlSemanticCatalogSnapshotProvider.orElseThrow()));
     }
 

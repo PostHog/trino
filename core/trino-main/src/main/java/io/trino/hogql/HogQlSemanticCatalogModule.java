@@ -21,11 +21,13 @@ import com.google.inject.Scopes;
 import com.google.inject.Singleton;
 import com.google.inject.multibindings.OptionalBinder;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
+import io.trino.connector.CatalogLifecycleListener;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotCache;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotJsonDecoder;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotLoader;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider;
 
+import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static io.airlift.http.client.HttpClientBinder.httpClientBinder;
 
 public class HogQlSemanticCatalogModule
@@ -43,6 +45,10 @@ public class HogQlSemanticCatalogModule
                         .setMaxRequestsQueuedPerDestination(config.getLoaderQueueCapacity()));
         binder.bind(HogQlSemanticCatalogHttpTransport.class).in(Scopes.SINGLETON);
         binder.bind(HogQlSemanticCatalogManager.class).asEagerSingleton();
+        newSetBinder(binder, CatalogLifecycleListener.class)
+                .addBinding()
+                .to(HogQlSemanticCatalogPrewarmListener.class)
+                .in(Scopes.SINGLETON);
         OptionalBinder.newOptionalBinder(binder, HogQlSemanticCatalogSnapshotProvider.class)
                 .setBinding()
                 .toProvider(SnapshotProviderFactory.class)
