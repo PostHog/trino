@@ -43,8 +43,8 @@ public class TestHogQlCompatibilityManifest
 
         assertThat(manifest.schemaVersion()).isEqualTo(1);
         assertThat(manifest.languageVersion()).isEqualTo(HogQlLanguageContract.current().languageVersion());
-        assertThat(manifest.features()).hasSize(518);
-        assertThat(manifest.unresolvedGrammarAlternativeRules()).hasSize(21);
+        assertThat(manifest.features()).hasSize(583);
+        assertThat(manifest.sourceUnlabeledAlternativeRules()).hasSize(21);
         assertThat(manifest.features())
                 .allSatisfy(feature -> assertThat(feature.testCaseIds()).isNotEmpty());
     }

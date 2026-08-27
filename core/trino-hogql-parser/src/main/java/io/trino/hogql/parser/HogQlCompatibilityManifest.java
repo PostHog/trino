@@ -36,8 +36,9 @@ public record HogQlCompatibilityManifest(
         int schemaVersion,
         HogQlLanguageVersion languageVersion,
         String grammarSha256,
+        String grammarAlternativeIdentityManifestSha256,
         String grammarFeatureManifestSha256,
-        List<UnresolvedGrammarAlternativeRule> unresolvedGrammarAlternativeRules,
+        List<SourceUnlabeledAlternativeRule> sourceUnlabeledAlternativeRules,
         List<Feature> features)
 {
     private static final String LANGUAGE_RESOURCE_ROOT = "/io/trino/hogql/parser/language/1.0.0/";
@@ -51,8 +52,9 @@ public record HogQlCompatibilityManifest(
             @JsonProperty("schemaVersion") int schemaVersion,
             @JsonProperty("languageVersion") HogQlLanguageVersion languageVersion,
             @JsonProperty("grammarSha256") String grammarSha256,
+            @JsonProperty("grammarAlternativeIdentityManifestSha256") String grammarAlternativeIdentityManifestSha256,
             @JsonProperty("grammarFeatureManifestSha256") String grammarFeatureManifestSha256,
-            @JsonProperty("unresolvedGrammarAlternativeRules") List<UnresolvedGrammarAlternativeRule> unresolvedGrammarAlternativeRules,
+            @JsonProperty("sourceUnlabeledAlternativeRules") List<SourceUnlabeledAlternativeRule> sourceUnlabeledAlternativeRules,
             @JsonProperty("features") List<Feature> features)
     {
         if (schemaVersion != 1) {
@@ -61,8 +63,9 @@ public record HogQlCompatibilityManifest(
         this.schemaVersion = schemaVersion;
         this.languageVersion = requireNonNull(languageVersion, "languageVersion is null");
         this.grammarSha256 = requireNonNull(grammarSha256, "grammarSha256 is null");
+        this.grammarAlternativeIdentityManifestSha256 = requireNonNull(grammarAlternativeIdentityManifestSha256, "grammarAlternativeIdentityManifestSha256 is null");
         this.grammarFeatureManifestSha256 = requireNonNull(grammarFeatureManifestSha256, "grammarFeatureManifestSha256 is null");
-        this.unresolvedGrammarAlternativeRules = List.copyOf(requireNonNull(unresolvedGrammarAlternativeRules, "unresolvedGrammarAlternativeRules is null"));
+        this.sourceUnlabeledAlternativeRules = List.copyOf(requireNonNull(sourceUnlabeledAlternativeRules, "sourceUnlabeledAlternativeRules is null"));
         this.features = List.copyOf(requireNonNull(features, "features is null"));
     }
 
@@ -84,6 +87,10 @@ public record HogQlCompatibilityManifest(
         if (!manifest.grammarFeatureManifestSha256().equals(languageContract.grammarFeatureManifest().sha256())) {
             throw new IllegalStateException("HogQL compatibility manifest feature hash does not match the language contract");
         }
+        HogQlGrammarAlternativeIdentities alternativeIdentities = HogQlGrammarAlternativeIdentities.current();
+        if (!manifest.grammarAlternativeIdentityManifestSha256().equals(HogQlGrammarAlternativeIdentities.currentSha256())) {
+            throw new IllegalStateException("HogQL compatibility manifest alternative identity hash does not match the published sidecar");
+        }
 
         String featureManifestResource = LANGUAGE_RESOURCE_ROOT + languageContract.grammarFeatureManifest().path();
         byte[] featureManifestBytes = readResourceBytes(featureManifestResource);
@@ -91,11 +98,14 @@ public record HogQlCompatibilityManifest(
             throw new IllegalStateException("published HogQL grammar feature manifest checksum does not match the compatibility manifest");
         }
         PublishedGrammarFeatureManifest published = GRAMMAR_FEATURE_MANIFEST_CODEC.fromJson(new String(featureManifestBytes, StandardCharsets.UTF_8));
-        validateFeatures(manifest, published);
+        validateFeatures(manifest, published, alternativeIdentities);
         return manifest;
     }
 
-    private static void validateFeatures(HogQlCompatibilityManifest manifest, PublishedGrammarFeatureManifest published)
+    private static void validateFeatures(
+            HogQlCompatibilityManifest manifest,
+            PublishedGrammarFeatureManifest published,
+            HogQlGrammarAlternativeIdentities alternativeIdentities)
     {
         if (!published.languageVersion().equals(manifest.languageVersion()) || !published.grammarSha256().equals(manifest.grammarSha256())) {
             throw new IllegalStateException("published HogQL grammar features do not match the compatibility manifest language");
@@ -106,6 +116,28 @@ public record HogQlCompatibilityManifest(
             if (publishedById.put(feature.id(), feature) != null) {
                 throw new IllegalStateException("duplicate published HogQL grammar feature: " + feature.id());
             }
+        }
+
+        Map<String, SourceUnlabeledAlternativeRule> sourceUnlabeledByRule = new HashMap<>();
+        for (SourceUnlabeledAlternativeRule sourceUnlabeled : published.validationErrors()) {
+            if (sourceUnlabeledByRule.put(sourceUnlabeled.rule(), sourceUnlabeled) != null) {
+                throw new IllegalStateException("duplicate source-unlabeled HogQL grammar alternative rule: " + sourceUnlabeled.rule());
+            }
+        }
+        for (HogQlGrammarAlternativeIdentities.AlternativeRule rule : alternativeIdentities.rules()) {
+            SourceUnlabeledAlternativeRule sourceUnlabeled = sourceUnlabeledByRule.remove(rule.rule());
+            if (sourceUnlabeled == null || sourceUnlabeled.alternativeCount() != rule.alternatives().size() || sourceUnlabeled.queryReachable() != rule.queryReachable()) {
+                throw new IllegalStateException("HogQL grammar alternative identities do not match the published rule: " + rule.rule());
+            }
+            for (HogQlGrammarAlternativeIdentities.Alternative alternative : rule.alternatives()) {
+                PublishedFeature feature = new PublishedFeature(alternative.id(), "parserAlternative", rule.queryReachable());
+                if (publishedById.put(feature.id(), feature) != null) {
+                    throw new IllegalStateException("duplicate published HogQL grammar feature: " + feature.id());
+                }
+            }
+        }
+        if (!sourceUnlabeledByRule.isEmpty()) {
+            throw new IllegalStateException("HogQL grammar alternative identities do not cover every source-unlabeled rule");
         }
 
         Map<String, Feature> compatibilityById = new HashMap<>();
@@ -127,8 +159,8 @@ public record HogQlCompatibilityManifest(
         if (!compatibilityById.keySet().equals(publishedById.keySet())) {
             throw new IllegalStateException("HogQL compatibility manifest does not account for every published grammar feature");
         }
-        if (!manifest.unresolvedGrammarAlternativeRules().equals(published.validationErrors())) {
-            throw new IllegalStateException("HogQL compatibility manifest does not acknowledge every unresolved grammar alternative rule");
+        if (!manifest.sourceUnlabeledAlternativeRules().equals(published.validationErrors())) {
+            throw new IllegalStateException("HogQL compatibility manifest does not acknowledge every source-unlabeled grammar alternative rule");
         }
     }
 
@@ -232,21 +264,21 @@ public record HogQlCompatibilityManifest(
         }
     }
 
-    public record UnresolvedGrammarAlternativeRule(
+    public record SourceUnlabeledAlternativeRule(
             int alternativeCount,
             String code,
             boolean queryReachable,
             String rule)
     {
         @JsonCreator
-        public UnresolvedGrammarAlternativeRule(
+        public SourceUnlabeledAlternativeRule(
                 @JsonProperty("alternativeCount") int alternativeCount,
                 @JsonProperty("code") String code,
                 @JsonProperty("queryReachable") boolean queryReachable,
                 @JsonProperty("rule") String rule)
         {
             if (alternativeCount < 2) {
-                throw new IllegalArgumentException("unresolved grammar rule must have multiple alternatives: " + rule);
+                throw new IllegalArgumentException("source-unlabeled grammar rule must have multiple alternatives: " + rule);
             }
             this.alternativeCount = alternativeCount;
             this.code = requireNonNull(code, "code is null");
@@ -259,14 +291,14 @@ public record HogQlCompatibilityManifest(
             HogQlLanguageVersion languageVersion,
             String grammarSha256,
             List<PublishedFeature> features,
-            List<UnresolvedGrammarAlternativeRule> validationErrors)
+            List<SourceUnlabeledAlternativeRule> validationErrors)
     {
         @JsonCreator
         public PublishedGrammarFeatureManifest(
                 @JsonProperty("languageVersion") HogQlLanguageVersion languageVersion,
                 @JsonProperty("grammarSha256") String grammarSha256,
                 @JsonProperty("features") List<PublishedFeature> features,
-                @JsonProperty("validationErrors") List<UnresolvedGrammarAlternativeRule> validationErrors)
+                @JsonProperty("validationErrors") List<SourceUnlabeledAlternativeRule> validationErrors)
         {
             this.languageVersion = requireNonNull(languageVersion, "languageVersion is null");
             this.grammarSha256 = requireNonNull(grammarSha256, "grammarSha256 is null");

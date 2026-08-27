@@ -1,6 +1,39 @@
 {
     "features": [
         {
+            "id": "alternative:alias:keyword",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:alias:quoted-identifier",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:alias:unquoted-identifier",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
             "id": "alternative:arrayJoinClause",
             "kind": "parserAlternative",
             "loweringHandler": "UnsupportedFeature",
@@ -110,6 +143,28 @@
             "testCaseIds": [
                 "TestHogQlCompatibilityCorpus#expr.accept.array",
                 "TestHogQlCompatibilityCorpus#expr.accept.tuple"
+            ]
+        },
+        {
+            "id": "alternative:columnExprTupleOrSingle:scalar",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:columnExprTupleOrSingle:tuple",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
             ]
         },
         {
@@ -781,6 +836,28 @@
             ]
         },
         {
+            "id": "alternative:columnIdentifier:field-path",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:columnIdentifier:placeholder",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
             "id": "alternative:columnLambdaExpr:ArrowLambda",
             "kind": "parserAlternative",
             "loweringHandler": "UnsupportedFeature",
@@ -815,6 +892,50 @@
         },
         {
             "id": "alternative:columnTypeCastExpr:ColumnTypeCastExprWithTimeZone",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:columnTypeCastIdentifier:interval-keyword",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:columnTypeCastIdentifier:quoted-identifier",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:columnTypeCastIdentifier:type-keyword",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:columnTypeCastIdentifier:unquoted-identifier",
             "kind": "parserAlternative",
             "loweringHandler": "UnsupportedFeature",
             "parseHandler": "CanonicalAntlrParser",
@@ -936,6 +1057,28 @@
             ]
         },
         {
+            "id": "alternative:declaration:statement",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:declaration:variable",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
             "id": "alternative:emptyStmt",
             "kind": "parserAlternative",
             "loweringHandler": "UnsupportedFeature",
@@ -981,6 +1124,39 @@
         },
         {
             "id": "alternative:expression",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:floatingLiteral:floating-token",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:floatingLiteral:leading-decimal-point",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:floatingLiteral:trailing-decimal-point",
             "kind": "parserAlternative",
             "loweringHandler": "UnsupportedFeature",
             "parseHandler": "CanonicalAntlrParser",
@@ -1090,6 +1266,72 @@
             ]
         },
         {
+            "id": "alternative:hogqlxChildElement:expression",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:hogqlxChildElement:tag",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:hogqlxChildElement:text",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:hogqlxTagAttribute:boolean",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:hogqlxTagAttribute:expression",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:hogqlxTagAttribute:string",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
             "id": "alternative:hogqlxTagElement:HogqlxTagElementClosed",
             "kind": "parserAlternative",
             "loweringHandler": "UnsupportedFeature",
@@ -1123,6 +1365,50 @@
             ]
         },
         {
+            "id": "alternative:identifier:interval-keyword",
+            "kind": "parserAlternative",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifier",
+            "queryReachable": true,
+            "status": "supported",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "alternative:identifier:keyword",
+            "kind": "parserAlternative",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifier",
+            "queryReachable": true,
+            "status": "supported",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "alternative:identifier:quoted",
+            "kind": "parserAlternative",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifier",
+            "queryReachable": true,
+            "status": "supported",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "alternative:identifier:unquoted",
+            "kind": "parserAlternative",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifier",
+            "queryReachable": true,
+            "status": "supported",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
             "id": "alternative:identifierList",
             "kind": "parserAlternative",
             "loweringHandler": "UnsupportedFeature",
@@ -1135,6 +1421,39 @@
         },
         {
             "id": "alternative:ifStmt",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:implicitAlias:keyword",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:implicitAlias:quoted-identifier",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:implicitAlias:unquoted-identifier",
             "kind": "parserAlternative",
             "loweringHandler": "UnsupportedFeature",
             "parseHandler": "CanonicalAntlrParser",
@@ -1168,6 +1487,39 @@
         },
         {
             "id": "alternative:interval",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:joinConstraintClause:on",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:joinConstraintClause:using",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:joinConstraintClause:using-parenthesized",
             "kind": "parserAlternative",
             "loweringHandler": "UnsupportedFeature",
             "parseHandler": "CanonicalAntlrParser",
@@ -1288,6 +1640,28 @@
             ]
         },
         {
+            "id": "alternative:joinOpCross:comma",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:joinOpCross:cross-join",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
             "id": "alternative:keyword",
             "kind": "parserAlternative",
             "loweringHandler": "UnsupportedFeature",
@@ -1354,6 +1728,61 @@
             ]
         },
         {
+            "id": "alternative:limitAndOffsetClause:compact",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:limitAndOffsetClause:with-offset",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:limitAndOffsetClauseOptional:limit",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:limitAndOffsetClauseOptional:limit-with-offset",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:limitAndOffsetClauseOptional:offset-only",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
             "id": "alternative:limitByClause",
             "kind": "parserAlternative",
             "loweringHandler": "UnsupportedFeature",
@@ -1366,6 +1795,39 @@
         },
         {
             "id": "alternative:limitExpr",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:literal:null",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:literal:number",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:literal:string",
             "kind": "parserAlternative",
             "loweringHandler": "UnsupportedFeature",
             "parseHandler": "CanonicalAntlrParser",
@@ -1519,6 +1981,28 @@
             ]
         },
         {
+            "id": "alternative:ratioExpr:numeric",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:ratioExpr:placeholder",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
             "id": "alternative:returnStmt",
             "kind": "parserAlternative",
             "loweringHandler": "UnsupportedFeature",
@@ -1651,6 +2135,50 @@
             ]
         },
         {
+            "id": "alternative:selectStmtWithParens:direct",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:selectStmtWithParens:parenthesized",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:selectStmtWithParens:placeholder",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:selectStmtWithParens:with-parenthesized",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
             "id": "alternative:settingExpr",
             "kind": "parserAlternative",
             "loweringHandler": "UnsupportedFeature",
@@ -1681,6 +2209,193 @@
             "status": "explicitCurrentError",
             "testCaseIds": [
                 "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:statement:block",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:statement:empty",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:statement:expression",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:statement:for",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:statement:for-in",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:statement:function",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:statement:if",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:statement:return",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:statement:throw",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:statement:try-catch",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:statement:while",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:string:literal",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:string:template",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:stringContents:interpolation",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:stringContents:text",
+            "kind": "parserAlternative",
+            "loweringHandler": "UnsupportedFeature",
+            "parseHandler": "CanonicalAntlrParser",
+            "queryReachable": true,
+            "status": "explicitCurrentError",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testUsesOnlyExplicitDispositionsForUnsupportedFeatures"
+            ]
+        },
+        {
+            "id": "alternative:stringContentsFull:interpolation",
+            "kind": "parserAlternative",
+            "loweringHandler": "NotQueryLanguage",
+            "parseHandler": "NotQueryLanguage",
+            "queryReachable": false,
+            "status": "notQueryLanguage",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testAccountsForEveryPublishedGrammarFeature"
+            ]
+        },
+        {
+            "id": "alternative:stringContentsFull:text",
+            "kind": "parserAlternative",
+            "loweringHandler": "NotQueryLanguage",
+            "parseHandler": "NotQueryLanguage",
+            "queryReachable": false,
+            "status": "notQueryLanguage",
+            "testCaseIds": [
+                "TestHogQlCompatibilityManifest#testAccountsForEveryPublishedGrammarFeature"
             ]
         },
         {
@@ -5711,11 +6426,12 @@
             ]
         }
     ],
+    "grammarAlternativeIdentityManifestSha256": "55e33d04906b058bdbab00507b402766d386e4f771b60e4f5106fef63e18383d",
     "grammarFeatureManifestSha256": "fbf7236643b43d929e9ef1c8fd01a04b746736dca2f965cc2e78ad62f1a98b10",
     "grammarSha256": "c255b1c828ea34b4eb5373dd1a153bbcf69f4f9eb58a900d353972ce07724242",
     "languageVersion": "1.0.0",
     "schemaVersion": 1,
-    "unresolvedGrammarAlternativeRules": [
+    "sourceUnlabeledAlternativeRules": [
         {
             "alternativeCount": 3,
             "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",

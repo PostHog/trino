@@ -270,6 +270,38 @@
             ]
         },
         {
+            "id": "alternative:identifier:interval-keyword",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifier",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "alternative:identifier:keyword",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifier",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "alternative:identifier:quoted",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifier",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "alternative:identifier:unquoted",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifier",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
             "id": "alternative:nestedIdentifier",
             "loweringHandler": "TrinoAstFactory#createIdentifier",
             "parseHandler": "AstBuilder#buildIdentifiers",
