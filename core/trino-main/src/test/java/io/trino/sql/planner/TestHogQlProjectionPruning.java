@@ -117,6 +117,30 @@ public class TestHogQlProjectionPruning
         assertThat(nodes(plan, JoinNode.class)).hasSize(1);
     }
 
+    @Test
+    public void testUnusedLazyProjectionIsPrunedThroughDerivedCteChain()
+    {
+        Plan plan = plan(compile(
+                "WITH first_source AS (SELECT e.personProfile.*, e.* FROM events e), " +
+                        "second_source AS (SELECT derived.* FROM (SELECT * FROM first_source) derived) " +
+                        "SELECT event FROM second_source"));
+
+        assertThat(nodes(plan, TableScanNode.class)).hasSize(1);
+        assertThat(nodes(plan, JoinNode.class)).isEmpty();
+    }
+
+    @Test
+    public void testDemandedLazyProjectionRemainsThroughDerivedCteChain()
+    {
+        Plan plan = plan(compile(
+                "WITH first_source AS (SELECT e.personProfile.*, e.* FROM events e), " +
+                        "second_source AS (SELECT derived.* FROM (SELECT * FROM first_source) derived) " +
+                        "SELECT name FROM second_source WHERE name = 'Customer#000000001'"));
+
+        assertThat(nodes(plan, TableScanNode.class)).hasSize(2);
+        assertThat(nodes(plan, JoinNode.class)).hasSize(1);
+    }
+
     private String compile(String query)
     {
         HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));

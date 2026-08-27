@@ -476,6 +476,56 @@ public class TestHogQlSemanticResolution
     }
 
     @Test
+    public void testInfersDerivedOutputsForColumnsAndStarModifiers()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+
+        HogQlCompilationResult columns = compiler.compile(
+                envelope(
+                        "SELECT COLUMNS('eventName|person') FROM " +
+                                "(SELECT event AS eventName, personId AS person FROM events) source",
+                        OptionalLong.of(7)),
+                Optional.of(context));
+        HogQlCompilationResult modifiedStar = compiler.compile(
+                envelope(
+                        "SELECT COLUMNS(source.* EXCLUDE (person) REPLACE (person AS eventName)) FROM " +
+                                "(SELECT event AS eventName, personId AS person FROM events) source",
+                        OptionalLong.of(7)),
+                Optional.of(context));
+        HogQlCompilationResult columnAliases = compiler.compile(
+                envelope(
+                        "SELECT renamedEvent FROM (SELECT event, personId FROM events) source(renamedEvent, renamedPerson)",
+                        OptionalLong.of(7)),
+                Optional.of(context));
+
+        assertThat(columns.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT \"eventName\" AS \"eventName\", \"person\" AS \"person\" FROM (" +
+                        "SELECT event_name AS eventName, \"Person ID\" AS person FROM analytics.\"Hog Data\".\"raw-events\") source"));
+        assertThat(modifiedStar.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT \"person\" AS \"eventName\" FROM (" +
+                        "SELECT event_name AS eventName, \"Person ID\" AS person FROM analytics.\"Hog Data\".\"raw-events\") source"));
+        assertThat(columnAliases.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT \"renamedEvent\" AS renamedEvent FROM (" +
+                        "SELECT event_name AS event, \"Person ID\" AS personId FROM analytics.\"Hog Data\".\"raw-events\") " +
+                        "source(renamedEvent, renamedPerson)"));
+    }
+
+    @Test
+    public void testRejectsDerivedOutputWithoutAnInferableName()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+        String hogql = "SELECT * FROM (SELECT event + personId FROM events) source";
+
+        TrinoException exception = catchThrowableOfType(
+                TrinoException.class,
+                () -> compiler.compile(envelope(hogql, OptionalLong.of(7)), Optional.of(context)));
+
+        assertThat(exception.getErrorCode()).isEqualTo(HOGQL_RESOLUTION_ERROR.toErrorCode());
+        assertThat(exception.getLocation()).contains(new Location(1, hogql.indexOf("event + personId") + 1));
+        assertThat(exception).hasMessageContaining("Cannot infer HogQL CTE output name");
+    }
+
+    @Test
     public void testUnknownLogicalFieldFailsAtOriginalLocation()
     {
         HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));

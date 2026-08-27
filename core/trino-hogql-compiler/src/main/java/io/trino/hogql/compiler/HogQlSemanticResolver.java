@@ -122,6 +122,7 @@ final class HogQlSemanticResolver
 {
     private static final String MATCHES_ACTION = "matchesaction";
     private static final String CTE_RELATION_PREFIX = "\0cte:";
+    private static final String DERIVED_RELATION_PREFIX = "\0derived:";
 
     private final PinnedSnapshot snapshot;
     private final ExpansionBudget expansionBudget;
@@ -202,7 +203,9 @@ final class HogQlSemanticResolver
         }
         SelectQueryBody select = (SelectQueryBody) query.body();
         localRelationQualifiers = select.from().map(HogQlSemanticResolver::relationQualifiers).orElse(Set.of());
-        HogQlProjectionDemand projectionDemand = HogQlProjectionDemand.collect(query);
+        HogQlProjectionDemand projectionDemand = requiredOutputs
+                .map(outputs -> HogQlProjectionDemand.collect(query, outputs))
+                .orElseGet(() -> HogQlProjectionDemand.collect(query));
         Optional<ResolvedRelation> relation = select.from().map(value -> resolveRelation(value, projectionDemand));
         bindings = relation.map(ResolvedRelation::bindings).orElse(List.of());
         allRelationsLogical = relation.map(ResolvedRelation::allLogical).orElse(false);
@@ -287,51 +290,71 @@ final class HogQlSemanticResolver
 
     private CteAnalysis inferCommonTable(CommonTableExpression commonTable, Map<String, TableBinding> availableBindings)
     {
-        if (!(commonTable.query().body() instanceof SelectQueryBody select)) {
-            throw cteInferenceError(commonTable.span(), "HogQL CTE output inference does not support set operations");
+        List<CteOutput> outputs = inferQueryOutputs(commonTable.query(), commonTable.columnAliases(), commonTable.span(), availableBindings);
+        TableBinding binding = inferredBinding(CTE_RELATION_PREFIX, commonTable.name(), outputs);
+        return new CteAnalysis(commonTable, binding, outputs);
+    }
+
+    private List<CteOutput> inferQueryOutputs(
+            HogQlQuery query,
+            List<Identifier> columnAliases,
+            HogQlQuery.SourceSpan span,
+            Map<String, TableBinding> availableBindings)
+    {
+        if (!(query.body() instanceof SelectQueryBody select)) {
+            throw cteInferenceError(span, "HogQL inferred relation outputs do not support set operations");
         }
         List<TableBinding> sourceBindings = select.from()
                 .map(relation -> inferRelationBindings(relation, availableBindings))
                 .orElse(List.of());
         List<CteOutput> outputs = new ArrayList<>();
         for (Projection projection : select.projections()) {
-            outputs.addAll(inferProjectionOutputs(projection, sourceBindings, !commonTable.columnAliases().isEmpty()));
+            outputs.addAll(inferProjectionOutputs(projection, sourceBindings, !columnAliases.isEmpty()));
         }
-        if (!commonTable.columnAliases().isEmpty()) {
-            if (commonTable.columnAliases().size() != outputs.size()) {
-                throw cteInferenceError(commonTable.span(), "HogQL CTE column alias count does not match its output count");
+        if (!columnAliases.isEmpty()) {
+            if (columnAliases.size() != outputs.size()) {
+                throw cteInferenceError(span, "HogQL inferred relation column alias count does not match its output count");
             }
             for (int index = 0; index < outputs.size(); index++) {
-                outputs.set(index, new CteOutput(commonTable.columnAliases().get(index).value(), outputs.get(index).sourceDemand()));
+                outputs.set(index, new CteOutput(columnAliases.get(index).value(), outputs.get(index).sourceDemand()));
             }
         }
         Set<String> names = new HashSet<>();
         for (CteOutput output : outputs) {
             if (!names.add(canonical(output.name()))) {
-                throw cteInferenceError(commonTable.span(), "HogQL CTE output names must be unique: " + output.name());
+                throw cteInferenceError(span, "HogQL inferred relation output names must be unique: " + output.name());
             }
         }
+        return List.copyOf(outputs);
+    }
+
+    private static TableBinding inferredBinding(String relationPrefix, Identifier name, List<CteOutput> outputs)
+    {
         List<BoundField> fields = outputs.stream()
                 .map(output -> new BoundField(output.name(), new PhysicalIdentifier(output.name(), true), true, Optional.empty()))
                 .toList();
-        String name = commonTable.name().value();
-        TableBinding binding = new TableBinding(
-                CTE_RELATION_PREFIX + canonical(name),
-                canonical(name),
-                new PhysicalIdentifier(name, commonTable.name().delimited()),
-                List.of(new PhysicalIdentifier(name, commonTable.name().delimited())),
+        return new TableBinding(
+                relationPrefix + canonical(name.value()),
+                canonical(name.value()),
+                new PhysicalIdentifier(name.value(), name.delimited()),
+                List.of(new PhysicalIdentifier(name.value(), name.delimited())),
                 false,
                 fields,
                 TableBinding.fieldMap(fields));
-        return new CteAnalysis(commonTable, binding, outputs);
     }
 
     private List<TableBinding> inferRelationBindings(Relation relation, Map<String, TableBinding> availableBindings)
     {
         return switch (relation) {
-            case AliasedRelation alias -> inferRelationBindings(alias.relation(), availableBindings).stream()
-                    .map(binding -> binding.withAlias(alias.alias()))
-                    .toList();
+            case AliasedRelation alias -> {
+                if (alias.relation() instanceof SubqueryRelation subquery) {
+                    List<CteOutput> outputs = inferQueryOutputs(subquery.query(), alias.columnAliases(), alias.span(), availableBindings);
+                    yield List.of(inferredBinding(DERIVED_RELATION_PREFIX, alias.alias(), outputs));
+                }
+                yield inferRelationBindings(alias.relation(), availableBindings).stream()
+                        .map(binding -> binding.withAlias(alias.alias()))
+                        .toList();
+            }
             case CommonTableReference commonTable -> Optional.ofNullable(availableBindings.get(canonical(commonTable.name().value())))
                     .map(List::of)
                     .orElse(List.of());
@@ -479,7 +502,18 @@ final class HogQlSemanticResolver
     {
         switch (relation) {
             case AliasedRelation alias -> {
-                if (alias.relation() instanceof CommonTableReference commonTable) {
+                if (alias.relation() instanceof SubqueryRelation subquery) {
+                    List<CteOutput> outputs = inferQueryOutputs(subquery.query(), alias.columnAliases(), alias.span(), availableBindings);
+                    RequiredOutputs requiredOutputs = demand.forAlias(alias.alias());
+                    HogQlProjectionDemand sourceDemand = HogQlProjectionDemand.collectNonProjection(subquery.query());
+                    for (CteOutput output : outputs) {
+                        if (requiredOutputs.includes(output.name())) {
+                            sourceDemand = sourceDemand.merge(output.sourceDemand());
+                        }
+                    }
+                    collectCommonTableDemands(subquery.query(), sourceDemand, availableBindings, demands);
+                }
+                else if (alias.relation() instanceof CommonTableReference commonTable) {
                     addCommonTableDemand(commonTable, demand.forAlias(alias.alias()), availableBindings, demands);
                 }
                 else {
@@ -870,8 +904,16 @@ final class HogQlSemanticResolver
         return switch (relation) {
             case AliasedRelation alias -> {
                 ResolvedRelation child;
-                if (alias.relation() instanceof SubqueryRelation subquery && alias.columnAliases().isEmpty()) {
-                    child = resolveSubquery(subquery, projectionDemand.forAlias(alias.alias()));
+                if (alias.relation() instanceof SubqueryRelation subquery) {
+                    List<CteOutput> outputs = inferQueryOutputs(subquery.query(), alias.columnAliases(), alias.span(), commonTableBindings);
+                    RequiredOutputs demand = alias.columnAliases().isEmpty()
+                            ? projectionDemand.forAlias(alias.alias())
+                            : RequiredOutputs.allOutputs();
+                    child = resolveSubquery(subquery, demand);
+                    yield new ResolvedRelation(
+                            new AliasedRelation(child.relation(), alias.alias(), alias.columnAliases(), alias.span()),
+                            List.of(inferredBinding(DERIVED_RELATION_PREFIX, alias.alias(), outputs)),
+                            true);
                 }
                 else {
                     child = resolveRelation(alias.relation(), HogQlProjectionDemand.preserveAll());
@@ -1722,6 +1764,9 @@ final class HogQlSemanticResolver
 
     private Optional<RelationshipDefinition> relationship(TableBinding binding, String name)
     {
+        if (isInferredRelation(binding)) {
+            return Optional.empty();
+        }
         return snapshot.logicalTable(binding.relationName()).flatMap(table -> relationship(table, name));
     }
 
@@ -1734,6 +1779,9 @@ final class HogQlSemanticResolver
 
     private Optional<LazyTableDefinition> lazyTable(TableBinding binding, String name)
     {
+        if (isInferredRelation(binding)) {
+            return Optional.empty();
+        }
         return snapshot.snapshot().lazyTables().stream()
                 .filter(candidate -> canonical(candidate.table()).equals(canonical(binding.relationName())))
                 .filter(candidate -> canonical(candidate.name()).equals(canonical(name)))
@@ -1843,9 +1891,17 @@ final class HogQlSemanticResolver
 
     private List<PropertyDefinition> properties(TableBinding binding)
     {
+        if (isInferredRelation(binding)) {
+            return List.of();
+        }
         return snapshot.logicalTable(binding.relationName())
                 .map(LogicalTableDefinition::properties)
                 .orElse(List.of());
+    }
+
+    private static boolean isInferredRelation(TableBinding binding)
+    {
+        return binding.relationName().startsWith(CTE_RELATION_PREFIX) || binding.relationName().startsWith(DERIVED_RELATION_PREFIX);
     }
 
     private Expression resolveBoundField(

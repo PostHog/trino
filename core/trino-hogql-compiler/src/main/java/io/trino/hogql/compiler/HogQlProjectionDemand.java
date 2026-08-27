@@ -92,6 +92,47 @@ final class HogQlProjectionDemand
         return builder.build();
     }
 
+    public static HogQlProjectionDemand collect(HogQlQuery query, RequiredOutputs requiredOutputs)
+    {
+        requireNonNull(requiredOutputs, "requiredOutputs is null");
+        if (requiredOutputs.all()) {
+            return collect(query);
+        }
+        Builder builder = collectNonProjection(query).toBuilder();
+        if (query.body() instanceof SelectQueryBody select) {
+            select.projections().forEach(projection -> collectRequiredProjection(projection, requiredOutputs, builder));
+        }
+        return builder.build();
+    }
+
+    private static void collectRequiredProjection(Projection projection, RequiredOutputs requiredOutputs, Builder builder)
+    {
+        switch (projection) {
+            case ExpressionProjection expression -> {
+                String name = expression.alias()
+                        .map(Identifier::value)
+                        .orElseGet(() -> expression.expression() instanceof ColumnReference reference ? reference.parts().getLast().value() : "");
+                if (requiredOutputs.includes(name)) {
+                    collect(expression.expression(), builder);
+                }
+            }
+            case ColumnsList columns -> columns.expressions().stream()
+                    .filter(ColumnReference.class::isInstance)
+                    .map(ColumnReference.class::cast)
+                    .filter(reference -> requiredOutputs.includes(reference.parts().getLast().value()))
+                    .forEach(builder::add);
+            case ColumnsRegex _ -> requiredOutputs.names().forEach(builder::addUnqualified);
+            case Star star -> requiredOutputs.names().forEach(name -> {
+                if (star.qualifier().isEmpty()) {
+                    builder.addUnqualified(name);
+                }
+                else {
+                    builder.addQualified(star.qualifier().getFirst().value(), name);
+                }
+            });
+        }
+    }
+
     public static HogQlProjectionDemand collectNonProjection(HogQlQuery query)
     {
         Builder builder = new Builder();
@@ -162,6 +203,16 @@ final class HogQlProjectionDemand
         Set<String> mergedAllQualifiers = new HashSet<>(allQualifiers);
         mergedAllQualifiers.addAll(other.allQualifiers);
         return new HogQlProjectionDemand(all || other.all, mergedUnqualified, mergedAllQualifiers, mergedQualified);
+    }
+
+    private Builder toBuilder()
+    {
+        Builder builder = new Builder();
+        builder.all = all;
+        builder.unqualified.addAll(unqualified);
+        builder.allQualifiers.addAll(allQualifiers);
+        qualified.forEach((key, value) -> builder.qualified.put(key, new HashSet<>(value)));
+        return builder;
     }
 
     private static void collect(Projection projection, Builder builder)
@@ -322,6 +373,11 @@ final class HogQlProjectionDemand
         public void addUnqualified(Identifier identifier)
         {
             unqualified.add(canonical(identifier.value()));
+        }
+
+        public void addUnqualified(String name)
+        {
+            unqualified.add(canonical(name));
         }
 
         public void addQualified(String qualifier, String name)
