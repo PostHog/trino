@@ -298,7 +298,7 @@ public class TestHogQlSemanticCatalogSnapshotJsonDecoder
                      ],
                      "properties": [
                        {
-                         "name": "browser",
+                         "name": "properties",
                          "sourceField": "properties",
                          "storage": "JSON_OBJECT",
                          "logicalType": "STRING",
@@ -455,7 +455,7 @@ public class TestHogQlSemanticCatalogSnapshotJsonDecoder
                            "kind": "PROPERTY_LOOKUP",
                            "propertyLookup": {
                              "table": "events",
-                             "property": "browser",
+                             "property": "properties",
                              "key": {"kind": "LITERAL", "literal": {"typeSignature": "varchar", "encoding": "STRING", "value": "browser"}}
                            }
                          }
@@ -474,7 +474,7 @@ public class TestHogQlSemanticCatalogSnapshotJsonDecoder
                          "kind": "PROPERTY_LOOKUP",
                          "propertyLookup": {
                            "table": "events",
-                           "property": "browser",
+                           "property": "properties",
                            "key": {"kind": "LITERAL", "literal": {"typeSignature": "varchar", "encoding": "STRING", "value": "browser"}}
                          }
                        }

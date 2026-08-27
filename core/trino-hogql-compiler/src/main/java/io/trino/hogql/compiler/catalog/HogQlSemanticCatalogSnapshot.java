@@ -143,7 +143,17 @@ public record HogQlSemanticCatalogSnapshot(
             }
             Set<String> members = new HashSet<>();
             table.fields().forEach(field -> addUnique(members, field.name(), "duplicate logical member"));
-            table.properties().forEach(property -> addUnique(members, property.name(), "duplicate logical member"));
+            Set<String> properties = new HashSet<>();
+            for (PropertyDefinition property : table.properties()) {
+                String name = canonical(property.name(), "property name");
+                if (!properties.add(name)) {
+                    throw new IllegalArgumentException("duplicate logical member");
+                }
+                if (members.contains(name) && !name.equals(canonical(property.sourceField(), "property source field"))) {
+                    throw new IllegalArgumentException("duplicate logical member");
+                }
+                members.add(name);
+            }
             table.relationships().forEach(relationship -> addUnique(members, relationship.name(), "duplicate logical member"));
         }
         return Map.copyOf(tables);

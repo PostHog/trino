@@ -159,6 +159,20 @@ public class TestHogQlParser
     }
 
     @Test
+    public void testBuildsPropertyAccessPaths()
+    {
+        HogQlQuery query = parser.parseStatement("SELECT properties.browser, e.properties.browser FROM events e");
+
+        ColumnReference unqualified = (ColumnReference) ((ExpressionProjection) query.projections().getFirst()).expression();
+        assertThat(unqualified.parts()).extracting(HogQlQuery.Identifier::value).containsExactly("properties", "browser");
+        assertThat(unqualified.span()).isEqualTo(new HogQlQuery.SourceSpan(7, 25, 1, 8, 1, 26));
+
+        ColumnReference qualified = (ColumnReference) ((ExpressionProjection) query.projections().get(1)).expression();
+        assertThat(qualified.parts()).extracting(HogQlQuery.Identifier::value).containsExactly("e", "properties", "browser");
+        assertThat(qualified.span()).isEqualTo(new HogQlQuery.SourceSpan(27, 47, 1, 28, 1, 48));
+    }
+
+    @Test
     public void testBuildsOrdinaryGroupingHavingAndAggregateFunctionAst()
     {
         HogQlQuery query = parser.parseStatement("SELECT country, count(DISTINCT person_id) FROM events GROUP BY country, lower(source) HAVING count(*) > 1");

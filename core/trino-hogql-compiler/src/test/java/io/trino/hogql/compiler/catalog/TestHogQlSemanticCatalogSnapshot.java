@@ -174,13 +174,13 @@ public class TestHogQlSemanticCatalogSnapshot
                 LogicalType.STRING,
                 true,
                 true,
-                propertyLookup("events", "browser"))));
+                propertyLookup("events", "properties"))));
         List<LazyTableDefinition> lazyTables = new ArrayList<>(List.of(new LazyTableDefinition("events", "profile", relationshipPath, projections)));
         List<ActionReference> actions = new ArrayList<>(List.of(new ActionReference(
                 "paid",
                 "action-1",
                 "events",
-                new PredicateRepresentation(propertyLookup("events", "browser")))));
+                new PredicateRepresentation(propertyLookup("events", "properties")))));
         List<CohortReference> cohorts = new ArrayList<>(List.of(new CohortReference(
                 "active",
                 "cohort-1",
@@ -242,7 +242,7 @@ public class TestHogQlSemanticCatalogSnapshot
                         "events",
                         "profile",
                         List.of("missing"),
-                        List.of(new LazyProjectionDefinition("browser", "varchar", LogicalType.STRING, true, true, propertyLookup("events", "browser"))))),
+                        List.of(new LazyProjectionDefinition("browser", "varchar", LogicalType.STRING, true, true, propertyLookup("events", "properties"))))),
                 List.of(),
                 List.of()))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -352,6 +352,10 @@ public class TestHogQlSemanticCatalogSnapshot
                 Arguments.of(
                         "duplicate members",
                         List.of(table("events", List.of(field("id"), field("ID")), List.of(), List.of())),
+                        "duplicate logical member"),
+                Arguments.of(
+                        "property collides with another field",
+                        List.of(table("events", List.of(field("id"), field("properties")), List.of(property("id", "properties")), List.of())),
                         "duplicate logical member"),
                 Arguments.of(
                         "missing property field",
@@ -487,7 +491,7 @@ public class TestHogQlSemanticCatalogSnapshot
     private static PropertyDefinition propertyWithLookup(ExpressionRecipe recipe)
     {
         return new PropertyDefinition(
-                "browser",
+                "properties",
                 "properties",
                 PropertyStorage.JSON_OBJECT,
                 LogicalType.STRING,

@@ -15,6 +15,7 @@ package io.trino.hogql.compiler;
 
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ArgumentReferenceRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.CastRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionArgument;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionFieldDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FieldReferenceRecipe;
@@ -26,6 +27,7 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalTable
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.MaterializedViewReference;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.OperatorRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyLookupRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ReferencedField;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationKind;
@@ -527,15 +529,9 @@ final class HogQlSemanticResolver
                     isNull.predicateSpan(),
                     isNull.span());
             case Literal literal -> literal;
-            case MemberAccessExpression memberAccess -> new MemberAccessExpression(
-                    resolveExpression(memberAccess.base()),
-                    memberAccess.member(),
-                    memberAccess.span());
+            case MemberAccessExpression memberAccess -> resolveMemberAccess(memberAccess);
             case Placeholder placeholder -> placeholder;
-            case SubscriptExpression subscript -> new SubscriptExpression(
-                    resolveExpression(subscript.base()),
-                    resolveExpression(subscript.index()),
-                    subscript.span());
+            case SubscriptExpression subscript -> resolveSubscript(subscript);
             case TupleExpression tuple -> new TupleExpression(tuple.values().stream().map(this::resolveExpression).toList(), tuple.span());
             case UnaryExpression unary -> new UnaryExpression(unary.operator(), resolveExpression(unary.operand()), unary.span());
         };
@@ -576,6 +572,10 @@ final class HogQlSemanticResolver
     private Expression resolveColumn(ColumnReference reference)
     {
         List<Identifier> parts = reference.parts();
+        Optional<Expression> propertyAccess = resolveDottedPropertyAccess(reference);
+        if (propertyAccess.isPresent()) {
+            return propertyAccess.orElseThrow();
+        }
         if (parts.size() == 2) {
             Optional<TableBinding> binding = bindings.stream()
                     .filter(candidate -> candidate.qualifier().equals(canonical(parts.getFirst().value())))
@@ -617,6 +617,114 @@ final class HogQlSemanticResolver
         return reference;
     }
 
+    private Expression resolveMemberAccess(MemberAccessExpression memberAccess)
+    {
+        if (memberAccess.base() instanceof ColumnReference reference) {
+            Optional<Expression> propertyAccess = resolvePropertyAccess(
+                    reference,
+                    new Literal(HogQlQuery.LiteralKind.STRING, memberAccess.member().value(), memberAccess.member().span()),
+                    memberAccess.span());
+            if (propertyAccess.isPresent()) {
+                return propertyAccess.orElseThrow();
+            }
+        }
+        return new MemberAccessExpression(
+                resolveExpression(memberAccess.base()),
+                memberAccess.member(),
+                memberAccess.span());
+    }
+
+    private Expression resolveSubscript(SubscriptExpression subscript)
+    {
+        if (subscript.base() instanceof ColumnReference reference) {
+            Optional<Expression> propertyAccess = resolvePropertyAccess(
+                    reference,
+                    subscript.index(),
+                    subscript.span());
+            if (propertyAccess.isPresent()) {
+                return propertyAccess.orElseThrow();
+            }
+        }
+        return new SubscriptExpression(
+                resolveExpression(subscript.base()),
+                resolveExpression(subscript.index()),
+                subscript.span());
+    }
+
+    private Optional<Expression> resolveDottedPropertyAccess(ColumnReference reference)
+    {
+        List<Identifier> parts = reference.parts();
+        if (parts.size() == 2 && bindings.stream().noneMatch(binding -> binding.qualifier().equals(canonical(parts.getFirst().value())))) {
+            return resolvePropertyAccess(
+                    new ColumnReference(List.of(parts.getFirst()), parts.getFirst().span()),
+                    new Literal(HogQlQuery.LiteralKind.STRING, parts.getLast().value(), parts.getLast().span()),
+                    reference.span());
+        }
+        if (parts.size() == 3) {
+            return resolvePropertyAccess(
+                    new ColumnReference(parts.subList(0, 2), reference.span()),
+                    new Literal(HogQlQuery.LiteralKind.STRING, parts.getLast().value(), parts.getLast().span()),
+                    reference.span());
+        }
+        return Optional.empty();
+    }
+
+    private Optional<Expression> resolvePropertyAccess(
+            ColumnReference propertyReference,
+            Expression key,
+            HogQlQuery.SourceSpan span)
+    {
+        List<Identifier> parts = propertyReference.parts();
+        List<TableBinding> candidateBindings;
+        String propertyName;
+        boolean qualified;
+        if (parts.size() == 1) {
+            candidateBindings = bindings;
+            propertyName = parts.getFirst().value();
+            qualified = false;
+        }
+        else if (parts.size() == 2) {
+            candidateBindings = bindings.stream()
+                    .filter(binding -> binding.qualifier().equals(canonical(parts.getFirst().value())))
+                    .toList();
+            propertyName = parts.getLast().value();
+            qualified = true;
+        }
+        else {
+            return Optional.empty();
+        }
+
+        List<PropertyMatch> propertyMatches = candidateBindings.stream()
+                .flatMap(binding -> properties(binding).stream()
+                        .filter(property -> canonical(property.name()).equals(canonical(propertyName)))
+                        .map(property -> new PropertyMatch(binding, property)))
+                .toList();
+        if (propertyMatches.isEmpty()) {
+            return Optional.empty();
+        }
+        List<TableBinding> matchedBindings = propertyMatches.stream()
+                .map(PropertyMatch::binding)
+                .distinct()
+                .toList();
+        if (matchedBindings.size() > 1) {
+            throw ambiguousPropertyResolutionError(span, propertyName);
+        }
+
+        PropertyDefinition property = propertyMatches.getFirst().property();
+        TableBinding binding = matchedBindings.getFirst();
+        Optional<PhysicalIdentifier> qualifier = qualified || bindings.size() > 1
+                ? Optional.of(binding.outputQualifier())
+                : Optional.empty();
+        return Optional.of(expandProperty(binding, property, resolveExpression(key), qualifier, span, expansionBudget));
+    }
+
+    private List<PropertyDefinition> properties(TableBinding binding)
+    {
+        return snapshot.logicalTable(binding.relationName())
+                .map(LogicalTableDefinition::properties)
+                .orElse(List.of());
+    }
+
     private Expression resolveBoundField(
             TableBinding binding,
             BoundField field,
@@ -645,6 +753,17 @@ final class HogQlSemanticResolver
             HogQlQuery.SourceSpan span,
             ExpansionBudget budget)
     {
+        return expandRecipe(binding, recipe, qualifier, span, budget, Map.of());
+    }
+
+    private Expression expandRecipe(
+            TableBinding binding,
+            ExpressionRecipe recipe,
+            Optional<PhysicalIdentifier> qualifier,
+            HogQlQuery.SourceSpan span,
+            ExpansionBudget budget,
+            Map<ExpressionArgument, Expression> arguments)
+    {
         budget.enter(span);
         try {
             return switch (recipe) {
@@ -656,16 +775,22 @@ final class HogQlSemanticResolver
                     yield resolveBoundField(binding, field, qualifier, span, budget);
                 }
                 case LiteralRecipe literal -> typedLiteral(literal.literal(), span);
-                case FunctionCallRecipe function -> expandFunction(binding, function, qualifier, span, budget);
-                case OperatorRecipe operator -> expandOperator(binding, operator, qualifier, span, budget);
+                case FunctionCallRecipe function -> expandFunction(binding, function, qualifier, span, budget, arguments);
+                case OperatorRecipe operator -> expandOperator(binding, operator, qualifier, span, budget, arguments);
                 case CastRecipe cast -> new CastExpression(
-                        expandRecipe(binding, cast.expression(), qualifier, span, budget),
+                        expandRecipe(binding, cast.expression(), qualifier, span, budget, arguments),
                         new Identifier(cast.targetTypeSignature(), false, span),
                         false,
                         span);
-                case ArgumentReferenceRecipe _ -> throw unsupportedExpansion(span, "HogQL recipe argument is only valid inside a property lookup recipe");
+                case ArgumentReferenceRecipe reference -> {
+                    Expression argument = arguments.get(reference.argument());
+                    if (argument == null) {
+                        throw unsupportedExpansion(span, "HogQL recipe argument is unavailable in this expansion context");
+                    }
+                    yield argument;
+                }
                 case ScopedFieldReferenceRecipe _ -> throw unsupportedExpansion(span, "HogQL scoped field recipe is only valid inside a relationship predicate");
-                case PropertyLookupRecipe _ -> throw unsupportedExpansion(span, "HogQL property lookup recipe expansion is unavailable");
+                case PropertyLookupRecipe lookup -> expandPropertyLookup(binding, lookup, qualifier, span, budget, arguments);
             };
         }
         finally {
@@ -678,7 +803,8 @@ final class HogQlSemanticResolver
             FunctionCallRecipe function,
             Optional<PhysicalIdentifier> qualifier,
             HogQlQuery.SourceSpan span,
-            ExpansionBudget budget)
+            ExpansionBudget budget,
+            Map<ExpressionArgument, Expression> arguments)
     {
         FunctionCapabilityDefinition capability = snapshot.snapshot().functions().stream()
                 .filter(candidate -> canonical(candidate.name()).equals(canonical(function.name())))
@@ -699,7 +825,7 @@ final class HogQlSemanticResolver
                         .map(name -> new Identifier(name.value(), name.delimited(), span))
                         .toList(),
                 function.arguments().stream()
-                        .map(argument -> expandRecipe(binding, argument, qualifier, span, budget))
+                        .map(argument -> expandRecipe(binding, argument, qualifier, span, budget, arguments))
                         .toList(),
                 false,
                 List.of(),
@@ -712,10 +838,11 @@ final class HogQlSemanticResolver
             OperatorRecipe operator,
             Optional<PhysicalIdentifier> qualifier,
             HogQlQuery.SourceSpan span,
-            ExpansionBudget budget)
+            ExpansionBudget budget,
+            Map<ExpressionArgument, Expression> recipeArguments)
     {
         List<Expression> arguments = operator.arguments().stream()
-                .map(argument -> expandRecipe(binding, argument, qualifier, span, budget))
+                .map(argument -> expandRecipe(binding, argument, qualifier, span, budget, recipeArguments))
                 .toList();
         return switch (operator.operator()) {
             case NOT -> new UnaryExpression(HogQlQuery.UnaryOperator.NOT, arguments.getFirst(), span);
@@ -725,6 +852,63 @@ final class HogQlSemanticResolver
             case SUBSCRIPT -> new SubscriptExpression(arguments.getFirst(), arguments.getLast(), span);
             default -> new BinaryExpression(binaryOperator(operator.operator()), arguments.getFirst(), arguments.getLast(), span);
         };
+    }
+
+    private Expression expandPropertyLookup(
+            TableBinding binding,
+            PropertyLookupRecipe lookup,
+            Optional<PhysicalIdentifier> qualifier,
+            HogQlQuery.SourceSpan span,
+            ExpansionBudget budget,
+            Map<ExpressionArgument, Expression> arguments)
+    {
+        if (!canonical(binding.relationName()).equals(canonical(lookup.table()))) {
+            throw expansionError(span, "HogQL property lookup recipe references an unavailable table");
+        }
+        PropertyDefinition property = properties(binding).stream()
+                .filter(candidate -> canonical(candidate.name()).equals(canonical(lookup.property())))
+                .findFirst()
+                .orElseThrow(() -> expansionError(span, "HogQL property lookup recipe references an unavailable property"));
+        Expression key = expandRecipe(binding, lookup.key(), qualifier, span, budget, arguments);
+        return expandProperty(binding, property, key, qualifier, span, budget);
+    }
+
+    private Expression expandProperty(
+            TableBinding binding,
+            PropertyDefinition property,
+            Expression key,
+            Optional<PhysicalIdentifier> qualifier,
+            HogQlQuery.SourceSpan span,
+            ExpansionBudget budget)
+    {
+        budget.enter(span);
+        try {
+            ExpressionRecipe recipe = property.lookupRecipe()
+                    .orElseThrow(() -> unsupportedExpansion(span, "HogQL property lookup has no declared compiler recipe"));
+            String keyType = property.keyTypeSignature()
+                    .orElseThrow(() -> unsupportedExpansion(span, "HogQL property lookup has no declared key type"));
+            String valueType = property.valueTypeSignature()
+                    .orElseThrow(() -> unsupportedExpansion(span, "HogQL property lookup has no declared value type"));
+            BoundField source = binding.fields().get(canonical(property.sourceField()));
+            if (source == null) {
+                throw expansionError(span, "HogQL property lookup references an unavailable source field");
+            }
+            Expression sourceExpression = resolveBoundField(binding, source, qualifier, span, budget);
+            Expression typedKey = new CastExpression(key, new Identifier(keyType, false, key.span()), false, key.span());
+            Expression value = expandRecipe(
+                    binding,
+                    recipe,
+                    qualifier,
+                    span,
+                    budget,
+                    Map.of(
+                            ExpressionArgument.PROPERTY_SOURCE, sourceExpression,
+                            ExpressionArgument.PROPERTY_KEY, typedKey));
+            return new CastExpression(value, new Identifier(valueType, false, span), false, span);
+        }
+        finally {
+            budget.exit();
+        }
     }
 
     private static HogQlQuery.BinaryOperator binaryOperator(SemanticOperator operator)
@@ -841,6 +1025,15 @@ final class HogQlSemanticResolver
                 null);
     }
 
+    private static TrinoException ambiguousPropertyResolutionError(HogQlQuery.SourceSpan span, String name)
+    {
+        return new TrinoException(
+                HOGQL_RESOLUTION_ERROR,
+                Optional.of(new Location(span.startLine(), span.startColumn())),
+                "Ambiguous HogQL property source: " + name,
+                null);
+    }
+
     private static TrinoException incompatibleUsingResolutionError(Identifier identifier)
     {
         return new TrinoException(
@@ -923,6 +1116,8 @@ final class HogQlSemanticResolver
     }
 
     private record FieldMatch(TableBinding binding, BoundField field) {}
+
+    private record PropertyMatch(TableBinding binding, PropertyDefinition property) {}
 
     private record ProjectedField(String name, String sourceField, boolean starVisible)
     {

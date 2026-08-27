@@ -14,7 +14,9 @@
 package io.trino.hogql.compiler;
 
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ArgumentReferenceRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.CastRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionArgument;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionFieldDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FieldReferenceRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionCallRecipe;
@@ -31,6 +33,9 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.Materialized
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.OperatorRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalQualifiedName;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyLookupRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyStorage;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ReferencedField;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationKind;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationReference;
@@ -54,6 +59,7 @@ import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_COMPILER_LIMIT_EXCEEDED;
+import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_UNSUPPORTED_FEATURE;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
 
@@ -123,7 +129,61 @@ public class TestHogQlSemanticExpansion
     }
 
     @Test
-    public void testBoundsRecursiveExpressionExpansionAtOriginalLocation()
+    public void testExpandsStaticAndQualifiedPropertyAccessThroughDeclaredRecipe()
+    {
+        HogQlCompilationResult result = compile("SELECT properties.browser, e.properties.browser, (properties).browser FROM events e");
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT CAST(event_properties_blob[CAST('browser' AS varchar)] AS varchar) AS browser, " +
+                        "CAST(e.event_properties_blob[CAST('browser' AS varchar)] AS varchar) AS browser, " +
+                        "CAST(event_properties_blob[CAST('browser' AS varchar)] AS varchar) " +
+                        "FROM analytics.data.raw_events e"));
+    }
+
+    @Test
+    public void testExpandsDynamicPropertyAccessAndPreservesPlaceholder()
+    {
+        HogQlCompilationResult result = compile(
+                "SELECT properties[{key}] FROM events",
+                SNAPSHOT,
+                Map.of("key", new HogQlTypedValue("varchar", new HogQlTypedValue.StringValue("browser"))));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT CAST(event_properties_blob[CAST(? AS varchar)] AS varchar) FROM analytics.data.raw_events"));
+        assertThat(result.parameterNames()).containsExactly("key");
+    }
+
+    @Test
+    public void testExpandsPropertyLookupRecipeThroughDeclaredPropertyRecipe()
+    {
+        HogQlCompilationResult result = compile("SELECT browserProperty FROM events");
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT CAST(event_properties_blob[CAST(CAST('browser' AS varchar) AS varchar)] AS varchar) AS browserProperty " +
+                        "FROM analytics.data.raw_events"));
+    }
+
+    @Test
+    public void testRejectsPropertyAccessWithoutDeclaredRecipeAtOriginalLocation()
+    {
+        PropertyDefinition property = new PropertyDefinition(
+                "properties",
+                "eventProperties",
+                PropertyStorage.JSON_OBJECT,
+                LogicalType.STRING,
+                true);
+
+        TrinoException exception = catchThrowableOfType(
+                TrinoException.class,
+                () -> compile("SELECT properties.browser FROM events", propertySnapshot(property, List.of())));
+
+        assertThat(exception.getErrorCode()).isEqualTo(HOGQL_UNSUPPORTED_FEATURE.toErrorCode());
+        assertThat(exception.getLocation()).contains(new Location(1, 8));
+        assertThat(exception).hasMessage("line 1:8: HogQL property lookup has no declared compiler recipe");
+    }
+
+    @Test
+    public void testBoundsPropertyLookupExpansionAtOriginalLocation()
     {
         List<ExpressionFieldDefinition> expressions = new ArrayList<>();
         expressions.add(expression("branch0", new LiteralRecipe(new TypedLiteral("bigint", LiteralEncoding.INTEGER, "1"))));
@@ -133,23 +193,15 @@ public class TestHogQlSemanticExpansion
                     new FieldReferenceRecipe("events", previous),
                     new FieldReferenceRecipe("events", previous)))));
         }
-        HogQlSemanticCatalogSnapshot expansiveSnapshot = new HogQlSemanticCatalogSnapshot(
-                SNAPSHOT.protocolVersion(),
-                SNAPSHOT.schemaVersion(),
-                SNAPSHOT.languageVersion(),
-                SNAPSHOT.catalog(),
-                SNAPSHOT.generation(),
-                SNAPSHOT.logicalTables(),
-                expressions,
-                List.of(),
-                List.of(),
-                List.of(),
-                List.of(),
-                List.of());
+        expressions.add(expression("lookupBranch", new PropertyLookupRecipe(
+                "events",
+                "properties",
+                new FieldReferenceRecipe("events", "branch14"))));
+        HogQlSemanticCatalogSnapshot expansiveSnapshot = propertySnapshot(propertiesProperty(), expressions);
 
         TrinoException exception = catchThrowableOfType(
                 TrinoException.class,
-                () -> compile("SELECT branch14 FROM events", expansiveSnapshot));
+                () -> compile("SELECT lookupBranch FROM events", expansiveSnapshot));
 
         assertThat(exception.getErrorCode()).isEqualTo(HOGQL_COMPILER_LIMIT_EXCEEDED.toErrorCode());
         assertThat(exception.getLocation()).contains(new Location(1, 8));
@@ -163,12 +215,17 @@ public class TestHogQlSemanticExpansion
 
     private HogQlCompilationResult compile(String query, HogQlSemanticCatalogSnapshot snapshot)
     {
+        return compile(query, snapshot, Map.of());
+    }
+
+    private HogQlCompilationResult compile(String query, HogQlSemanticCatalogSnapshot snapshot, Map<String, HogQlTypedValue> parameters)
+    {
         HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(snapshot));
         return compiler.compile(new HogQlCompileEnvelope(
                 query,
                 HogQlCompileEnvelope.PROTOCOL_VERSION,
                 HogQlLanguageContract.current().languageVersion(),
-                Map.of(),
+                parameters,
                 Map.of(),
                 Map.of(),
                 Map.of(),
@@ -178,6 +235,7 @@ public class TestHogQlSemanticExpansion
     private static HogQlSemanticCatalogSnapshot snapshot()
     {
         LogicalFieldDefinition event = new LogicalFieldDefinition("event", new PhysicalIdentifier("event_name", false), "varchar", LogicalType.STRING, false, true);
+        LogicalFieldDefinition properties = new LogicalFieldDefinition("eventProperties", new PhysicalIdentifier("event_properties_blob", false), "map(varchar, varchar)", LogicalType.MAP, true, false);
         List<ExpressionFieldDefinition> expressions = List.of(
                 expression("constant", new LiteralRecipe(new TypedLiteral("bigint", LiteralEncoding.INTEGER, "7"))),
                 expression("upperEvent", new FunctionCallRecipe("hogUpper", List.of(new FieldReferenceRecipe("events", "event")))),
@@ -185,7 +243,11 @@ public class TestHogQlSemanticExpansion
                         new FieldReferenceRecipe("events", "constant"),
                         new LiteralRecipe(new TypedLiteral("bigint", LiteralEncoding.INTEGER, "1"))))),
                 expression("castEvent", new CastRecipe(new FieldReferenceRecipe("events", "event"), "varchar")),
-                expression("missingEvent", new OperatorRecipe(SemanticOperator.IS_NULL, List.of(new FieldReferenceRecipe("events", "event")))));
+                expression("missingEvent", new OperatorRecipe(SemanticOperator.IS_NULL, List.of(new FieldReferenceRecipe("events", "event")))),
+                expression("browserProperty", new PropertyLookupRecipe(
+                        "events",
+                        "properties",
+                        new LiteralRecipe(new TypedLiteral("varchar", LiteralEncoding.STRING, "browser")))));
         ReferencedField eventTitle = new ReferencedField("eventTitle", "varchar", LogicalType.STRING, false, true);
         return new HogQlSemanticCatalogSnapshot(
                 1,
@@ -196,8 +258,8 @@ public class TestHogQlSemanticExpansion
                 List.of(new LogicalTableDefinition(
                         "events",
                         physicalName("raw_events"),
-                        List.of(event),
-                        List.of(),
+                        List.of(event, properties),
+                        List.of(propertiesProperty()),
                         List.of())),
                 expressions,
                 List.of(new VirtualTableDefinition(
@@ -230,6 +292,51 @@ public class TestHogQlSemanticExpansion
                         false,
                         false)),
                 List.of());
+    }
+
+    private static HogQlSemanticCatalogSnapshot propertySnapshot(PropertyDefinition property, List<ExpressionFieldDefinition> expressions)
+    {
+        return new HogQlSemanticCatalogSnapshot(
+                1,
+                2,
+                HogQlLanguageContract.current().languageVersion(),
+                CATALOG,
+                7,
+                List.of(new LogicalTableDefinition(
+                        "events",
+                        physicalName("raw_events"),
+                        List.of(new LogicalFieldDefinition(
+                                "eventProperties",
+                                new PhysicalIdentifier("event_properties_blob", false),
+                                "map(varchar, varchar)",
+                                LogicalType.MAP,
+                                true,
+                                false)),
+                        List.of(property),
+                        List.of())),
+                expressions,
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of());
+    }
+
+    private static PropertyDefinition propertiesProperty()
+    {
+        return new PropertyDefinition(
+                "properties",
+                "eventProperties",
+                PropertyStorage.JSON_OBJECT,
+                LogicalType.STRING,
+                true,
+                Optional.of("varchar"),
+                Optional.of("varchar"),
+                Optional.of(new OperatorRecipe(
+                        SemanticOperator.SUBSCRIPT,
+                        List.of(
+                                new ArgumentReferenceRecipe(ExpressionArgument.PROPERTY_SOURCE),
+                                new ArgumentReferenceRecipe(ExpressionArgument.PROPERTY_KEY)))));
     }
 
     private static ExpressionFieldDefinition expression(String name, HogQlSemanticCatalogSnapshot.ExpressionRecipe recipe)
