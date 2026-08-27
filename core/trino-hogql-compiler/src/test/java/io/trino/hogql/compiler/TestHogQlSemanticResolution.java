@@ -14,6 +14,10 @@
 package io.trino.hogql.compiler;
 
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionCapabilityDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionImplementation;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionKind;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionSignature;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalFieldDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalTableDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalType;
@@ -47,6 +51,7 @@ public class TestHogQlSemanticResolution
 {
     private static final PhysicalIdentifier CATALOG = new PhysicalIdentifier("analytics", false);
     private static final HogQlSemanticCatalogSnapshot SNAPSHOT = new HogQlSemanticCatalogSnapshot(
+            1,
             2,
             HogQlLanguageContract.current().languageVersion(),
             CATALOG,
@@ -74,7 +79,23 @@ public class TestHogQlSemanticResolution
                                     new LogicalFieldDefinition("personId", new PhysicalIdentifier("person_id", false), "varchar", LogicalType.STRING, false, true),
                                     new LogicalFieldDefinition("name", new PhysicalIdentifier("full_name", false), "varchar", LogicalType.STRING, false, true)),
                             List.of(),
-                            List.of())));
+                            List.of())),
+            List.of(),
+            List.of(),
+            List.of(),
+            List.of(),
+            List.of(new FunctionCapabilityDefinition(
+                    "count",
+                    FunctionKind.AGGREGATE,
+                    FunctionImplementation.STOCK,
+                    List.of(new PhysicalIdentifier("count", false)),
+                    List.of(new FunctionSignature(List.of(), "bigint", false)),
+                    true,
+                    true,
+                    true,
+                    true,
+                    true)),
+            List.of());
 
     private final HogQlCompiler compiler = new HogQlCompiler();
     private final SqlParser sqlParser = new SqlParser();

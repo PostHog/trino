@@ -29,6 +29,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.CastExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
 import io.trino.hogql.parser.tree.HogQlQuery.CommonTableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.Expression;
+import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
@@ -210,15 +211,17 @@ public final class HogQlCompiler
                 context.catalog(),
                 requireNonNull(languageVersion, "languageVersion is null"),
                 expectedCatalogGeneration));
-        HogQlQuery resolved = HogQlSemanticResolver.resolve(pinned, query)
+        HogQlQuery functionsResolved = HogQlFunctionResolver.resolve(pinned, query);
+        HogQlQuery resolved = HogQlSemanticResolver.resolve(pinned, functionsResolved)
                 .map(HogQlSemanticResolver.ResolvedQuery::query)
-                .orElse(query);
+                .orElse(functionsResolved);
         return new ResolvedQuery(resolved, OptionalLong.of(pinned.generation()));
     }
 
     private static boolean containsSemanticCandidate(HogQlQuery query)
     {
-        return query.with().stream().anyMatch(commonTable -> containsSemanticCandidate(commonTable.query())) ||
+        return containsFunctionCall(query) ||
+                query.with().stream().anyMatch(commonTable -> containsSemanticCandidate(commonTable.query())) ||
                 switch (query.body()) {
                     case SelectQueryBody select -> select.from().map(HogQlCompiler::containsSemanticCandidate).orElse(false);
                     case SetOperation setOperation -> containsSemanticCandidate(setOperation.left()) || containsSemanticCandidate(setOperation.right());
@@ -235,6 +238,64 @@ public final class HogQlCompiler
             case TablePlaceholder _ -> false;
             case HogQlQuery.TableReference table -> table.parts().size() == 1;
             case ValuesRelation _ -> false;
+        };
+    }
+
+    private static boolean containsFunctionCall(HogQlQuery query)
+    {
+        return query.with().stream().anyMatch(commonTable -> containsFunctionCall(commonTable.query())) ||
+                switch (query.body()) {
+                    case SelectQueryBody select -> select.projections().stream()
+                            .filter(ExpressionProjection.class::isInstance)
+                            .map(ExpressionProjection.class::cast)
+                            .anyMatch(projection -> containsFunctionCall(projection.expression())) ||
+                            select.from().map(HogQlCompiler::containsFunctionCall).orElse(false) ||
+                            select.where().map(HogQlCompiler::containsFunctionCall).orElse(false) ||
+                            select.groupBy().stream().anyMatch(HogQlCompiler::containsFunctionCall) ||
+                            select.having().map(HogQlCompiler::containsFunctionCall).orElse(false);
+                    case SetOperation set -> containsFunctionCall(set.left()) || containsFunctionCall(set.right());
+                } ||
+                query.orderBy().stream().anyMatch(sortItem -> containsFunctionCall(sortItem.expression())) ||
+                query.limit().map(HogQlCompiler::containsFunctionCall).orElse(false) ||
+                query.offset().map(HogQlCompiler::containsFunctionCall).orElse(false);
+    }
+
+    private static boolean containsFunctionCall(Relation relation)
+    {
+        return switch (relation) {
+            case AliasedRelation alias -> containsFunctionCall(alias.relation());
+            case CommonTableReference _ -> false;
+            case JoinRelation join -> containsFunctionCall(join.left()) ||
+                    containsFunctionCall(join.right()) ||
+                    join.criteria().filter(JoinOn.class::isInstance)
+                            .map(JoinOn.class::cast)
+                            .map(JoinOn::expression)
+                            .map(HogQlCompiler::containsFunctionCall)
+                            .orElse(false);
+            case SubqueryRelation subquery -> containsFunctionCall(subquery.query());
+            case TablePlaceholder _, HogQlQuery.TableReference _ -> false;
+            case ValuesRelation values -> values.rows().stream()
+                    .flatMap(List::stream)
+                    .anyMatch(HogQlCompiler::containsFunctionCall);
+        };
+    }
+
+    private static boolean containsFunctionCall(Expression expression)
+    {
+        return switch (expression) {
+            case ArrayExpression array -> array.values().stream().anyMatch(HogQlCompiler::containsFunctionCall);
+            case BetweenExpression between -> containsFunctionCall(between.value()) || containsFunctionCall(between.min()) || containsFunctionCall(between.max());
+            case BinaryExpression binary -> containsFunctionCall(binary.left()) || containsFunctionCall(binary.right());
+            case CaseExpression caseExpression -> caseExpression.operand().map(HogQlCompiler::containsFunctionCall).orElse(false) ||
+                    caseExpression.whenClauses().stream().anyMatch(when -> containsFunctionCall(when.operand()) || containsFunctionCall(when.result())) ||
+                    caseExpression.defaultValue().map(HogQlCompiler::containsFunctionCall).orElse(false);
+            case CastExpression cast -> containsFunctionCall(cast.value());
+            case ColumnReference _, Literal _, Placeholder _ -> false;
+            case FunctionCall _ -> true;
+            case InExpression in -> containsFunctionCall(in.value()) || in.values().stream().anyMatch(HogQlCompiler::containsFunctionCall);
+            case IsNullExpression isNull -> containsFunctionCall(isNull.value());
+            case TupleExpression tuple -> tuple.values().stream().anyMatch(HogQlCompiler::containsFunctionCall);
+            case UnaryExpression unary -> containsFunctionCall(unary.operand());
         };
     }
 
