@@ -16,6 +16,7 @@ package io.trino.hogql.parser;
 import io.trino.hogql.parser.canonical.HogQLLexer;
 import io.trino.hogql.parser.canonical.HogQLParser;
 import io.trino.hogql.parser.tree.HogQlQuery;
+import io.trino.hogql.parser.tree.HogQlQuery.AliasedRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.ArrayExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.BetweenExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
@@ -30,6 +31,11 @@ import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinCriteria;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinType;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinUsing;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.NullPlacement;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
@@ -452,7 +458,7 @@ public final class HogQlParser
                     .toList();
             Optional<Relation> from = Optional.ofNullable(select.fromClause())
                     .map(HogQLParser.FromClauseContext::joinExpr)
-                    .map(this::buildTableReference);
+                    .map(this::buildRelation);
             Optional<Expression> where = Optional.ofNullable(select.whereClause())
                     .map(HogQLParser.WhereClauseContext::columnExpr)
                     .map(this::buildExpression);
@@ -943,18 +949,110 @@ public final class HogQlParser
             return new Placeholder(reference.parts().getFirst().value(), sourceSpan(context));
         }
 
-        private Relation buildTableReference(HogQLParser.JoinExprContext context)
+        private Relation buildRelation(HogQLParser.JoinExprContext context)
         {
-            if (!(context instanceof HogQLParser.JoinExprTableContext table) || table.FINAL() != null || table.sampleClause() != null) {
-                throw unsupported(context, "table expression or join");
+            if (context instanceof HogQLParser.JoinExprTableContext table) {
+                if (table.FINAL() != null || table.sampleClause() != null) {
+                    throw unsupported(context, "HogQL-specific table modifier");
+                }
+                return buildTableExpression(table.tableExpr());
             }
-            if (table.tableExpr() instanceof HogQLParser.TableExprIdentifierContext identifier) {
+            if (context instanceof HogQLParser.JoinExprParensContext parens) {
+                return buildRelation(parens.joinExpr());
+            }
+            if (context instanceof HogQLParser.JoinExprCrossOpContext cross) {
+                if (cross.joinOpCross().COMMA() != null) {
+                    throw unsupported(context, "implicit comma join");
+                }
+                return new JoinRelation(
+                        JoinType.CROSS,
+                        buildRelation(cross.joinExpr(0)),
+                        buildRelation(cross.joinExpr(1)),
+                        Optional.empty(),
+                        sourceSpan(context));
+            }
+            if (context instanceof HogQLParser.JoinExprOpContext join) {
+                if (join.NATURAL() != null) {
+                    throw unsupported(context, "natural join");
+                }
+                if (join.joinConstraintClause() == null) {
+                    throw unsupported(context, "join without ON or USING");
+                }
+                return new JoinRelation(
+                        buildJoinType(join.joinOp()),
+                        buildRelation(join.joinExpr(0)),
+                        buildRelation(join.joinExpr(1)),
+                        Optional.of(buildJoinCriteria(join.joinConstraintClause())),
+                        sourceSpan(context));
+            }
+            throw unsupported(context, "HogQL-specific join variant");
+        }
+
+        private Relation buildTableExpression(HogQLParser.TableExprContext context)
+        {
+            if (context instanceof HogQLParser.TableExprIdentifierContext identifier) {
                 return new TableReference(buildIdentifiers(identifier.tableIdentifier()), sourceSpan(context));
             }
-            if (table.tableExpr() instanceof HogQLParser.TableExprPlaceholderContext placeholder) {
+            if (context instanceof HogQLParser.TableExprPlaceholderContext placeholder) {
                 return new TablePlaceholder(buildPlaceholder(placeholder.placeholder()));
             }
-            throw unsupported(context, "table expression or join");
+            if (context instanceof HogQLParser.TableExprAliasContext alias) {
+                if (alias.columnAliases() != null) {
+                    throw unsupported(context, "table column aliases");
+                }
+                Identifier identifier = alias.identifier() != null
+                        ? buildIdentifier(alias.identifier())
+                        : buildIdentifier(alias.alias().getText(), alias.alias());
+                return new AliasedRelation(buildTableExpression(alias.tableExpr()), identifier, sourceSpan(context));
+            }
+            throw unsupported(context, "table expression");
+        }
+
+        private JoinType buildJoinType(HogQLParser.JoinOpContext context)
+        {
+            if (context == null) {
+                return JoinType.INNER;
+            }
+            if (context instanceof HogQLParser.JoinOpInnerContext inner) {
+                if (inner.ANTI() != null || inner.SEMI() != null || inner.ASOF() != null || inner.ALL() != null || inner.ANY() != null) {
+                    throw unsupported(context, "HogQL-specific inner join modifier");
+                }
+                return JoinType.INNER;
+            }
+            if (context instanceof HogQLParser.JoinOpLeftRightContext outer) {
+                if (outer.ANTI() != null || outer.SEMI() != null || outer.ASOF() != null || outer.ALL() != null || outer.ANY() != null) {
+                    throw unsupported(context, "HogQL-specific outer join modifier");
+                }
+                return outer.LEFT() != null ? JoinType.LEFT : JoinType.RIGHT;
+            }
+            if (context instanceof HogQLParser.JoinOpFullContext full) {
+                if (full.ASOF() != null || full.ALL() != null || full.ANY() != null) {
+                    throw unsupported(context, "HogQL-specific full join modifier");
+                }
+                return JoinType.FULL;
+            }
+            throw unsupported(context, "join operator");
+        }
+
+        private JoinCriteria buildJoinCriteria(HogQLParser.JoinConstraintClauseContext context)
+        {
+            if (context.ON() != null) {
+                List<HogQLParser.ColumnExprContext> expressions = context.columnExprList().columnExpr();
+                if (expressions.size() != 1) {
+                    throw unsupported(context, "multiple ON expressions");
+                }
+                return new JoinOn(buildExpression(expressions.getFirst()), sourceSpan(context));
+            }
+            List<Identifier> columns = context.columnExprList().columnExpr().stream()
+                    .map(this::buildExpression)
+                    .map(expression -> {
+                        if (!(expression instanceof ColumnReference reference) || reference.parts().size() != 1) {
+                            throw unsupported(context, "non-identifier USING column");
+                        }
+                        return reference.parts().getFirst();
+                    })
+                    .toList();
+            return new JoinUsing(columns, sourceSpan(context));
         }
 
         private List<Identifier> buildIdentifiers(HogQLParser.TableIdentifierContext context)

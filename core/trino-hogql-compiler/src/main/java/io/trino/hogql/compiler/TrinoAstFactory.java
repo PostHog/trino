@@ -14,6 +14,7 @@
 package io.trino.hogql.compiler;
 
 import io.trino.hogql.parser.tree.HogQlQuery;
+import io.trino.hogql.parser.tree.HogQlQuery.AliasedRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.ArrayExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.BetweenExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
@@ -25,6 +26,9 @@ import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinUsing;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
@@ -94,7 +98,7 @@ final class TrinoAstFactory
                 new Select(location, query.distinct(), query.projections().stream()
                         .map(projection -> createSelectItem(projection, parameterIds))
                         .toList()),
-                query.from().map(TrinoAstFactory::createRelation),
+                query.from().map(relation -> createRelation(relation, parameterIds)),
                 query.where().map(expression -> createExpression(expression, parameterIds)),
                 createGroupBy(query, parameterIds),
                 query.having().map(expression -> createExpression(expression, parameterIds)),
@@ -318,9 +322,31 @@ final class TrinoAstFactory
         return expression;
     }
 
-    private static io.trino.sql.tree.Relation createRelation(Relation relation)
+    private static io.trino.sql.tree.Relation createRelation(Relation relation, Map<SourceSpan, Integer> parameterIds)
     {
         return switch (relation) {
+            case AliasedRelation alias -> new io.trino.sql.tree.AliasedRelation(
+                    location(alias.span()),
+                    createRelation(alias.relation(), parameterIds),
+                    createIdentifier(alias.alias()),
+                    null);
+            case JoinRelation join -> new io.trino.sql.tree.Join(
+                    location(join.span()),
+                    switch (join.type()) {
+                        case CROSS -> io.trino.sql.tree.Join.Type.CROSS;
+                        case INNER -> io.trino.sql.tree.Join.Type.INNER;
+                        case LEFT -> io.trino.sql.tree.Join.Type.LEFT;
+                        case RIGHT -> io.trino.sql.tree.Join.Type.RIGHT;
+                        case FULL -> io.trino.sql.tree.Join.Type.FULL;
+                    },
+                    createRelation(join.left(), parameterIds),
+                    createRelation(join.right(), parameterIds),
+                    join.criteria().map(criteria -> switch (criteria) {
+                        case JoinOn on -> new io.trino.sql.tree.JoinOn(createExpression(on.expression(), parameterIds));
+                        case JoinUsing using -> new io.trino.sql.tree.JoinUsing(using.columns().stream()
+                                .map(TrinoAstFactory::createIdentifier)
+                                .toList());
+                    }));
             case TablePlaceholder _ -> throw new IllegalArgumentException("table placeholder was not validated");
             case TableReference table -> createTable(table);
         };

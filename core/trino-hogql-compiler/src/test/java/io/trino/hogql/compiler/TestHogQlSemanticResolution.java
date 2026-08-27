@@ -24,6 +24,7 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider.Pinn
 import io.trino.hogql.parser.HogQlLanguageContract;
 import io.trino.spi.Location;
 import io.trino.spi.TrinoException;
+import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.Identifier;
 import io.trino.sql.tree.Query;
 import io.trino.sql.tree.QuerySpecification;
@@ -50,20 +51,33 @@ public class TestHogQlSemanticResolution
             HogQlLanguageContract.current().languageVersion(),
             CATALOG,
             7,
-            List.of(new LogicalTableDefinition(
-                    "events",
-                    new PhysicalQualifiedName(
-                            CATALOG,
-                            new PhysicalIdentifier("Hog Data", true),
-                            new PhysicalIdentifier("raw-events", true)),
-                    List.of(
-                            new LogicalFieldDefinition("event", new PhysicalIdentifier("event_name", false), "varchar", LogicalType.STRING, false, true),
-                            new LogicalFieldDefinition("personId", new PhysicalIdentifier("Person ID", true), "varchar", LogicalType.STRING, false, true),
-                            new LogicalFieldDefinition("hidden", new PhysicalIdentifier("hidden", false), "bigint", LogicalType.INTEGER, true, false)),
-                    List.of(),
-                    List.of())));
+            List.of(
+                    new LogicalTableDefinition(
+                            "events",
+                            new PhysicalQualifiedName(
+                                    CATALOG,
+                                    new PhysicalIdentifier("Hog Data", true),
+                                    new PhysicalIdentifier("raw-events", true)),
+                            List.of(
+                                    new LogicalFieldDefinition("event", new PhysicalIdentifier("event_name", false), "varchar", LogicalType.STRING, false, true),
+                                    new LogicalFieldDefinition("personId", new PhysicalIdentifier("Person ID", true), "varchar", LogicalType.STRING, false, true),
+                                    new LogicalFieldDefinition("hidden", new PhysicalIdentifier("hidden", false), "bigint", LogicalType.INTEGER, true, false)),
+                            List.of(),
+                            List.of()),
+                    new LogicalTableDefinition(
+                            "persons",
+                            new PhysicalQualifiedName(
+                                    CATALOG,
+                                    new PhysicalIdentifier("Hog Data", true),
+                                    new PhysicalIdentifier("raw-persons", true)),
+                            List.of(
+                                    new LogicalFieldDefinition("personId", new PhysicalIdentifier("person_id", false), "varchar", LogicalType.STRING, false, true),
+                                    new LogicalFieldDefinition("name", new PhysicalIdentifier("full_name", false), "varchar", LogicalType.STRING, false, true)),
+                            List.of(),
+                            List.of())));
 
     private final HogQlCompiler compiler = new HogQlCompiler();
+    private final SqlParser sqlParser = new SqlParser();
 
     @Test
     public void testPinsAndResolvesLogicalTableFieldsAndStar()
@@ -127,6 +141,37 @@ public class TestHogQlSemanticResolution
         assertThat(exception.getErrorCode()).isEqualTo(HOGQL_RESOLUTION_ERROR.toErrorCode());
         assertThat(exception.getLocation()).contains(new Location(1, 8));
         assertThat(exception).hasMessage("line 1:8: Unknown HogQL field: missing");
+    }
+
+    @Test
+    public void testResolvesAliasedLogicalTablesAndJoinCriteria()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+
+        HogQlCompilationResult result = compiler.compile(
+                envelope("SELECT e.event, p.name FROM events e JOIN persons p ON e.personId = p.personId", OptionalLong.of(7)),
+                Optional.of(context));
+
+        assertThat(result.catalogGeneration()).hasValue(7);
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT e.event_name AS event, p.full_name AS name " +
+                        "FROM analytics.\"Hog Data\".\"raw-events\" e " +
+                        "JOIN analytics.\"Hog Data\".\"raw-persons\" p ON e.\"Person ID\" = p.person_id"));
+    }
+
+    @Test
+    public void testRejectsLogicalUsingWhenPhysicalColumnNamesDiffer()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+        String hogql = "SELECT e.event FROM events e JOIN persons p USING (personId)";
+
+        TrinoException exception = catchThrowableOfType(
+                TrinoException.class,
+                () -> compiler.compile(envelope(hogql, OptionalLong.empty()), Optional.of(context)));
+
+        assertThat(exception.getErrorCode()).isEqualTo(HOGQL_RESOLUTION_ERROR.toErrorCode());
+        assertThat(exception.getLocation()).contains(new Location(1, hogql.lastIndexOf("personId") + 1));
+        assertThat(exception).hasMessageContaining("HogQL USING field maps to different physical columns: personId");
     }
 
     private static QuerySpecification querySpecification(HogQlCompilationResult result)

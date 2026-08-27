@@ -20,6 +20,7 @@ import io.trino.hogql.parser.HogQlLanguageVersion;
 import io.trino.hogql.parser.HogQlParser;
 import io.trino.hogql.parser.HogQlParsingException;
 import io.trino.hogql.parser.tree.HogQlQuery;
+import io.trino.hogql.parser.tree.HogQlQuery.AliasedRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.ArrayExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.BetweenExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
@@ -30,8 +31,11 @@ import io.trino.hogql.parser.tree.HogQlQuery.Expression;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
+import io.trino.hogql.parser.tree.HogQlQuery.Relation;
 import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
 import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
@@ -120,9 +124,7 @@ public final class HogQlCompiler
             OptionalLong expectedCatalogGeneration)
     {
         validateParameters(query, parameters);
-        if (query.from().orElse(null) instanceof TablePlaceholder tablePlaceholder) {
-            throw bindingError(tablePlaceholder.span(), "HogQL parameter placeholders are not supported in table positions: " + tablePlaceholder.placeholder().name());
-        }
+        query.from().ifPresent(HogQlCompiler::validateRelation);
 
         List<Placeholder> placeholders = new ArrayList<>();
         query.projections().forEach(projection -> {
@@ -130,6 +132,7 @@ public final class HogQlCompiler
                 collectPlaceholders(expressionProjection.expression(), placeholders);
             }
         });
+        query.from().ifPresent(relation -> collectPlaceholders(relation, placeholders));
         query.where().ifPresent(expression -> collectPlaceholders(expression, placeholders));
         query.groupBy().forEach(expression -> collectPlaceholders(expression, placeholders));
         query.having().ifPresent(expression -> collectPlaceholders(expression, placeholders));
@@ -180,7 +183,7 @@ public final class HogQlCompiler
             HogQlLanguageVersion languageVersion,
             OptionalLong expectedCatalogGeneration)
     {
-        if (!(query.from().orElse(null) instanceof HogQlQuery.TableReference table) || table.parts().size() != 1 || catalogContext.isEmpty()) {
+        if (query.from().isEmpty() || !containsSemanticCandidate(query.from().orElseThrow()) || catalogContext.isEmpty()) {
             return new ResolvedQuery(query, OptionalLong.empty());
         }
         HogQlSemanticCatalogContext context = catalogContext.orElseThrow();
@@ -192,6 +195,16 @@ public final class HogQlCompiler
                 .map(HogQlSemanticResolver.ResolvedQuery::query)
                 .orElse(query);
         return new ResolvedQuery(resolved, OptionalLong.of(pinned.generation()));
+    }
+
+    private static boolean containsSemanticCandidate(Relation relation)
+    {
+        return switch (relation) {
+            case AliasedRelation alias -> containsSemanticCandidate(alias.relation());
+            case JoinRelation join -> containsSemanticCandidate(join.left()) || containsSemanticCandidate(join.right());
+            case TablePlaceholder _ -> false;
+            case HogQlQuery.TableReference table -> table.parts().size() == 1;
+        };
     }
 
     private record ResolvedQuery(HogQlQuery query, OptionalLong catalogGeneration)
@@ -252,6 +265,39 @@ public final class HogQlCompiler
             case Placeholder placeholder -> placeholders.add(placeholder);
             case TupleExpression tuple -> tuple.values().forEach(value -> collectPlaceholders(value, placeholders));
             case UnaryExpression unary -> collectPlaceholders(unary.operand(), placeholders);
+        }
+    }
+
+    private static void validateRelation(Relation relation)
+    {
+        switch (relation) {
+            case AliasedRelation alias -> validateRelation(alias.relation());
+            case JoinRelation join -> {
+                validateRelation(join.left());
+                validateRelation(join.right());
+            }
+            case TablePlaceholder tablePlaceholder -> throw bindingError(
+                    tablePlaceholder.span(),
+                    "HogQL parameter placeholders are not supported in table positions: " + tablePlaceholder.placeholder().name());
+            case HogQlQuery.TableReference _ -> {}
+        }
+    }
+
+    private static void collectPlaceholders(Relation relation, List<Placeholder> placeholders)
+    {
+        switch (relation) {
+            case AliasedRelation alias -> collectPlaceholders(alias.relation(), placeholders);
+            case JoinRelation join -> {
+                collectPlaceholders(join.left(), placeholders);
+                collectPlaceholders(join.right(), placeholders);
+                join.criteria().ifPresent(criteria -> {
+                    if (criteria instanceof JoinOn on) {
+                        collectPlaceholders(on.expression(), placeholders);
+                    }
+                });
+            }
+            case TablePlaceholder _ -> {}
+            case HogQlQuery.TableReference _ -> {}
         }
     }
 

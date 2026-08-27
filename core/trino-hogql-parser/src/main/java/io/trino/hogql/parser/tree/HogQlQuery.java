@@ -326,9 +326,77 @@ public record HogQlQuery(
     }
 
     public sealed interface Relation
-            permits TablePlaceholder, TableReference
+            permits AliasedRelation,
+                    JoinRelation,
+                    TablePlaceholder,
+                    TableReference
     {
         SourceSpan span();
+    }
+
+    public record AliasedRelation(Relation relation, Identifier alias, SourceSpan span)
+            implements Relation
+    {
+        public AliasedRelation
+        {
+            relation = requireNonNull(relation, "relation is null");
+            alias = requireNonNull(alias, "alias is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public enum JoinType
+    {
+        CROSS,
+        INNER,
+        LEFT,
+        RIGHT,
+        FULL,
+    }
+
+    public sealed interface JoinCriteria
+            permits JoinOn, JoinUsing
+    {
+        SourceSpan span();
+    }
+
+    public record JoinOn(Expression expression, SourceSpan span)
+            implements JoinCriteria
+    {
+        public JoinOn
+        {
+            expression = requireNonNull(expression, "expression is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record JoinUsing(List<Identifier> columns, SourceSpan span)
+            implements JoinCriteria
+    {
+        public JoinUsing
+        {
+            columns = List.copyOf(requireNonNull(columns, "columns is null"));
+            if (columns.isEmpty()) {
+                throw new IllegalArgumentException("columns is empty");
+            }
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record JoinRelation(JoinType type, Relation left, Relation right, Optional<JoinCriteria> criteria, SourceSpan span)
+            implements Relation
+    {
+        public JoinRelation
+        {
+            type = requireNonNull(type, "type is null");
+            left = requireNonNull(left, "left is null");
+            right = requireNonNull(right, "right is null");
+            criteria = requireNonNull(criteria, "criteria is null");
+            span = requireNonNull(span, "span is null");
+            if ((type == JoinType.CROSS) == criteria.isPresent()) {
+                throw new IllegalArgumentException("cross joins must omit criteria and qualified joins must provide criteria");
+            }
+        }
     }
 
     public record TableReference(List<Identifier> parts, SourceSpan span)

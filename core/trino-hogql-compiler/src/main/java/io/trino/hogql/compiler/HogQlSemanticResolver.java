@@ -18,6 +18,7 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalTable
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider.PinnedSnapshot;
 import io.trino.hogql.parser.tree.HogQlQuery;
+import io.trino.hogql.parser.tree.HogQlQuery.AliasedRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.ArrayExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.BetweenExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
@@ -31,11 +32,16 @@ import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
 import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinUsing;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
+import io.trino.hogql.parser.tree.HogQlQuery.Relation;
 import io.trino.hogql.parser.tree.HogQlQuery.SortItem;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
+import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
@@ -54,36 +60,40 @@ import static java.util.Objects.requireNonNull;
 
 final class HogQlSemanticResolver
 {
-    private final LogicalTableDefinition logicalTable;
-    private final Map<String, LogicalFieldDefinition> fields;
+    private final PinnedSnapshot snapshot;
+    private List<TableBinding> bindings = List.of();
+    private boolean allRelationsLogical;
 
-    private HogQlSemanticResolver(LogicalTableDefinition logicalTable)
+    private HogQlSemanticResolver(PinnedSnapshot snapshot)
     {
-        this.logicalTable = requireNonNull(logicalTable, "logicalTable is null");
-        Map<String, LogicalFieldDefinition> fields = new HashMap<>();
-        logicalTable.fields().forEach(field -> fields.put(canonical(field.name()), field));
-        this.fields = Map.copyOf(fields);
+        this.snapshot = requireNonNull(snapshot, "snapshot is null");
     }
 
     public static Optional<ResolvedQuery> resolve(PinnedSnapshot snapshot, HogQlQuery query)
     {
         requireNonNull(snapshot, "snapshot is null");
         requireNonNull(query, "query is null");
-        if (!(query.from().orElse(null) instanceof TableReference table) || table.parts().size() != 1) {
+        if (query.from().isEmpty()) {
             return Optional.empty();
         }
-        Optional<LogicalTableDefinition> logicalTable = snapshot.logicalTable(table.parts().getFirst().value());
-        return logicalTable.map(definition -> new HogQlSemanticResolver(definition).resolveQuery(query, table));
+        HogQlSemanticResolver resolver = new HogQlSemanticResolver(snapshot);
+        ResolvedRelation relation = resolver.resolveRelation(query.from().orElseThrow());
+        if (relation.bindings().isEmpty()) {
+            return Optional.empty();
+        }
+        resolver.bindings = relation.bindings();
+        resolver.allRelationsLogical = relation.allLogical();
+        return Optional.of(resolver.resolveQuery(query, relation.relation()));
     }
 
-    private ResolvedQuery resolveQuery(HogQlQuery query, TableReference originalTable)
+    private ResolvedQuery resolveQuery(HogQlQuery query, Relation relation)
     {
         List<Projection> projections = new ArrayList<>();
         query.projections().forEach(projection -> projections.addAll(resolveProjection(projection)));
         HogQlQuery resolved = new HogQlQuery(
                 query.distinct(),
                 projections,
-                Optional.of(resolveTable(originalTable)),
+                Optional.of(relation),
                 query.where().map(this::resolveExpression),
                 query.groupBy().stream().map(this::resolveExpression).toList(),
                 query.having().map(this::resolveExpression),
@@ -97,13 +107,19 @@ final class HogQlSemanticResolver
     private List<Projection> resolveProjection(Projection projection)
     {
         return switch (projection) {
-            case Star star -> logicalTable.fields().stream()
-                    .filter(LogicalFieldDefinition::starVisible)
-                    .map(field -> new ExpressionProjection(
-                            physicalColumn(field, star.span()),
-                            Optional.of(new Identifier(field.name(), true, star.span()))))
-                    .map(Projection.class::cast)
-                    .toList();
+            case Star star -> {
+                if (!allRelationsLogical) {
+                    yield List.of(star);
+                }
+                yield bindings.stream()
+                        .flatMap(binding -> binding.logicalTable().fields().stream()
+                                .filter(LogicalFieldDefinition::starVisible)
+                                .map(field -> new ExpressionProjection(
+                                        physicalColumn(field, binding.starQualifier(bindings.size()), star.span()),
+                                        Optional.of(new Identifier(field.name(), true, star.span())))))
+                        .map(Projection.class::cast)
+                        .toList();
+            }
             case ExpressionProjection expressionProjection -> {
                 Expression resolved = resolveExpression(expressionProjection.expression());
                 Optional<Identifier> alias = expressionProjection.alias();
@@ -115,14 +131,97 @@ final class HogQlSemanticResolver
         };
     }
 
-    private TableReference resolveTable(TableReference table)
+    private ResolvedRelation resolveRelation(Relation relation)
     {
-        return new TableReference(
+        return switch (relation) {
+            case AliasedRelation alias -> {
+                ResolvedRelation child = resolveRelation(alias.relation());
+                List<TableBinding> aliasedBindings = child.bindings().stream()
+                        .map(binding -> binding.withAlias(alias.alias()))
+                        .toList();
+                yield new ResolvedRelation(
+                        new AliasedRelation(child.relation(), alias.alias(), alias.span()),
+                        aliasedBindings,
+                        child.allLogical());
+            }
+            case JoinRelation join -> {
+                ResolvedRelation left = resolveRelation(join.left());
+                ResolvedRelation right = resolveRelation(join.right());
+                List<TableBinding> joinBindings = new ArrayList<>(left.bindings());
+                joinBindings.addAll(right.bindings());
+                List<TableBinding> previousBindings = bindings;
+                boolean previousAllRelationsLogical = allRelationsLogical;
+                bindings = List.copyOf(joinBindings);
+                allRelationsLogical = left.allLogical() && right.allLogical();
+                Optional<HogQlQuery.JoinCriteria> criteria = join.criteria().map(value -> switch (value) {
+                    case JoinOn on -> new JoinOn(resolveExpression(on.expression()), on.span());
+                    case JoinUsing using -> resolveJoinUsing(using, left.bindings(), right.bindings());
+                });
+                bindings = previousBindings;
+                allRelationsLogical = previousAllRelationsLogical;
+                yield new ResolvedRelation(
+                        new JoinRelation(join.type(), left.relation(), right.relation(), criteria, join.span()),
+                        joinBindings,
+                        left.allLogical() && right.allLogical());
+            }
+            case TablePlaceholder placeholder -> new ResolvedRelation(placeholder, List.of(), false);
+            case TableReference table -> resolveTable(table);
+        };
+    }
+
+    private JoinUsing resolveJoinUsing(JoinUsing using, List<TableBinding> leftBindings, List<TableBinding> rightBindings)
+    {
+        List<Identifier> columns = using.columns().stream()
+                .map(column -> {
+                    List<LogicalFieldDefinition> leftFields = matchingFields(leftBindings, column.value());
+                    List<LogicalFieldDefinition> rightFields = matchingFields(rightBindings, column.value());
+                    if (leftFields.size() != 1 || rightFields.size() != 1) {
+                        throw resolutionError(new ColumnReference(List.of(column), column.span()), column.value());
+                    }
+                    PhysicalIdentifier left = leftFields.getFirst().physicalColumn();
+                    PhysicalIdentifier right = rightFields.getFirst().physicalColumn();
+                    if (!left.equals(right)) {
+                        throw incompatibleUsingResolutionError(column);
+                    }
+                    return new Identifier(left.value(), left.delimited(), column.span());
+                })
+                .toList();
+        return new JoinUsing(columns, using.span());
+    }
+
+    private static List<LogicalFieldDefinition> matchingFields(List<TableBinding> tableBindings, String name)
+    {
+        return tableBindings.stream()
+                .map(TableBinding::fields)
+                .map(fields -> fields.get(canonical(name)))
+                .filter(field -> field != null)
+                .toList();
+    }
+
+    private ResolvedRelation resolveTable(TableReference table)
+    {
+        if (table.parts().size() != 1) {
+            return new ResolvedRelation(table, List.of(), false);
+        }
+        Optional<LogicalTableDefinition> logicalTable = snapshot.logicalTable(table.parts().getFirst().value());
+        if (logicalTable.isEmpty()) {
+            return new ResolvedRelation(table, List.of(), false);
+        }
+        LogicalTableDefinition definition = logicalTable.orElseThrow();
+        TableReference physicalTable = new TableReference(
                 List.of(
-                        identifier(logicalTable.physicalTable().catalog(), table),
-                        identifier(logicalTable.physicalTable().schema(), table),
-                        identifier(logicalTable.physicalTable().table(), table)),
+                        identifier(definition.physicalTable().catalog(), table),
+                        identifier(definition.physicalTable().schema(), table),
+                        identifier(definition.physicalTable().table(), table)),
                 table.span());
+        return new ResolvedRelation(
+                physicalTable,
+                List.of(new TableBinding(
+                        definition,
+                        canonical(definition.name()),
+                        definition.physicalTable().table(),
+                        false)),
+                true);
     }
 
     private List<SortItem> resolveSortItems(List<SortItem> sortItems)
@@ -185,23 +284,52 @@ final class HogQlSemanticResolver
     private ColumnReference resolveColumn(ColumnReference reference)
     {
         List<Identifier> parts = reference.parts();
-        if (parts.size() == 2 && !canonical(parts.getFirst().value()).equals(canonical(logicalTable.name()))) {
-            throw resolutionError(reference, parts.getLast().value());
+        if (parts.size() == 2) {
+            Optional<TableBinding> binding = bindings.stream()
+                    .filter(candidate -> candidate.qualifier().equals(canonical(parts.getFirst().value())))
+                    .findFirst();
+            if (binding.isEmpty()) {
+                if (allRelationsLogical) {
+                    throw resolutionError(reference, parts.getLast().value());
+                }
+                return reference;
+            }
+            LogicalFieldDefinition field = binding.orElseThrow().fields().get(canonical(parts.getLast().value()));
+            if (field == null) {
+                throw resolutionError(reference, parts.getLast().value());
+            }
+            return physicalColumn(field, Optional.of(binding.orElseThrow().outputQualifier()), reference.span());
         }
         if (parts.size() > 2) {
-            throw resolutionError(reference, parts.getLast().value());
+            if (allRelationsLogical) {
+                throw resolutionError(reference, parts.getLast().value());
+            }
+            return reference;
         }
         String logicalName = parts.getLast().value();
-        LogicalFieldDefinition field = fields.get(canonical(logicalName));
-        if (field == null) {
+        List<LogicalFieldDefinition> matches = bindings.stream()
+                .map(TableBinding::fields)
+                .map(fields -> fields.get(canonical(logicalName)))
+                .filter(field -> field != null)
+                .toList();
+        if (matches.size() == 1 && (allRelationsLogical || bindings.size() == 1)) {
+            return physicalColumn(matches.getFirst(), Optional.empty(), reference.span());
+        }
+        if (matches.size() > 1) {
+            throw ambiguousResolutionError(reference, logicalName);
+        }
+        if (allRelationsLogical) {
             throw resolutionError(reference, logicalName);
         }
-        return physicalColumn(field, reference.span());
+        return reference;
     }
 
-    private static ColumnReference physicalColumn(LogicalFieldDefinition field, HogQlQuery.SourceSpan span)
+    private static ColumnReference physicalColumn(LogicalFieldDefinition field, Optional<PhysicalIdentifier> qualifier, HogQlQuery.SourceSpan span)
     {
-        return new ColumnReference(List.of(new Identifier(field.physicalColumn().value(), field.physicalColumn().delimited(), span)), span);
+        List<Identifier> parts = new ArrayList<>();
+        qualifier.ifPresent(identifier -> parts.add(new Identifier(identifier.value(), identifier.delimited(), span)));
+        parts.add(new Identifier(field.physicalColumn().value(), field.physicalColumn().delimited(), span));
+        return new ColumnReference(parts, span);
     }
 
     private static Identifier identifier(PhysicalIdentifier identifier, TableReference source)
@@ -221,6 +349,76 @@ final class HogQlSemanticResolver
                 Optional.of(new Location(reference.span().startLine(), reference.span().startColumn())),
                 "Unknown HogQL field: " + name,
                 null);
+    }
+
+    private static TrinoException ambiguousResolutionError(ColumnReference reference, String name)
+    {
+        return new TrinoException(
+                HOGQL_RESOLUTION_ERROR,
+                Optional.of(new Location(reference.span().startLine(), reference.span().startColumn())),
+                "Ambiguous HogQL field: " + name,
+                null);
+    }
+
+    private static TrinoException incompatibleUsingResolutionError(Identifier identifier)
+    {
+        return new TrinoException(
+                HOGQL_RESOLUTION_ERROR,
+                Optional.of(new Location(identifier.span().startLine(), identifier.span().startColumn())),
+                "HogQL USING field maps to different physical columns: " + identifier.value(),
+                null);
+    }
+
+    private record ResolvedRelation(Relation relation, List<TableBinding> bindings, boolean allLogical)
+    {
+        private ResolvedRelation
+        {
+            relation = requireNonNull(relation, "relation is null");
+            bindings = List.copyOf(requireNonNull(bindings, "bindings is null"));
+        }
+    }
+
+    private record TableBinding(
+            LogicalTableDefinition logicalTable,
+            String qualifier,
+            PhysicalIdentifier outputQualifier,
+            boolean aliased,
+            Map<String, LogicalFieldDefinition> fields)
+    {
+        private TableBinding(LogicalTableDefinition logicalTable, String qualifier, PhysicalIdentifier outputQualifier, boolean aliased)
+        {
+            this(logicalTable, qualifier, outputQualifier, aliased, fieldMap(logicalTable));
+        }
+
+        private TableBinding
+        {
+            logicalTable = requireNonNull(logicalTable, "logicalTable is null");
+            qualifier = requireNonNull(qualifier, "qualifier is null");
+            outputQualifier = requireNonNull(outputQualifier, "outputQualifier is null");
+            fields = Map.copyOf(requireNonNull(fields, "fields is null"));
+        }
+
+        private TableBinding withAlias(Identifier alias)
+        {
+            return new TableBinding(
+                    logicalTable,
+                    canonical(alias.value()),
+                    new PhysicalIdentifier(alias.value(), alias.delimited()),
+                    true,
+                    fields);
+        }
+
+        private Optional<PhysicalIdentifier> starQualifier(int relationCount)
+        {
+            return aliased || relationCount > 1 ? Optional.of(outputQualifier) : Optional.empty();
+        }
+
+        private static Map<String, LogicalFieldDefinition> fieldMap(LogicalTableDefinition table)
+        {
+            Map<String, LogicalFieldDefinition> fields = new HashMap<>();
+            table.fields().forEach(field -> fields.put(canonical(field.name()), field));
+            return fields;
+        }
     }
 
     record ResolvedQuery(HogQlQuery query)

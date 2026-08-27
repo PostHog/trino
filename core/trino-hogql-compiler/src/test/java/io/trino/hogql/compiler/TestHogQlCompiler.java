@@ -18,8 +18,11 @@ import io.trino.spi.Location;
 import io.trino.spi.TrinoException;
 import io.trino.sql.SqlFormatter;
 import io.trino.sql.parser.SqlParser;
+import io.trino.sql.tree.AliasedRelation;
 import io.trino.sql.tree.AllColumns;
 import io.trino.sql.tree.Identifier;
+import io.trino.sql.tree.Join;
+import io.trino.sql.tree.JoinOn;
 import io.trino.sql.tree.Node;
 import io.trino.sql.tree.NodeLocation;
 import io.trino.sql.tree.Parameter;
@@ -149,6 +152,63 @@ public class TestHogQlCompiler
         assertThat(parameters(result.statement()))
                 .extracting(Parameter::getId)
                 .containsExactly(0, 1, 2, 3, 4, 5);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "SELECT e.id FROM events AS e",
+            "SELECT date.id FROM events AS date",
+            "SELECT \"e\".id FROM events AS \"e\"",
+            "SELECT e.id FROM events e JOIN persons p ON e.person_id = p.id",
+            "SELECT * FROM events LEFT OUTER JOIN persons USING (id)",
+            "SELECT * FROM events RIGHT JOIN persons ON events.id = persons.id",
+            "SELECT * FROM events FULL OUTER JOIN persons USING (id, team_id)",
+            "SELECT * FROM events CROSS JOIN persons",
+            "SELECT * FROM (events CROSS JOIN persons)",
+    })
+    public void testLowersAliasesAndStockJoins(String hogql)
+    {
+        Statement statement = compiler.compile(hogql);
+
+        assertThat(statement).isEqualTo(sqlParser.createStatement(hogql));
+        assertThat(sqlParser.createStatement(SqlFormatter.formatSql(statement))).isEqualTo(statement);
+    }
+
+    @Test
+    public void testLowersUnparenthesizedUsing()
+    {
+        assertThat(compiler.compile("SELECT * FROM events JOIN persons USING id"))
+                .isEqualTo(sqlParser.createStatement("SELECT * FROM events JOIN persons USING (id)"));
+    }
+
+    @Test
+    public void testPreservesAliasedJoinSourceLocations()
+    {
+        Query query = (Query) compiler.compile("SELECT e.id\nFROM events AS e\nLEFT JOIN persons AS p ON e.person_id = p.id");
+        Join join = (Join) ((QuerySpecification) query.getQueryBody()).getFrom().orElseThrow();
+        AliasedRelation left = (AliasedRelation) join.getLeft();
+        JoinOn criteria = (JoinOn) join.getCriteria().orElseThrow();
+
+        assertThat(join.getLocation()).contains(new NodeLocation(2, 6));
+        assertThat(left.getLocation()).contains(new NodeLocation(2, 6));
+        assertThat(left.getAlias().getLocation()).contains(new NodeLocation(2, 16));
+        assertThat(criteria.getExpression().getLocation()).contains(new NodeLocation(3, 27));
+    }
+
+    @Test
+    public void testBindsPlaceholdersInJoinCriteriaBySourceOrder()
+    {
+        HogQlCompilationResult result = compiler.compile(
+                "SELECT {projection} FROM events e JOIN persons p ON e.id = {join_value} WHERE {where_value}",
+                Map.of(
+                        "projection", typedValue("projection"),
+                        "join_value", typedValue("join"),
+                        "where_value", typedValue("where")));
+
+        assertThat(result.parameterNames()).containsExactly("projection", "join_value", "where_value");
+        assertThat(parameters(result.statement()))
+                .extracting(Parameter::getId)
+                .containsExactly(0, 1, 2);
     }
 
     @ParameterizedTest

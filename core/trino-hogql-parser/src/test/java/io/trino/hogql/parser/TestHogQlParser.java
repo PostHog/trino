@@ -14,10 +14,14 @@
 package io.trino.hogql.parser;
 
 import io.trino.hogql.parser.tree.HogQlQuery;
+import io.trino.hogql.parser.tree.HogQlQuery.AliasedRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
 import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinType;
 import io.trino.hogql.parser.tree.HogQlQuery.NullPlacement;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.SortDirection;
@@ -41,6 +45,13 @@ public class TestHogQlParser
     @ValueSource(strings = {
             "SELECT",
             "SELECT * FROM first JOIN second",
+            "SELECT * FROM first NATURAL JOIN second",
+            "SELECT * FROM first ANY INNER JOIN second ON first.id = second.id",
+            "SELECT * FROM first LEFT SEMI JOIN second ON first.id = second.id",
+            "SELECT * FROM first ASOF JOIN second ON first.id = second.id",
+            "SELECT * FROM first POSITIONAL JOIN second",
+            "SELECT * FROM first, second",
+            "SELECT * FROM events AS e(id)",
             "SELECT count(*) OVER ()",
             "SELECT function(1)(value)",
             "DROP TABLE events",
@@ -108,6 +119,21 @@ public class TestHogQlParser
         assertThat(count.name().value()).isEqualTo("count");
         assertThat(count.distinct()).isTrue();
         assertThat(count.arguments()).singleElement().isInstanceOf(ColumnReference.class);
+    }
+
+    @Test
+    public void testBuildsAliasedJoinAstWithSourceSpans()
+    {
+        HogQlQuery query = parser.parseStatement("SELECT e.id\nFROM events AS e\nLEFT JOIN persons AS p ON e.person_id = p.id");
+
+        JoinRelation join = (JoinRelation) query.from().orElseThrow();
+        assertThat(join.type()).isEqualTo(JoinType.LEFT);
+        assertThat(join.span()).isEqualTo(new HogQlQuery.SourceSpan(17, 73, 2, 6, 3, 45));
+        AliasedRelation left = (AliasedRelation) join.left();
+        assertThat(left.alias().value()).isEqualTo("e");
+        assertThat(left.span()).isEqualTo(new HogQlQuery.SourceSpan(17, 28, 2, 6, 2, 17));
+        JoinOn criteria = (JoinOn) join.criteria().orElseThrow();
+        assertThat(criteria.span()).isEqualTo(new HogQlQuery.SourceSpan(52, 73, 3, 24, 3, 45));
     }
 
     @Test
