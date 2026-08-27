@@ -52,6 +52,7 @@ import io.trino.execution.DynamicFiltersCollector.VersionedDynamicFilterDomains;
 import io.trino.execution.ExecutionFailureInfo;
 import io.trino.execution.ExplainAnalyzeContext;
 import io.trino.execution.ForQueryExecution;
+import io.trino.execution.HogQlCompilationExecutor;
 import io.trino.execution.NodeTaskMap;
 import io.trino.execution.QueryExecution;
 import io.trino.execution.QueryExecutionMBean;
@@ -186,6 +187,7 @@ public class CoordinatorModule
         configBinder(binder).bindConfig(HogQlConfig.class);
         configBinder(binder).bindConfig(HogQlSemanticCatalogConfig.class);
         binder.bind(HogQlCompiler.class).in(Scopes.SINGLETON);
+        binder.bind(HogQlCompilationExecutor.class).in(Scopes.SINGLETON);
         binder.bind(HogQlCompilationStats.class).in(Scopes.SINGLETON);
         binder.bind(HogQlCompilationObserver.class).to(HogQlCompilationStats.class);
         OptionalBinder.newOptionalBinder(binder, HogQlSemanticCatalogSnapshotProvider.class);

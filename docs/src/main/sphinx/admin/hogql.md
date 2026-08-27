@@ -50,6 +50,22 @@ The supported plan types are `LOGICAL`, `DISTRIBUTED`, `VALIDATE`, and `IO`.
 The supported formats are `TEXT`, `GRAPHVIZ`, and `JSON`. Execution timeouts
 continue to use Trino session properties such as `query_max_execution_time`.
 
+## Compilation capacity
+
+HogQL compilation runs on coordinator threads that are separate from standard
+query dispatch work. The following properties set the maximum concurrent and
+queued compilation work:
+
+| Property | Default | Description |
+| --- | --- | --- |
+| `hogql.compilation-threads` | `2` | Number of coordinator threads dedicated to HogQL compilation. The value must be at least `1`. |
+| `hogql.compilation-queue-capacity` | `32` | Maximum compilations waiting for a compiler thread. Set this to `0` to reject requests instead of queuing them when every compiler thread is busy. |
+
+When the workers and queue are full, the coordinator fails the HogQL query with
+`HOGQL_COMPILATION_QUEUE_FULL`. This is an insufficient-resources error, so the
+caller can retry the query. Standard Trino SQL does not use this executor or
+queue.
+
 ## Semantic catalog manifests
 
 Logical tables, fields, quoted physical names, and star expansion use an

@@ -15,10 +15,13 @@ package io.trino.hogql;
 
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
+import jakarta.validation.constraints.Min;
 
 public class HogQlConfig
 {
     private boolean enabled;
+    private int compilationThreads = 2;
+    private int compilationQueueCapacity = 32;
 
     public boolean isEnabled()
     {
@@ -30,6 +33,34 @@ public class HogQlConfig
     public HogQlConfig setEnabled(boolean enabled)
     {
         this.enabled = enabled;
+        return this;
+    }
+
+    @Min(1)
+    public int getCompilationThreads()
+    {
+        return compilationThreads;
+    }
+
+    @Config("hogql.compilation-threads")
+    @ConfigDescription("Number of coordinator threads dedicated to HogQL compilation")
+    public HogQlConfig setCompilationThreads(int compilationThreads)
+    {
+        this.compilationThreads = compilationThreads;
+        return this;
+    }
+
+    @Min(0)
+    public int getCompilationQueueCapacity()
+    {
+        return compilationQueueCapacity;
+    }
+
+    @Config("hogql.compilation-queue-capacity")
+    @ConfigDescription("Maximum number of HogQL compilations waiting for a compiler thread")
+    public HogQlConfig setCompilationQueueCapacity(int compilationQueueCapacity)
+    {
+        this.compilationQueueCapacity = compilationQueueCapacity;
         return this;
     }
 }

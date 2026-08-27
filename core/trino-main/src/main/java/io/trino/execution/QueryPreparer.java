@@ -61,23 +61,23 @@ public class QueryPreparer
     private final HogQlParameterDecoder hogQlParameterDecoder;
     private final HogQlCompilationObserver hogQlCompilationObserver;
     private final Optional<HogQlSemanticCatalogSnapshotProvider> hogQlSemanticCatalogSnapshotProvider;
+    private final HogQlCompilationExecutor hogQlCompilationExecutor;
 
     public QueryPreparer(SqlParser sqlParser)
     {
-        this(sqlParser, Optional.empty(), NOOP, Optional.empty());
+        this(sqlParser, Optional.empty(), NOOP, Optional.empty(), HogQlCompilationExecutor.directExecutor());
     }
 
     public QueryPreparer(SqlParser sqlParser, HogQlCompiler hogQlCompiler)
     {
-        this(sqlParser, Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")), NOOP, Optional.empty());
+        this(sqlParser, Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")), NOOP, Optional.empty(), HogQlCompilationExecutor.directExecutor());
     }
 
     public QueryPreparer(SqlParser sqlParser, HogQlCompiler hogQlCompiler, HogQlCompilationObserver hogQlCompilationObserver)
     {
-        this(sqlParser, Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")), hogQlCompilationObserver, Optional.empty());
+        this(sqlParser, Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")), hogQlCompilationObserver, Optional.empty(), HogQlCompilationExecutor.directExecutor());
     }
 
-    @Inject
     public QueryPreparer(
             SqlParser sqlParser,
             HogQlCompiler hogQlCompiler,
@@ -87,20 +87,38 @@ public class QueryPreparer
         this(sqlParser,
                 Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")),
                 hogQlCompilationObserver,
-                hogQlSemanticCatalogSnapshotProvider);
+                hogQlSemanticCatalogSnapshotProvider,
+                HogQlCompilationExecutor.directExecutor());
+    }
+
+    @Inject
+    public QueryPreparer(
+            SqlParser sqlParser,
+            HogQlCompiler hogQlCompiler,
+            HogQlCompilationObserver hogQlCompilationObserver,
+            Optional<HogQlSemanticCatalogSnapshotProvider> hogQlSemanticCatalogSnapshotProvider,
+            HogQlCompilationExecutor hogQlCompilationExecutor)
+    {
+        this(sqlParser,
+                Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")),
+                hogQlCompilationObserver,
+                hogQlSemanticCatalogSnapshotProvider,
+                hogQlCompilationExecutor);
     }
 
     private QueryPreparer(
             SqlParser sqlParser,
             Optional<HogQlCompiler> hogQlCompiler,
             HogQlCompilationObserver hogQlCompilationObserver,
-            Optional<HogQlSemanticCatalogSnapshotProvider> hogQlSemanticCatalogSnapshotProvider)
+            Optional<HogQlSemanticCatalogSnapshotProvider> hogQlSemanticCatalogSnapshotProvider,
+            HogQlCompilationExecutor hogQlCompilationExecutor)
     {
         this.sqlParser = requireNonNull(sqlParser, "sqlParser is null");
         this.hogQlCompiler = requireNonNull(hogQlCompiler, "hogQlCompiler is null");
         this.hogQlParameterDecoder = new HogQlParameterDecoder(sqlParser);
         this.hogQlCompilationObserver = requireNonNull(hogQlCompilationObserver, "hogQlCompilationObserver is null");
         this.hogQlSemanticCatalogSnapshotProvider = requireNonNull(hogQlSemanticCatalogSnapshotProvider, "hogQlSemanticCatalogSnapshotProvider is null");
+        this.hogQlCompilationExecutor = requireNonNull(hogQlCompilationExecutor, "hogQlCompilationExecutor is null");
     }
 
     public PreparedQuery prepareQuery(Session session, String query)
@@ -120,9 +138,9 @@ public class QueryPreparer
                 HogQlCompilationTracker tracker = new HogQlCompilationTracker(hogQlCompilationObserver, Dimensions.fromEnvelope(envelope));
                 PreparedQuery preparedQuery;
                 try {
-                    HogQlCompilationResult result = tracker.observe(COMPILATION, () -> hogQlCompiler
+                    HogQlCompilationResult result = tracker.observe(COMPILATION, () -> hogQlCompilationExecutor.execute(() -> hogQlCompiler
                             .orElseThrow(() -> new TrinoException(NOT_SUPPORTED, "HogQL query submission is disabled"))
-                            .compile(envelope, semanticCatalogContext(session)));
+                            .compile(envelope, semanticCatalogContext(session))));
                     Statement statement = explain(result.statement(), submission.hogQlExplain());
                     preparedQuery = tracker.observe(PARAMETER_BINDING, () -> prepareQuery(
                             session,

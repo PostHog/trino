@@ -27,14 +27,22 @@ public class TestHogQlConfig
     public void testDefaults()
     {
         assertRecordedDefaults(recordDefaults(HogQlConfig.class)
-                .setEnabled(false));
+                .setEnabled(false)
+                .setCompilationThreads(2)
+                .setCompilationQueueCapacity(32));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
         assertFullMapping(
-                Map.of("hogql.enabled", "true"),
-                new HogQlConfig().setEnabled(true));
+                Map.of(
+                        "hogql.enabled", "true",
+                        "hogql.compilation-threads", "4",
+                        "hogql.compilation-queue-capacity", "128"),
+                new HogQlConfig()
+                        .setEnabled(true)
+                        .setCompilationThreads(4)
+                        .setCompilationQueueCapacity(128));
     }
 }
