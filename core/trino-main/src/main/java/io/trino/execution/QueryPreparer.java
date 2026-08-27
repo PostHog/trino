@@ -64,16 +64,18 @@ public class QueryPreparer
     public PreparedQuery prepareQuery(Session session, String query)
             throws ParsingException, TrinoException
     {
-        return prepareQuery(session, query, QueryLanguage.SQL);
+        return prepareQuery(session, QuerySubmission.trino(query));
     }
 
-    public PreparedQuery prepareQuery(Session session, String query, QueryLanguage queryLanguage)
+    public PreparedQuery prepareQuery(Session session, QuerySubmission submission)
             throws ParsingException, TrinoException
     {
-        requireNonNull(queryLanguage, "queryLanguage is null");
-        Statement wrappedStatement = switch (queryLanguage) {
-            case SQL -> sqlParser.createStatement(query);
-            case HOGQL -> hogQlCompiler.orElseThrow(() -> new IllegalStateException("HogQL compiler is not configured")).compile(query);
+        requireNonNull(submission, "submission is null");
+        Statement wrappedStatement = switch (submission.language()) {
+            case TRINO -> sqlParser.createStatement(submission.originalText());
+            case HOGQL -> hogQlCompiler
+                    .orElseThrow(() -> new TrinoException(NOT_SUPPORTED, "HogQL query submission is disabled"))
+                    .compile(submission.originalText());
         };
         return prepareQuery(session, wrappedStatement);
     }

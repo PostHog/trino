@@ -15,6 +15,6 @@ package io.trino.execution;
 
 public enum QueryLanguage
 {
-    SQL,
+    TRINO,
     HOGQL,
 }

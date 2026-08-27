@@ -24,9 +24,11 @@ import io.trino.sql.tree.Query;
 import org.junit.jupiter.api.Test;
 
 import static io.trino.SessionTestUtils.TEST_SESSION;
-import static io.trino.execution.QueryLanguage.HOGQL;
+import static io.trino.execution.QuerySubmission.hogQl;
+import static io.trino.execution.QuerySubmission.trino;
 import static io.trino.spi.StandardErrorCode.INVALID_PARAMETER_USAGE;
 import static io.trino.spi.StandardErrorCode.NOT_FOUND;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.sql.QueryUtil.selectList;
 import static io.trino.sql.QueryUtil.simpleQuery;
 import static io.trino.sql.QueryUtil.table;
@@ -45,14 +47,24 @@ public class TestQueryPreparer
     public void testSelectStatement()
     {
         PreparedQuery preparedQuery = QUERY_PREPARER.prepareQuery(TEST_SESSION, "SELECT * FROM foo");
+        PreparedQuery submittedQuery = QUERY_PREPARER.prepareQuery(TEST_SESSION, trino("SELECT * FROM foo"));
         assertThat(preparedQuery.getStatement()).isEqualTo(simpleQuery(selectList(new AllColumns()), table(QualifiedName.of("foo"))));
+        assertThat(submittedQuery.getStatement()).isEqualTo(preparedQuery.getStatement());
     }
 
     @Test
     public void testHogQlStatement()
     {
-        PreparedQuery preparedQuery = HOGQL_QUERY_PREPARER.prepareQuery(TEST_SESSION, "SELECT 1", HOGQL);
+        PreparedQuery preparedQuery = HOGQL_QUERY_PREPARER.prepareQuery(TEST_SESSION, hogQl("SELECT 1"));
         assertThat(preparedQuery.getStatement()).isInstanceOf(Query.class);
+    }
+
+    @Test
+    public void testHogQlSubmissionFailsClosedWithoutCompiler()
+    {
+        assertTrinoExceptionThrownBy(() -> QUERY_PREPARER.prepareQuery(TEST_SESSION, hogQl("SELECT 1")))
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessage("HogQL query submission is disabled");
     }
 
     @Test

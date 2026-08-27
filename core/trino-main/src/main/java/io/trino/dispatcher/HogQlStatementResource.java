@@ -25,7 +25,7 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Response;
 
-import static io.trino.execution.QueryLanguage.HOGQL;
+import static io.trino.execution.QuerySubmission.hogQl;
 import static io.trino.server.security.ResourceSecurity.AccessType.AUTHENTICATED_USER;
 import static jakarta.ws.rs.core.MediaType.APPLICATION_JSON;
 import static java.util.Objects.requireNonNull;
@@ -50,6 +50,6 @@ public class HogQlStatementResource
             @Context HttpHeaders httpHeaders,
             @BeanParam ExternalUriInfo externalUriInfo)
     {
-        return queuedStatementResource.postStatement(statement, HOGQL, servletRequest, httpHeaders, externalUriInfo);
+        return queuedStatementResource.postStatement(hogQl(statement), servletRequest, httpHeaders, externalUriInfo);
     }
 }

@@ -27,11 +27,11 @@ import io.trino.Session;
 import io.trino.event.QueryMonitor;
 import io.trino.execution.QueryIdGenerator;
 import io.trino.execution.QueryInfo;
-import io.trino.execution.QueryLanguage;
 import io.trino.execution.QueryManagerConfig;
 import io.trino.execution.QueryManagerStats;
 import io.trino.execution.QueryPreparer;
 import io.trino.execution.QueryPreparer.PreparedQuery;
+import io.trino.execution.QuerySubmission;
 import io.trino.execution.QueryTracker;
 import io.trino.execution.resourcegroups.ResourceGroupManager;
 import io.trino.metadata.SessionPropertyManager;
@@ -60,11 +60,11 @@ import java.util.concurrent.ScheduledExecutorService;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
-import static io.trino.execution.QueryLanguage.SQL;
 import static io.trino.execution.QueryState.FINISHING;
 import static io.trino.execution.QueryState.QUEUED;
 import static io.trino.execution.QueryState.RUNNING;
 import static io.trino.execution.QueryState.WAITING_FOR_RESOURCES;
+import static io.trino.execution.QuerySubmission.trino;
 import static io.trino.spi.StandardErrorCode.QUERY_TEXT_TOO_LARGE;
 import static io.trino.tracing.ScopedSpan.scopedSpan;
 import static io.trino.util.Failures.toFailure;
@@ -177,17 +177,16 @@ public class DispatchManager
 
     public ListenableFuture<Void> createQuery(QueryId queryId, Span querySpan, Slug slug, SessionContext sessionContext, String query)
     {
-        return createQuery(queryId, querySpan, slug, sessionContext, query, SQL);
+        return createQuery(queryId, querySpan, slug, sessionContext, trino(query));
     }
 
-    public ListenableFuture<Void> createQuery(QueryId queryId, Span querySpan, Slug slug, SessionContext sessionContext, String query, QueryLanguage queryLanguage)
+    public ListenableFuture<Void> createQuery(QueryId queryId, Span querySpan, Slug slug, SessionContext sessionContext, QuerySubmission submission)
     {
         requireNonNull(queryId, "queryId is null");
         requireNonNull(querySpan, "querySpan is null");
         requireNonNull(sessionContext, "sessionContext is null");
-        requireNonNull(query, "query is null");
-        requireNonNull(queryLanguage, "queryLanguage is null");
-        checkArgument(!query.isEmpty(), "query must not be empty string");
+        requireNonNull(submission, "submission is null");
+        checkArgument(!submission.originalText().isEmpty(), "query must not be empty string");
         checkArgument(!queryTracker.hasQuery(queryId), "query %s already exists", queryId);
 
         // It is important to return a future implementation which ignores cancellation request.
@@ -200,7 +199,7 @@ public class DispatchManager
                     .setParent(Context.current().with(querySpan))
                     .startSpan();
             try (var _ = scopedSpan(span)) {
-                createQueryInternal(queryId, querySpan, slug, sessionContext, query, queryLanguage, resourceGroupManager);
+                createQueryInternal(queryId, querySpan, slug, sessionContext, submission, resourceGroupManager);
             }
             finally {
                 queryCreationFuture.set(null);
@@ -213,8 +212,9 @@ public class DispatchManager
      * Creates and registers a dispatch query with the query tracker.  This method will never fail to register a query with the query
      * tracker.  If an error occurs while creating a dispatch query, a failed dispatch will be created and registered.
      */
-    private <C> void createQueryInternal(QueryId queryId, Span querySpan, Slug slug, SessionContext sessionContext, String query, QueryLanguage queryLanguage, ResourceGroupManager<C> resourceGroupManager)
+    private <C> void createQueryInternal(QueryId queryId, Span querySpan, Slug slug, SessionContext sessionContext, QuerySubmission submission, ResourceGroupManager<C> resourceGroupManager)
     {
+        String query = submission.originalText();
         Session session = null;
         PreparedQuery preparedQuery = null;
         try {
@@ -231,7 +231,7 @@ public class DispatchManager
             accessControl.checkCanExecuteQuery(sessionContext.getIdentity(), queryId);
 
             // prepare query
-            preparedQuery = queryPreparer.prepareQuery(session, query, queryLanguage);
+            preparedQuery = queryPreparer.prepareQuery(session, submission);
 
             // select resource group
             Optional<String> queryType = getQueryType(preparedQuery.getStatement()).map(Enum::name);
