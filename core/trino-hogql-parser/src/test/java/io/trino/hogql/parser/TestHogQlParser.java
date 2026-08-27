@@ -16,9 +16,14 @@ package io.trino.hogql.parser;
 import io.trino.hogql.parser.tree.HogQlQuery;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
+import io.trino.hogql.parser.tree.HogQlSyntaxTree;
+import io.trino.hogql.parser.tree.HogQlSyntaxTree.Element;
+import io.trino.hogql.parser.tree.HogQlSyntaxTree.Node;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -64,5 +69,41 @@ public class TestHogQlParser
 
         assertThat(query.span()).isEqualTo(new HogQlQuery.SourceSpan(0, 18, 1, 1, 2, 7));
         assertThat(reference.span()).isEqualTo(new HogQlQuery.SourceSpan(13, 18, 2, 2, 2, 7));
+    }
+
+    @Test
+    public void testSyntaxTreeRepresentsReadOnlyGrammarBeforeLowering()
+    {
+        String hogql = "WITH x AS (SELECT 1) SELECT * FROM x UNION ALL SELECT event FROM events ORDER BY event LIMIT 10 OFFSET 2;";
+
+        HogQlSyntaxTree syntaxTree = parser.parseSyntax(hogql);
+
+        assertThat(syntaxTree.languageClass()).isEqualTo(HogQlSyntaxTree.LanguageClass.READ_ONLY_QUERY);
+        assertThat(syntaxTree.root().span()).isEqualTo(new HogQlQuery.SourceSpan(0, hogql.length(), 1, 1, 1, hogql.length() + 1));
+        assertThat(nodes(syntaxTree.root()))
+                .extracting(Node::rule)
+                .contains("withClause", "selectSetStmt", "subsequentSelectSetClause", "orderByClause", "limitAndOffsetClauseOptional");
+        assertThat(nodes(syntaxTree.root()))
+                .extracting(Node::alternative)
+                .contains(java.util.Optional.of("WithExprSubquery"), java.util.Optional.of("ColumnExprIdentifier"));
+    }
+
+    @Test
+    public void testSyntaxTreeClassifiesHogQlXAsNonQuerySyntax()
+    {
+        HogQlSyntaxTree syntaxTree = parser.parseSyntax("<Table />");
+
+        assertThat(syntaxTree.languageClass()).isEqualTo(HogQlSyntaxTree.LanguageClass.HOGQLX);
+        assertThat(nodes(syntaxTree.root()))
+                .extracting(Node::rule)
+                .contains("hogqlxTagElement");
+    }
+
+    private static Stream<Node> nodes(Element element)
+    {
+        if (!(element instanceof Node node)) {
+            return Stream.empty();
+        }
+        return Stream.concat(Stream.of(node), node.children().stream().flatMap(TestHogQlParser::nodes));
     }
 }

@@ -29,6 +29,20 @@ booleans, or `NULL`. Identifiers can be unquoted, double quoted, or backquoted.
 The parser rejects unsupported clauses and multiple statements instead of
 silently interpreting them as SQL.
 
+## M1 syntax contract
+
+`HogQlParser.parseSyntax` accepts the complete canonical read-only query entry
+point and returns an immutable, source-located tree containing grammar rules,
+ANTLR alternative labels when present, and tokens. The tree contains no ANTLR
+or Trino SQL objects. It classifies declarative HogQLX separately from read-only
+queries.
+
+This syntax contract is intentionally independent from executable lowering.
+`HogQlParser.parseStatement` and `HogQlCompiler.compile` continue to return an
+explicit error for valid constructs that do not yet have a stock Trino AST
+mapping. Adding syntax support therefore cannot silently claim semantic or
+execution parity.
+
 Set `hogql.enabled=true` on the coordinator to register `POST /v1/hogql`. The
 request body is raw HogQL text and the response uses Trino's existing statement
 protocol. Follow-up result and cancellation URIs remain under `/v1/statement`.

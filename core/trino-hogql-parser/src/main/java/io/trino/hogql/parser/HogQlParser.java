@@ -37,6 +37,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.Star;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
+import io.trino.hogql.parser.tree.HogQlSyntaxTree;
 import org.antlr.v4.runtime.ANTLRErrorListener;
 import org.antlr.v4.runtime.BailErrorStrategy;
 import org.antlr.v4.runtime.BaseErrorListener;
@@ -49,6 +50,8 @@ import org.antlr.v4.runtime.Recognizer;
 import org.antlr.v4.runtime.Token;
 import org.antlr.v4.runtime.atn.PredictionMode;
 import org.antlr.v4.runtime.misc.ParseCancellationException;
+import org.antlr.v4.runtime.tree.ParseTree;
+import org.antlr.v4.runtime.tree.TerminalNode;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -96,39 +99,129 @@ public final class HogQlParser
 
     public HogQlQuery parseStatement(String hogql, HogQlLanguageVersion languageVersion)
     {
+        try {
+            ParsedQuery parsed = parseQuery(hogql, languageVersion);
+            return new AstBuilder(parsed.source()).build(parsed.tree());
+        }
+        catch (StackOverflowError _) {
+            throw new HogQlParsingException("statement is too large", null, 1, 1);
+        }
+    }
+
+    public HogQlSyntaxTree parseSyntax(String hogql)
+    {
+        return parseSyntax(hogql, CURRENT_LANGUAGE_VERSION);
+    }
+
+    public HogQlSyntaxTree parseSyntax(String hogql, HogQlLanguageVersion languageVersion)
+    {
+        try {
+            ParsedQuery parsed = parseQuery(hogql, languageVersion);
+            return new SyntaxTreeBuilder(parsed.source()).build(parsed.tree());
+        }
+        catch (StackOverflowError _) {
+            throw new HogQlParsingException("statement is too large", null, 1, 1);
+        }
+    }
+
+    private static ParsedQuery parseQuery(String hogql, HogQlLanguageVersion languageVersion)
+    {
         requireNonNull(hogql, "hogql is null");
         requireNonNull(languageVersion, "languageVersion is null");
         if (!languageVersion.equals(CURRENT_LANGUAGE_VERSION)) {
             throw new IllegalArgumentException("unsupported HogQL language version: " + languageVersion);
         }
 
+        HogQLLexer lexer = new HogQLLexer(CharStreams.fromString(hogql));
+        CommonTokenStream tokenStream = new CommonTokenStream(lexer);
+        HogQLParser parser = new HogQLParser(tokenStream);
+
+        lexer.removeErrorListeners();
+        lexer.addErrorListener(ERROR_LISTENER);
+        parser.removeErrorListeners();
+
+        HogQLParser.SelectContext tree;
         try {
-            HogQLLexer lexer = new HogQLLexer(CharStreams.fromString(hogql));
-            CommonTokenStream tokenStream = new CommonTokenStream(lexer);
-            HogQLParser parser = new HogQLParser(tokenStream);
-
-            lexer.removeErrorListeners();
-            lexer.addErrorListener(ERROR_LISTENER);
-            parser.removeErrorListeners();
-
-            HogQLParser.SelectContext tree;
-            try {
-                parser.getInterpreter().setPredictionMode(PredictionMode.SLL);
-                parser.setErrorHandler(new BailErrorStrategy());
-                tree = parser.select();
-            }
-            catch (ParseCancellationException _) {
-                parser.reset();
-                parser.getInterpreter().setPredictionMode(PredictionMode.LL);
-                parser.setErrorHandler(new DefaultErrorStrategy());
-                parser.addErrorListener(ERROR_LISTENER);
-                tree = parser.select();
-            }
-
-            return new AstBuilder(hogql).build(tree);
+            parser.getInterpreter().setPredictionMode(PredictionMode.SLL);
+            parser.setErrorHandler(new BailErrorStrategy());
+            tree = parser.select();
         }
-        catch (StackOverflowError _) {
-            throw new HogQlParsingException("statement is too large", null, 1, 1);
+        catch (ParseCancellationException _) {
+            parser.reset();
+            parser.getInterpreter().setPredictionMode(PredictionMode.LL);
+            parser.setErrorHandler(new DefaultErrorStrategy());
+            parser.addErrorListener(ERROR_LISTENER);
+            tree = parser.select();
+        }
+        return new ParsedQuery(hogql, tree);
+    }
+
+    private record ParsedQuery(String source, HogQLParser.SelectContext tree) {}
+
+    private static final class SyntaxTreeBuilder
+    {
+        private final SourcePositions sourcePositions;
+
+        private SyntaxTreeBuilder(String source)
+        {
+            sourcePositions = new SourcePositions(source);
+        }
+
+        public HogQlSyntaxTree build(HogQLParser.SelectContext context)
+        {
+            HogQlSyntaxTree.LanguageClass languageClass = context.hogqlxTagElement() == null ?
+                    HogQlSyntaxTree.LanguageClass.READ_ONLY_QUERY :
+                    HogQlSyntaxTree.LanguageClass.HOGQLX;
+            return new HogQlSyntaxTree(languageClass, buildNode(context));
+        }
+
+        private HogQlSyntaxTree.Node buildNode(ParserRuleContext context)
+        {
+            String rule = HogQLParser.ruleNames[context.getRuleIndex()];
+            String contextName = context.getClass().getSimpleName();
+            String baseContextName = Character.toUpperCase(rule.charAt(0)) + rule.substring(1) + "Context";
+            Optional<String> alternative = contextName.equals(baseContextName) ?
+                    Optional.empty() :
+                    Optional.of(contextName.substring(0, contextName.length() - "Context".length()));
+
+            List<HogQlSyntaxTree.Element> children = new ArrayList<>();
+            for (int index = 0; index < context.getChildCount(); index++) {
+                ParseTree child = context.getChild(index);
+                if (child instanceof ParserRuleContext ruleChild) {
+                    children.add(buildNode(ruleChild));
+                }
+                else if (child instanceof TerminalNode terminal && terminal.getSymbol().getType() != Token.EOF) {
+                    children.add(buildToken(terminal.getSymbol()));
+                }
+            }
+            return new HogQlSyntaxTree.Node(rule, alternative, children, sourceSpan(context));
+        }
+
+        private HogQlSyntaxTree.Token buildToken(Token token)
+        {
+            String type = HogQLLexer.VOCABULARY.getSymbolicName(token.getType());
+            if (type == null) {
+                type = HogQLLexer.VOCABULARY.getDisplayName(token.getType());
+            }
+            return new HogQlSyntaxTree.Token(type, token.getText(), sourceSpan(token, token));
+        }
+
+        private SourceSpan sourceSpan(ParserRuleContext context)
+        {
+            return sourceSpan(context.getStart(), context.getStop());
+        }
+
+        private SourceSpan sourceSpan(Token start, Token stop)
+        {
+            int startOffset = Math.max(0, start.getStartIndex());
+            int endOffset = Math.max(startOffset, stop.getStopIndex() + 1);
+            return new SourceSpan(
+                    startOffset,
+                    endOffset,
+                    sourcePositions.line(startOffset),
+                    sourcePositions.column(startOffset),
+                    sourcePositions.line(endOffset),
+                    sourcePositions.column(endOffset));
         }
     }
 

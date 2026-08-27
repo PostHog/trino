@@ -16,6 +16,10 @@ package io.trino.hogql.parser;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.airlift.json.JsonCodec;
+import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
+import io.trino.hogql.parser.tree.HogQlSyntaxTree;
+import io.trino.hogql.parser.tree.HogQlSyntaxTree.Element;
+import io.trino.hogql.parser.tree.HogQlSyntaxTree.Node;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestFactory;
@@ -81,6 +85,14 @@ public class TestHogQlCompatibilityCorpus
                 .map(corpusCase -> dynamicTest(corpusCase.id(), () -> assertDisposition(corpusCase, dispositionById.get(corpusCase.id()))));
     }
 
+    @TestFactory
+    public Stream<DynamicTest> testSyntaxTreeDispositionForEveryCorpusCase()
+            throws IOException
+    {
+        return loadCorpusManifest().cases().stream()
+                .map(corpusCase -> dynamicTest(corpusCase.id(), () -> assertSyntaxDisposition(corpusCase)));
+    }
+
     private void assertDisposition(CorpusCase corpusCase, CorpusDisposition disposition)
     {
         String query = switch (corpusCase.entryPoint()) {
@@ -98,6 +110,70 @@ public class TestHogQlCompatibilityCorpus
                     .hasMessageStartingWith("line ");
             default -> throw new IllegalArgumentException("unknown corpus disposition: " + disposition.status());
         }
+    }
+
+    private void assertSyntaxDisposition(CorpusCase corpusCase)
+    {
+        String query = switch (corpusCase.entryPoint()) {
+            case "expression" -> "SELECT " + corpusCase.source();
+            case "query" -> corpusCase.source();
+            default -> throw new IllegalArgumentException("unknown corpus entry point: " + corpusCase.entryPoint());
+        };
+        if (!corpusCase.accepted()) {
+            assertThatThrownBy(() -> parser.parseSyntax(query))
+                    .isInstanceOf(HogQlParsingException.class)
+                    .hasMessageStartingWith("line ");
+            return;
+        }
+
+        HogQlSyntaxTree syntaxTree = parser.parseSyntax(query);
+        int sourceLength = query.codePointCount(0, query.length());
+        assertThat(syntaxTree.root().span()).isEqualTo(new SourceSpan(0, sourceLength, 1, 1, lineCount(query), finalColumn(query)));
+        assertContainedSpans(syntaxTree.root(), sourceLength);
+    }
+
+    private static void assertContainedSpans(Element element, int sourceLength)
+    {
+        SourceSpan span = element.span();
+        assertThat(span.startOffset()).isBetween(0, sourceLength);
+        assertThat(span.endOffset()).isBetween(span.startOffset(), sourceLength);
+        if (element instanceof Node node) {
+            for (Element child : node.children()) {
+                assertThat(child.span().startOffset()).isGreaterThanOrEqualTo(span.startOffset());
+                assertThat(child.span().endOffset()).isLessThanOrEqualTo(span.endOffset());
+                assertContainedSpans(child, sourceLength);
+            }
+        }
+    }
+
+    private static int lineCount(String source)
+    {
+        int lines = 1;
+        boolean previousWasCarriageReturn = false;
+        for (int offset = 0; offset < source.length(); ) {
+            int codePoint = source.codePointAt(offset);
+            offset += Character.charCount(codePoint);
+            if (codePoint == '\r') {
+                lines++;
+                previousWasCarriageReturn = true;
+            }
+            else if (codePoint == '\n') {
+                if (!previousWasCarriageReturn) {
+                    lines++;
+                }
+                previousWasCarriageReturn = false;
+            }
+            else {
+                previousWasCarriageReturn = false;
+            }
+        }
+        return lines;
+    }
+
+    private static int finalColumn(String source)
+    {
+        int lastNewline = Math.max(source.lastIndexOf('\n'), source.lastIndexOf('\r'));
+        return source.codePointCount(lastNewline + 1, source.length()) + 1;
     }
 
     private static CorpusManifest loadCorpusManifest()
