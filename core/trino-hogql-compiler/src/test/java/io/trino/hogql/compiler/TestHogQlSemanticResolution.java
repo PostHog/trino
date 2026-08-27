@@ -526,6 +526,88 @@ public class TestHogQlSemanticResolution
     }
 
     @Test
+    public void testInfersSetOperationOutputsAndPrunesBranchesByPosition()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+
+        HogQlCompilationResult cte = compiler.compile(
+                envelope(
+                        "WITH source AS (" +
+                                "SELECT event AS chosen, personId AS unused FROM events " +
+                                "UNION ALL " +
+                                "SELECT personId AS rightChosen, event AS rightUnused FROM events) " +
+                                "SELECT chosen FROM source",
+                        OptionalLong.of(7)),
+                Optional.of(context));
+        HogQlCompilationResult derived = compiler.compile(
+                envelope(
+                        "SELECT COLUMNS('value') FROM (" +
+                                "SELECT event AS value FROM events " +
+                                "INTERSECT " +
+                                "SELECT personId AS other FROM events) source",
+                        OptionalLong.of(7)),
+                Optional.of(context));
+
+        assertThat(cte.statement()).isEqualTo(sqlParser.createStatement(
+                "WITH source AS (" +
+                        "SELECT event_name AS chosen FROM analytics.\"Hog Data\".\"raw-events\" " +
+                        "UNION ALL " +
+                        "SELECT \"Person ID\" AS rightChosen FROM analytics.\"Hog Data\".\"raw-events\") " +
+                        "SELECT \"chosen\" AS chosen FROM source"));
+        assertThat(derived.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT \"value\" AS \"value\" FROM (" +
+                        "SELECT event_name AS value FROM analytics.\"Hog Data\".\"raw-events\" " +
+                        "INTERSECT " +
+                        "SELECT \"Person ID\" AS other FROM analytics.\"Hog Data\".\"raw-events\") source"));
+    }
+
+    @Test
+    public void testRejectsUnsafeSetOperationOutputInference()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+
+        TrinoException incompatibleArity = catchThrowableOfType(
+                TrinoException.class,
+                () -> compiler.compile(
+                        envelope(
+                                "WITH source AS (SELECT event FROM events EXCEPT SELECT event, personId FROM events) SELECT event FROM source",
+                                OptionalLong.of(7)),
+                        Optional.of(context)));
+        TrinoException unnamed = catchThrowableOfType(
+                TrinoException.class,
+                () -> compiler.compile(
+                        envelope(
+                                "WITH source AS (SELECT event FROM events UNION ALL SELECT event + personId FROM events) SELECT event FROM source",
+                                OptionalLong.of(7)),
+                        Optional.of(context)));
+        TrinoException ambiguous = catchThrowableOfType(
+                TrinoException.class,
+                () -> compiler.compile(
+                        envelope(
+                                "WITH source AS (SELECT event AS value, personId AS value FROM events UNION ALL " +
+                                        "SELECT event AS firstValue, personId AS secondValue FROM events) SELECT value FROM source",
+                                OptionalLong.of(7)),
+                        Optional.of(context)));
+        TrinoException unsafeAliases = catchThrowableOfType(
+                TrinoException.class,
+                () -> compiler.compile(
+                        envelope(
+                                "WITH source(onlyValue) AS (SELECT event AS value, personId AS other FROM events UNION ALL " +
+                                        "SELECT event AS rightValue, personId AS rightOther FROM events) SELECT onlyValue FROM source",
+                                OptionalLong.of(7)),
+                        Optional.of(context)));
+
+        assertThat(incompatibleArity.getErrorCode()).isEqualTo(HOGQL_RESOLUTION_ERROR.toErrorCode());
+        assertThat(incompatibleArity).hasMessageContaining("set operation branches have incompatible output arity");
+        assertThat(unnamed.getErrorCode()).isEqualTo(HOGQL_RESOLUTION_ERROR.toErrorCode());
+        assertThat(unnamed).hasMessageContaining("Cannot infer HogQL CTE output name");
+        assertThat(ambiguous.getErrorCode()).isEqualTo(HOGQL_RESOLUTION_ERROR.toErrorCode());
+        assertThat(ambiguous).hasMessageContaining("output names must be unique");
+        assertThat(unsafeAliases.getErrorCode()).isEqualTo(HOGQL_RESOLUTION_ERROR.toErrorCode());
+        assertThat(unsafeAliases).hasMessageContaining("column alias count does not match its output count");
+    }
+
+    @Test
     public void testUnknownLogicalFieldFailsAtOriginalLocation()
     {
         HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));

@@ -190,11 +190,16 @@ final class HogQlSemanticResolver
         }
         List<CommonTableExpression> commonTables = List.of();
         if (query.body() instanceof SetOperation setOperation) {
+            Optional<SetBranchDemand> branchDemand = requiredOutputs.map(outputs -> {
+                SetOperationOutputs inferredOutputs = inferSetOperationOutputs(setOperation, commonTableBindings);
+                RequiredOutputs effectiveOutputs = query.orderBy().isEmpty() ? outputs : RequiredOutputs.allOutputs();
+                return remapSetOperationDemand(inferredOutputs, effectiveOutputs);
+            });
             SetOperation resolved = new SetOperation(
                     setOperation.type(),
                     setOperation.distinct(),
-                    new HogQlSemanticResolver(snapshot, expansionBudget, Optional.empty(), outerBindingScopes, commonTableBindings).resolveNestedQuery(setOperation.left()),
-                    new HogQlSemanticResolver(snapshot, expansionBudget, Optional.empty(), outerBindingScopes, commonTableBindings).resolveNestedQuery(setOperation.right()),
+                    new HogQlSemanticResolver(snapshot, expansionBudget, branchDemand.map(SetBranchDemand::left), outerBindingScopes, commonTableBindings).resolveNestedQuery(setOperation.left()),
+                    new HogQlSemanticResolver(snapshot, expansionBudget, branchDemand.map(SetBranchDemand::right), outerBindingScopes, commonTableBindings).resolveNestedQuery(setOperation.right()),
                     setOperation.leftParenthesized(),
                     setOperation.rightParenthesized(),
                     setOperation.operatorSpan(),
@@ -240,18 +245,21 @@ final class HogQlSemanticResolver
 
         HogQlQuery body = new HogQlQuery(List.of(), query.body(), query.orderBy(), query.limit(), query.offset(), query.span());
         Map<String, RequiredOutputs> demands = new HashMap<>();
-        collectCommonTableDemands(body, HogQlProjectionDemand.collect(body), inferredBindings, demands);
+        if (body.body() instanceof SetOperation) {
+            collectQueryOutputDemands(body, requiredOutputs.orElseGet(RequiredOutputs::allOutputs), inferredBindings, demands);
+        }
+        else {
+            collectCommonTableDemands(body, HogQlProjectionDemand.collect(body), inferredBindings, demands);
+        }
         for (int index = analyses.size() - 1; index >= 0; index--) {
             CteAnalysis analysis = analyses.get(index);
             String name = canonical(analysis.commonTable().name().value());
-            RequiredOutputs demand = demands.getOrDefault(name, new RequiredOutputs(false, Set.of()));
-            HogQlProjectionDemand sourceDemand = HogQlProjectionDemand.collectNonProjection(analysis.commonTable().query());
-            for (CteOutput output : analysis.outputs()) {
-                if (demand.includes(output.name())) {
-                    sourceDemand = sourceDemand.merge(output.sourceDemand());
-                }
-            }
-            collectCommonTableDemands(analysis.commonTable().query(), sourceDemand, inferredBindings, demands);
+            RequiredOutputs externalDemand = demands.getOrDefault(name, new RequiredOutputs(false, Set.of()));
+            RequiredOutputs sourceDemand = remapAliasedOutputDemand(
+                    analysis.outputs(),
+                    analysis.commonTable().columnAliases(),
+                    externalDemand).sourceOutputs();
+            collectQueryOutputDemands(analysis.commonTable().query(), sourceDemand, inferredBindings, demands);
         }
 
         Map<String, TableBinding> resolvedBindings = new LinkedHashMap<>(commonTableBindings);
@@ -300,16 +308,14 @@ final class HogQlSemanticResolver
             HogQlQuery.SourceSpan span,
             Map<String, TableBinding> availableBindings)
     {
-        if (!(query.body() instanceof SelectQueryBody select)) {
-            throw cteInferenceError(span, "HogQL inferred relation outputs do not support set operations");
+        if (!query.with().isEmpty()) {
+            throw cteInferenceError(span, "HogQL inferred relation outputs do not support branch-local WITH clauses");
         }
-        List<TableBinding> sourceBindings = select.from()
-                .map(relation -> inferRelationBindings(relation, availableBindings))
-                .orElse(List.of());
-        List<CteOutput> outputs = new ArrayList<>();
-        for (Projection projection : select.projections()) {
-            outputs.addAll(inferProjectionOutputs(projection, sourceBindings, !columnAliases.isEmpty()));
-        }
+        List<CteOutput> outputs = switch (query.body()) {
+            case SelectQueryBody select -> inferSelectOutputs(select, availableBindings, !columnAliases.isEmpty());
+            case SetOperation setOperation -> inferSetOperationOutputs(setOperation, availableBindings).outputs();
+        };
+        outputs = new ArrayList<>(outputs);
         if (!columnAliases.isEmpty()) {
             if (columnAliases.size() != outputs.size()) {
                 throw cteInferenceError(span, "HogQL inferred relation column alias count does not match its output count");
@@ -326,6 +332,53 @@ final class HogQlSemanticResolver
             }
         }
         return List.copyOf(outputs);
+    }
+
+    private List<CteOutput> inferSelectOutputs(
+            SelectQueryBody select,
+            Map<String, TableBinding> availableBindings,
+            boolean hasColumnAliases)
+    {
+        List<TableBinding> sourceBindings = select.from()
+                .map(relation -> inferRelationBindings(relation, availableBindings))
+                .orElse(List.of());
+        List<CteOutput> outputs = new ArrayList<>();
+        for (Projection projection : select.projections()) {
+            outputs.addAll(inferProjectionOutputs(projection, sourceBindings, hasColumnAliases));
+        }
+        return List.copyOf(outputs);
+    }
+
+    private SetOperationOutputs inferSetOperationOutputs(SetOperation setOperation, Map<String, TableBinding> availableBindings)
+    {
+        List<CteOutput> left = inferQueryOutputs(setOperation.left(), List.of(), setOperation.left().span(), availableBindings);
+        List<CteOutput> right = inferQueryOutputs(setOperation.right(), List.of(), setOperation.right().span(), availableBindings);
+        if (left.size() != right.size()) {
+            throw cteInferenceError(setOperation.operatorSpan(), "HogQL set operation branches have incompatible output arity");
+        }
+        List<CteOutput> outputs = java.util.stream.IntStream.range(0, left.size())
+                .mapToObj(index -> new CteOutput(
+                        left.get(index).name(),
+                        Optional.of(left.get(index).name()),
+                        left.get(index).sourceDemand().merge(right.get(index).sourceDemand())))
+                .toList();
+        return new SetOperationOutputs(outputs, left, right);
+    }
+
+    private static SetBranchDemand remapSetOperationDemand(SetOperationOutputs outputs, RequiredOutputs demand)
+    {
+        if (demand.all()) {
+            return new SetBranchDemand(RequiredOutputs.allOutputs(), RequiredOutputs.allOutputs());
+        }
+        Set<String> left = new HashSet<>();
+        Set<String> right = new HashSet<>();
+        for (int index = 0; index < outputs.outputs().size(); index++) {
+            if (demand.includes(outputs.outputs().get(index).name())) {
+                left.add(canonical(outputs.left().get(index).name()));
+                right.add(canonical(outputs.right().get(index).name()));
+            }
+        }
+        return new SetBranchDemand(new RequiredOutputs(false, left), new RequiredOutputs(false, right));
     }
 
     private static AliasedOutputDemand remapAliasedOutputDemand(
@@ -529,6 +582,30 @@ final class HogQlSemanticResolver
         }
     }
 
+    private void collectQueryOutputDemands(
+            HogQlQuery query,
+            RequiredOutputs outputDemand,
+            Map<String, TableBinding> availableBindings,
+            Map<String, RequiredOutputs> demands)
+    {
+        if (query.body() instanceof SetOperation setOperation) {
+            SetOperationOutputs outputs = inferSetOperationOutputs(setOperation, availableBindings);
+            RequiredOutputs effectiveDemand = query.orderBy().isEmpty() ? outputDemand : RequiredOutputs.allOutputs();
+            SetBranchDemand branchDemand = remapSetOperationDemand(outputs, effectiveDemand);
+            collectQueryOutputDemands(setOperation.left(), branchDemand.left(), availableBindings, demands);
+            collectQueryOutputDemands(setOperation.right(), branchDemand.right(), availableBindings, demands);
+            return;
+        }
+        List<CteOutput> outputs = inferQueryOutputs(query, List.of(), query.span(), availableBindings);
+        HogQlProjectionDemand sourceDemand = HogQlProjectionDemand.collectNonProjection(query);
+        for (CteOutput output : outputs) {
+            if (outputDemand.includes(output.name())) {
+                sourceDemand = sourceDemand.merge(output.sourceDemand());
+            }
+        }
+        collectCommonTableDemands(query, sourceDemand, availableBindings, demands);
+    }
+
     private void collectCommonTableDemands(
             Relation relation,
             HogQlProjectionDemand demand,
@@ -539,14 +616,11 @@ final class HogQlSemanticResolver
             case AliasedRelation alias -> {
                 if (alias.relation() instanceof SubqueryRelation subquery) {
                     List<CteOutput> outputs = inferQueryOutputs(subquery.query(), alias.columnAliases(), alias.span(), availableBindings);
-                    RequiredOutputs requiredOutputs = demand.forAlias(alias.alias());
-                    HogQlProjectionDemand sourceDemand = HogQlProjectionDemand.collectNonProjection(subquery.query());
-                    for (CteOutput output : outputs) {
-                        if (requiredOutputs.includes(output.name())) {
-                            sourceDemand = sourceDemand.merge(output.sourceDemand());
-                        }
-                    }
-                    collectCommonTableDemands(subquery.query(), sourceDemand, availableBindings, demands);
+                    RequiredOutputs sourceDemand = remapAliasedOutputDemand(
+                            outputs,
+                            alias.columnAliases(),
+                            demand.forAlias(alias.alias())).sourceOutputs();
+                    collectQueryOutputDemands(subquery.query(), sourceDemand, availableBindings, demands);
                 }
                 else if (alias.relation() instanceof CommonTableReference commonTable) {
                     addCommonTableDemand(commonTable, demand.forAlias(alias.alias()), availableBindings, demands);
@@ -2373,6 +2447,25 @@ final class HogQlSemanticResolver
         {
             sourceOutputs = requireNonNull(sourceOutputs, "sourceOutputs is null");
             outputAliases = List.copyOf(requireNonNull(outputAliases, "outputAliases is null"));
+        }
+    }
+
+    private record SetOperationOutputs(List<CteOutput> outputs, List<CteOutput> left, List<CteOutput> right)
+    {
+        private SetOperationOutputs
+        {
+            outputs = List.copyOf(requireNonNull(outputs, "outputs is null"));
+            left = List.copyOf(requireNonNull(left, "left is null"));
+            right = List.copyOf(requireNonNull(right, "right is null"));
+        }
+    }
+
+    private record SetBranchDemand(RequiredOutputs left, RequiredOutputs right)
+    {
+        private SetBranchDemand
+        {
+            left = requireNonNull(left, "left is null");
+            right = requireNonNull(right, "right is null");
         }
     }
 

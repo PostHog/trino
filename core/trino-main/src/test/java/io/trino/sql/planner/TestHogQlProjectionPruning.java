@@ -38,8 +38,11 @@ import io.trino.sql.planner.optimizations.PlanNodeSearcher;
 import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.JoinNode;
 import io.trino.sql.planner.plan.PlanNode;
+import io.trino.sql.planner.plan.SetOperationNode;
 import io.trino.sql.planner.plan.TableScanNode;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -48,6 +51,7 @@ import java.util.OptionalLong;
 
 import static io.trino.SystemSessionProperties.ENABLE_DYNAMIC_FILTERING;
 import static io.trino.SystemSessionProperties.JOIN_REORDERING_STRATEGY;
+import static io.trino.sql.planner.LogicalPlanner.Stage.CREATED;
 import static io.trino.sql.planner.plan.JoinType.INNER;
 import static io.trino.testing.TestingHandles.TEST_CATALOG_NAME;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -143,6 +147,28 @@ public class TestHogQlProjectionPruning
         assertThat(nodes(plan, JoinNode.class)).hasSize(1);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"UNION ALL", "INTERSECT ALL", "EXCEPT ALL"})
+    public void testSetOperationDemandIsMappedByBranchPosition(String operator)
+    {
+        Plan plan = plan(compile(
+                "WITH source AS (" +
+                        "SELECT CAST(e.event AS String) AS selected, e.personProfile.name AS discarded FROM events e " +
+                        operator + " " +
+                        "SELECT e.personProfile.name AS rightSelected, CAST(e.event AS String) AS rightDiscarded FROM events e) " +
+                        "SELECT selected FROM source"), CREATED);
+
+        List<SetOperationNode> setOperations = nodes(plan, SetOperationNode.class);
+        assertThat(setOperations).hasSize(1);
+        SetOperationNode setOperation = setOperations.getFirst();
+        assertThat(nodes(setOperation.getSources().getFirst(), TableScanNode.class)).hasSize(1);
+        assertThat(nodes(setOperation.getSources().getFirst(), JoinNode.class)).isEmpty();
+        assertThat(nodes(setOperation.getSources().getLast(), TableScanNode.class)).hasSize(2);
+        assertThat(nodes(setOperation.getSources().getLast(), JoinNode.class)).hasSize(1);
+        assertThat(nodes(plan, TableScanNode.class)).hasSize(3);
+        assertThat(nodes(plan, JoinNode.class)).hasSize(1);
+    }
+
     private String compile(String query)
     {
         HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
@@ -160,7 +186,12 @@ public class TestHogQlProjectionPruning
 
     private static <T extends PlanNode> List<T> nodes(Plan plan, Class<T> type)
     {
-        return PlanNodeSearcher.searchFrom(plan.getRoot())
+        return nodes(plan.getRoot(), type);
+    }
+
+    private static <T extends PlanNode> List<T> nodes(PlanNode root, Class<T> type)
+    {
+        return PlanNodeSearcher.searchFrom(root)
                 .whereIsInstanceOfAny(type)
                 .findAll().stream()
                 .map(type::cast)
