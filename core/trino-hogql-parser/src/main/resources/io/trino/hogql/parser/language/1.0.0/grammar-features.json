@@ -1,0 +1,2771 @@
+{
+    "features": [
+        {
+            "id": "alternative:arrayJoinClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "arrayJoinClause"
+        },
+        {
+            "id": "alternative:block",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "block"
+        },
+        {
+            "id": "alternative:catchBlock",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "catchBlock"
+        },
+        {
+            "id": "alternative:columnAliases",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "columnAliases"
+        },
+        {
+            "id": "alternative:columnExpr:ColumnExprAnd",
+            "kind": "parserAlternative",
+            "label": "ColumnExprAnd",
+            "queryReachable": true,
+            "rule": "columnExpr"
+        },
+        {
+            "id": "alternative:columnExprList",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "columnExprList"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprCase",
+            "kind": "parserAlternative",
+            "label": "ColumnExprCase",
+            "queryReachable": true,
+            "rule": "columnExprValue"
+        },
+        {
+            "id": "alternative:columnLambdaExpr:ArrowLambda",
+            "kind": "parserAlternative",
+            "label": "ArrowLambda",
+            "queryReachable": true,
+            "rule": "columnLambdaExpr"
+        },
+        {
+            "id": "alternative:columnLambdaExpr:ColonLambda",
+            "kind": "parserAlternative",
+            "label": "ColonLambda",
+            "queryReachable": true,
+            "rule": "columnLambdaExpr"
+        },
+        {
+            "id": "alternative:columnTypeCastExpr:ColumnTypeCastExprSimple",
+            "kind": "parserAlternative",
+            "label": "ColumnTypeCastExprSimple",
+            "queryReachable": true,
+            "rule": "columnTypeCastExpr"
+        },
+        {
+            "id": "alternative:columnTypeCastExpr:ColumnTypeCastExprWithTimeZone",
+            "kind": "parserAlternative",
+            "label": "ColumnTypeCastExprWithTimeZone",
+            "queryReachable": true,
+            "rule": "columnTypeCastExpr"
+        },
+        {
+            "id": "alternative:columnTypeExpr:ColumnTypeExprArray",
+            "kind": "parserAlternative",
+            "label": "ColumnTypeExprArray",
+            "queryReachable": true,
+            "rule": "columnTypeExpr"
+        },
+        {
+            "id": "alternative:columnsReplaceItem",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "columnsReplaceItem"
+        },
+        {
+            "id": "alternative:columnsReplaceList",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "columnsReplaceList"
+        },
+        {
+            "id": "alternative:databaseIdentifier",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "databaseIdentifier"
+        },
+        {
+            "id": "alternative:emptyStmt",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "emptyStmt"
+        },
+        {
+            "id": "alternative:enumValue",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "enumValue"
+        },
+        {
+            "id": "alternative:expr",
+            "kind": "parserAlternative",
+            "queryReachable": false,
+            "rule": "expr"
+        },
+        {
+            "id": "alternative:exprStmt",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "exprStmt"
+        },
+        {
+            "id": "alternative:expression",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "expression"
+        },
+        {
+            "id": "alternative:forInStmt",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "forInStmt"
+        },
+        {
+            "id": "alternative:forStmt",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "forStmt"
+        },
+        {
+            "id": "alternative:fromClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "fromClause"
+        },
+        {
+            "id": "alternative:fullTemplateString",
+            "kind": "parserAlternative",
+            "queryReachable": false,
+            "rule": "fullTemplateString"
+        },
+        {
+            "id": "alternative:funcStmt",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "funcStmt"
+        },
+        {
+            "id": "alternative:groupByClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "groupByClause"
+        },
+        {
+            "id": "alternative:groupingSet",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "groupingSet"
+        },
+        {
+            "id": "alternative:groupingSetList",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "groupingSetList"
+        },
+        {
+            "id": "alternative:havingClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "havingClause"
+        },
+        {
+            "id": "alternative:hogqlxTagElement:HogqlxTagElementClosed",
+            "kind": "parserAlternative",
+            "label": "HogqlxTagElementClosed",
+            "queryReachable": true,
+            "rule": "hogqlxTagElement"
+        },
+        {
+            "id": "alternative:hogqlxTagElement:HogqlxTagElementNested",
+            "kind": "parserAlternative",
+            "label": "HogqlxTagElementNested",
+            "queryReachable": true,
+            "rule": "hogqlxTagElement"
+        },
+        {
+            "id": "alternative:hogqlxText",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "hogqlxText"
+        },
+        {
+            "id": "alternative:identifierList",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "identifierList"
+        },
+        {
+            "id": "alternative:ifStmt",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "ifStmt"
+        },
+        {
+            "id": "alternative:interpolateClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "interpolateClause"
+        },
+        {
+            "id": "alternative:interpolateExpr",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "interpolateExpr"
+        },
+        {
+            "id": "alternative:interval",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "interval"
+        },
+        {
+            "id": "alternative:joinExpr:JoinExprOp",
+            "kind": "parserAlternative",
+            "label": "JoinExprOp",
+            "queryReachable": true,
+            "rule": "joinExpr"
+        },
+        {
+            "id": "alternative:joinOp:JoinOpFull",
+            "kind": "parserAlternative",
+            "label": "JoinOpFull",
+            "queryReachable": true,
+            "rule": "joinOp"
+        },
+        {
+            "id": "alternative:joinOp:JoinOpInner",
+            "kind": "parserAlternative",
+            "label": "JoinOpInner",
+            "queryReachable": true,
+            "rule": "joinOp"
+        },
+        {
+            "id": "alternative:joinOp:JoinOpLeftRight",
+            "kind": "parserAlternative",
+            "label": "JoinOpLeftRight",
+            "queryReachable": true,
+            "rule": "joinOp"
+        },
+        {
+            "id": "alternative:keyword",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "keyword"
+        },
+        {
+            "id": "alternative:keywordForAlias",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "keywordForAlias"
+        },
+        {
+            "id": "alternative:keywordForImplicitAlias",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "keywordForImplicitAlias"
+        },
+        {
+            "id": "alternative:keywordForTypeCast",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "keywordForTypeCast"
+        },
+        {
+            "id": "alternative:kvPair",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "kvPair"
+        },
+        {
+            "id": "alternative:kvPairList",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "kvPairList"
+        },
+        {
+            "id": "alternative:limitByClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "limitByClause"
+        },
+        {
+            "id": "alternative:limitExpr",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "limitExpr"
+        },
+        {
+            "id": "alternative:nestedIdentifier",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "nestedIdentifier"
+        },
+        {
+            "id": "alternative:numberLiteral",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "numberLiteral"
+        },
+        {
+            "id": "alternative:offsetOnlyClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "offsetOnlyClause"
+        },
+        {
+            "id": "alternative:orderByClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "orderByClause"
+        },
+        {
+            "id": "alternative:orderExpr",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "orderExpr"
+        },
+        {
+            "id": "alternative:orderExprList",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "orderExprList"
+        },
+        {
+            "id": "alternative:pivotColumn",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "pivotColumn"
+        },
+        {
+            "id": "alternative:pivotColumnList",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "pivotColumnList"
+        },
+        {
+            "id": "alternative:placeholder",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "placeholder"
+        },
+        {
+            "id": "alternative:prewhereClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "prewhereClause"
+        },
+        {
+            "id": "alternative:program",
+            "kind": "parserAlternative",
+            "queryReachable": false,
+            "rule": "program"
+        },
+        {
+            "id": "alternative:projectionOrderByClause",
+            "kind": "parserAlternative",
+            "queryReachable": false,
+            "rule": "projectionOrderByClause"
+        },
+        {
+            "id": "alternative:qualifyClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "qualifyClause"
+        },
+        {
+            "id": "alternative:returnStmt",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "returnStmt"
+        },
+        {
+            "id": "alternative:sampleClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "sampleClause"
+        },
+        {
+            "id": "alternative:select",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "select"
+        },
+        {
+            "id": "alternative:selectColumnExpr:ColumnExprAliasBefore",
+            "kind": "parserAlternative",
+            "label": "ColumnExprAliasBefore",
+            "queryReachable": true,
+            "rule": "selectColumnExpr"
+        },
+        {
+            "id": "alternative:selectColumnExpr:ColumnExprAliasImplicit",
+            "kind": "parserAlternative",
+            "label": "ColumnExprAliasImplicit",
+            "queryReachable": true,
+            "rule": "selectColumnExpr"
+        },
+        {
+            "id": "alternative:selectColumnExpr:ColumnExprInvalidFromImplicitAlias",
+            "kind": "parserAlternative",
+            "label": "ColumnExprInvalidFromImplicitAlias",
+            "queryReachable": true,
+            "rule": "selectColumnExpr"
+        },
+        {
+            "id": "alternative:selectColumnExpr:ColumnExprSelectValue",
+            "kind": "parserAlternative",
+            "label": "ColumnExprSelectValue",
+            "queryReachable": true,
+            "rule": "selectColumnExpr"
+        },
+        {
+            "id": "alternative:selectColumnExprList",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "selectColumnExprList"
+        },
+        {
+            "id": "alternative:selectColumnExprListBeforeFrom:SelectColumnExprListBeforeFromPlain",
+            "kind": "parserAlternative",
+            "label": "SelectColumnExprListBeforeFromPlain",
+            "queryReachable": true,
+            "rule": "selectColumnExprListBeforeFrom"
+        },
+        {
+            "id": "alternative:selectColumnExprListBeforeFrom:SelectColumnExprListBeforeFromTrailingComma",
+            "kind": "parserAlternative",
+            "label": "SelectColumnExprListBeforeFromTrailingComma",
+            "queryReachable": true,
+            "rule": "selectColumnExprListBeforeFrom"
+        },
+        {
+            "id": "alternative:selectSetStmt",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "selectSetStmt"
+        },
+        {
+            "id": "alternative:selectStmt",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "selectStmt"
+        },
+        {
+            "id": "alternative:settingExpr",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "settingExpr"
+        },
+        {
+            "id": "alternative:settingExprList",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "settingExprList"
+        },
+        {
+            "id": "alternative:settingsClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "settingsClause"
+        },
+        {
+            "id": "alternative:subsequentSelectSetClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "subsequentSelectSetClause"
+        },
+        {
+            "id": "alternative:tableArgList",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "tableArgList"
+        },
+        {
+            "id": "alternative:tableExpr:TableExprIdentifier",
+            "kind": "parserAlternative",
+            "label": "TableExprIdentifier",
+            "queryReachable": true,
+            "rule": "tableExpr"
+        },
+        {
+            "id": "alternative:tableFunctionExpr",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "tableFunctionExpr"
+        },
+        {
+            "id": "alternative:tableIdentifier",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "tableIdentifier"
+        },
+        {
+            "id": "alternative:templateString",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "templateString"
+        },
+        {
+            "id": "alternative:throwStmt",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "throwStmt"
+        },
+        {
+            "id": "alternative:topClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "topClause"
+        },
+        {
+            "id": "alternative:tryCatchStmt",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "tryCatchStmt"
+        },
+        {
+            "id": "alternative:unpivotColumn",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "unpivotColumn"
+        },
+        {
+            "id": "alternative:unpivotColumnList",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "unpivotColumnList"
+        },
+        {
+            "id": "alternative:valuesClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "valuesClause"
+        },
+        {
+            "id": "alternative:valuesRow",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "valuesRow"
+        },
+        {
+            "id": "alternative:varAssignment",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "varAssignment"
+        },
+        {
+            "id": "alternative:varDecl",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "varDecl"
+        },
+        {
+            "id": "alternative:whereClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "whereClause"
+        },
+        {
+            "id": "alternative:whileStmt",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "whileStmt"
+        },
+        {
+            "id": "alternative:winFrameBound",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "winFrameBound"
+        },
+        {
+            "id": "alternative:winFrameClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "winFrameClause"
+        },
+        {
+            "id": "alternative:winFrameExtend:frameBetween",
+            "kind": "parserAlternative",
+            "label": "frameBetween",
+            "queryReachable": true,
+            "rule": "winFrameExtend"
+        },
+        {
+            "id": "alternative:winFrameExtend:frameStart",
+            "kind": "parserAlternative",
+            "label": "frameStart",
+            "queryReachable": true,
+            "rule": "winFrameExtend"
+        },
+        {
+            "id": "alternative:winOrderByClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "winOrderByClause"
+        },
+        {
+            "id": "alternative:winPartitionByClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "winPartitionByClause"
+        },
+        {
+            "id": "alternative:windowClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "windowClause"
+        },
+        {
+            "id": "alternative:windowExpr",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "windowExpr"
+        },
+        {
+            "id": "alternative:withClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "withClause"
+        },
+        {
+            "id": "alternative:withExpr:WithExprColumn",
+            "kind": "parserAlternative",
+            "label": "WithExprColumn",
+            "queryReachable": true,
+            "rule": "withExpr"
+        },
+        {
+            "id": "alternative:withExpr:WithExprSubquery",
+            "kind": "parserAlternative",
+            "label": "WithExprSubquery",
+            "queryReachable": true,
+            "rule": "withExpr"
+        },
+        {
+            "id": "alternative:withExprColumnNameList",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "withExprColumnNameList"
+        },
+        {
+            "id": "alternative:withExprList",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "withExprList"
+        },
+        {
+            "id": "alternative:withFillClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "withFillClause"
+        },
+        {
+            "id": "alternative:withinGroupClause",
+            "kind": "parserAlternative",
+            "queryReachable": true,
+            "rule": "withinGroupClause"
+        },
+        {
+            "id": "rule:alias",
+            "kind": "parserRule",
+            "name": "alias",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:arrayJoinClause",
+            "kind": "parserRule",
+            "name": "arrayJoinClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:block",
+            "kind": "parserRule",
+            "name": "block",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:catchBlock",
+            "kind": "parserRule",
+            "name": "catchBlock",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:columnAliases",
+            "kind": "parserRule",
+            "name": "columnAliases",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:columnExpr",
+            "kind": "parserRule",
+            "name": "columnExpr",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:columnExprList",
+            "kind": "parserRule",
+            "name": "columnExprList",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:columnExprTupleOrSingle",
+            "kind": "parserRule",
+            "name": "columnExprTupleOrSingle",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:columnExprValue",
+            "kind": "parserRule",
+            "name": "columnExprValue",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:columnIdentifier",
+            "kind": "parserRule",
+            "name": "columnIdentifier",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:columnLambdaExpr",
+            "kind": "parserRule",
+            "name": "columnLambdaExpr",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:columnTypeCastExpr",
+            "kind": "parserRule",
+            "name": "columnTypeCastExpr",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:columnTypeCastIdentifier",
+            "kind": "parserRule",
+            "name": "columnTypeCastIdentifier",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:columnTypeExpr",
+            "kind": "parserRule",
+            "name": "columnTypeExpr",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:columnsReplaceItem",
+            "kind": "parserRule",
+            "name": "columnsReplaceItem",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:columnsReplaceList",
+            "kind": "parserRule",
+            "name": "columnsReplaceList",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:databaseIdentifier",
+            "kind": "parserRule",
+            "name": "databaseIdentifier",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:declaration",
+            "kind": "parserRule",
+            "name": "declaration",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:emptyStmt",
+            "kind": "parserRule",
+            "name": "emptyStmt",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:enumValue",
+            "kind": "parserRule",
+            "name": "enumValue",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:expr",
+            "kind": "parserRule",
+            "name": "expr",
+            "queryReachable": false
+        },
+        {
+            "id": "rule:exprStmt",
+            "kind": "parserRule",
+            "name": "exprStmt",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:expression",
+            "kind": "parserRule",
+            "name": "expression",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:floatingLiteral",
+            "kind": "parserRule",
+            "name": "floatingLiteral",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:forInStmt",
+            "kind": "parserRule",
+            "name": "forInStmt",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:forStmt",
+            "kind": "parserRule",
+            "name": "forStmt",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:fromClause",
+            "kind": "parserRule",
+            "name": "fromClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:fullTemplateString",
+            "kind": "parserRule",
+            "name": "fullTemplateString",
+            "queryReachable": false
+        },
+        {
+            "id": "rule:funcStmt",
+            "kind": "parserRule",
+            "name": "funcStmt",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:groupByClause",
+            "kind": "parserRule",
+            "name": "groupByClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:groupingSet",
+            "kind": "parserRule",
+            "name": "groupingSet",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:groupingSetList",
+            "kind": "parserRule",
+            "name": "groupingSetList",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:havingClause",
+            "kind": "parserRule",
+            "name": "havingClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:hogqlxChildElement",
+            "kind": "parserRule",
+            "name": "hogqlxChildElement",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:hogqlxTagAttribute",
+            "kind": "parserRule",
+            "name": "hogqlxTagAttribute",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:hogqlxTagElement",
+            "kind": "parserRule",
+            "name": "hogqlxTagElement",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:hogqlxText",
+            "kind": "parserRule",
+            "name": "hogqlxText",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:identifier",
+            "kind": "parserRule",
+            "name": "identifier",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:identifierList",
+            "kind": "parserRule",
+            "name": "identifierList",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:ifStmt",
+            "kind": "parserRule",
+            "name": "ifStmt",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:implicitAlias",
+            "kind": "parserRule",
+            "name": "implicitAlias",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:interpolateClause",
+            "kind": "parserRule",
+            "name": "interpolateClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:interpolateExpr",
+            "kind": "parserRule",
+            "name": "interpolateExpr",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:interval",
+            "kind": "parserRule",
+            "name": "interval",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:joinConstraintClause",
+            "kind": "parserRule",
+            "name": "joinConstraintClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:joinExpr",
+            "kind": "parserRule",
+            "name": "joinExpr",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:joinOp",
+            "kind": "parserRule",
+            "name": "joinOp",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:joinOpCross",
+            "kind": "parserRule",
+            "name": "joinOpCross",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:keyword",
+            "kind": "parserRule",
+            "name": "keyword",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:keywordForAlias",
+            "kind": "parserRule",
+            "name": "keywordForAlias",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:keywordForImplicitAlias",
+            "kind": "parserRule",
+            "name": "keywordForImplicitAlias",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:keywordForTypeCast",
+            "kind": "parserRule",
+            "name": "keywordForTypeCast",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:kvPair",
+            "kind": "parserRule",
+            "name": "kvPair",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:kvPairList",
+            "kind": "parserRule",
+            "name": "kvPairList",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:limitAndOffsetClause",
+            "kind": "parserRule",
+            "name": "limitAndOffsetClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:limitAndOffsetClauseOptional",
+            "kind": "parserRule",
+            "name": "limitAndOffsetClauseOptional",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:limitByClause",
+            "kind": "parserRule",
+            "name": "limitByClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:limitExpr",
+            "kind": "parserRule",
+            "name": "limitExpr",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:literal",
+            "kind": "parserRule",
+            "name": "literal",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:nestedIdentifier",
+            "kind": "parserRule",
+            "name": "nestedIdentifier",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:numberLiteral",
+            "kind": "parserRule",
+            "name": "numberLiteral",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:offsetOnlyClause",
+            "kind": "parserRule",
+            "name": "offsetOnlyClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:orderByClause",
+            "kind": "parserRule",
+            "name": "orderByClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:orderExpr",
+            "kind": "parserRule",
+            "name": "orderExpr",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:orderExprList",
+            "kind": "parserRule",
+            "name": "orderExprList",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:pivotColumn",
+            "kind": "parserRule",
+            "name": "pivotColumn",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:pivotColumnList",
+            "kind": "parserRule",
+            "name": "pivotColumnList",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:placeholder",
+            "kind": "parserRule",
+            "name": "placeholder",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:prewhereClause",
+            "kind": "parserRule",
+            "name": "prewhereClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:program",
+            "kind": "parserRule",
+            "name": "program",
+            "queryReachable": false
+        },
+        {
+            "id": "rule:projectionOrderByClause",
+            "kind": "parserRule",
+            "name": "projectionOrderByClause",
+            "queryReachable": false
+        },
+        {
+            "id": "rule:qualifyClause",
+            "kind": "parserRule",
+            "name": "qualifyClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:ratioExpr",
+            "kind": "parserRule",
+            "name": "ratioExpr",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:returnStmt",
+            "kind": "parserRule",
+            "name": "returnStmt",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:sampleClause",
+            "kind": "parserRule",
+            "name": "sampleClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:select",
+            "kind": "parserRule",
+            "name": "select",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:selectColumnExpr",
+            "kind": "parserRule",
+            "name": "selectColumnExpr",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:selectColumnExprList",
+            "kind": "parserRule",
+            "name": "selectColumnExprList",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:selectColumnExprListBeforeFrom",
+            "kind": "parserRule",
+            "name": "selectColumnExprListBeforeFrom",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:selectSetStmt",
+            "kind": "parserRule",
+            "name": "selectSetStmt",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:selectStmt",
+            "kind": "parserRule",
+            "name": "selectStmt",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:selectStmtWithParens",
+            "kind": "parserRule",
+            "name": "selectStmtWithParens",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:settingExpr",
+            "kind": "parserRule",
+            "name": "settingExpr",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:settingExprList",
+            "kind": "parserRule",
+            "name": "settingExprList",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:settingsClause",
+            "kind": "parserRule",
+            "name": "settingsClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:statement",
+            "kind": "parserRule",
+            "name": "statement",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:string",
+            "kind": "parserRule",
+            "name": "string",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:stringContents",
+            "kind": "parserRule",
+            "name": "stringContents",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:stringContentsFull",
+            "kind": "parserRule",
+            "name": "stringContentsFull",
+            "queryReachable": false
+        },
+        {
+            "id": "rule:subsequentSelectSetClause",
+            "kind": "parserRule",
+            "name": "subsequentSelectSetClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:tableArgList",
+            "kind": "parserRule",
+            "name": "tableArgList",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:tableExpr",
+            "kind": "parserRule",
+            "name": "tableExpr",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:tableFunctionExpr",
+            "kind": "parserRule",
+            "name": "tableFunctionExpr",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:tableIdentifier",
+            "kind": "parserRule",
+            "name": "tableIdentifier",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:templateString",
+            "kind": "parserRule",
+            "name": "templateString",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:throwStmt",
+            "kind": "parserRule",
+            "name": "throwStmt",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:topClause",
+            "kind": "parserRule",
+            "name": "topClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:tryCatchStmt",
+            "kind": "parserRule",
+            "name": "tryCatchStmt",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:unpivotColumn",
+            "kind": "parserRule",
+            "name": "unpivotColumn",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:unpivotColumnList",
+            "kind": "parserRule",
+            "name": "unpivotColumnList",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:valuesClause",
+            "kind": "parserRule",
+            "name": "valuesClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:valuesRow",
+            "kind": "parserRule",
+            "name": "valuesRow",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:varAssignment",
+            "kind": "parserRule",
+            "name": "varAssignment",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:varDecl",
+            "kind": "parserRule",
+            "name": "varDecl",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:whereClause",
+            "kind": "parserRule",
+            "name": "whereClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:whileStmt",
+            "kind": "parserRule",
+            "name": "whileStmt",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:winFrameBound",
+            "kind": "parserRule",
+            "name": "winFrameBound",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:winFrameClause",
+            "kind": "parserRule",
+            "name": "winFrameClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:winFrameExtend",
+            "kind": "parserRule",
+            "name": "winFrameExtend",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:winOrderByClause",
+            "kind": "parserRule",
+            "name": "winOrderByClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:winPartitionByClause",
+            "kind": "parserRule",
+            "name": "winPartitionByClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:windowClause",
+            "kind": "parserRule",
+            "name": "windowClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:windowExpr",
+            "kind": "parserRule",
+            "name": "windowExpr",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:withClause",
+            "kind": "parserRule",
+            "name": "withClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:withExpr",
+            "kind": "parserRule",
+            "name": "withExpr",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:withExprColumnNameList",
+            "kind": "parserRule",
+            "name": "withExprColumnNameList",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:withExprList",
+            "kind": "parserRule",
+            "name": "withExprList",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:withFillClause",
+            "kind": "parserRule",
+            "name": "withFillClause",
+            "queryReachable": true
+        },
+        {
+            "id": "rule:withinGroupClause",
+            "kind": "parserRule",
+            "name": "withinGroupClause",
+            "queryReachable": true
+        },
+        {
+            "id": "token:ALL",
+            "kind": "token",
+            "name": "ALL",
+            "queryReachable": true
+        },
+        {
+            "id": "token:AND",
+            "kind": "token",
+            "name": "AND",
+            "queryReachable": true
+        },
+        {
+            "id": "token:ANTI",
+            "kind": "token",
+            "name": "ANTI",
+            "queryReachable": true
+        },
+        {
+            "id": "token:ANY",
+            "kind": "token",
+            "name": "ANY",
+            "queryReachable": true
+        },
+        {
+            "id": "token:ARRAY",
+            "kind": "token",
+            "name": "ARRAY",
+            "queryReachable": true
+        },
+        {
+            "id": "token:ARROW",
+            "kind": "token",
+            "name": "ARROW",
+            "queryReachable": true
+        },
+        {
+            "id": "token:AS",
+            "kind": "token",
+            "name": "AS",
+            "queryReachable": true
+        },
+        {
+            "id": "token:ASCENDING",
+            "kind": "token",
+            "name": "ASCENDING",
+            "queryReachable": true
+        },
+        {
+            "id": "token:ASOF",
+            "kind": "token",
+            "name": "ASOF",
+            "queryReachable": true
+        },
+        {
+            "id": "token:ASTERISK",
+            "kind": "token",
+            "name": "ASTERISK",
+            "queryReachable": true
+        },
+        {
+            "id": "token:BACKQUOTE",
+            "kind": "token",
+            "name": "BACKQUOTE",
+            "queryReachable": false
+        },
+        {
+            "id": "token:BACKSLASH",
+            "kind": "token",
+            "name": "BACKSLASH",
+            "queryReachable": false
+        },
+        {
+            "id": "token:BETWEEN",
+            "kind": "token",
+            "name": "BETWEEN",
+            "queryReachable": true
+        },
+        {
+            "id": "token:BINARY_LITERAL",
+            "kind": "token",
+            "name": "BINARY_LITERAL",
+            "queryReachable": true
+        },
+        {
+            "id": "token:BOTH",
+            "kind": "token",
+            "name": "BOTH",
+            "queryReachable": true
+        },
+        {
+            "id": "token:BY",
+            "kind": "token",
+            "name": "BY",
+            "queryReachable": true
+        },
+        {
+            "id": "token:CASE",
+            "kind": "token",
+            "name": "CASE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:CAST",
+            "kind": "token",
+            "name": "CAST",
+            "queryReachable": true
+        },
+        {
+            "id": "token:CATCH",
+            "kind": "token",
+            "name": "CATCH",
+            "queryReachable": true
+        },
+        {
+            "id": "token:COHORT",
+            "kind": "token",
+            "name": "COHORT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:COLLATE",
+            "kind": "token",
+            "name": "COLLATE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:COLON",
+            "kind": "token",
+            "name": "COLON",
+            "queryReachable": true
+        },
+        {
+            "id": "token:COLONEQUALS",
+            "kind": "token",
+            "name": "COLONEQUALS",
+            "queryReachable": true
+        },
+        {
+            "id": "token:COLUMNS",
+            "kind": "token",
+            "name": "COLUMNS",
+            "queryReachable": true
+        },
+        {
+            "id": "token:COMMA",
+            "kind": "token",
+            "name": "COMMA",
+            "queryReachable": true
+        },
+        {
+            "id": "token:CONCAT",
+            "kind": "token",
+            "name": "CONCAT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:CROSS",
+            "kind": "token",
+            "name": "CROSS",
+            "queryReachable": true
+        },
+        {
+            "id": "token:CUBE",
+            "kind": "token",
+            "name": "CUBE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:CURRENT",
+            "kind": "token",
+            "name": "CURRENT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:DASH",
+            "kind": "token",
+            "name": "DASH",
+            "queryReachable": true
+        },
+        {
+            "id": "token:DATE",
+            "kind": "token",
+            "name": "DATE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:DAY",
+            "kind": "token",
+            "name": "DAY",
+            "queryReachable": true
+        },
+        {
+            "id": "token:DECIMAL_LITERAL",
+            "kind": "token",
+            "name": "DECIMAL_LITERAL",
+            "queryReachable": true
+        },
+        {
+            "id": "token:DESC",
+            "kind": "token",
+            "name": "DESC",
+            "queryReachable": true
+        },
+        {
+            "id": "token:DESCENDING",
+            "kind": "token",
+            "name": "DESCENDING",
+            "queryReachable": true
+        },
+        {
+            "id": "token:DISTINCT",
+            "kind": "token",
+            "name": "DISTINCT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:DOLLAR",
+            "kind": "token",
+            "name": "DOLLAR",
+            "queryReachable": false
+        },
+        {
+            "id": "token:DOT",
+            "kind": "token",
+            "name": "DOT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:DOUBLECOLON",
+            "kind": "token",
+            "name": "DOUBLECOLON",
+            "queryReachable": true
+        },
+        {
+            "id": "token:ELSE",
+            "kind": "token",
+            "name": "ELSE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:END",
+            "kind": "token",
+            "name": "END",
+            "queryReachable": true
+        },
+        {
+            "id": "token:EQ_DOUBLE",
+            "kind": "token",
+            "name": "EQ_DOUBLE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:EQ_SINGLE",
+            "kind": "token",
+            "name": "EQ_SINGLE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:ESCAPE_CHAR_COMMON",
+            "kind": "token",
+            "name": "ESCAPE_CHAR_COMMON",
+            "queryReachable": false
+        },
+        {
+            "id": "token:EXCEPT",
+            "kind": "token",
+            "name": "EXCEPT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:EXCLUDE",
+            "kind": "token",
+            "name": "EXCLUDE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:EXTRACT",
+            "kind": "token",
+            "name": "EXTRACT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:FILL",
+            "kind": "token",
+            "name": "FILL",
+            "queryReachable": true
+        },
+        {
+            "id": "token:FILTER",
+            "kind": "token",
+            "name": "FILTER",
+            "queryReachable": true
+        },
+        {
+            "id": "token:FINAL",
+            "kind": "token",
+            "name": "FINAL",
+            "queryReachable": true
+        },
+        {
+            "id": "token:FINALLY",
+            "kind": "token",
+            "name": "FINALLY",
+            "queryReachable": true
+        },
+        {
+            "id": "token:FIRST",
+            "kind": "token",
+            "name": "FIRST",
+            "queryReachable": true
+        },
+        {
+            "id": "token:FLOATING_LITERAL",
+            "kind": "token",
+            "name": "FLOATING_LITERAL",
+            "queryReachable": true
+        },
+        {
+            "id": "token:FN",
+            "kind": "token",
+            "name": "FN",
+            "queryReachable": true
+        },
+        {
+            "id": "token:FOLLOWING",
+            "kind": "token",
+            "name": "FOLLOWING",
+            "queryReachable": true
+        },
+        {
+            "id": "token:FOR",
+            "kind": "token",
+            "name": "FOR",
+            "queryReachable": true
+        },
+        {
+            "id": "token:FROM",
+            "kind": "token",
+            "name": "FROM",
+            "queryReachable": true
+        },
+        {
+            "id": "token:FULL",
+            "kind": "token",
+            "name": "FULL",
+            "queryReachable": true
+        },
+        {
+            "id": "token:FULL_STRING_ESCAPE_TRIGGER",
+            "kind": "token",
+            "name": "FULL_STRING_ESCAPE_TRIGGER",
+            "queryReachable": false
+        },
+        {
+            "id": "token:FULL_STRING_TEXT",
+            "kind": "token",
+            "name": "FULL_STRING_TEXT",
+            "queryReachable": false
+        },
+        {
+            "id": "token:FUN",
+            "kind": "token",
+            "name": "FUN",
+            "queryReachable": true
+        },
+        {
+            "id": "token:GROUP",
+            "kind": "token",
+            "name": "GROUP",
+            "queryReachable": true
+        },
+        {
+            "id": "token:GROUPING",
+            "kind": "token",
+            "name": "GROUPING",
+            "queryReachable": true
+        },
+        {
+            "id": "token:GT",
+            "kind": "token",
+            "name": "GT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:GT_EQ",
+            "kind": "token",
+            "name": "GT_EQ",
+            "queryReachable": true
+        },
+        {
+            "id": "token:HASH",
+            "kind": "token",
+            "name": "HASH",
+            "queryReachable": true
+        },
+        {
+            "id": "token:HASH_COMMENT",
+            "kind": "token",
+            "name": "HASH_COMMENT",
+            "queryReachable": false
+        },
+        {
+            "id": "token:HAVING",
+            "kind": "token",
+            "name": "HAVING",
+            "queryReachable": true
+        },
+        {
+            "id": "token:HEXADECIMAL_LITERAL",
+            "kind": "token",
+            "name": "HEXADECIMAL_LITERAL",
+            "queryReachable": true
+        },
+        {
+            "id": "token:HOGQLX_TEXT_TEXT",
+            "kind": "token",
+            "name": "HOGQLX_TEXT_TEXT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:HOGQLX_TEXT_WS",
+            "kind": "token",
+            "name": "HOGQLX_TEXT_WS",
+            "queryReachable": false
+        },
+        {
+            "id": "token:HOUR",
+            "kind": "token",
+            "name": "HOUR",
+            "queryReachable": true
+        },
+        {
+            "id": "token:ID",
+            "kind": "token",
+            "name": "ID",
+            "queryReachable": true
+        },
+        {
+            "id": "token:IDENTIFIER",
+            "kind": "token",
+            "name": "IDENTIFIER",
+            "queryReachable": true
+        },
+        {
+            "id": "token:IF",
+            "kind": "token",
+            "name": "IF",
+            "queryReachable": true
+        },
+        {
+            "id": "token:IGNORE",
+            "kind": "token",
+            "name": "IGNORE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:ILIKE",
+            "kind": "token",
+            "name": "ILIKE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:IN",
+            "kind": "token",
+            "name": "IN",
+            "queryReachable": true
+        },
+        {
+            "id": "token:INCLUDE",
+            "kind": "token",
+            "name": "INCLUDE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:INF",
+            "kind": "token",
+            "name": "INF",
+            "queryReachable": true
+        },
+        {
+            "id": "token:INNER",
+            "kind": "token",
+            "name": "INNER",
+            "queryReachable": true
+        },
+        {
+            "id": "token:INTERPOLATE",
+            "kind": "token",
+            "name": "INTERPOLATE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:INTERSECT",
+            "kind": "token",
+            "name": "INTERSECT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:INTERVAL",
+            "kind": "token",
+            "name": "INTERVAL",
+            "queryReachable": true
+        },
+        {
+            "id": "token:IREGEX_DOUBLE",
+            "kind": "token",
+            "name": "IREGEX_DOUBLE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:IREGEX_SINGLE",
+            "kind": "token",
+            "name": "IREGEX_SINGLE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:IS",
+            "kind": "token",
+            "name": "IS",
+            "queryReachable": true
+        },
+        {
+            "id": "token:JOIN",
+            "kind": "token",
+            "name": "JOIN",
+            "queryReachable": true
+        },
+        {
+            "id": "token:KEY",
+            "kind": "token",
+            "name": "KEY",
+            "queryReachable": true
+        },
+        {
+            "id": "token:LAMBDA",
+            "kind": "token",
+            "name": "LAMBDA",
+            "queryReachable": true
+        },
+        {
+            "id": "token:LAST",
+            "kind": "token",
+            "name": "LAST",
+            "queryReachable": true
+        },
+        {
+            "id": "token:LBRACE",
+            "kind": "token",
+            "name": "LBRACE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:LBRACKET",
+            "kind": "token",
+            "name": "LBRACKET",
+            "queryReachable": true
+        },
+        {
+            "id": "token:LEADING",
+            "kind": "token",
+            "name": "LEADING",
+            "queryReachable": true
+        },
+        {
+            "id": "token:LEFT",
+            "kind": "token",
+            "name": "LEFT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:LET",
+            "kind": "token",
+            "name": "LET",
+            "queryReachable": true
+        },
+        {
+            "id": "token:LIKE",
+            "kind": "token",
+            "name": "LIKE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:LIMIT",
+            "kind": "token",
+            "name": "LIMIT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:LOCAL",
+            "kind": "token",
+            "name": "LOCAL",
+            "queryReachable": true
+        },
+        {
+            "id": "token:LPAREN",
+            "kind": "token",
+            "name": "LPAREN",
+            "queryReachable": true
+        },
+        {
+            "id": "token:LT",
+            "kind": "token",
+            "name": "LT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:LT_EQ",
+            "kind": "token",
+            "name": "LT_EQ",
+            "queryReachable": true
+        },
+        {
+            "id": "token:LT_SLASH",
+            "kind": "token",
+            "name": "LT_SLASH",
+            "queryReachable": true
+        },
+        {
+            "id": "token:MALFORMED_BINARY_LITERAL",
+            "kind": "token",
+            "name": "MALFORMED_BINARY_LITERAL",
+            "queryReachable": false
+        },
+        {
+            "id": "token:MATERIALIZED",
+            "kind": "token",
+            "name": "MATERIALIZED",
+            "queryReachable": true
+        },
+        {
+            "id": "token:MINUTE",
+            "kind": "token",
+            "name": "MINUTE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:MONTH",
+            "kind": "token",
+            "name": "MONTH",
+            "queryReachable": true
+        },
+        {
+            "id": "token:MULTI_LINE_COMMENT",
+            "kind": "token",
+            "name": "MULTI_LINE_COMMENT",
+            "queryReachable": false
+        },
+        {
+            "id": "token:NAME",
+            "kind": "token",
+            "name": "NAME",
+            "queryReachable": true
+        },
+        {
+            "id": "token:NAN_SQL",
+            "kind": "token",
+            "name": "NAN_SQL",
+            "queryReachable": true
+        },
+        {
+            "id": "token:NATURAL",
+            "kind": "token",
+            "name": "NATURAL",
+            "queryReachable": true
+        },
+        {
+            "id": "token:NOT",
+            "kind": "token",
+            "name": "NOT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:NOT_EQ",
+            "kind": "token",
+            "name": "NOT_EQ",
+            "queryReachable": true
+        },
+        {
+            "id": "token:NOT_IREGEX",
+            "kind": "token",
+            "name": "NOT_IREGEX",
+            "queryReachable": true
+        },
+        {
+            "id": "token:NOT_REGEX",
+            "kind": "token",
+            "name": "NOT_REGEX",
+            "queryReachable": true
+        },
+        {
+            "id": "token:NULLISH",
+            "kind": "token",
+            "name": "NULLISH",
+            "queryReachable": true
+        },
+        {
+            "id": "token:NULLS",
+            "kind": "token",
+            "name": "NULLS",
+            "queryReachable": true
+        },
+        {
+            "id": "token:NULL_PROPERTY",
+            "kind": "token",
+            "name": "NULL_PROPERTY",
+            "queryReachable": true
+        },
+        {
+            "id": "token:NULL_SAFE_EQ",
+            "kind": "token",
+            "name": "NULL_SAFE_EQ",
+            "queryReachable": true
+        },
+        {
+            "id": "token:NULL_SQL",
+            "kind": "token",
+            "name": "NULL_SQL",
+            "queryReachable": true
+        },
+        {
+            "id": "token:OCTAL_LITERAL",
+            "kind": "token",
+            "name": "OCTAL_LITERAL",
+            "queryReachable": true
+        },
+        {
+            "id": "token:OCTAL_PREFIX_LITERAL",
+            "kind": "token",
+            "name": "OCTAL_PREFIX_LITERAL",
+            "queryReachable": true
+        },
+        {
+            "id": "token:OFFSET",
+            "kind": "token",
+            "name": "OFFSET",
+            "queryReachable": true
+        },
+        {
+            "id": "token:ON",
+            "kind": "token",
+            "name": "ON",
+            "queryReachable": true
+        },
+        {
+            "id": "token:OR",
+            "kind": "token",
+            "name": "OR",
+            "queryReachable": true
+        },
+        {
+            "id": "token:ORDER",
+            "kind": "token",
+            "name": "ORDER",
+            "queryReachable": true
+        },
+        {
+            "id": "token:OUTER",
+            "kind": "token",
+            "name": "OUTER",
+            "queryReachable": true
+        },
+        {
+            "id": "token:OVER",
+            "kind": "token",
+            "name": "OVER",
+            "queryReachable": true
+        },
+        {
+            "id": "token:PARTITION",
+            "kind": "token",
+            "name": "PARTITION",
+            "queryReachable": true
+        },
+        {
+            "id": "token:PERCENT",
+            "kind": "token",
+            "name": "PERCENT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:PIVOT",
+            "kind": "token",
+            "name": "PIVOT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:PLUS",
+            "kind": "token",
+            "name": "PLUS",
+            "queryReachable": true
+        },
+        {
+            "id": "token:POSITIONAL",
+            "kind": "token",
+            "name": "POSITIONAL",
+            "queryReachable": true
+        },
+        {
+            "id": "token:PRECEDING",
+            "kind": "token",
+            "name": "PRECEDING",
+            "queryReachable": true
+        },
+        {
+            "id": "token:PREWHERE",
+            "kind": "token",
+            "name": "PREWHERE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:QUALIFY",
+            "kind": "token",
+            "name": "QUALIFY",
+            "queryReachable": true
+        },
+        {
+            "id": "token:QUARTER",
+            "kind": "token",
+            "name": "QUARTER",
+            "queryReachable": true
+        },
+        {
+            "id": "token:QUERY",
+            "kind": "token",
+            "name": "QUERY",
+            "queryReachable": true
+        },
+        {
+            "id": "token:QUOTED_IDENTIFIER",
+            "kind": "token",
+            "name": "QUOTED_IDENTIFIER",
+            "queryReachable": true
+        },
+        {
+            "id": "token:QUOTE_DOUBLE",
+            "kind": "token",
+            "name": "QUOTE_DOUBLE",
+            "queryReachable": false
+        },
+        {
+            "id": "token:QUOTE_SINGLE",
+            "kind": "token",
+            "name": "QUOTE_SINGLE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:QUOTE_SINGLE_TEMPLATE",
+            "kind": "token",
+            "name": "QUOTE_SINGLE_TEMPLATE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:QUOTE_SINGLE_TEMPLATE_FULL",
+            "kind": "token",
+            "name": "QUOTE_SINGLE_TEMPLATE_FULL",
+            "queryReachable": false
+        },
+        {
+            "id": "token:RANGE",
+            "kind": "token",
+            "name": "RANGE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:RBRACE",
+            "kind": "token",
+            "name": "RBRACE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:RBRACKET",
+            "kind": "token",
+            "name": "RBRACKET",
+            "queryReachable": true
+        },
+        {
+            "id": "token:RECURSIVE",
+            "kind": "token",
+            "name": "RECURSIVE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:REGEX_DOUBLE",
+            "kind": "token",
+            "name": "REGEX_DOUBLE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:REGEX_SINGLE",
+            "kind": "token",
+            "name": "REGEX_SINGLE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:REPLACE",
+            "kind": "token",
+            "name": "REPLACE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:RETURN",
+            "kind": "token",
+            "name": "RETURN",
+            "queryReachable": true
+        },
+        {
+            "id": "token:RIGHT",
+            "kind": "token",
+            "name": "RIGHT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:ROLLUP",
+            "kind": "token",
+            "name": "ROLLUP",
+            "queryReachable": true
+        },
+        {
+            "id": "token:ROW",
+            "kind": "token",
+            "name": "ROW",
+            "queryReachable": true
+        },
+        {
+            "id": "token:ROWS",
+            "kind": "token",
+            "name": "ROWS",
+            "queryReachable": true
+        },
+        {
+            "id": "token:RPAREN",
+            "kind": "token",
+            "name": "RPAREN",
+            "queryReachable": true
+        },
+        {
+            "id": "token:SAMPLE",
+            "kind": "token",
+            "name": "SAMPLE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:SECOND",
+            "kind": "token",
+            "name": "SECOND",
+            "queryReachable": true
+        },
+        {
+            "id": "token:SELECT",
+            "kind": "token",
+            "name": "SELECT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:SEMI",
+            "kind": "token",
+            "name": "SEMI",
+            "queryReachable": true
+        },
+        {
+            "id": "token:SEMICOLON",
+            "kind": "token",
+            "name": "SEMICOLON",
+            "queryReachable": true
+        },
+        {
+            "id": "token:SETS",
+            "kind": "token",
+            "name": "SETS",
+            "queryReachable": true
+        },
+        {
+            "id": "token:SETTINGS",
+            "kind": "token",
+            "name": "SETTINGS",
+            "queryReachable": true
+        },
+        {
+            "id": "token:SINGLE_LINE_COMMENT",
+            "kind": "token",
+            "name": "SINGLE_LINE_COMMENT",
+            "queryReachable": false
+        },
+        {
+            "id": "token:SLASH",
+            "kind": "token",
+            "name": "SLASH",
+            "queryReachable": true
+        },
+        {
+            "id": "token:SLASH_GT",
+            "kind": "token",
+            "name": "SLASH_GT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:STEP",
+            "kind": "token",
+            "name": "STEP",
+            "queryReachable": true
+        },
+        {
+            "id": "token:STRING_ESCAPE_TRIGGER",
+            "kind": "token",
+            "name": "STRING_ESCAPE_TRIGGER",
+            "queryReachable": true
+        },
+        {
+            "id": "token:STRING_LITERAL",
+            "kind": "token",
+            "name": "STRING_LITERAL",
+            "queryReachable": true
+        },
+        {
+            "id": "token:STRING_TEXT",
+            "kind": "token",
+            "name": "STRING_TEXT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:SUBSTRING",
+            "kind": "token",
+            "name": "SUBSTRING",
+            "queryReachable": true
+        },
+        {
+            "id": "token:TAGC_MULTI_LINE_COMMENT",
+            "kind": "token",
+            "name": "TAGC_MULTI_LINE_COMMENT",
+            "queryReachable": false
+        },
+        {
+            "id": "token:TAGC_SINGLE_LINE_COMMENT",
+            "kind": "token",
+            "name": "TAGC_SINGLE_LINE_COMMENT",
+            "queryReachable": false
+        },
+        {
+            "id": "token:TAGC_WS",
+            "kind": "token",
+            "name": "TAGC_WS",
+            "queryReachable": false
+        },
+        {
+            "id": "token:TAG_MULTI_LINE_COMMENT",
+            "kind": "token",
+            "name": "TAG_MULTI_LINE_COMMENT",
+            "queryReachable": false
+        },
+        {
+            "id": "token:TAG_SINGLE_LINE_COMMENT",
+            "kind": "token",
+            "name": "TAG_SINGLE_LINE_COMMENT",
+            "queryReachable": false
+        },
+        {
+            "id": "token:TAG_WS",
+            "kind": "token",
+            "name": "TAG_WS",
+            "queryReachable": false
+        },
+        {
+            "id": "token:THEN",
+            "kind": "token",
+            "name": "THEN",
+            "queryReachable": true
+        },
+        {
+            "id": "token:THROW",
+            "kind": "token",
+            "name": "THROW",
+            "queryReachable": true
+        },
+        {
+            "id": "token:TIES",
+            "kind": "token",
+            "name": "TIES",
+            "queryReachable": true
+        },
+        {
+            "id": "token:TIME",
+            "kind": "token",
+            "name": "TIME",
+            "queryReachable": true
+        },
+        {
+            "id": "token:TIMESTAMP",
+            "kind": "token",
+            "name": "TIMESTAMP",
+            "queryReachable": true
+        },
+        {
+            "id": "token:TO",
+            "kind": "token",
+            "name": "TO",
+            "queryReachable": true
+        },
+        {
+            "id": "token:TOP",
+            "kind": "token",
+            "name": "TOP",
+            "queryReachable": true
+        },
+        {
+            "id": "token:TOTALS",
+            "kind": "token",
+            "name": "TOTALS",
+            "queryReachable": true
+        },
+        {
+            "id": "token:TRAILING",
+            "kind": "token",
+            "name": "TRAILING",
+            "queryReachable": true
+        },
+        {
+            "id": "token:TRIM",
+            "kind": "token",
+            "name": "TRIM",
+            "queryReachable": true
+        },
+        {
+            "id": "token:TRUNCATE",
+            "kind": "token",
+            "name": "TRUNCATE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:TRY",
+            "kind": "token",
+            "name": "TRY",
+            "queryReachable": true
+        },
+        {
+            "id": "token:TRY_CAST",
+            "kind": "token",
+            "name": "TRY_CAST",
+            "queryReachable": true
+        },
+        {
+            "id": "token:UNBOUNDED",
+            "kind": "token",
+            "name": "UNBOUNDED",
+            "queryReachable": true
+        },
+        {
+            "id": "token:UNDERSCORE",
+            "kind": "token",
+            "name": "UNDERSCORE",
+            "queryReachable": false
+        },
+        {
+            "id": "token:UNEXPECTED_CHARACTER",
+            "kind": "token",
+            "name": "UNEXPECTED_CHARACTER",
+            "queryReachable": false
+        },
+        {
+            "id": "token:UNION",
+            "kind": "token",
+            "name": "UNION",
+            "queryReachable": true
+        },
+        {
+            "id": "token:UNPIVOT",
+            "kind": "token",
+            "name": "UNPIVOT",
+            "queryReachable": true
+        },
+        {
+            "id": "token:USING",
+            "kind": "token",
+            "name": "USING",
+            "queryReachable": true
+        },
+        {
+            "id": "token:VALUES",
+            "kind": "token",
+            "name": "VALUES",
+            "queryReachable": true
+        },
+        {
+            "id": "token:WEEK",
+            "kind": "token",
+            "name": "WEEK",
+            "queryReachable": true
+        },
+        {
+            "id": "token:WHEN",
+            "kind": "token",
+            "name": "WHEN",
+            "queryReachable": true
+        },
+        {
+            "id": "token:WHERE",
+            "kind": "token",
+            "name": "WHERE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:WHILE",
+            "kind": "token",
+            "name": "WHILE",
+            "queryReachable": true
+        },
+        {
+            "id": "token:WHITESPACE",
+            "kind": "token",
+            "name": "WHITESPACE",
+            "queryReachable": false
+        },
+        {
+            "id": "token:WINDOW",
+            "kind": "token",
+            "name": "WINDOW",
+            "queryReachable": true
+        },
+        {
+            "id": "token:WITH",
+            "kind": "token",
+            "name": "WITH",
+            "queryReachable": true
+        },
+        {
+            "id": "token:WITHIN",
+            "kind": "token",
+            "name": "WITHIN",
+            "queryReachable": true
+        },
+        {
+            "id": "token:YEAR",
+            "kind": "token",
+            "name": "YEAR",
+            "queryReachable": true
+        },
+        {
+            "id": "token:ZONE",
+            "kind": "token",
+            "name": "ZONE",
+            "queryReachable": true
+        }
+    ],
+    "grammarSha256": "c255b1c828ea34b4eb5373dd1a153bbcf69f4f9eb58a900d353972ce07724242",
+    "languageVersion": "1.0.0",
+    "queryEntryPoint": "select",
+    "schemaVersion": 1,
+    "valid": false,
+    "validationErrors": [
+        {
+            "alternativeCount": 3,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "alias"
+        },
+        {
+            "alternativeCount": 2,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "columnExprTupleOrSingle"
+        },
+        {
+            "alternativeCount": 2,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "columnIdentifier"
+        },
+        {
+            "alternativeCount": 4,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "columnTypeCastIdentifier"
+        },
+        {
+            "alternativeCount": 2,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "declaration"
+        },
+        {
+            "alternativeCount": 3,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "floatingLiteral"
+        },
+        {
+            "alternativeCount": 3,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "hogqlxChildElement"
+        },
+        {
+            "alternativeCount": 3,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "hogqlxTagAttribute"
+        },
+        {
+            "alternativeCount": 4,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "identifier"
+        },
+        {
+            "alternativeCount": 3,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "implicitAlias"
+        },
+        {
+            "alternativeCount": 3,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "joinConstraintClause"
+        },
+        {
+            "alternativeCount": 2,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "joinOpCross"
+        },
+        {
+            "alternativeCount": 2,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "limitAndOffsetClause"
+        },
+        {
+            "alternativeCount": 3,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "limitAndOffsetClauseOptional"
+        },
+        {
+            "alternativeCount": 3,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "literal"
+        },
+        {
+            "alternativeCount": 2,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "ratioExpr"
+        },
+        {
+            "alternativeCount": 4,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "selectStmtWithParens"
+        },
+        {
+            "alternativeCount": 11,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "statement"
+        },
+        {
+            "alternativeCount": 2,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "string"
+        },
+        {
+            "alternativeCount": 2,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": true,
+            "rule": "stringContents"
+        },
+        {
+            "alternativeCount": 2,
+            "code": "UNLABELED_MULTI_ALTERNATIVE_RULE",
+            "queryReachable": false,
+            "rule": "stringContentsFull"
+        }
+    ]
+}

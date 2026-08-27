@@ -1,6 +1,16 @@
 {
     "antlrVersion": "4.13.2",
     "canonicalParser": "cpp-antlr",
+    "corpora": [
+        {
+            "manifestPath": "corpus/expr_select_cases.json",
+            "manifestSha256": "100c08ef64c9a02b956f5bbaca265c3b47993acf26e000e1812f110ae5112a3d",
+            "oraclePath": "corpus/expr_select_cpp_oracle.jsonl",
+            "oracleSha256": "c45fa533a9fb9cb80b7a4009fc468b6e1a76ef1ac347220a0feb5a91453c500b",
+            "schemaVersion": 1,
+            "slice": "expression-and-plain-select"
+        }
+    ],
     "entryPoints": {
         "expression": "expr",
         "query": "select"
@@ -19,6 +29,11 @@
             "sha256": "4cc3cf6f6f8d2584df7cae12a31d546c6bffef3e0e85d7101e7749d6bd0f5430"
         }
     ],
+    "grammarFeatureManifest": {
+        "path": "grammar-features.json",
+        "schemaVersion": 1,
+        "sha256": "b116128c3972a3c0ac3988f9d7ed9b16f4d0f58514e788c41604fae0b97ecbae"
+    },
     "grammarSha256": "c255b1c828ea34b4eb5373dd1a153bbcf69f4f9eb58a900d353972ce07724242",
     "languageVersion": "1.0.0",
     "schemaVersion": 1

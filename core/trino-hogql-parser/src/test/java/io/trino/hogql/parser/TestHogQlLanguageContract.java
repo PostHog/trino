@@ -42,6 +42,9 @@ public class TestHogQlLanguageContract
         assertThat(contract.antlrVersion()).isEqualTo("4.13.2");
         assertThat(contract.canonicalParser()).isEqualTo("cpp-antlr");
         assertThat(contract.entryPoints()).containsEntry("query", "select");
+        assertThat(contract.grammarFeatureManifest().schemaVersion()).isEqualTo(1);
+        assertThat(contract.corpora()).singleElement()
+                .satisfies(corpus -> assertThat(corpus.slice()).isEqualTo("expression-and-plain-select"));
         assertThat(contract.grammarSha256()).isEqualTo("c255b1c828ea34b4eb5373dd1a153bbcf69f4f9eb58a900d353972ce07724242");
     }
 
@@ -79,6 +82,23 @@ public class TestHogQlLanguageContract
         }
 
         assertThat(HexFormat.of().formatHex(aggregate.digest())).isEqualTo(contract.grammarSha256());
+    }
+
+    @Test
+    public void testPublishedManifestsMatchLanguageDescriptor()
+            throws IOException
+    {
+        HogQlLanguageContract contract = HogQlLanguageContract.current();
+        HogQlLanguageContract.GrammarFeatureManifest featureManifest = contract.grammarFeatureManifest();
+        assertThat(sha256(readResource(LANGUAGE_RESOURCE_ROOT + featureManifest.path())))
+                .isEqualTo(featureManifest.sha256());
+
+        for (HogQlLanguageContract.Corpus corpus : contract.corpora()) {
+            assertThat(sha256(readResource(LANGUAGE_RESOURCE_ROOT + corpus.manifestPath())))
+                    .isEqualTo(corpus.manifestSha256());
+            assertThat(sha256(readResource(LANGUAGE_RESOURCE_ROOT + corpus.oraclePath())))
+                    .isEqualTo(corpus.oracleSha256());
+        }
     }
 
     private static byte[] readResource(String path)

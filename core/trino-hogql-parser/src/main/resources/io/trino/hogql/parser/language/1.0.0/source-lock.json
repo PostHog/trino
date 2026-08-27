@@ -1,6 +1,6 @@
 {
-  "descriptorSha256": "dfb983a1b449cbf0e09481ac4fbbceb8e12f62184f361971f51768b0f6575b25",
+  "descriptorSha256": "42250da46fd4dda2b8889007c4aa5b7443b674c800066a716fc413a9f0f8889d",
   "schemaVersion": 1,
   "sourceRepository": "https://github.com/PostHog/posthog",
-  "sourceRevision": "02508a8eafa30ca2b1ae561c921a8e64d4332dd6"
+  "sourceRevision": "47a7b39826348448f82ee5bdf5a399cbc0a4c4b2"
 }

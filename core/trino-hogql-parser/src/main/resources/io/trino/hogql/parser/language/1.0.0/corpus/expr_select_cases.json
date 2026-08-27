@@ -1,0 +1,210 @@
+{
+    "cases": [
+        {
+            "accepted": true,
+            "category": "arithmetic-expression",
+            "entryPoint": "expression",
+            "id": "expr.accept.arithmetic",
+            "source": "-value * 2 + 1"
+        },
+        {
+            "accepted": true,
+            "category": "array-expression",
+            "entryPoint": "expression",
+            "id": "expr.accept.array",
+            "source": "[1, 2, 3]"
+        },
+        {
+            "accepted": true,
+            "category": "between-predicate",
+            "entryPoint": "expression",
+            "id": "expr.accept.between",
+            "source": "value BETWEEN 1 AND 10"
+        },
+        {
+            "accepted": true,
+            "category": "boolean-expression",
+            "entryPoint": "expression",
+            "id": "expr.accept.boolean",
+            "source": "NOT enabled OR value >= 10"
+        },
+        {
+            "accepted": true,
+            "category": "case-expression",
+            "entryPoint": "expression",
+            "id": "expr.accept.case",
+            "source": "CASE WHEN enabled THEN 1 ELSE 0 END"
+        },
+        {
+            "accepted": true,
+            "category": "cast-expression",
+            "entryPoint": "expression",
+            "id": "expr.accept.cast",
+            "source": "CAST(value AS INT)"
+        },
+        {
+            "accepted": true,
+            "category": "field-reference",
+            "entryPoint": "expression",
+            "id": "expr.accept.dotted-field",
+            "source": "properties.plan"
+        },
+        {
+            "accepted": true,
+            "category": "function-call",
+            "entryPoint": "expression",
+            "id": "expr.accept.function",
+            "source": "coalesce(value, 0)"
+        },
+        {
+            "accepted": true,
+            "category": "in-predicate",
+            "entryPoint": "expression",
+            "id": "expr.accept.in-list",
+            "source": "value IN (1, 2, 3)"
+        },
+        {
+            "accepted": true,
+            "category": "literal-expression",
+            "entryPoint": "expression",
+            "id": "expr.accept.literal-boolean",
+            "source": "true"
+        },
+        {
+            "accepted": true,
+            "category": "literal-expression",
+            "entryPoint": "expression",
+            "id": "expr.accept.literal-null",
+            "source": "null"
+        },
+        {
+            "accepted": true,
+            "category": "literal-expression",
+            "entryPoint": "expression",
+            "id": "expr.accept.literal-number",
+            "source": "42"
+        },
+        {
+            "accepted": true,
+            "category": "literal-expression",
+            "entryPoint": "expression",
+            "id": "expr.accept.literal-string",
+            "source": "'example'"
+        },
+        {
+            "accepted": true,
+            "category": "null-predicate",
+            "entryPoint": "expression",
+            "id": "expr.accept.null-predicate",
+            "source": "value IS NULL"
+        },
+        {
+            "accepted": true,
+            "category": "tuple-expression",
+            "entryPoint": "expression",
+            "id": "expr.accept.tuple",
+            "source": "(1, 'example')"
+        },
+        {
+            "accepted": false,
+            "category": "invalid-expression",
+            "entryPoint": "expression",
+            "errorCategory": "incomplete-input",
+            "id": "expr.reject.incomplete-binary",
+            "source": "1 +"
+        },
+        {
+            "accepted": false,
+            "category": "invalid-expression",
+            "entryPoint": "expression",
+            "errorCategory": "unclosed-delimiter",
+            "id": "expr.reject.unclosed-tuple",
+            "source": "(1, 2"
+        },
+        {
+            "accepted": false,
+            "category": "invalid-expression",
+            "entryPoint": "expression",
+            "errorCategory": "unexpected-character",
+            "id": "expr.reject.unexpected-character",
+            "source": "value @ 1"
+        },
+        {
+            "accepted": true,
+            "category": "select-aggregation",
+            "entryPoint": "query",
+            "id": "query.accept.aggregate",
+            "source": "SELECT event, count() AS total FROM events GROUP BY event HAVING total > 1"
+        },
+        {
+            "accepted": true,
+            "category": "select-query",
+            "entryPoint": "query",
+            "id": "query.accept.constant",
+            "source": "SELECT 1"
+        },
+        {
+            "accepted": true,
+            "category": "select-query",
+            "entryPoint": "query",
+            "id": "query.accept.multiline",
+            "source": "SELECT event,\n    value\nFROM events"
+        },
+        {
+            "accepted": true,
+            "category": "select-ordering",
+            "entryPoint": "query",
+            "id": "query.accept.order-limit-offset",
+            "source": "SELECT event FROM events ORDER BY event DESC LIMIT 10 OFFSET 2"
+        },
+        {
+            "accepted": true,
+            "category": "select-query",
+            "entryPoint": "query",
+            "id": "query.accept.projection-from",
+            "source": "SELECT event, value + 1 AS next_value FROM events"
+        },
+        {
+            "accepted": true,
+            "category": "select-filter",
+            "entryPoint": "query",
+            "id": "query.accept.where",
+            "source": "SELECT event FROM events WHERE event = '$pageview'"
+        },
+        {
+            "accepted": false,
+            "category": "invalid-query",
+            "entryPoint": "query",
+            "errorCategory": "missing-projection",
+            "id": "query.reject.missing-projection",
+            "source": "SELECT"
+        },
+        {
+            "accepted": false,
+            "category": "invalid-query",
+            "entryPoint": "query",
+            "errorCategory": "missing-source",
+            "id": "query.reject.missing-source",
+            "source": "SELECT 1 FROM"
+        },
+        {
+            "accepted": false,
+            "category": "invalid-query",
+            "entryPoint": "query",
+            "errorCategory": "missing-predicate",
+            "id": "query.reject.missing-where-expression",
+            "source": "SELECT 1 WHERE"
+        },
+        {
+            "accepted": false,
+            "category": "invalid-query",
+            "entryPoint": "query",
+            "errorCategory": "incomplete-input",
+            "id": "query.reject.trailing-comparison",
+            "source": "SELECT 1 FROM events WHERE value ="
+        }
+    ],
+    "provenance": "synthetic-public-safe",
+    "schemaVersion": 1,
+    "slice": "expression-and-plain-select"
+}
