@@ -1,0 +1,8 @@
+{"id":"missing-projection","source":"SELECT"}
+{"id":"trailing-binary-operator","source":"SELECT 1 +"}
+{"id":"unclosed-tuple","source":"SELECT (1, 2"}
+{"id":"unexpected-character","source":"SELECT value @ 1"}
+{"id":"missing-source","source":"SELECT 1 FROM"}
+{"id":"missing-predicate","source":"SELECT 1 WHERE"}
+{"id":"unclosed-string","source":"SELECT 'example"}
+{"id":"second-statement","source":"SELECT 1; SELECT 2"}
