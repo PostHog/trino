@@ -31,9 +31,12 @@ import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
+import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
+import io.trino.hogql.parser.tree.HogQlQuery.Relation;
 import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
+import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
@@ -443,7 +446,7 @@ public final class HogQlParser
             List<Projection> projections = selectColumns(select.selectColumnExprListBeforeFrom()).stream()
                     .map(this::buildProjection)
                     .toList();
-            Optional<TableReference> from = Optional.ofNullable(select.fromClause())
+            Optional<Relation> from = Optional.ofNullable(select.fromClause())
                     .map(HogQLParser.FromClauseContext::joinExpr)
                     .map(this::buildTableReference);
             Optional<Expression> where = Optional.ofNullable(select.whereClause())
@@ -748,7 +751,7 @@ public final class HogQlParser
         private Expression buildColumnReference(HogQLParser.ColumnIdentifierContext context)
         {
             if (context.placeholder() != null) {
-                throw unsupported(context, "placeholder");
+                return buildPlaceholder(context.placeholder());
             }
             List<Identifier> parts = new ArrayList<>();
             if (context.tableIdentifier() != null) {
@@ -766,12 +769,27 @@ public final class HogQlParser
             return new ColumnReference(parts, sourceSpan(context));
         }
 
-        private TableReference buildTableReference(HogQLParser.JoinExprContext context)
+        private Placeholder buildPlaceholder(HogQLParser.PlaceholderContext context)
         {
-            if (!(context instanceof HogQLParser.JoinExprTableContext table) || table.FINAL() != null || table.sampleClause() != null || !(table.tableExpr() instanceof HogQLParser.TableExprIdentifierContext identifier)) {
+            Expression expression = buildExpression(context.columnExpr());
+            if (!(expression instanceof ColumnReference reference) || reference.parts().size() != 1) {
+                throw unsupported(context, "non-name placeholder");
+            }
+            return new Placeholder(reference.parts().getFirst().value(), sourceSpan(context));
+        }
+
+        private Relation buildTableReference(HogQLParser.JoinExprContext context)
+        {
+            if (!(context instanceof HogQLParser.JoinExprTableContext table) || table.FINAL() != null || table.sampleClause() != null) {
                 throw unsupported(context, "table expression or join");
             }
-            return new TableReference(buildIdentifiers(identifier.tableIdentifier()), sourceSpan(context));
+            if (table.tableExpr() instanceof HogQLParser.TableExprIdentifierContext identifier) {
+                return new TableReference(buildIdentifiers(identifier.tableIdentifier()), sourceSpan(context));
+            }
+            if (table.tableExpr() instanceof HogQLParser.TableExprPlaceholderContext placeholder) {
+                return new TablePlaceholder(buildPlaceholder(placeholder.placeholder()));
+            }
+            throw unsupported(context, "table expression or join");
         }
 
         private List<Identifier> buildIdentifiers(HogQLParser.TableIdentifierContext context)

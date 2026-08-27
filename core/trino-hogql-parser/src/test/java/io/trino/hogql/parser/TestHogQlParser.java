@@ -14,8 +14,10 @@
 package io.trino.hogql.parser;
 
 import io.trino.hogql.parser.tree.HogQlQuery;
+import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
 import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
+import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlSyntaxTree;
 import io.trino.hogql.parser.tree.HogQlSyntaxTree.Element;
 import io.trino.hogql.parser.tree.HogQlSyntaxTree.Node;
@@ -40,7 +42,7 @@ public class TestHogQlParser
             "DROP TABLE events",
             "SELECT 1; SELECT 2",
             "SELECT * FROM",
-            "SELECT {value}",
+            "SELECT {1 + 2}",
             "SELECT 1 GROUP BY 1",
     })
     public void testRejectsSyntaxWithoutAnAstMapping(String hogql)
@@ -58,6 +60,23 @@ public class TestHogQlParser
         assertThat(query.projections()).hasSize(1);
         assertThat(query.from()).isPresent();
         assertThat(query.where()).isPresent();
+    }
+
+    @Test
+    public void testPreservesNamedPlaceholderNamesAndSourceSpans()
+    {
+        HogQlQuery query = parser.parseStatement("SELECT {later},\n {first} + {later}");
+        Placeholder later = (Placeholder) ((ExpressionProjection) query.projections().getFirst()).expression();
+        BinaryExpression addition = (BinaryExpression) ((ExpressionProjection) query.projections().get(1)).expression();
+        Placeholder first = (Placeholder) addition.left();
+        Placeholder repeated = (Placeholder) addition.right();
+
+        assertThat(later.name()).isEqualTo("later");
+        assertThat(later.span()).isEqualTo(new HogQlQuery.SourceSpan(7, 14, 1, 8, 1, 15));
+        assertThat(first.name()).isEqualTo("first");
+        assertThat(first.span()).isEqualTo(new HogQlQuery.SourceSpan(17, 24, 2, 2, 2, 9));
+        assertThat(repeated.name()).isEqualTo("later");
+        assertThat(repeated.span()).isEqualTo(new HogQlQuery.SourceSpan(27, 34, 2, 12, 2, 19));
     }
 
     @Test

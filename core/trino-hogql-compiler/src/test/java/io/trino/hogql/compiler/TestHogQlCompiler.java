@@ -13,6 +13,7 @@
  */
 package io.trino.hogql.compiler;
 
+import io.trino.hogql.compiler.HogQlTypedValue.StringValue;
 import io.trino.spi.Location;
 import io.trino.spi.TrinoException;
 import io.trino.sql.SqlFormatter;
@@ -21,6 +22,7 @@ import io.trino.sql.tree.AllColumns;
 import io.trino.sql.tree.Identifier;
 import io.trino.sql.tree.Node;
 import io.trino.sql.tree.NodeLocation;
+import io.trino.sql.tree.Parameter;
 import io.trino.sql.tree.Predicated;
 import io.trino.sql.tree.Query;
 import io.trino.sql.tree.QuerySpecification;
@@ -29,14 +31,24 @@ import io.trino.sql.tree.Statement;
 import io.trino.sql.tree.Table;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Deque;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 public class TestHogQlCompiler
 {
@@ -148,6 +160,54 @@ public class TestHogQlCompiler
     }
 
     @Test
+    public void testLowersNamedPlaceholdersToOrderedPositionalParameters()
+    {
+        String firstValue = "sensitive-first-value";
+        String laterValue = "sensitive-later-value";
+        Map<String, HogQlTypedValue> bindings = new LinkedHashMap<>();
+        bindings.put("first", typedValue(firstValue));
+        bindings.put("later", typedValue(laterValue));
+
+        HogQlCompilationResult result = compiler.compile("SELECT {later},\n {first} + {later}", bindings);
+        List<Parameter> parameters = parameters(result.statement());
+
+        assertThat(result.parameterNames()).containsExactly("later", "first", "later");
+        assertThat(parameters)
+                .extracting(Parameter::getId)
+                .containsExactly(0, 1, 2);
+        assertThat(parameters)
+                .extracting(Parameter::getLocation)
+                .containsExactly(
+                        Optional.of(new NodeLocation(1, 8)),
+                        Optional.of(new NodeLocation(2, 2)),
+                        Optional.of(new NodeLocation(2, 12)));
+        assertThat(SqlFormatter.formatSql(result.statement()))
+                .contains("?")
+                .doesNotContain(firstValue, laterValue, "{first}", "{later}");
+    }
+
+    @ParameterizedTest
+    @MethodSource("bindingErrors")
+    public void testReportsStableSourceLocatedBindingErrors(
+            String hogql,
+            Map<String, HogQlTypedValue> bindings,
+            String expectedMessage,
+            Location expectedLocation,
+            String sensitiveValue)
+    {
+        TrinoException exception = catchThrowableOfType(
+                TrinoException.class,
+                () -> compiler.compile(hogql, bindings));
+
+        assertThat(exception.getErrorCode()).isEqualTo(HogQlErrorCode.HOGQL_BINDING_ERROR.toErrorCode());
+        assertThat(exception.getLocation()).contains(expectedLocation);
+        assertThat(exception)
+                .hasMessage(expectedMessage)
+                .message()
+                .doesNotContain(sensitiveValue);
+    }
+
+    @Test
     public void testReturnsOnlyStockTrinoTreeNodes()
     {
         Statement statement = compiler.compile("SELECT event, * FROM ducklake.default.events");
@@ -171,5 +231,50 @@ public class TestHogQlCompiler
         assertThat(exception.getErrorCode()).isEqualTo(HogQlErrorCode.HOGQL_SYNTAX_ERROR.toErrorCode());
         assertThat(exception.getLocation()).contains(new Location(2, 1));
         assertThat(exception).hasMessageStartingWith("line 2:1:");
+    }
+
+    private static Stream<Arguments> bindingErrors()
+    {
+        return Stream.of(
+                arguments(
+                        "SELECT\n {missing}",
+                        Map.of(),
+                        "line 2:2: Missing HogQL parameter bindings: missing",
+                        new Location(2, 2),
+                        "sensitive-missing-value"),
+                arguments(
+                        "SELECT 1",
+                        Map.of("extra", typedValue("sensitive-extra-value")),
+                        "line 1:1: Unused HogQL parameter bindings: extra",
+                        new Location(1, 1),
+                        "sensitive-extra-value"),
+                arguments(
+                        "SELECT *\nFROM {source}",
+                        Map.of("source", typedValue("sensitive-table-value")),
+                        "line 2:6: HogQL parameter placeholders are not supported in table positions: source",
+                        new Location(2, 6),
+                        "sensitive-table-value"));
+    }
+
+    private static HogQlTypedValue typedValue(String value)
+    {
+        return new HogQlTypedValue("varchar", new StringValue(value));
+    }
+
+    private static List<Parameter> parameters(Statement statement)
+    {
+        Deque<Node> pending = new ArrayDeque<>();
+        List<Parameter> parameters = new ArrayList<>();
+        pending.add(statement);
+        while (!pending.isEmpty()) {
+            Node node = pending.removeFirst();
+            if (node instanceof Parameter parameter) {
+                parameters.add(parameter);
+            }
+            pending.addAll(node.getChildren());
+        }
+        return parameters.stream()
+                .sorted(Comparator.comparingInt(Parameter::getId))
+                .toList();
     }
 }

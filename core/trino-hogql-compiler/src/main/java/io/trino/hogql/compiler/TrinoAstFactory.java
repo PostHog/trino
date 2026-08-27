@@ -26,9 +26,12 @@ import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
 import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
+import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
+import io.trino.hogql.parser.tree.HogQlQuery.Relation;
 import io.trino.hogql.parser.tree.HogQlQuery.SourceSpan;
 import io.trino.hogql.parser.tree.HogQlQuery.Star;
+import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
@@ -51,6 +54,7 @@ import io.trino.sql.tree.LongLiteral;
 import io.trino.sql.tree.NodeLocation;
 import io.trino.sql.tree.NotExpression;
 import io.trino.sql.tree.NullLiteral;
+import io.trino.sql.tree.Parameter;
 import io.trino.sql.tree.Predicated;
 import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.Query;
@@ -67,22 +71,23 @@ import io.trino.sql.tree.Table;
 import io.trino.sql.tree.WhenClause;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 final class TrinoAstFactory
 {
     private TrinoAstFactory() {}
 
-    public static Statement createStatement(HogQlQuery query)
+    public static Statement createStatement(HogQlQuery query, Map<SourceSpan, Integer> parameterIds)
     {
         NodeLocation location = location(query.span());
         QuerySpecification querySpecification = new QuerySpecification(
                 location,
                 new Select(location, false, query.projections().stream()
-                        .map(TrinoAstFactory::createSelectItem)
+                        .map(projection -> createSelectItem(projection, parameterIds))
                         .toList()),
-                query.from().map(TrinoAstFactory::createTable),
-                query.where().map(TrinoAstFactory::createExpression),
+                query.from().map(TrinoAstFactory::createRelation),
+                query.where().map(expression -> createExpression(expression, parameterIds)),
                 Optional.empty(),
                 Optional.empty(),
                 List.of(),
@@ -100,31 +105,31 @@ final class TrinoAstFactory
                 Optional.empty());
     }
 
-    private static SelectItem createSelectItem(Projection projection)
+    private static SelectItem createSelectItem(Projection projection, Map<SourceSpan, Integer> parameterIds)
     {
         return switch (projection) {
             case Star star -> new AllColumns(location(star.span()));
             case ExpressionProjection expression -> new SingleColumn(
                     location(expression.span()),
-                    createExpression(expression.expression()),
+                    createExpression(expression.expression(), parameterIds),
                     expression.alias().map(TrinoAstFactory::createIdentifier));
         };
     }
 
-    private static Expression createExpression(HogQlQuery.Expression expression)
+    private static Expression createExpression(HogQlQuery.Expression expression, Map<SourceSpan, Integer> parameterIds)
     {
         return switch (expression) {
             case ArrayExpression array -> new Array(
                     location(array.span()),
                     array.values().stream()
-                            .map(TrinoAstFactory::createExpression)
+                            .map(value -> createExpression(value, parameterIds))
                             .toList());
-            case BetweenExpression between -> createBetweenExpression(between);
-            case BinaryExpression binary -> createBinaryExpression(binary);
-            case CaseExpression caseExpression -> createCaseExpression(caseExpression);
+            case BetweenExpression between -> createBetweenExpression(between, parameterIds);
+            case BinaryExpression binary -> createBinaryExpression(binary, parameterIds);
+            case CaseExpression caseExpression -> createCaseExpression(caseExpression, parameterIds);
             case CastExpression cast -> new Cast(
                     location(cast.span()),
-                    createExpression(cast.value()),
+                    createExpression(cast.value(), parameterIds),
                     new GenericDataType(location(cast.type().span()), createIdentifier(cast.type()), List.of()),
                     cast.safe());
             case ColumnReference reference -> createColumnReference(reference);
@@ -132,77 +137,78 @@ final class TrinoAstFactory
                     location(function.span()),
                     QualifiedName.of(List.of(createIdentifier(function.name()))),
                     function.arguments().stream()
-                            .map(TrinoAstFactory::createExpression)
+                            .map(argument -> createExpression(argument, parameterIds))
                             .toList());
-            case InExpression in -> createInExpression(in);
+            case InExpression in -> createInExpression(in, parameterIds);
             case IsNullExpression isNull -> new Predicated(
                     location(isNull.predicateSpan()),
-                    createExpression(isNull.value()),
+                    createExpression(isNull.value(), parameterIds),
                     new IsNullPredicate(location(isNull.predicateSpan()), isNull.negated()));
             case Literal literal -> createLiteral(literal);
+            case Placeholder placeholder -> new Parameter(location(placeholder.span()), parameterIds.get(placeholder.span()));
             case TupleExpression tuple -> new Row(
                     location(tuple.span()),
                     tuple.values().stream()
-                            .map(value -> new Row.Field(location(value.span()), Optional.empty(), createExpression(value)))
+                            .map(value -> new Row.Field(location(value.span()), Optional.empty(), createExpression(value, parameterIds)))
                             .toList());
             case UnaryExpression unary -> switch (unary.operator()) {
-                case NEGATE -> ArithmeticUnaryExpression.negative(location(unary.span()), createExpression(unary.operand()));
-                case NOT -> new NotExpression(location(unary.span()), createExpression(unary.operand()));
-                case POSITIVE -> ArithmeticUnaryExpression.positive(location(unary.span()), createExpression(unary.operand()));
+                case NEGATE -> ArithmeticUnaryExpression.negative(location(unary.span()), createExpression(unary.operand(), parameterIds));
+                case NOT -> new NotExpression(location(unary.span()), createExpression(unary.operand(), parameterIds));
+                case POSITIVE -> ArithmeticUnaryExpression.positive(location(unary.span()), createExpression(unary.operand(), parameterIds));
             };
         };
     }
 
-    private static Expression createCaseExpression(CaseExpression caseExpression)
+    private static Expression createCaseExpression(CaseExpression caseExpression, Map<SourceSpan, Integer> parameterIds)
     {
         NodeLocation location = location(caseExpression.span());
         List<WhenClause> whenClauses = caseExpression.whenClauses().stream()
                 .map(when -> new WhenClause(
                         location(when.span()),
-                        createExpression(when.operand()),
-                        createExpression(when.result())))
+                        createExpression(when.operand(), parameterIds),
+                        createExpression(when.result(), parameterIds)))
                 .toList();
-        Optional<Expression> defaultValue = caseExpression.defaultValue().map(TrinoAstFactory::createExpression);
+        Optional<Expression> defaultValue = caseExpression.defaultValue().map(value -> createExpression(value, parameterIds));
         return caseExpression.operand()
-                .<Expression>map(operand -> new SimpleCaseExpression(location, createExpression(operand), whenClauses, defaultValue))
+                .<Expression>map(operand -> new SimpleCaseExpression(location, createExpression(operand, parameterIds), whenClauses, defaultValue))
                 .orElseGet(() -> new SearchedCaseExpression(location, whenClauses, defaultValue));
     }
 
-    private static Expression createBetweenExpression(BetweenExpression between)
+    private static Expression createBetweenExpression(BetweenExpression between, Map<SourceSpan, Integer> parameterIds)
     {
         NodeLocation location = location(between.predicateSpan());
         return new Predicated(
                 location,
-                createExpression(between.value()),
+                createExpression(between.value(), parameterIds),
                 new BetweenPredicate(
                         location,
                         between.negated(),
                         Optional.empty(),
-                        createExpression(between.min()),
-                        createExpression(between.max())));
+                        createExpression(between.min(), parameterIds),
+                        createExpression(between.max(), parameterIds)));
     }
 
-    private static Expression createInExpression(InExpression in)
+    private static Expression createInExpression(InExpression in, Map<SourceSpan, Integer> parameterIds)
     {
         NodeLocation location = location(in.predicateSpan());
         return new Predicated(
                 location,
-                createExpression(in.value()),
+                createExpression(in.value(), parameterIds),
                 new InPredicate(
                         location,
                         in.negated(),
                         new InListExpression(
                                 location,
                                 in.values().stream()
-                                        .map(TrinoAstFactory::createExpression)
+                                        .map(value -> createExpression(value, parameterIds))
                                         .toList())));
     }
 
-    private static Expression createBinaryExpression(BinaryExpression binary)
+    private static Expression createBinaryExpression(BinaryExpression binary, Map<SourceSpan, Integer> parameterIds)
     {
         NodeLocation location = location(binary.span());
-        Expression left = createExpression(binary.left());
-        Expression right = createExpression(binary.right());
+        Expression left = createExpression(binary.left(), parameterIds);
+        Expression right = createExpression(binary.right(), parameterIds);
         return switch (binary.operator()) {
             case ADD -> new ArithmeticBinaryExpression(location, ArithmeticBinaryExpression.Operator.ADD, left, right);
             case SUBTRACT -> new ArithmeticBinaryExpression(location, ArithmeticBinaryExpression.Operator.SUBTRACT, left, right);
@@ -244,6 +250,14 @@ final class TrinoAstFactory
             expression = new DereferenceExpression(location(reference.span()), expression, createIdentifier(part));
         }
         return expression;
+    }
+
+    private static io.trino.sql.tree.Relation createRelation(Relation relation)
+    {
+        return switch (relation) {
+            case TablePlaceholder _ -> throw new IllegalArgumentException("table placeholder was not validated");
+            case TableReference table -> createTable(table);
+        };
     }
 
     private static Table createTable(TableReference table)

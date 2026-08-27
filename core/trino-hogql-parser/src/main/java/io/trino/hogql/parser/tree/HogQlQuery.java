@@ -18,7 +18,7 @@ import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
-public record HogQlQuery(List<Projection> projections, Optional<TableReference> from, Optional<Expression> where, SourceSpan span)
+public record HogQlQuery(List<Projection> projections, Optional<Relation> from, Optional<Expression> where, SourceSpan span)
 {
     public HogQlQuery
     {
@@ -70,6 +70,7 @@ public record HogQlQuery(List<Projection> projections, Optional<TableReference> 
                     InExpression,
                     IsNullExpression,
                     Literal,
+                    Placeholder,
                     TupleExpression,
                     UnaryExpression
     {
@@ -245,6 +246,19 @@ public record HogQlQuery(List<Projection> projections, Optional<TableReference> 
         }
     }
 
+    public record Placeholder(String name, SourceSpan span)
+            implements Expression
+    {
+        public Placeholder
+        {
+            name = requireNonNull(name, "name is null");
+            if (name.isEmpty()) {
+                throw new IllegalArgumentException("name is empty");
+            }
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
     public record Literal(LiteralKind kind, String value, SourceSpan span)
             implements Expression
     {
@@ -264,7 +278,14 @@ public record HogQlQuery(List<Projection> projections, Optional<TableReference> 
         STRING,
     }
 
+    public sealed interface Relation
+            permits TablePlaceholder, TableReference
+    {
+        SourceSpan span();
+    }
+
     public record TableReference(List<Identifier> parts, SourceSpan span)
+            implements Relation
     {
         public TableReference
         {
@@ -273,6 +294,21 @@ public record HogQlQuery(List<Projection> projections, Optional<TableReference> 
                 throw new IllegalArgumentException("parts is empty");
             }
             span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record TablePlaceholder(Placeholder placeholder)
+            implements Relation
+    {
+        public TablePlaceholder
+        {
+            placeholder = requireNonNull(placeholder, "placeholder is null");
+        }
+
+        @Override
+        public SourceSpan span()
+        {
+            return placeholder.span();
         }
     }
 
