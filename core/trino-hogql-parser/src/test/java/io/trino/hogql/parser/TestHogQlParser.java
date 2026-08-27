@@ -99,6 +99,17 @@ public class TestHogQlParser
                 .contains("hogqlxTagElement");
     }
 
+    @Test
+    public void testSyntaxTreeClassifiesBlockLambdaAsProcedural()
+    {
+        HogQlSyntaxTree syntaxTree = parser.parseSyntax("SELECT value -> { RETURN value }");
+
+        assertThat(syntaxTree.languageClass()).isEqualTo(HogQlSyntaxTree.LanguageClass.PROCEDURAL);
+        assertThat(nodes(syntaxTree.root()))
+                .extracting(Node::rule)
+                .contains("block", "returnStmt");
+    }
+
     private static Stream<Node> nodes(Element element)
     {
         if (!(element instanceof Node node)) {

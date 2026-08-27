@@ -302,10 +302,30 @@ public final class HogQlParser
 
         public HogQlSyntaxTree build(HogQLParser.SelectContext context)
         {
-            HogQlSyntaxTree.LanguageClass languageClass = context.hogqlxTagElement() == null ?
-                    HogQlSyntaxTree.LanguageClass.READ_ONLY_QUERY :
-                    HogQlSyntaxTree.LanguageClass.HOGQLX;
+            HogQlSyntaxTree.LanguageClass languageClass;
+            if (context.hogqlxTagElement() != null) {
+                languageClass = HogQlSyntaxTree.LanguageClass.HOGQLX;
+            }
+            else if (containsRule(context, HogQLParser.RULE_block)) {
+                languageClass = HogQlSyntaxTree.LanguageClass.PROCEDURAL;
+            }
+            else {
+                languageClass = HogQlSyntaxTree.LanguageClass.READ_ONLY_QUERY;
+            }
             return new HogQlSyntaxTree(languageClass, buildNode(context));
+        }
+
+        private static boolean containsRule(ParserRuleContext context, int ruleIndex)
+        {
+            if (context.getRuleIndex() == ruleIndex) {
+                return true;
+            }
+            for (int index = 0; index < context.getChildCount(); index++) {
+                if (context.getChild(index) instanceof ParserRuleContext child && containsRule(child, ruleIndex)) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private HogQlSyntaxTree.Node buildNode(ParserRuleContext context)

@@ -30,6 +30,7 @@ public record HogQlSyntaxTree(LanguageClass languageClass, Node root)
     {
         READ_ONLY_QUERY,
         HOGQLX,
+        PROCEDURAL,
     }
 
     public sealed interface Element
