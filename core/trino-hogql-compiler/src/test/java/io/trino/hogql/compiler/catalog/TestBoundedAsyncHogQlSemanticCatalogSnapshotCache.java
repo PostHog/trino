@@ -20,15 +20,20 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalTable
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalType;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalQualifiedName;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotLoader.LoadRequest;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider.PinRequest;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider.PinnedSnapshot;
 import io.trino.hogql.parser.HogQlLanguageVersion;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
@@ -219,6 +224,77 @@ public class TestBoundedAsyncHogQlSemanticCatalogSnapshotCache
         }
     }
 
+    @Test
+    public void testPinnedSnapshotRemainsStableAcrossRefreshPublication()
+    {
+        AtomicLong ticker = new AtomicLong();
+        ControlledLoader loader = new ControlledLoader();
+        BoundedAsyncHogQlSemanticCatalogSnapshotCache cache = cache(2, ticker, loader);
+        completePrewarm(cache, loader, snapshot(CATALOG, 1));
+        HogQlSemanticCatalogSnapshotProvider provider = HogQlSemanticCatalogSnapshotProvider.fromCache(cache);
+
+        CompletableFuture<HogQlSemanticCatalogSnapshot> load = loader.expect(CATALOG);
+        ticker.set(REFRESH_AFTER.toNanos());
+        PinnedSnapshot pinned = provider.pin(new PinRequest(CATALOG, LANGUAGE_VERSION, OptionalLong.empty()));
+        load.complete(snapshot(CATALOG, 2));
+
+        assertThat(pinned.generation()).isEqualTo(1);
+        assertThat(pinned.snapshot().generation()).isEqualTo(1);
+        assertThat(provider.pin(new PinRequest(CATALOG, LANGUAGE_VERSION, OptionalLong.of(2))).generation()).isEqualTo(2);
+    }
+
+    @Test
+    public void testOrdinaryAndDelimitedCatalogIdentifiersHaveIsolatedEntries()
+    {
+        AtomicLong ticker = new AtomicLong();
+        ControlledLoader loader = new ControlledLoader();
+        BoundedAsyncHogQlSemanticCatalogSnapshotCache cache = cache(2, ticker, loader);
+        PhysicalIdentifier ordinary = new PhysicalIdentifier("sales", false);
+        PhysicalIdentifier delimited = new PhysicalIdentifier("sales", true);
+
+        completePrewarm(cache, loader, snapshot(ordinary, 1));
+        completePrewarm(cache, loader, snapshot(delimited, 2));
+
+        assertThat(cache.currentSnapshot(ordinary)).get().extracting(HogQlSemanticCatalogSnapshot::generation).isEqualTo(1L);
+        assertThat(cache.currentSnapshot(delimited)).get().extracting(HogQlSemanticCatalogSnapshot::generation).isEqualTo(2L);
+        cache.invalidate(ordinary);
+        assertThat(cache.currentSnapshot(delimited)).get().extracting(HogQlSemanticCatalogSnapshot::generation).isEqualTo(2L);
+    }
+
+    @Test
+    public void testMalformedSchemaV2RefreshRetainsLastKnownGoodSnapshot()
+    {
+        AtomicLong ticker = new AtomicLong();
+        ArrayDeque<CompletableFuture<byte[]>> payloads = new ArrayDeque<>();
+        HogQlSemanticCatalogSnapshotLoader jsonLoader = HogQlSemanticCatalogSnapshotLoader.fromJsonTransport(
+                _ -> payloads.remove(),
+                new HogQlSemanticCatalogSnapshotJsonDecoder());
+        BoundedAsyncHogQlSemanticCatalogSnapshotCache cache = cache(
+                2,
+                ticker,
+                catalog -> jsonLoader.load(LoadRequest.latest(catalog, LANGUAGE_VERSION)));
+
+        CompletableFuture<byte[]> initialPayload = new CompletableFuture<>();
+        payloads.add(initialPayload);
+        CompletionStage<HogQlSemanticCatalogSnapshot> initialRefresh = cache.prewarm(CATALOG);
+        initialPayload.complete(snapshotJson(1).getBytes(StandardCharsets.UTF_8));
+        assertThat(initialRefresh.toCompletableFuture()).isCompletedWithValueMatching(snapshot -> snapshot.generation() == 1);
+
+        CompletableFuture<byte[]> malformedPayload = new CompletableFuture<>();
+        payloads.add(malformedPayload);
+        ticker.set(REFRESH_AFTER.toNanos());
+        assertThat(cache.currentSnapshot(CATALOG)).get().extracting(HogQlSemanticCatalogSnapshot::generation).isEqualTo(1L);
+        CompletionStage<HogQlSemanticCatalogSnapshot> malformedRefresh = cache.prewarm(CATALOG);
+        malformedPayload.complete(snapshotJson(2)
+                .replace("\"logicalTables\": []", "\"logicalTables\": {}")
+                .getBytes(StandardCharsets.UTF_8));
+
+        assertThatThrownBy(malformedRefresh.toCompletableFuture()::join)
+                .cause()
+                .isInstanceOf(HogQlSemanticCatalogSnapshotJsonDecoder.DecodeException.class);
+        assertThat(cache.currentSnapshot(CATALOG)).get().extracting(HogQlSemanticCatalogSnapshot::generation).isEqualTo(1L);
+    }
+
     private static BoundedAsyncHogQlSemanticCatalogSnapshotCache cache(int maximumEntries, AtomicLong ticker, SnapshotLoader loader)
     {
         return new BoundedAsyncHogQlSemanticCatalogSnapshotCache(
@@ -284,6 +360,26 @@ public class TestBoundedAsyncHogQlSemanticCatalogSnapshotCache
                                 true)),
                         List.of(),
                         List.of())));
+    }
+
+    private static String snapshotJson(long generation)
+    {
+        return """
+               {
+                 "protocolVersion": 1,
+                 "schemaVersion": 2,
+                 "languageVersion": "1.0.0",
+                 "catalog": {"value": "ducklake", "delimited": false},
+                 "generation": %s,
+                 "logicalTables": [],
+                 "expressionFields": [],
+                 "virtualTables": [],
+                 "savedQueries": [],
+                 "materializedViews": [],
+                 "functions": [],
+                 "modifierDefaults": []
+               }
+               """.formatted(generation);
     }
 
     private static final class ControlledLoader

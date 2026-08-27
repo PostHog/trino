@@ -24,11 +24,14 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestHogQlSemanticCatalogManager
 {
@@ -120,7 +123,72 @@ public class TestHogQlSemanticCatalogManager
             assertThat(manager.cache().currentSnapshot(unusualCatalog)).isEmpty();
         }
         finally {
-            metadata.complete(new HogQlSemanticCatalogSnapshot(1, LANGUAGE_VERSION, unusualCatalog, 1, List.of()));
+            metadata.complete(new HogQlSemanticCatalogSnapshot(2, LANGUAGE_VERSION, unusualCatalog, 1, List.of()));
+            manager.shutdown();
+        }
+    }
+
+    @Test
+    public void testRejectedLoaderWorkIsBackedOffBeforeRetry()
+    {
+        AtomicLong ticker = new AtomicLong();
+        PhysicalIdentifier runningCatalog = new PhysicalIdentifier("running", false);
+        PhysicalIdentifier queuedCatalog = new PhysicalIdentifier("queued", false);
+        PhysicalIdentifier rejectedCatalog = new PhysicalIdentifier("rejected", false);
+        CompletableFuture<Void> runningStarted = new CompletableFuture<>();
+        CompletableFuture<Void> releaseRunning = new CompletableFuture<>();
+        CompletableFuture<Void> rejectedStarted = new CompletableFuture<>();
+        CompletableFuture<HogQlSemanticCatalogSnapshot> rejectedLoad = new CompletableFuture<>();
+        AtomicInteger rejectedLoads = new AtomicInteger();
+        HogQlSemanticCatalogSnapshotLoader loader = request -> switch (request.catalog().value()) {
+            case "running" -> {
+                runningStarted.complete(null);
+                releaseRunning.join();
+                yield CompletableFuture.completedFuture(snapshot(runningCatalog, 1));
+            }
+            case "queued" -> CompletableFuture.completedFuture(snapshot(queuedCatalog, 1));
+            case "rejected" -> {
+                rejectedLoads.incrementAndGet();
+                rejectedStarted.complete(null);
+                yield rejectedLoad;
+            }
+            default -> throw new IllegalStateException("unexpected catalog load");
+        };
+        HogQlSemanticCatalogConfig config = config()
+                .setMaximumEntries(4)
+                .setFailureBackoff(new Duration(10, SECONDS))
+                .setLoaderQueueCapacity(1);
+        HogQlSemanticCatalogManager manager = new HogQlSemanticCatalogManager(config, loader, LANGUAGE_VERSION, ticker::get);
+        try {
+            CompletionStage<HogQlSemanticCatalogSnapshot> runningRefresh = manager.prewarm(runningCatalog);
+            runningStarted.join();
+            CompletionStage<HogQlSemanticCatalogSnapshot> queuedRefresh = manager.prewarm(queuedCatalog);
+            CompletionStage<HogQlSemanticCatalogSnapshot> rejectedRefresh = manager.prewarm(rejectedCatalog);
+
+            assertThatThrownBy(rejectedRefresh.toCompletableFuture()::join)
+                    .cause()
+                    .isInstanceOf(RejectedExecutionException.class);
+            assertThat(rejectedLoads).hasValue(0);
+            assertThat(manager.cache().currentSnapshot(rejectedCatalog)).isEmpty();
+
+            releaseRunning.complete(null);
+            runningRefresh.toCompletableFuture().join();
+            queuedRefresh.toCompletableFuture().join();
+
+            ticker.set(SECONDS.toNanos(10) - 1);
+            assertThat(manager.cache().currentSnapshot(rejectedCatalog)).isEmpty();
+            assertThat(rejectedLoads).hasValue(0);
+
+            ticker.set(SECONDS.toNanos(10));
+            assertThat(manager.cache().currentSnapshot(rejectedCatalog)).isEmpty();
+            rejectedStarted.join();
+            assertThat(rejectedLoads).hasValue(1);
+            rejectedLoad.complete(snapshot(rejectedCatalog, 1));
+            assertThat(manager.cache().currentSnapshot(rejectedCatalog)).get().extracting(HogQlSemanticCatalogSnapshot::generation).isEqualTo(1L);
+        }
+        finally {
+            releaseRunning.complete(null);
+            rejectedLoad.completeExceptionally(new IllegalStateException("test shutdown"));
             manager.shutdown();
         }
     }
@@ -138,6 +206,11 @@ public class TestHogQlSemanticCatalogManager
 
     private static HogQlSemanticCatalogSnapshot snapshot(long generation)
     {
-        return new HogQlSemanticCatalogSnapshot(1, LANGUAGE_VERSION, CATALOG, generation, List.of());
+        return snapshot(CATALOG, generation);
+    }
+
+    private static HogQlSemanticCatalogSnapshot snapshot(PhysicalIdentifier catalog, long generation)
+    {
+        return new HogQlSemanticCatalogSnapshot(2, LANGUAGE_VERSION, catalog, generation, List.of());
     }
 }
