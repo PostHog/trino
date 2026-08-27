@@ -1,0 +1,25 @@
+{
+    "antlrVersion": "4.13.2",
+    "canonicalParser": "cpp-antlr",
+    "entryPoints": {
+        "expression": "expr",
+        "query": "select"
+    },
+    "files": [
+        {
+            "path": "HogQLLexer.common.g4",
+            "sha256": "f5a92ca0c19267ee8ded72fe4f5ca05939aea4bb4e1d6ee3b6bf095622adf268"
+        },
+        {
+            "path": "HogQLLexer.java.g4",
+            "sha256": "04f799086dfa92aacf7caa30c2e1bf75032118c61fe7eb1d80b8dddba7ad3afc"
+        },
+        {
+            "path": "HogQLParser.g4",
+            "sha256": "4cc3cf6f6f8d2584df7cae12a31d546c6bffef3e0e85d7101e7749d6bd0f5430"
+        }
+    ],
+    "grammarSha256": "c255b1c828ea34b4eb5373dd1a153bbcf69f4f9eb58a900d353972ce07724242",
+    "languageVersion": "1.0.0",
+    "schemaVersion": 1
+}

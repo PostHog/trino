@@ -51,6 +51,8 @@ import static java.util.Objects.requireNonNull;
 
 public final class HogQlParser
 {
+    private static final HogQlLanguageVersion CURRENT_LANGUAGE_VERSION = HogQlLanguageContract.current().languageVersion();
+
     private static final ANTLRErrorListener ERROR_LISTENER = new BaseErrorListener()
     {
         @Override
@@ -62,7 +64,16 @@ public final class HogQlParser
 
     public HogQlQuery parseStatement(String hogql)
     {
+        return parseStatement(hogql, CURRENT_LANGUAGE_VERSION);
+    }
+
+    public HogQlQuery parseStatement(String hogql, HogQlLanguageVersion languageVersion)
+    {
         requireNonNull(hogql, "hogql is null");
+        requireNonNull(languageVersion, "languageVersion is null");
+        if (!languageVersion.equals(CURRENT_LANGUAGE_VERSION)) {
+            throw new IllegalArgumentException("unsupported HogQL language version: " + languageVersion);
+        }
 
         try {
             HogQlBaseLexer lexer = new HogQlBaseLexer(CharStreams.fromString(hogql));
