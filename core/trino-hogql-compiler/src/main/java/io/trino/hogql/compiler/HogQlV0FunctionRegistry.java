@@ -145,6 +145,7 @@ final class HogQlV0FunctionRegistry
             scalar("substringUTF8", "substring", signature(2), signature(3)),
             scalar("arrayConcat", "concat", variadicSignature(2)),
             scalar("roundBankers", "round", signature(1), signature(2)),
+            scalar("cityHash64", "cityhash64", signature(1)),
             scalar("hasAny", "arrays_overlap", signature(2)),
             scalar("parseDateTime", "date_parse", signature(2)),
             scalar("toLastDayOfMonth", "last_day_of_month", signature(1)),
