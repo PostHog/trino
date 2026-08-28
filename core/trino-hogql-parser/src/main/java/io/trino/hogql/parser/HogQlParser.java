@@ -1134,6 +1134,9 @@ public final class HogQlParser
 
         private Expression buildExpression(HogQLParser.ColumnExprContext context)
         {
+            if (context instanceof HogQLParser.ColumnExprAliasContext alias) {
+                return buildExpression(alias.columnExpr());
+            }
             if (context instanceof HogQLParser.ColumnExprValuePassthroughContext passthrough) {
                 return buildExpression(passthrough.columnExprValue());
             }

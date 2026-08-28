@@ -346,6 +346,16 @@ public class TestHogQlParser
     }
 
     @Test
+    public void testUnwrapsNestedExpressionAlias()
+    {
+        HogQlQuery query = parser.parseStatement("SELECT md5((first || second) AS TEXT)");
+        FunctionCall md5 = (FunctionCall) ((ExpressionProjection) query.projections().getFirst()).expression();
+
+        assertThat(md5.arguments()).hasSize(1);
+        assertThat(md5.arguments().getFirst()).isInstanceOf(BinaryExpression.class);
+    }
+
+    @Test
     public void testBuildsPivotAstWithCompositeKeysAliasesAndSourceSpans()
     {
         String hogql = "SELECT * FROM orders PIVOT (sum(totalprice) AS total FOR (orderstatus, custkey) " +
