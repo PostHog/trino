@@ -32,6 +32,15 @@ TEMURIN_RELEASE=$("${SOURCE_DIR}/mvnw" -f "${SOURCE_DIR}/pom.xml" --quiet help:e
 TEMURIN_DOWNLOAD_URL="https://api.adoptium.net/v3/binary/version/{release_name}/linux/{arch}/jdk/hotspot/normal/eclipse?project=jdk"
 
 SKIP_TESTS=false
+EXPLICIT_TRINO_SOURCE_REVISION="${TRINO_SOURCE_REVISION:-}"
+TRINO_SOURCE_REVISION="${EXPLICIT_TRINO_SOURCE_REVISION}"
+if [ -z "${TRINO_SOURCE_REVISION}" ] && git -C "${SOURCE_DIR}" rev-parse HEAD >/dev/null 2>&1; then
+    TRINO_SOURCE_REVISION="$(git -C "${SOURCE_DIR}" rev-parse HEAD)"
+fi
+TRINO_SOURCE_REVISION="${TRINO_SOURCE_REVISION:-unknown}"
+HOGQL_LANGUAGE_VERSION="${HOGQL_LANGUAGE_VERSION:-1.0.0}"
+HOGQL_CATALOG_PROTOCOL_VERSION="${HOGQL_CATALOG_PROTOCOL_VERSION:-1}"
+HOGQL_CATALOG_SCHEMA_VERSION="${HOGQL_CATALOG_SCHEMA_VERSION:-2}"
 
 while getopts ":a:h:r:p:t:j:x" o; do
     case "${o}" in
@@ -72,10 +81,23 @@ while getopts ":a:h:r:p:t:j:x" o; do
 done
 shift $((OPTIND - 1))
 
+if [ -n "${TRINO_VERSION}" ] && [ -z "${EXPLICIT_TRINO_SOURCE_REVISION}" ]; then
+    echo >&2 "TRINO_SOURCE_REVISION must be set when building downloaded release artifacts"
+    exit 1
+fi
+
 function check_environment() {
     if ! command -v jq &> /dev/null; then
         echo >&2 "Please install jq"
         exit 1
+    fi
+}
+
+function sha256_file() {
+    if command -v sha256sum &> /dev/null; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
     fi
 }
 
@@ -112,6 +134,8 @@ else
     trino_server="${SOURCE_DIR}/core/${SERVER_ARTIFACT}/target/${SERVER_ARTIFACT}-${TRINO_VERSION}.tar.gz"
     trino_client="${SOURCE_DIR}/client/trino-cli/target/trino-cli-${TRINO_VERSION}-executable.jar"
 fi
+TRINO_SERVER_SHA256="$(sha256_file "${trino_server}")"
+TRINO_CLI_SHA256="$(sha256_file "${trino_client}")"
 
 echo "🧱 Preparing the image build context directory"
 WORK_DIR="$(mktemp -d)"
@@ -138,6 +162,12 @@ for arch in "${ARCHITECTURES[@]}"; do
         --build-arg ARCH="${arch}" \
         --build-arg JDK_VERSION="${TEMURIN_RELEASE}" \
         --build-arg JDK_DOWNLOAD_LINK="${JDK_DOWNLOAD_LINK}" \
+        --build-arg TRINO_SOURCE_REVISION="${TRINO_SOURCE_REVISION}" \
+        --build-arg HOGQL_LANGUAGE_VERSION="${HOGQL_LANGUAGE_VERSION}" \
+        --build-arg HOGQL_CATALOG_PROTOCOL_VERSION="${HOGQL_CATALOG_PROTOCOL_VERSION}" \
+        --build-arg HOGQL_CATALOG_SCHEMA_VERSION="${HOGQL_CATALOG_SCHEMA_VERSION}" \
+        --build-arg TRINO_SERVER_SHA256="${TRINO_SERVER_SHA256}" \
+        --build-arg TRINO_CLI_SHA256="${TRINO_CLI_SHA256}" \
         --platform "linux/$arch" \
         -f Dockerfile \
         -t "${TAG}-$arch"
@@ -157,4 +187,3 @@ else
       docker image inspect -f '🚀 Built {{.RepoTags}} {{.Id}}' "${TAG}-$arch"
   done
 fi
-

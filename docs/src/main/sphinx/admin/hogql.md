@@ -11,6 +11,17 @@ Set the following coordinator property to enable the endpoint:
 hogql.enabled=true
 ```
 
+Compilation runs on a dedicated fixed-size executor. Configure
+`hogql.compilation-threads`, `hogql.compilation-queue-capacity`, and
+`hogql.compilation-timeout`; saturation and timeout fail with retryable
+insufficient-resource errors without affecting standard SQL submission.
+
+The MVP profile supports read-only queries over the logical `events` and
+`persons` tables, scalar reads from their VARCHAR JSON `properties` columns,
+and the lazy `events.person` relationship. It also supports the frozen
+fail-closed function set documented below. Physical tables remain available
+through normal Trino names.
+
 The endpoint accepts a JSON request envelope. Identity, catalog, schema, time
 zone, source, tags, and allowed session properties continue to use the standard
 Trino request headers.
@@ -111,13 +122,41 @@ Trino `relation.*`. `EXCLUDE` needs the manifest's ordered, star-visible field
 list, and fails with a source-located compatibility error when that schema is
 unavailable. Duckgres should publish physical tables as physical-derived
 semantic definitions from the physical catalog inventory when those tables
-need HogQL star exclusion. Schema inference for CTE and subquery outputs is not
-currently supported.
+need HogQL star exclusion.
 
-The Trino transport does not currently send an application authentication
-credential. Duckgres requires `X-Duckgres-Internal-Secret` by default, so the
-production connection remains incomplete until the coordinator credential
-mechanism is configured.
+Set `hogql.semantic-catalog.authentication-token-file` to a file containing a
+Duckgres read-only or admin token. Trino reads the file for every manifest
+request so token rotation does not require a coordinator restart. Surrounding
+whitespace is stripped; blank tokens, oversized tokens, and embedded CR or LF
+are rejected. The token is sent as `X-Duckgres-Internal-Secret` and is never
+included in error messages.
+
+Clients can set `catalogGeneration` in the request envelope to require an exact
+immutable generation. Exact-generation cache entries never fall back to the
+latest manifest. A missing, expired, or mismatched generation fails closed.
+
+## MVP function profile
+
+The compiler accepts only the following unqualified function names. Unknown
+names fail before Trino analysis.
+
+| Family | HogQL names |
+| --- | --- |
+| Numeric, conditional, and strings | `abs`, `coalesce`, `if`, `lower`, `upper`, `length`, `concat`, `replace` |
+| Collections | `map`, `arraySort`, `arrayDistinct`, `arrayFlatten`, `arrayStringConcat` |
+| Date and time | `dateAdd`, `dateDiff`, `dateTrunc` |
+| Aggregates | `count`, `sum`, `min`, `max`, `avg`, `any`, `argMin`, `argMax`, `array_agg` |
+| Windows | `first_value`, `rank`, `row_number` |
+
+The MVP intentionally excludes actions, cohorts, saved queries, explicit
+modifiers, HogQLX, PIVOT/UNPIVOT execution, ClickHouse-only clauses, advanced
+lambda and table functions, and complete HogQL type/function parity. These
+constructs return typed compatibility errors; they do not fall through as
+Trino functions.
+
+`any`, `argMin`, and `argMax` are nondeterministic when more than one input can
+satisfy the selection rule. Differential validation uses unique selection keys
+or invariant-based comparisons for those calls.
 
 ## Physical catalog inventory
 
@@ -154,6 +193,7 @@ accept a separate credential or an existing transaction ID.
 | Property | Default | Description |
 | --- | --- | --- |
 | `hogql.semantic-catalog.maximum-entries` | `100` | Maximum catalog snapshots retained by one coordinator. |
+| `hogql.semantic-catalog.authentication-token-file` | none | Required when the semantic catalog URI is set. File containing a rotating Duckgres read-only or admin token. |
 | `hogql.semantic-catalog.refresh-after` | `1m` | Age at which a cached manifest is refreshed in the background. |
 | `hogql.semantic-catalog.expire-after` | `5m` | Age after which a cached manifest cannot be used. |
 | `hogql.semantic-catalog.failure-backoff` | `10s` | Minimum delay before retrying a failed refresh. |
@@ -164,3 +204,18 @@ accept a separate credential or an existing transaction ID.
 
 Keep `refresh-after` below `expire-after`. Size the entry count, loader threads,
 and queue capacity for the number of catalogs assigned to one coordinator.
+
+## Image identity and rollback
+
+Release images use tags of the form
+`<trino>-ducklake.<release>-hogql.<release>`. Inspect the immutable digest and
+the `io.posthog.trino.*` OCI labels to verify the source/DuckLake revision,
+compiler build, server and CLI artifact digests, language version, and semantic
+catalog protocol/schema.
+
+To roll back, first stop routing clients to `/v1/hogql`. Set
+`hogql.enabled=false` and roll the coordinators; standard `/v1/statement`
+queries remain on the unchanged Trino path. Restore the previous immutable
+image digest if needed. Semantic catalog content is immutable, so restore prior
+content by publishing it as a new higher generation rather than mutating an
+existing generation.
