@@ -84,7 +84,6 @@ public class TestHogQlParser
             "WITH x AS MATERIALIZED (SELECT 1) SELECT * FROM x",
             "WITH x AS NOT MATERIALIZED (SELECT 1) SELECT * FROM x",
             "WITH x USING KEY (id) AS (SELECT 1) SELECT * FROM x",
-            "WITH 1 AS x SELECT x",
             "WITH x AS (SELECT * FROM x) SELECT * FROM x",
             "WITH x AS (SELECT 1), y AS (WITH x AS (SELECT * FROM x) SELECT * FROM x) SELECT * FROM y",
             "WITH x AS (SELECT 1), x AS (SELECT 2) SELECT * FROM x",
@@ -353,6 +352,21 @@ public class TestHogQlParser
 
         assertThat(md5.arguments()).hasSize(1);
         assertThat(md5.arguments().getFirst()).isInstanceOf(BinaryExpression.class);
+    }
+
+    @Test
+    public void testExpandsWithExpressionAliases()
+    {
+        HogQlQuery query = parser.parseStatement(
+                "WITH (SELECT max(date) FROM daily) AS last_day SELECT last_day, last_day + 1");
+
+        assertThat(query.with()).isEmpty();
+        assertThat(((ExpressionProjection) query.projections().get(0)).expression())
+                .isInstanceOf(ScalarSubqueryExpression.class);
+        assertThat(((ExpressionProjection) query.projections().get(1)).expression())
+                .isInstanceOfSatisfying(
+                        BinaryExpression.class,
+                        addition -> assertThat(addition.left()).isInstanceOf(ScalarSubqueryExpression.class));
     }
 
     @Test

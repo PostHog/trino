@@ -106,9 +106,11 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -488,6 +490,7 @@ public final class HogQlParser
         private final SourcePositions sourcePositions;
         private final Deque<Set<String>> commonTableScopes = new ArrayDeque<>();
         private final Deque<Set<String>> prohibitedCommonTableScopes = new ArrayDeque<>();
+        private final Deque<Map<String, Expression>> withExpressionScopes = new ArrayDeque<>();
 
         private AstBuilder(String source)
         {
@@ -735,6 +738,7 @@ public final class HogQlParser
             rejectUnsupportedClauses(select);
             commonTableScopes.push(new LinkedHashSet<>());
             prohibitedCommonTableScopes.push(new LinkedHashSet<>());
+            withExpressionScopes.push(new LinkedHashMap<>());
             try {
                 List<CommonTableExpression> with = buildCommonTables(select.withClause());
 
@@ -779,6 +783,7 @@ public final class HogQlParser
                         sourceSpan(select));
             }
             finally {
+                withExpressionScopes.pop();
                 prohibitedCommonTableScopes.pop();
                 commonTableScopes.pop();
             }
@@ -795,9 +800,16 @@ public final class HogQlParser
             List<CommonTableExpression> commonTables = new ArrayList<>();
             Set<String> localNames = commonTableScopes.getFirst();
             for (HogQLParser.WithExprContext expression : context.withExprList().withExpr()) {
-                if (!(expression instanceof HogQLParser.WithExprSubqueryContext subquery)) {
-                    throw unsupported(expression, "non-query WITH expression");
+                if (expression instanceof HogQLParser.WithExprColumnContext column) {
+                    Identifier name = buildIdentifier(column.identifier());
+                    String canonicalName = canonicalName(name);
+                    if (!localNames.add(canonicalName)) {
+                        throw unsupported(column, "duplicate WITH name");
+                    }
+                    withExpressionScopes.getFirst().put(canonicalName, buildExpression(column.columnExpr()));
+                    continue;
                 }
+                HogQLParser.WithExprSubqueryContext subquery = (HogQLParser.WithExprSubqueryContext) expression;
                 if (subquery.USING() != null) {
                     throw unsupported(subquery, "CTE USING KEY");
                 }
@@ -1783,6 +1795,15 @@ public final class HogQlParser
                 }
                 if (parts.getFirst().value().equalsIgnoreCase("false")) {
                     return new Literal(HogQlQuery.LiteralKind.BOOLEAN, "false", sourceSpan(context));
+                }
+            }
+            if (parts.size() == 1) {
+                String name = canonicalName(parts.getFirst());
+                for (Map<String, Expression> scope : withExpressionScopes) {
+                    Expression expression = scope.get(name);
+                    if (expression != null) {
+                        return expression;
+                    }
                 }
             }
             return new ColumnReference(parts, sourceSpan(context));
