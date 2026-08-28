@@ -362,7 +362,7 @@ final class HogQlFunctionResolver
                 function.span());
     }
 
-    private static Expression rewrite(FunctionCall function, FunctionRewrite rewrite, List<Expression> arguments)
+    private Expression rewrite(FunctionCall function, FunctionRewrite rewrite, List<Expression> arguments)
     {
         HogQlQuery.SourceSpan span = function.span();
         return switch (rewrite) {
@@ -410,20 +410,20 @@ final class HogQlFunctionResolver
             case DATE_TRUNC_HOUR -> dateTrunc("hour", arguments.getFirst(), span);
             case DATE_TRUNC_MONTH -> dateTrunc("month", arguments.getFirst(), span);
             case DATE_TRUNC_WEEK -> dateTrunc("week", arguments.getFirst(), span);
-            case COUNT_IF -> aggregate("count", List.of(), false, arguments.getFirst(), span);
-            case SUM_IF -> aggregate("sum", List.of(arguments.getFirst()), false, arguments.get(1), span);
-            case MAX_IF -> aggregate("max", List.of(arguments.getFirst()), false, arguments.get(1), span);
-            case UNIQ_IF -> aggregate("approx_distinct", List.of(arguments.getFirst()), false, arguments.get(1), span);
-            case UNIQ_EXACT -> aggregate("count", List.of(arguments.getFirst()), true, null, span);
-            case GROUP_UNIQ_ARRAY -> aggregate("array_agg", List.of(arguments.getFirst()), true, null, span);
-            case ARG_MAX_IF -> aggregate("max_by", List.of(arguments.getFirst(), arguments.get(1)), false, arguments.get(2), span);
-            case ANY_IF -> aggregate("arbitrary", List.of(arguments.getFirst()), false, arguments.get(1), span);
-            case MIN_IF -> aggregate("min", List.of(arguments.getFirst()), false, arguments.get(1), span);
-            case AVG_IF -> aggregate("avg", List.of(arguments.getFirst()), false, arguments.get(1), span);
-            case GROUP_ARRAY_IF -> aggregate("array_agg", List.of(arguments.getFirst()), false, arguments.get(1), span);
-            case UNIQ_EXACT_IF -> aggregate("count", List.of(arguments.getFirst()), true, arguments.get(1), span);
-            case GROUP_UNIQ_ARRAY_IF -> aggregate("array_agg", List.of(arguments.getFirst()), true, arguments.get(1), span);
-            case COUNT_DISTINCT -> aggregate("count", List.of(arguments.getFirst()), true, null, span);
+            case COUNT_IF -> aggregate(function, "count", List.of(), false, arguments.getFirst(), span);
+            case SUM_IF -> aggregate(function, "sum", List.of(arguments.getFirst()), false, arguments.get(1), span);
+            case MAX_IF -> aggregate(function, "max", List.of(arguments.getFirst()), false, arguments.get(1), span);
+            case UNIQ_IF -> aggregate(function, "approx_distinct", List.of(arguments.getFirst()), false, arguments.get(1), span);
+            case UNIQ_EXACT -> aggregate(function, "count", List.of(arguments.getFirst()), true, null, span);
+            case GROUP_UNIQ_ARRAY -> aggregate(function, "array_agg", List.of(arguments.getFirst()), true, null, span);
+            case ARG_MAX_IF -> aggregate(function, "max_by", List.of(arguments.getFirst(), arguments.get(1)), false, arguments.get(2), span);
+            case ANY_IF -> aggregate(function, "arbitrary", List.of(arguments.getFirst()), false, arguments.get(1), span);
+            case MIN_IF -> aggregate(function, "min", List.of(arguments.getFirst()), false, arguments.get(1), span);
+            case AVG_IF -> aggregate(function, "avg", List.of(arguments.getFirst()), false, arguments.get(1), span);
+            case GROUP_ARRAY_IF -> aggregate(function, "array_agg", List.of(arguments.getFirst()), false, arguments.get(1), span);
+            case UNIQ_EXACT_IF -> aggregate(function, "count", List.of(arguments.getFirst()), true, arguments.get(1), span);
+            case GROUP_UNIQ_ARRAY_IF -> aggregate(function, "array_agg", List.of(arguments.getFirst()), true, arguments.get(1), span);
+            case COUNT_DISTINCT -> aggregate(function, "count", List.of(arguments.getFirst()), true, null, span);
             case MULTI_IF -> multiIf(function, arguments);
             case JSON_EXTRACT_STRING -> jsonExtractScalar(function, arguments, "varchar", new Literal(HogQlQuery.LiteralKind.STRING, "", span));
             case JSON_EXTRACT_INT -> jsonExtractScalar(function, arguments, "bigint", new Literal(HogQlQuery.LiteralKind.INTEGER, "0", span));
@@ -476,6 +476,7 @@ final class HogQlFunctionResolver
             case JSON_VALUE -> call("json_extract_scalar", arguments, span);
             case MD5 -> call("md5", List.of(call("to_utf8", List.of(cast(arguments.getFirst(), "varchar", span)), span)), span);
             case MEDIAN_IF -> aggregate(
+                    function,
                     "approx_percentile",
                     List.of(arguments.getFirst(), new Literal(HogQlQuery.LiteralKind.FLOAT, "0.5", span)),
                     false,
@@ -624,14 +625,16 @@ final class HogQlFunctionResolver
                 span);
     }
 
-    private static FunctionCall aggregate(String name, List<Expression> arguments, boolean distinct, Expression filter, HogQlQuery.SourceSpan span)
+    private FunctionCall aggregate(FunctionCall source, String name, List<Expression> arguments, boolean distinct, Expression filter, HogQlQuery.SourceSpan span)
     {
         return new FunctionCall(
-                new Identifier(name, false, span),
+                List.of(new Identifier(name, false, span)),
                 arguments,
                 distinct,
                 List.of(),
                 Optional.ofNullable(filter),
+                Optional.empty(),
+                source.window().map(this::resolveWindow),
                 span);
     }
 

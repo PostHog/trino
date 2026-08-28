@@ -273,6 +273,18 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testCompilerPreservesWindowsOnAggregateRewrites()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT countIf(active) OVER (PARTITION BY account_id), " +
+                        "countDistinct(value) OVER (PARTITION BY account_id) FROM records"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT count(*) FILTER (WHERE active) OVER (PARTITION BY account_id), " +
+                        "count(DISTINCT value) OVER (PARTITION BY account_id) FROM records"));
+    }
+
+    @Test
     public void testCompilerLowersNumericConversions()
     {
         HogQlCompilationResult result = new HogQlCompiler().compile(envelope(

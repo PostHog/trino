@@ -65,6 +65,8 @@ The compatibility extension also lowers conditional aggregates (`countIf`,
 (`uniqExact`, `countDistinct`, and `groupUniqArray`), and `multiIf` directly to
 stock Trino aggregate filters, DISTINCT aggregates, and searched CASE
 expressions.
+Aggregate rewrites preserve `OVER` specifications when the target Trino
+aggregate is used as a window function.
 Literal-path JSON extraction lowers to Trino JSON paths with HogQL-compatible
 defaults. The compatibility profile also supports the corpus's typed map and
 key/value extraction forms through checked JSON-to-map casts.

@@ -264,8 +264,8 @@ public record HogQlSemanticCatalogSnapshot(
                 if (function.supportsFilter()) {
                     throw new IllegalArgumentException("rewrite function cannot support FILTER");
                 }
-                if (function.supportsWindow()) {
-                    throw new IllegalArgumentException("rewrite function cannot support window invocation");
+                if (function.supportsWindow() && rewriteFunctionKind(rewrite) != FunctionKind.AGGREGATE) {
+                    throw new IllegalArgumentException("scalar rewrite function cannot support window invocation");
                 }
                 if (function.signatures().stream().anyMatch(signature -> !validRewriteSignature(rewrite, signature))) {
                     throw new IllegalArgumentException("rewrite function declares an invalid signature");

@@ -242,7 +242,7 @@ final class HogQlV0FunctionRegistry
                 false,
                 false,
                 false,
-                false);
+                true);
     }
 
     private static FunctionCapabilityDefinition aggregateWithOrderBy(String hogQlName, String trinoName, boolean supportsDistinct, FunctionSignature... signatures)
