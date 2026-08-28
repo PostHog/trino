@@ -346,11 +346,7 @@ final class HogQlFunctionResolver
         if (capability.implementation() == FunctionImplementation.REWRITE) {
             FunctionRewrite rewrite = capability.rewrite()
                     .orElseThrow(() -> unsupportedError(function, "HogQL function " + name + " has no compiler rewrite"));
-            boolean negated = switch (rewrite) {
-                case IS_NULL -> false;
-                case IS_NOT_NULL -> true;
-            };
-            return new IsNullExpression(arguments.getFirst(), negated, function.span(), function.span());
+            return rewrite(function, rewrite, arguments);
         }
         return new FunctionCall(
                 capability.trinoName().stream()
@@ -363,6 +359,40 @@ final class HogQlFunctionResolver
                 function.nullTreatment(),
                 function.window().map(this::resolveWindow),
                 function.span());
+    }
+
+    private static Expression rewrite(FunctionCall function, FunctionRewrite rewrite, List<Expression> arguments)
+    {
+        HogQlQuery.SourceSpan span = function.span();
+        return switch (rewrite) {
+            case IS_NULL -> new IsNullExpression(arguments.getFirst(), false, span, span);
+            case IS_NOT_NULL -> new IsNullExpression(arguments.getFirst(), true, span, span);
+            case CAST_DATE -> cast(arguments.getFirst(), "date", span);
+            case CAST_DOUBLE -> cast(arguments.getFirst(), "double", span);
+            case CAST_BIGINT -> cast(arguments.getFirst(), "bigint", span);
+            case CAST_TIMESTAMP -> cast(arguments.getFirst(), "timestamp(0)", span);
+            case CAST_VARCHAR -> cast(arguments.getFirst(), "varchar", span);
+            case DATE_TRUNC_DAY -> dateTrunc("day", arguments.getFirst(), span);
+            case DATE_TRUNC_HOUR -> dateTrunc("hour", arguments.getFirst(), span);
+            case DATE_TRUNC_MONTH -> dateTrunc("month", arguments.getFirst(), span);
+            case DATE_TRUNC_WEEK -> dateTrunc("week", arguments.getFirst(), span);
+        };
+    }
+
+    private static CastExpression cast(Expression value, String type, HogQlQuery.SourceSpan span)
+    {
+        return new CastExpression(value, new Identifier(type, false, span), false, span);
+    }
+
+    private static FunctionCall dateTrunc(String unit, Expression value, HogQlQuery.SourceSpan span)
+    {
+        return new FunctionCall(
+                new Identifier("date_trunc", false, span),
+                List.of(new Literal(HogQlQuery.LiteralKind.STRING, unit, span), value),
+                false,
+                List.of(),
+                Optional.empty(),
+                span);
     }
 
     private WindowDefinition resolveWindowDefinition(WindowDefinition definition)

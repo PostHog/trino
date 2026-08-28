@@ -16,6 +16,7 @@ package io.trino.hogql.compiler;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionCapabilityDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionImplementation;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionKind;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionRewrite;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionSignature;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
 
@@ -34,6 +35,22 @@ final class HogQlV0FunctionRegistry
             scalar("length", "length", signature(1)),
             scalar("concat", "concat", variadicSignature(2)),
             scalar("replace", "replace", signature(3)),
+            scalar("nullIf", "nullif", signature(2)),
+            scalar("ifNull", "coalesce", signature(2)),
+            scalar("trim", "trim", signature(1)),
+            scalar("round", "round", signature(1), signature(2)),
+            nondeterministicScalar("now", "now", signature(0)),
+            nondeterministicScalar("current_timestamp", "now", signature(0)),
+            rewrite("isNotNull", FunctionRewrite.IS_NOT_NULL, "boolean", signature(1)),
+            rewrite("toInt", FunctionRewrite.CAST_BIGINT, "bigint", signature(1)),
+            rewrite("toFloat", FunctionRewrite.CAST_DOUBLE, "double", signature(1)),
+            rewrite("toString", FunctionRewrite.CAST_VARCHAR, "varchar", signature(1)),
+            rewrite("toDate", FunctionRewrite.CAST_DATE, "date", signature(1)),
+            rewrite("toDateTime", FunctionRewrite.CAST_TIMESTAMP, "timestamp(0)", signature(1)),
+            rewrite("toStartOfMonth", FunctionRewrite.DATE_TRUNC_MONTH, "timestamp", signature(1)),
+            rewrite("toStartOfDay", FunctionRewrite.DATE_TRUNC_DAY, "timestamp", signature(1)),
+            rewrite("toStartOfHour", FunctionRewrite.DATE_TRUNC_HOUR, "timestamp", signature(1)),
+            rewrite("toMonday", FunctionRewrite.DATE_TRUNC_WEEK, "timestamp", signature(1)),
             scalar("map", "map", signature(2)),
             scalar("dateDiff", "date_diff", signature(3)),
             scalar("dateAdd", "date_add", signature(3)),
@@ -48,6 +65,8 @@ final class HogQlV0FunctionRegistry
             aggregate("max", "max", true, signature(1)),
             aggregate("avg", "avg", true, signature(1)),
             aggregateWithOrderBy("array_agg", "array_agg", true, signature(1)),
+            aggregateWithOrderBy("groupArray", "array_agg", false, signature(1)),
+            nondeterministicAggregate("uniq", "approx_distinct", false, signature(1)),
             nondeterministicAggregate("any", "arbitrary", false, signature(1)),
             nondeterministicAggregate("argMin", "min_by", false, signature(2)),
             nondeterministicAggregate("argMax", "max_by", false, signature(2)),
@@ -77,6 +96,29 @@ final class HogQlV0FunctionRegistry
     private static FunctionCapabilityDefinition scalar(String hogQlName, String trinoName, FunctionSignature... signatures)
     {
         return function(hogQlName, trinoName, FunctionKind.SCALAR, false, false, false, false, true, signatures);
+    }
+
+    private static FunctionCapabilityDefinition nondeterministicScalar(String hogQlName, String trinoName, FunctionSignature... signatures)
+    {
+        return function(hogQlName, trinoName, FunctionKind.SCALAR, false, false, false, false, false, signatures);
+    }
+
+    private static FunctionCapabilityDefinition rewrite(String hogQlName, FunctionRewrite rewrite, String returnType, FunctionSignature... signatures)
+    {
+        return new FunctionCapabilityDefinition(
+                hogQlName,
+                FunctionKind.SCALAR,
+                FunctionImplementation.REWRITE,
+                List.of(),
+                java.util.Optional.of(rewrite),
+                java.util.Arrays.stream(signatures)
+                        .map(signature -> new FunctionSignature(signature.argumentTypes(), returnType, signature.variadic()))
+                        .toList(),
+                true,
+                false,
+                false,
+                false,
+                false);
     }
 
     private static FunctionCapabilityDefinition aggregate(String hogQlName, String trinoName, boolean supportsDistinct, FunctionSignature... signatures)

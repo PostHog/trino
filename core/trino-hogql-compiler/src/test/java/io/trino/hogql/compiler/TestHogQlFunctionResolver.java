@@ -121,12 +121,20 @@ public class TestHogQlFunctionResolver
     {
         HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
                 "SELECT coalesce(NULL, 'fallback'), any(value), argMin(value, timestamp), " +
-                        "arrayDistinct([1, 1]), dateDiff('day', start_time, end_time), rank() OVER () FROM metrics"));
+                        "arrayDistinct([1, 1]), dateDiff('day', start_time, end_time), rank() OVER (), " +
+                        "nullIf(value, ''), ifNull(value, 'fallback'), trim(value), round(score, 2), " +
+                        "now(), current_timestamp(), isNotNull(value), groupArray(value), uniq(value), " +
+                        "toInt(value), toFloat(value), toString(value), toDate(timestamp), toDateTime(timestamp), " +
+                        "toStartOfMonth(timestamp), toStartOfDay(timestamp), toStartOfHour(timestamp), toMonday(timestamp) FROM metrics"));
 
         assertThat(result.catalogGeneration()).isEmpty();
         assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
                 "SELECT coalesce(NULL, 'fallback'), arbitrary(value), min_by(value, timestamp), " +
-                        "array_distinct(ARRAY[1, 1]), date_diff('day', start_time, end_time), rank() OVER () FROM metrics"));
+                        "array_distinct(ARRAY[1, 1]), date_diff('day', start_time, end_time), rank() OVER (), " +
+                        "nullif(value, ''), coalesce(value, 'fallback'), \"trim\"(value), round(score, 2), " +
+                        "now(), now(), value IS NOT NULL, array_agg(value), approx_distinct(value), " +
+                        "CAST(value AS bigint), CAST(value AS double), CAST(value AS varchar), CAST(timestamp AS date), CAST(timestamp AS timestamp(0)), " +
+                        "date_trunc('month', timestamp), date_trunc('day', timestamp), date_trunc('hour', timestamp), date_trunc('week', timestamp) FROM metrics"));
     }
 
     @Test

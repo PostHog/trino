@@ -96,6 +96,7 @@ import io.trino.sql.tree.LongLiteral;
 import io.trino.sql.tree.NodeLocation;
 import io.trino.sql.tree.NotExpression;
 import io.trino.sql.tree.NullLiteral;
+import io.trino.sql.tree.NullIfExpression;
 import io.trino.sql.tree.Offset;
 import io.trino.sql.tree.OrderBy;
 import io.trino.sql.tree.Parameter;
@@ -451,6 +452,9 @@ final class TrinoAstFactory
                     arguments.get(0),
                     arguments.get(1),
                     arguments.size() == 3 ? arguments.get(2) : null);
+        }
+        if (function.nameParts().size() == 1 && function.name().value().equalsIgnoreCase("nullif")) {
+            return new NullIfExpression(location(function.span()), arguments.get(0), arguments.get(1));
         }
         List<CallArgument> callArguments = new ArrayList<>();
         for (int index = 0; index < arguments.size(); index++) {

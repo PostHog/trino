@@ -269,8 +269,9 @@ public record HogQlSemanticCatalogSnapshot(
                 if (function.signatures().stream().anyMatch(signature -> signature.variadic() || signature.argumentTypes().size() != 1)) {
                     throw new IllegalArgumentException("rewrite function must declare unary signatures");
                 }
-                if (function.signatures().stream().anyMatch(signature -> !signature.returnType().equalsIgnoreCase("boolean"))) {
-                    throw new IllegalArgumentException("rewrite function signatures must return boolean");
+                if ((function.rewrite().orElseThrow() == FunctionRewrite.IS_NULL || function.rewrite().orElseThrow() == FunctionRewrite.IS_NOT_NULL) &&
+                        function.signatures().stream().anyMatch(signature -> !signature.returnType().equalsIgnoreCase("boolean"))) {
+                    throw new IllegalArgumentException("null predicate rewrite function signatures must return boolean");
                 }
             }
             else {
@@ -1267,7 +1268,17 @@ public record HogQlSemanticCatalogSnapshot(
 
     public enum FunctionRewrite
     {
-        IS_NULL, IS_NOT_NULL
+        CAST_DATE,
+        CAST_DOUBLE,
+        CAST_BIGINT,
+        CAST_TIMESTAMP,
+        CAST_VARCHAR,
+        DATE_TRUNC_DAY,
+        DATE_TRUNC_HOUR,
+        DATE_TRUNC_MONTH,
+        DATE_TRUNC_WEEK,
+        IS_NULL,
+        IS_NOT_NULL
     }
 
     public enum ModifierBehavior
