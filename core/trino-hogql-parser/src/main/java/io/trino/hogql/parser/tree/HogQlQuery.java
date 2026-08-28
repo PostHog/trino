@@ -885,6 +885,7 @@ public record HogQlQuery(
     {
         CROSS,
         INNER,
+        INNER_ANY,
         LEFT,
         LEFT_ANY,
         RIGHT,

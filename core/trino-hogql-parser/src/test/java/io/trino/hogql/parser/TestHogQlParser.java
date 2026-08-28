@@ -65,7 +65,6 @@ public class TestHogQlParser
             "SELECT",
             "SELECT * FROM first JOIN second",
             "SELECT * FROM first NATURAL JOIN second",
-            "SELECT * FROM first ANY INNER JOIN second ON first.id = second.id",
             "SELECT * FROM first LEFT SEMI JOIN second ON first.id = second.id",
             "SELECT * FROM first ASOF JOIN second ON first.id = second.id",
             "SELECT * FROM first POSITIONAL JOIN second",
@@ -342,6 +341,16 @@ public class TestHogQlParser
         JoinRelation join = (JoinRelation) query.from().orElseThrow();
         assertThat(join.type()).isEqualTo(JoinType.LEFT_ANY);
         assertThat(join.criteria()).hasValueSatisfying(JoinOn.class::isInstance);
+    }
+
+    @Test
+    public void testBuildsInnerAnyJoinAst()
+    {
+        HogQlQuery query = parser.parseStatement(
+                "SELECT e.id FROM events e ANY INNER JOIN persons p USING (person_id)");
+
+        JoinRelation join = (JoinRelation) query.from().orElseThrow();
+        assertThat(join.type()).isEqualTo(JoinType.INNER_ANY);
     }
 
     @Test

@@ -591,14 +591,27 @@ public class TestHogQlCompiler
     }
 
     @Test
-    public void testRejectsLeftAnyJoinUsing()
+    public void testLowersInnerAnyJoinUsingToCorrelatedLateralLimit()
     {
-        TrinoException exception = catchThrowableOfType(
-                TrinoException.class,
-                () -> compiler.compile("SELECT * FROM events e LEFT ANY JOIN persons p USING (person_id)"));
+        Statement statement = compiler.compile(
+                "SELECT e.id, p.name FROM events e ANY INNER JOIN persons p USING (person_id)");
+        Statement expected = sqlParser.createStatement(
+                "SELECT e.id, p.name FROM events e " +
+                        "INNER JOIN LATERAL (SELECT * FROM persons p WHERE e.person_id = p.person_id ORDER BY p.person_id LIMIT 1) p ON true");
 
-        assertThat(exception.getErrorCode()).isEqualTo(HogQlErrorCode.HOGQL_UNSUPPORTED_FEATURE.toErrorCode());
-        assertThat(exception).hasMessageContaining("cannot preserve merged-column semantics");
+        assertThat(statement).isEqualTo(expected);
+    }
+
+    @Test
+    public void testLowersLeftAnyJoinUsingToCorrelatedLateralLimit()
+    {
+        Statement statement = compiler.compile(
+                "SELECT e.id, p.name FROM events e LEFT ANY JOIN persons p USING (person_id)");
+        Statement expected = sqlParser.createStatement(
+                "SELECT e.id, p.name FROM events e " +
+                        "LEFT JOIN LATERAL (SELECT * FROM persons p WHERE e.person_id = p.person_id ORDER BY p.person_id LIMIT 1) p ON true");
+
+        assertThat(statement).isEqualTo(expected);
     }
 
     @Test

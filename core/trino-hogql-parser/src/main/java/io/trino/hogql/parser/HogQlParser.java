@@ -2236,10 +2236,10 @@ public final class HogQlParser
                 return JoinType.INNER;
             }
             if (context instanceof HogQLParser.JoinOpInnerContext inner) {
-                if (inner.ANTI() != null || inner.SEMI() != null || inner.ASOF() != null || inner.ALL() != null || inner.ANY() != null) {
+                if (inner.ANTI() != null || inner.SEMI() != null || inner.ASOF() != null || inner.ALL() != null) {
                     throw unsupported(context, "HogQL-specific inner join modifier");
                 }
-                return JoinType.INNER;
+                return inner.ANY() == null ? JoinType.INNER : JoinType.INNER_ANY;
             }
             if (context instanceof HogQLParser.JoinOpLeftRightContext outer) {
                 if (outer.ANTI() != null || outer.SEMI() != null || outer.ASOF() != null || outer.ALL() != null) {
