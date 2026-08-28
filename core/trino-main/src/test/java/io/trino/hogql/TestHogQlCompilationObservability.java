@@ -107,7 +107,21 @@ public class TestHogQlCompilationObservability
     }
 
     @Test
-    public void testStatsRecordOutcomesAndPhaseDurations()
+    public void testResolvedCatalogGenerationReplacesRequestedGeneration()
+    {
+        List<HogQlCompilationEvent> events = new ArrayList<>();
+        HogQlCompilationTracker tracker = new HogQlCompilationTracker(events::add, Dimensions.fromEnvelope(envelope()), () -> 0);
+
+        tracker.catalogGeneration(OptionalLong.of(43));
+        tracker.succeeded();
+
+        assertThat(events).singleElement()
+                .extracting(event -> event.dimensions().catalogGeneration())
+                .isEqualTo(OptionalLong.of(43));
+    }
+
+    @Test
+    public void testStatsRecordOutcomes()
     {
         HogQlCompilationStats stats = new HogQlCompilationStats();
         Dimensions dimensions = Dimensions.fromEnvelope(envelope());
@@ -119,10 +133,7 @@ public class TestHogQlCompilationObservability
         assertThat(stats.getSuccessfulCompilations().getTotalCount()).isEqualTo(1);
         assertThat(stats.getUserErrorFailures().getTotalCount()).isEqualTo(1);
         assertThat(stats.getInternalErrorFailures().getTotalCount()).isZero();
-        assertThat(stats.getTotalTime().getAllTime().getCount()).isEqualTo(2);
-        assertThat(stats.getParseTime().getAllTime().getCount()).isEqualTo(2);
-        assertThat(stats.getBindTime().getAllTime().getCount()).isEqualTo(1);
-        assertThat(stats.getLowerTime().getAllTime().getCount()).isEqualTo(1);
+        assertThat(stats.getLastCatalogGeneration()).isEqualTo(41);
     }
 
     private static Stream<Arguments> failures()

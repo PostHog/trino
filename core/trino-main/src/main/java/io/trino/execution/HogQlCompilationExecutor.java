@@ -19,6 +19,7 @@ import io.trino.spi.TrinoException;
 import jakarta.annotation.PreDestroy;
 
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -29,10 +30,12 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.trino.hogql.HogQlCoordinatorErrorCode.HOGQL_COMPILATION_QUEUE_FULL;
+import static io.trino.hogql.HogQlCoordinatorErrorCode.HOGQL_COMPILATION_TIMEOUT;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -41,6 +44,7 @@ public final class HogQlCompilationExecutor
 {
     private final Executor executor;
     private final Optional<ThreadPoolExecutor> ownedExecutor;
+    private final OptionalLong timeoutMillis;
     private final Set<FutureTask<?>> tasks = ConcurrentHashMap.newKeySet();
 
     @Inject
@@ -60,12 +64,14 @@ public final class HogQlCompilationExecutor
                 new ThreadPoolExecutor.AbortPolicy());
         this.executor = executor;
         this.ownedExecutor = Optional.of(executor);
+        this.timeoutMillis = OptionalLong.of(config.getCompilationTimeout().toMillis());
     }
 
     private HogQlCompilationExecutor(Executor executor)
     {
         this.executor = requireNonNull(executor, "executor is null");
         ownedExecutor = Optional.empty();
+        timeoutMillis = OptionalLong.empty();
     }
 
     static HogQlCompilationExecutor directExecutor()
@@ -87,6 +93,9 @@ public final class HogQlCompilationExecutor
             }
 
             try {
+                if (timeoutMillis.isPresent()) {
+                    return task.get(timeoutMillis.orElseThrow(), MILLISECONDS);
+                }
                 return task.get();
             }
             catch (InterruptedException failure) {
@@ -96,6 +105,10 @@ public final class HogQlCompilationExecutor
             }
             catch (CancellationException failure) {
                 throw new TrinoException(HOGQL_COMPILATION_QUEUE_FULL, "HogQL compilation capacity is unavailable; retry later", failure);
+            }
+            catch (TimeoutException failure) {
+                task.cancel(true);
+                throw new TrinoException(HOGQL_COMPILATION_TIMEOUT, "HogQL compilation exceeded its time limit; retry later", failure);
             }
             catch (ExecutionException failure) {
                 Throwable cause = failure.getCause();

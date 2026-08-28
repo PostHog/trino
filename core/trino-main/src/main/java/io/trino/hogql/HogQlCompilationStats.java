@@ -19,6 +19,8 @@ import io.trino.hogql.HogQlCompilationEvent.Phase;
 import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
 
+import java.util.concurrent.atomic.AtomicLong;
+
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
 public final class HogQlCompilationStats
@@ -36,12 +38,14 @@ public final class HogQlCompilationStats
     private final TimeStat bindTime = new TimeStat(NANOSECONDS);
     private final TimeStat lowerTime = new TimeStat(NANOSECONDS);
     private final TimeStat parameterBindingTime = new TimeStat(NANOSECONDS);
+    private final AtomicLong lastCatalogGeneration = new AtomicLong(-1);
 
     @Override
     public void compilationCompleted(HogQlCompilationEvent event)
     {
         completedCompilations.update(1);
         totalTime.addNanos(event.totalNanos());
+        event.dimensions().catalogGeneration().ifPresent(lastCatalogGeneration::set);
         event.phaseNanos().forEach((phase, duration) -> phaseTime(phase).addNanos(duration));
         switch (event.outcome()) {
             case SUCCESS -> successfulCompilations.update(1);
@@ -103,6 +107,12 @@ public final class HogQlCompilationStats
     public CounterStat getInsufficientResourcesFailures()
     {
         return insufficientResourcesFailures;
+    }
+
+    @Managed
+    public long getLastCatalogGeneration()
+    {
+        return lastCatalogGeneration.get();
     }
 
     @Managed

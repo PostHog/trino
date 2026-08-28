@@ -13,6 +13,7 @@
  */
 package io.trino.execution;
 
+import io.airlift.units.Duration;
 import io.trino.hogql.HogQlCompilationEvent;
 import io.trino.hogql.HogQlConfig;
 import io.trino.hogql.compiler.HogQlCompileEnvelope;
@@ -36,8 +37,10 @@ import static io.trino.execution.QuerySubmission.hogQl;
 import static io.trino.hogql.HogQlCompilationEvent.Outcome.INSUFFICIENT_RESOURCES;
 import static io.trino.hogql.HogQlCompilationEvent.Phase.COMPILATION;
 import static io.trino.hogql.HogQlCoordinatorErrorCode.HOGQL_COMPILATION_QUEUE_FULL;
+import static io.trino.hogql.HogQlCoordinatorErrorCode.HOGQL_COMPILATION_TIMEOUT;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static java.util.concurrent.Executors.newSingleThreadExecutor;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -153,6 +156,29 @@ public class TestHogQlCompilationExecutor
         }
     }
 
+    @Test
+    public void testCompilationTimeoutInterruptsWorker()
+            throws Exception
+    {
+        HogQlCompilationExecutor executor = new HogQlCompilationExecutor(config(1, 0)
+                .setCompilationTimeout(new Duration(10, MILLISECONDS)));
+        CountDownLatch workerInterrupted = new CountDownLatch(1);
+        try {
+            assertThatThrownBy(() -> executor.execute(() -> {
+                awaitInterruption(workerInterrupted);
+                return null;
+            }))
+                    .isInstanceOfSatisfying(TrinoException.class, exception -> {
+                        assertThat(exception.getErrorCode()).isEqualTo(HOGQL_COMPILATION_TIMEOUT.toErrorCode());
+                        assertThat(exception).hasMessageContaining("time limit");
+                    });
+            assertThat(workerInterrupted.await(10, SECONDS)).isTrue();
+        }
+        finally {
+            executor.shutdown();
+        }
+    }
+
     private static HogQlConfig config(int threads, int queueCapacity)
     {
         return new HogQlConfig()
@@ -181,6 +207,17 @@ public class TestHogQlCompilationExecutor
         catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             throw new RuntimeException(exception);
+        }
+    }
+
+    private static void awaitInterruption(CountDownLatch interrupted)
+    {
+        try {
+            new CountDownLatch(1).await();
+        }
+        catch (InterruptedException exception) {
+            interrupted.countDown();
+            Thread.currentThread().interrupt();
         }
     }
 }

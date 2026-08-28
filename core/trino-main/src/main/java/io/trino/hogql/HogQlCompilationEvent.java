@@ -101,5 +101,17 @@ public record HogQlCompilationEvent(
                     envelope.modifiers().size(),
                     envelope.catalogGeneration());
         }
+
+        public Dimensions withCatalogGeneration(OptionalLong catalogGeneration)
+        {
+            return new Dimensions(
+                    protocolVersion,
+                    languageVersion,
+                    parameterCount,
+                    variableCount,
+                    filterCount,
+                    modifierCount,
+                    catalogGeneration);
+        }
     }
 }

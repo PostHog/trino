@@ -17,18 +17,21 @@ import io.airlift.units.Duration;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotLoader;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotLoader.LoadRequest;
 import io.trino.hogql.parser.HogQlLanguageVersion;
 import io.trino.spi.catalog.CatalogName;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static io.trino.testing.assertions.Assert.assertEventually;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -78,6 +81,35 @@ public class TestHogQlSemanticCatalogManager
             assertThat(loads).hasValue(2);
         }
         finally {
+            manager.shutdown();
+        }
+    }
+
+    @Test
+    public void testColdExactGenerationUsesPinnedLoadRequest()
+    {
+        CompletableFuture<LoadRequest> requestedLoad = new CompletableFuture<>();
+        CompletableFuture<HogQlSemanticCatalogSnapshot> metadata = new CompletableFuture<>();
+        HogQlSemanticCatalogManager manager = new HogQlSemanticCatalogManager(
+                config(),
+                request -> {
+                    requestedLoad.complete(request);
+                    return metadata;
+                },
+                LANGUAGE_VERSION,
+                System::nanoTime);
+        try {
+            assertThat(manager.cache().currentSnapshot(CATALOG, OptionalLong.of(7))).isEmpty();
+            assertThat(requestedLoad.join()).isEqualTo(LoadRequest.pinned(CATALOG, LANGUAGE_VERSION, 7));
+
+            metadata.complete(snapshot(7));
+            assertEventually(() -> assertThat(manager.cache().currentSnapshot(CATALOG, OptionalLong.of(7)))
+                    .get()
+                    .extracting(HogQlSemanticCatalogSnapshot::generation)
+                    .isEqualTo(7L));
+        }
+        finally {
+            metadata.completeExceptionally(new IllegalStateException("test shutdown"));
             manager.shutdown();
         }
     }

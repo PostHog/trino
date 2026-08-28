@@ -23,6 +23,7 @@ public enum HogQlCoordinatorErrorCode
         implements ErrorCodeSupplier
 {
     HOGQL_COMPILATION_QUEUE_FULL(0, INSUFFICIENT_RESOURCES),
+    HOGQL_COMPILATION_TIMEOUT(1, INSUFFICIENT_RESOURCES),
     ;
 
     private final ErrorCode errorCode;

@@ -20,8 +20,11 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotCache;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider;
 import io.trino.server.testing.TestingTrinoServer;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -35,10 +38,16 @@ public class TestHogQlSemanticCatalogGuiceWiring
     private static final Key<Set<CatalogLifecycleListener>> CATALOG_LISTENERS_KEY =
             Key.get(new TypeLiteral<>() {});
 
+    @TempDir
+    public Path temporaryDirectory;
+
     @Test
     public void testOptionalProviderFollowsHogQlAndCatalogConfiguration()
             throws IOException
     {
+        Path tokenFile = temporaryDirectory.resolve("catalog-token");
+        Files.writeString(tokenFile, "test-token");
+
         try (TestingTrinoServer server = TestingTrinoServer.builder()
                 .setProperties(Map.of("hogql.enabled", "false"))
                 .build()) {
@@ -49,7 +58,8 @@ public class TestHogQlSemanticCatalogGuiceWiring
         try (TestingTrinoServer server = TestingTrinoServer.builder()
                 .setProperties(Map.of(
                         "hogql.enabled", "true",
-                        "hogql.semantic-catalog.uri", "https://duckgres.example/metadata"))
+                        "hogql.semantic-catalog.uri", "https://duckgres.example/metadata",
+                        "hogql.semantic-catalog.authentication-token-file", tokenFile.toString()))
                 .build()) {
             Optional<HogQlSemanticCatalogSnapshotProvider> provider = server.getInstance(OPTIONAL_PROVIDER_KEY);
             HogQlSemanticCatalogManager manager = server.getInstance(Key.get(HogQlSemanticCatalogManager.class));

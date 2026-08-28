@@ -91,7 +91,9 @@ public final class HogQlSemanticCatalogManager
                 config.getFailureBackoff().toJavaTime(),
                 ticker,
                 loaderExecutor,
-                catalog -> loader.load(LoadRequest.latest(catalog, languageVersion)));
+                (catalog, expectedGeneration) -> loader.load(expectedGeneration.isPresent()
+                        ? LoadRequest.pinned(catalog, languageVersion, expectedGeneration.orElseThrow())
+                        : LoadRequest.latest(catalog, languageVersion)));
     }
 
     public HogQlSemanticCatalogSnapshotLoader loader()

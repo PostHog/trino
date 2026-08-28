@@ -28,7 +28,12 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotLoader.LoadRe
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.function.Supplier;
 
 import static com.google.common.net.MediaType.JSON_UTF_8;
 import static io.airlift.concurrent.MoreFutures.toCompletableFuture;
@@ -45,11 +50,14 @@ public final class HogQlSemanticCatalogHttpTransport
         implements JsonTransport
 {
     private static final String METADATA_PATH = "v1/hogql/compatibility/semantic-catalog";
+    private static final String AUTHENTICATION_HEADER = "X-Duckgres-Internal-Secret";
+    private static final int MAXIMUM_AUTHENTICATION_TOKEN_BYTES = 4096;
     private static final MediaType JSON = JSON_UTF_8.withoutParameters();
 
     private final URI baseUri;
     private final HttpClient httpClient;
     private final int maximumResponseBytes;
+    private final Supplier<String> authenticationTokenSupplier;
 
     @Inject
     public HogQlSemanticCatalogHttpTransport(
@@ -58,15 +66,16 @@ public final class HogQlSemanticCatalogHttpTransport
     {
         this(requireNonNull(config, "config is null").getUri(),
                 httpClient,
-                toIntExact(config.getMaximumResponseSize().toBytes()));
+                toIntExact(config.getMaximumResponseSize().toBytes()),
+                tokenSupplier(config.getAuthenticationTokenFile()));
     }
 
-    HogQlSemanticCatalogHttpTransport(URI baseUri, HttpClient httpClient)
+    HogQlSemanticCatalogHttpTransport(URI baseUri, HttpClient httpClient, Supplier<String> authenticationTokenSupplier)
     {
-        this(baseUri, httpClient, HogQlSemanticCatalogSnapshotJsonDecoder.MAXIMUM_PAYLOAD_BYTES);
+        this(baseUri, httpClient, HogQlSemanticCatalogSnapshotJsonDecoder.MAXIMUM_PAYLOAD_BYTES, authenticationTokenSupplier);
     }
 
-    private HogQlSemanticCatalogHttpTransport(URI baseUri, HttpClient httpClient, int maximumResponseBytes)
+    private HogQlSemanticCatalogHttpTransport(URI baseUri, HttpClient httpClient, int maximumResponseBytes, Supplier<String> authenticationTokenSupplier)
     {
         this.baseUri = validateBaseUri(baseUri);
         this.httpClient = requireNonNull(httpClient, "httpClient is null");
@@ -74,17 +83,55 @@ public final class HogQlSemanticCatalogHttpTransport
             throw new IllegalArgumentException("invalid HogQL semantic catalog response size limit");
         }
         this.maximumResponseBytes = maximumResponseBytes;
+        this.authenticationTokenSupplier = requireNonNull(authenticationTokenSupplier, "authenticationTokenSupplier is null");
     }
 
     @Override
     public CompletionStage<byte[]> load(LoadRequest request)
     {
         requireNonNull(request, "request is null");
+        String authenticationToken;
+        try {
+            authenticationToken = validateAuthenticationToken(authenticationTokenSupplier.get());
+        }
+        catch (RuntimeException _) {
+            return CompletableFuture.failedFuture(unavailable());
+        }
         Request httpRequest = prepareGet()
                 .setUri(buildUri(baseUri, request))
                 .setHeader(ACCEPT, JSON.toString())
+                .setHeader(AUTHENTICATION_HEADER, authenticationToken)
                 .build();
         return toCompletableFuture(httpClient.executeAsync(httpRequest, new MetadataResponseHandler(request, maximumResponseBytes)));
+    }
+
+    private static Supplier<String> tokenSupplier(String authenticationTokenFile)
+    {
+        if (authenticationTokenFile == null || authenticationTokenFile.isBlank()) {
+            throw new IllegalArgumentException("HogQL semantic catalog authentication token file is not configured");
+        }
+        Path path = Path.of(authenticationTokenFile);
+        return () -> {
+            try (InputStream input = Files.newInputStream(path)) {
+                byte[] token = input.readNBytes(MAXIMUM_AUTHENTICATION_TOKEN_BYTES + 1);
+                if (token.length > MAXIMUM_AUTHENTICATION_TOKEN_BYTES) {
+                    throw new IllegalArgumentException("invalid HogQL semantic catalog authentication token");
+                }
+                return new String(token, StandardCharsets.UTF_8).strip();
+            }
+            catch (IOException e) {
+                throw new IllegalStateException("HogQL semantic catalog authentication token is unavailable", e);
+            }
+        };
+    }
+
+    private static String validateAuthenticationToken(String token)
+    {
+        requireNonNull(token, "authentication token is null");
+        if (token.isBlank() || token.indexOf('\r') >= 0 || token.indexOf('\n') >= 0) {
+            throw new IllegalArgumentException("invalid HogQL semantic catalog authentication token");
+        }
+        return token;
     }
 
     static URI buildUri(URI baseUri, LoadRequest request)
@@ -108,6 +155,11 @@ public final class HogQlSemanticCatalogHttpTransport
             throw new IllegalArgumentException("invalid HogQL semantic catalog URI");
         }
         return baseUri;
+    }
+
+    private static HogQlSemanticCatalogException unavailable()
+    {
+        return new HogQlSemanticCatalogException(Failure.UNAVAILABLE, "HogQL semantic catalog metadata is unavailable");
     }
 
     private static final class MetadataResponseHandler
@@ -174,7 +226,7 @@ public final class HogQlSemanticCatalogHttpTransport
 
         private static HogQlSemanticCatalogException unavailable()
         {
-            return new HogQlSemanticCatalogException(Failure.UNAVAILABLE, "HogQL semantic catalog metadata is unavailable");
+            return HogQlSemanticCatalogHttpTransport.unavailable();
         }
     }
 }

@@ -22,6 +22,7 @@ import io.trino.spi.TrinoException;
 import java.util.EnumMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
@@ -36,7 +37,7 @@ import static java.util.Objects.requireNonNull;
 public final class HogQlCompilationTracker
 {
     private final HogQlCompilationObserver observer;
-    private final Dimensions dimensions;
+    private Dimensions dimensions;
     private final LongSupplier ticker;
     private final long startedNanos;
     private final EnumMap<Phase, Long> phaseNanos = new EnumMap<>(Phase.class);
@@ -80,6 +81,14 @@ public final class HogQlCompilationTracker
     public void succeeded()
     {
         complete(SUCCESS, Optional.empty());
+    }
+
+    public void catalogGeneration(OptionalLong catalogGeneration)
+    {
+        if (completed) {
+            throw new IllegalStateException("HogQL compilation observation is complete");
+        }
+        dimensions = dimensions.withCatalogGeneration(requireNonNull(catalogGeneration, "catalogGeneration is null"));
     }
 
     public void failed(Throwable failure)

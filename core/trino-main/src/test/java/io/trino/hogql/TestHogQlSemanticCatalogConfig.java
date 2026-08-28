@@ -15,6 +15,7 @@ package io.trino.hogql;
 
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
+import jakarta.validation.constraints.AssertTrue;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
@@ -23,6 +24,7 @@ import java.util.Map;
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
+import static io.airlift.testing.ValidationAssertions.assertFailsValidation;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
@@ -34,6 +36,7 @@ public class TestHogQlSemanticCatalogConfig
     {
         assertRecordedDefaults(recordDefaults(HogQlSemanticCatalogConfig.class)
                 .setUri(null)
+                .setAuthenticationTokenFile(null)
                 .setMaximumEntries(100)
                 .setRefreshAfter(new Duration(1, MINUTES))
                 .setExpireAfter(new Duration(5, MINUTES))
@@ -49,6 +52,7 @@ public class TestHogQlSemanticCatalogConfig
     {
         Map<String, String> properties = Map.of(
                 "hogql.semantic-catalog.uri", "https://duckgres.example/metadata",
+                "hogql.semantic-catalog.authentication-token-file", "/run/secrets/hogql-catalog-token",
                 "hogql.semantic-catalog.maximum-entries", "17",
                 "hogql.semantic-catalog.refresh-after", "2m",
                 "hogql.semantic-catalog.expire-after", "9m",
@@ -60,6 +64,7 @@ public class TestHogQlSemanticCatalogConfig
 
         HogQlSemanticCatalogConfig expected = new HogQlSemanticCatalogConfig()
                 .setUri(URI.create("https://duckgres.example/metadata"))
+                .setAuthenticationTokenFile("/run/secrets/hogql-catalog-token")
                 .setMaximumEntries(17)
                 .setRefreshAfter(new Duration(2, MINUTES))
                 .setExpireAfter(new Duration(9, MINUTES))
@@ -70,5 +75,15 @@ public class TestHogQlSemanticCatalogConfig
                 .setMaximumResponseSize(DataSize.of(4, MEGABYTE));
 
         assertFullMapping(properties, expected);
+    }
+
+    @Test
+    public void testUriRequiresAuthenticationTokenFile()
+    {
+        assertFailsValidation(
+                new HogQlSemanticCatalogConfig().setUri(URI.create("https://duckgres.example/metadata")),
+                "authenticationConfigured",
+                "hogql.semantic-catalog.authentication-token-file is required when hogql.semantic-catalog.uri is set",
+                AssertTrue.class);
     }
 }

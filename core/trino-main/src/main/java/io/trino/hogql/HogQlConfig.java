@@ -15,13 +15,19 @@ package io.trino.hogql;
 
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
+import io.airlift.units.Duration;
+import io.airlift.units.MinDuration;
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
+
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 public class HogQlConfig
 {
     private boolean enabled;
     private int compilationThreads = 2;
     private int compilationQueueCapacity = 32;
+    private Duration compilationTimeout = new Duration(10, SECONDS);
 
     public boolean isEnabled()
     {
@@ -61,6 +67,21 @@ public class HogQlConfig
     public HogQlConfig setCompilationQueueCapacity(int compilationQueueCapacity)
     {
         this.compilationQueueCapacity = compilationQueueCapacity;
+        return this;
+    }
+
+    @NotNull
+    @MinDuration("1ms")
+    public Duration getCompilationTimeout()
+    {
+        return compilationTimeout;
+    }
+
+    @Config("hogql.compilation-timeout")
+    @ConfigDescription("Maximum wall time for one HogQL compilation, including queue wait")
+    public HogQlConfig setCompilationTimeout(Duration compilationTimeout)
+    {
+        this.compilationTimeout = compilationTimeout;
         return this;
     }
 }

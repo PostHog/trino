@@ -13,6 +13,7 @@
  */
 package io.trino.hogql;
 
+import io.airlift.units.Duration;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -20,6 +21,7 @@ import java.util.Map;
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 public class TestHogQlConfig
 {
@@ -29,7 +31,8 @@ public class TestHogQlConfig
         assertRecordedDefaults(recordDefaults(HogQlConfig.class)
                 .setEnabled(false)
                 .setCompilationThreads(2)
-                .setCompilationQueueCapacity(32));
+                .setCompilationQueueCapacity(32)
+                .setCompilationTimeout(new Duration(10, SECONDS)));
     }
 
     @Test
@@ -39,10 +42,12 @@ public class TestHogQlConfig
                 Map.of(
                         "hogql.enabled", "true",
                         "hogql.compilation-threads", "4",
-                        "hogql.compilation-queue-capacity", "128"),
+                        "hogql.compilation-queue-capacity", "128",
+                        "hogql.compilation-timeout", "3s"),
                 new HogQlConfig()
                         .setEnabled(true)
                         .setCompilationThreads(4)
-                        .setCompilationQueueCapacity(128));
+                        .setCompilationQueueCapacity(128)
+                        .setCompilationTimeout(new Duration(3, SECONDS)));
     }
 }

@@ -20,6 +20,7 @@ import io.airlift.units.Duration;
 import io.airlift.units.MaxDataSize;
 import io.airlift.units.MinDataSize;
 import io.airlift.units.MinDuration;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 
@@ -32,6 +33,7 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 public class HogQlSemanticCatalogConfig
 {
     private URI uri;
+    private String authenticationTokenFile;
     private int maximumEntries = 100;
     private Duration refreshAfter = new Duration(1, MINUTES);
     private Duration expireAfter = new Duration(5, MINUTES);
@@ -52,6 +54,25 @@ public class HogQlSemanticCatalogConfig
     {
         this.uri = uri;
         return this;
+    }
+
+    public String getAuthenticationTokenFile()
+    {
+        return authenticationTokenFile;
+    }
+
+    @Config("hogql.semantic-catalog.authentication-token-file")
+    @ConfigDescription("File containing the Duckgres HogQL compatibility metadata authentication token")
+    public HogQlSemanticCatalogConfig setAuthenticationTokenFile(String authenticationTokenFile)
+    {
+        this.authenticationTokenFile = authenticationTokenFile;
+        return this;
+    }
+
+    @AssertTrue(message = "hogql.semantic-catalog.authentication-token-file is required when hogql.semantic-catalog.uri is set")
+    public boolean isAuthenticationConfigured()
+    {
+        return uri == null || (authenticationTokenFile != null && !authenticationTokenFile.isBlank());
     }
 
     @Min(1)
