@@ -112,7 +112,7 @@ public final class HogQlCompiler
         requireNonNull(catalogContext, "catalogContext is null");
         return compile(
                 parse(envelope.query()),
-                envelope.parameters(),
+                envelope,
                 envelope.modifiers(),
                 catalogContext,
                 envelope.languageVersion(),
@@ -129,7 +129,7 @@ public final class HogQlCompiler
         }
         return compile(
                 parse(envelope.query()),
-                envelope.parameters(),
+                envelope,
                 Map.of(),
                 catalogContext,
                 envelope.languageVersion(),
@@ -141,7 +141,22 @@ public final class HogQlCompiler
     {
         requireNonNull(hogql, "hogql is null");
         requireNonNull(parameters, "parameters is null");
-        return compile(parse(hogql), parameters, Map.of(), Optional.empty(), HogQlLanguageContract.current().languageVersion(), OptionalLong.empty(), false);
+        return compile(
+                parse(hogql),
+                new HogQlCompileEnvelope(
+                        hogql,
+                        HogQlCompileEnvelope.PROTOCOL_VERSION,
+                        HogQlLanguageContract.current().languageVersion(),
+                        parameters,
+                        Map.of(),
+                        Map.of(),
+                        Map.of(),
+                        OptionalLong.empty()),
+                Map.of(),
+                Optional.empty(),
+                HogQlLanguageContract.current().languageVersion(),
+                OptionalLong.empty(),
+                false);
     }
 
     private HogQlQuery parse(String hogql)
@@ -161,14 +176,14 @@ public final class HogQlCompiler
 
     private static HogQlCompilationResult compile(
             HogQlQuery query,
-            Map<String, HogQlTypedValue> parameters,
+            HogQlCompileEnvelope envelope,
             Map<String, HogQlTypedValue> modifiers,
             Optional<HogQlSemanticCatalogContext> catalogContext,
             HogQlLanguageVersion languageVersion,
             OptionalLong expectedCatalogGeneration,
             boolean v0Profile)
     {
-        validateParameters(query, parameters);
+        validateParameters(query, envelope.parameters());
         validateQuery(query);
 
         List<Placeholder> placeholders = new ArrayList<>();
@@ -177,7 +192,7 @@ public final class HogQlCompiler
 
         List<String> missing = placeholders.stream()
                 .map(Placeholder::name)
-                .filter(name -> !parameters.containsKey(name))
+                .filter(name -> envelope.bindingForPlaceholder(name).isEmpty())
                 .distinct()
                 .toList();
         if (!missing.isEmpty()) {
@@ -188,12 +203,13 @@ public final class HogQlCompiler
             throw bindingError(firstMissing.span(), "Missing HogQL parameter bindings: " + String.join(", ", missing));
         }
 
-        Set<String> placeholderNames = new HashSet<>();
+        Set<String> parameterPlaceholderNames = new HashSet<>();
         placeholders.stream()
                 .map(Placeholder::name)
-                .forEach(placeholderNames::add);
-        List<String> extra = parameters.keySet().stream()
-                .filter(name -> !placeholderNames.contains(name))
+                .filter(name -> !name.contains("."))
+                .forEach(parameterPlaceholderNames::add);
+        List<String> extra = envelope.parameters().keySet().stream()
+                .filter(name -> !parameterPlaceholderNames.contains(name))
                 .sorted()
                 .toList();
         if (!extra.isEmpty()) {

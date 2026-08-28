@@ -17,6 +17,7 @@ import io.trino.hogql.parser.HogQlLanguageContract;
 import io.trino.hogql.parser.HogQlLanguageVersion;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 
@@ -81,6 +82,22 @@ public record HogQlCompileEnvelope(
                 semanticFields.getOrDefault("filters", Map.of()),
                 semanticFields.getOrDefault("modifiers", Map.of()),
                 catalogGeneration);
+    }
+
+    public Optional<HogQlTypedValue> bindingForPlaceholder(String placeholder)
+    {
+        requireNonNull(placeholder, "placeholder is null");
+        int separator = placeholder.indexOf('.');
+        if (separator < 0) {
+            return Optional.ofNullable(parameters.get(placeholder));
+        }
+        String namespace = placeholder.substring(0, separator);
+        String name = placeholder.substring(separator + 1);
+        return switch (namespace) {
+            case "variables" -> Optional.ofNullable(variables.get(name));
+            case "filters" -> Optional.ofNullable(filters.get(name));
+            default -> Optional.empty();
+        };
     }
 
     private static Map<String, HogQlTypedValue> immutableValues(String field, Map<String, HogQlTypedValue> values)

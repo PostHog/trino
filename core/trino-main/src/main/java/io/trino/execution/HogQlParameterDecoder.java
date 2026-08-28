@@ -22,6 +22,7 @@ import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import com.google.common.collect.ImmutableList;
+import io.trino.hogql.compiler.HogQlCompileEnvelope;
 import io.trino.hogql.compiler.HogQlCompilationResult;
 import io.trino.hogql.compiler.HogQlModifierBinding;
 import io.trino.hogql.compiler.HogQlTypedValue;
@@ -98,10 +99,10 @@ final class HogQlParameterDecoder
         this.sqlParser = requireNonNull(sqlParser, "sqlParser is null");
     }
 
-    List<Expression> decode(HogQlCompilationResult result, Map<String, HogQlTypedValue> bindings)
+    List<Expression> decode(HogQlCompilationResult result, HogQlCompileEnvelope envelope)
     {
         requireNonNull(result, "result is null");
-        requireNonNull(bindings, "bindings is null");
+        requireNonNull(envelope, "envelope is null");
         List<Parameter> parameters = ParameterExtractor.extractParameters(result.statement());
         if (parameters.size() != result.parameterNames().size()) {
             throw new IllegalStateException("HogQL compiler returned inconsistent parameter metadata");
@@ -112,7 +113,7 @@ final class HogQlParameterDecoder
             String name = result.parameterNames().get(index);
             NodeLocation location = parameters.get(index).getLocation().orElseThrow();
             try {
-                HogQlTypedValue binding = requireNonNull(bindings.get(name), "binding is null");
+                HogQlTypedValue binding = envelope.bindingForPlaceholder(name).orElseThrow(() -> new NullPointerException("binding is null"));
                 values.add(decode(binding, location));
             }
             catch (RuntimeException _) {

@@ -1670,10 +1670,20 @@ public final class HogQlParser
         private Placeholder buildPlaceholder(HogQLParser.PlaceholderContext context)
         {
             Expression expression = buildExpression(context.columnExpr());
-            if (!(expression instanceof ColumnReference reference) || reference.parts().size() != 1) {
+            if (!(expression instanceof ColumnReference reference)) {
                 throw unsupported(context, "non-name placeholder");
             }
-            return new Placeholder(reference.parts().getFirst().value(), sourceSpan(context));
+            if (reference.parts().size() == 1) {
+                return new Placeholder(reference.parts().getFirst().value(), sourceSpan(context));
+            }
+            if (reference.parts().size() == 2 &&
+                    (reference.parts().getFirst().value().equalsIgnoreCase("variables") ||
+                            reference.parts().getFirst().value().equalsIgnoreCase("filters"))) {
+                return new Placeholder(
+                        (reference.parts().getFirst().value().equalsIgnoreCase("variables") ? "variables." : "filters.") + reference.parts().getLast().value(),
+                        sourceSpan(context));
+            }
+            throw unsupported(context, "non-name placeholder");
         }
 
         private Relation buildRelation(HogQLParser.JoinExprContext context)

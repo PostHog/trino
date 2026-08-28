@@ -183,6 +183,17 @@ class TestHogQlStatementResource
         assertThat(rows(sqlResults)).containsExactly(ImmutableList.of(2));
     }
 
+    @Test
+    public void testBindsScopedVariablesAndFilters()
+            throws Exception
+    {
+        List<QueryResults> results = runHogQlToCompletion(hogQlRequestWithScopedBindings(
+                "SELECT {variables.organization_id}, {filters.date_from}"));
+
+        assertThat(results.getLast().getError()).isNull();
+        assertThat(rows(results)).containsExactly(ImmutableList.of(42L, "2026-01-01"));
+    }
+
     @ParameterizedTest(name = "{0}")
     @MethodSource("differentialQueries")
     public void testHogQlExecutionMatchesTrinoSql(String name, String hogql, String trinoSql)
@@ -612,6 +623,19 @@ class TestHogQlStatementResource
                  "filters": {"object": {"type": "object", "value": {"nested": 2.5}}},
                  "modifiers": {},
                  "catalogGeneration": 1
+               }
+               """.formatted(STRING_CODEC.toJson(query), HogQlLanguageContract.current().languageVersion());
+    }
+
+    private static String hogQlRequestWithScopedBindings(String query)
+    {
+        return """
+               {
+                 "query": %s,
+                 "protocolVersion": 1,
+                 "languageVersion": "%s",
+                 "variables": {"organization_id": {"type": "bigint", "value": 42}},
+                 "filters": {"date_from": {"type": "varchar", "value": "2026-01-01"}}
                }
                """.formatted(STRING_CODEC.toJson(query), HogQlLanguageContract.current().languageVersion());
     }

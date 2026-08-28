@@ -150,7 +150,7 @@ public class QueryPreparer
                     preparedQuery = tracker.observe(PARAMETER_BINDING, () -> prepareQuery(
                             session,
                             statement,
-                            Optional.of(hogQlParameterDecoder.decode(result, envelope.parameters())),
+                            Optional.of(hogQlParameterDecoder.decode(result, envelope)),
                             sessionPropertyOverrides(result, statement)));
                 }
                 catch (RuntimeException | Error failure) {
