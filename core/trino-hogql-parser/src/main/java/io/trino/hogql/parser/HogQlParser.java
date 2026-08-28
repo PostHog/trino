@@ -1185,6 +1185,9 @@ public final class HogQlParser
             if (context instanceof HogQLParser.ColumnExprTemplateStringContext template) {
                 return buildTemplateString(template.templateString());
             }
+            if (context instanceof HogQLParser.ColumnExprTagElementContext tag) {
+                return buildHogQlXTag(tag.hogqlxTagElement());
+            }
             if (context instanceof HogQLParser.ColumnExprTupleContext tuple) {
                 return new TupleExpression(buildExpressions(tuple.columnExprList()), sourceSpan(tuple));
             }
@@ -1412,6 +1415,77 @@ public final class HogQlParser
                     List.of(),
                     Optional.empty(),
                     sourceSpan(context));
+        }
+
+        private TupleExpression buildHogQlXTag(HogQLParser.HogqlxTagElementContext context)
+        {
+            HogQLParser.IdentifierContext openingIdentifier;
+            List<HogQLParser.HogqlxTagAttributeContext> attributes;
+            List<Expression> children = new ArrayList<>();
+            if (context instanceof HogQLParser.HogqlxTagElementClosedContext closed) {
+                openingIdentifier = closed.identifier();
+                attributes = closed.hogqlxTagAttribute();
+            }
+            else if (context instanceof HogQLParser.HogqlxTagElementNestedContext nested) {
+                openingIdentifier = nested.identifier(0);
+                Identifier opening = buildIdentifier(openingIdentifier);
+                Identifier closing = buildIdentifier(nested.identifier(1));
+                if (!opening.value().equals(closing.value())) {
+                    throw unsupported(nested.identifier(1), "mismatched HogQLX closing tag");
+                }
+                attributes = nested.hogqlxTagAttribute();
+                for (HogQLParser.HogqlxChildElementContext child : nested.hogqlxChildElement()) {
+                    if (child.hogqlxTagElement() != null) {
+                        children.add(buildHogQlXTag(child.hogqlxTagElement()));
+                    }
+                    else if (child.hogqlxText() != null) {
+                        String text = child.hogqlxText().getText();
+                        if (!((text.indexOf('\n') >= 0 || text.indexOf('\r') >= 0) && text.isBlank())) {
+                            children.add(new Literal(STRING, text, sourceSpan(child.hogqlxText())));
+                        }
+                    }
+                    else {
+                        children.add(buildExpression(child.columnExpr()));
+                    }
+                }
+            }
+            else {
+                throw unsupported(context, "HogQLX tag");
+            }
+
+            List<Expression> tupleValues = new ArrayList<>();
+            tupleValues.add(new Literal(STRING, "__hx_tag", sourceSpan(context)));
+            tupleValues.add(new Literal(STRING, buildIdentifier(openingIdentifier).value(), sourceSpan(openingIdentifier)));
+            boolean hasChildrenAttribute = false;
+            for (HogQLParser.HogqlxTagAttributeContext attribute : attributes) {
+                Identifier name = buildIdentifier(attribute.identifier());
+                hasChildrenAttribute |= name.value().equals("children");
+                tupleValues.add(new Literal(STRING, name.value(), sourceSpan(attribute.identifier())));
+                tupleValues.add(buildHogQlXAttributeValue(attribute));
+            }
+            if (!children.isEmpty()) {
+                if (hasChildrenAttribute) {
+                    throw unsupported(context, "HogQLX tag with both nested children and a children attribute");
+                }
+                tupleValues.add(new Literal(STRING, "children", sourceSpan(context)));
+                tupleValues.add(new TupleExpression(children, sourceSpan(context)));
+            }
+            return new TupleExpression(tupleValues, sourceSpan(context));
+        }
+
+        private Expression buildHogQlXAttributeValue(HogQLParser.HogqlxTagAttributeContext attribute)
+        {
+            if (attribute.string() != null) {
+                HogQLParser.StringContext value = attribute.string();
+                if (value.STRING_LITERAL() != null) {
+                    return new Literal(STRING, decodeQuoted(value.STRING_LITERAL().getText()), sourceSpan(value));
+                }
+                return buildTemplateString(value.templateString());
+            }
+            if (attribute.columnExpr() != null) {
+                return buildExpression(attribute.columnExpr());
+            }
+            return new Literal(HogQlQuery.LiteralKind.BOOLEAN, "true", sourceSpan(attribute));
         }
 
         private IntervalExpression buildStringInterval(HogQLParser.ColumnExprIntervalStringContext context)
