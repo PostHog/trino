@@ -371,7 +371,9 @@ final class HogQlFunctionResolver
             case CAST_DATE -> cast(arguments.getFirst(), "date", span);
             case CAST_DOUBLE -> cast(arguments.getFirst(), "double", span);
             case CAST_BIGINT -> cast(arguments.getFirst(), "bigint", span);
-            case CAST_TIMESTAMP -> cast(arguments.getFirst(), "timestamp(0)", span);
+            case CAST_TIMESTAMP -> arguments.size() == 1
+                    ? cast(arguments.getFirst(), "timestamp(0)", span)
+                    : call("with_timezone", List.of(cast(arguments.getFirst(), "timestamp(0)", span), arguments.get(1)), span);
             case CAST_VARCHAR -> cast(arguments.getFirst(), "varchar", span);
             case DATE_TRUNC_DAY -> dateTrunc("day", arguments.getFirst(), span);
             case DATE_TRUNC_HOUR -> dateTrunc("hour", arguments.getFirst(), span);
@@ -398,7 +400,24 @@ final class HogQlFunctionResolver
                     call("json_size", List.of(arguments.getFirst(), jsonPath(function, arguments.subList(1, arguments.size()))), span),
                     new Literal(HogQlQuery.LiteralKind.INTEGER, "0", span),
                     span);
+            case TODAY -> cast(call("now", List.of(), span), "date", span);
+            case INTERVAL_DAY -> new IntervalExpression(arguments.getFirst(), HogQlQuery.IntervalUnit.DAY, span);
+            case ADD_DAYS -> dateAdd("day", arguments, span);
+            case ADD_MONTHS -> dateAdd("month", arguments, span);
+            case DATE_ADD -> arguments.size() == 2
+                    ? new BinaryExpression(HogQlQuery.BinaryOperator.ADD, arguments.getFirst(), arguments.get(1), span)
+                    : call("date_add", arguments, span);
+            case TO_UNIX_TIMESTAMP -> cast(call("to_unixtime", arguments, span), "bigint", span);
+            case PARSE_TIMESTAMP -> new CastExpression(arguments.getFirst(), new Identifier("timestamp(3)", false, span), true, span);
         };
+    }
+
+    private static FunctionCall dateAdd(String unit, List<Expression> arguments, HogQlQuery.SourceSpan span)
+    {
+        return call(
+                "date_add",
+                List.of(new Literal(HogQlQuery.LiteralKind.STRING, unit, span), arguments.get(1), arguments.getFirst()),
+                span);
     }
 
     private static FunctionCall aggregate(String name, List<Expression> arguments, boolean distinct, Expression filter, HogQlQuery.SourceSpan span)

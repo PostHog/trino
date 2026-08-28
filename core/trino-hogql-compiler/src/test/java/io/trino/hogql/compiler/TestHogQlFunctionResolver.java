@@ -183,6 +183,23 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testCompilerLowersDateTimeCompatibilityFunctions()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT today(), toIntervalDay(2), addDays(timestamp, 3), addMonths(timestamp, -2), " +
+                        "dateAdd(timestamp, INTERVAL 4 DAY), fromUnixTimestamp(epoch), toUnixTimestamp(timestamp), " +
+                        "toDateTime(timestamp, 'UTC'), formatDateTime(timestamp, '%Y-%m-%d'), " +
+                        "toTimeZone(timestamp, 'UTC'), parseDateTimeBestEffort(text) FROM records"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT CAST(now() AS date), 2 * INTERVAL '1' DAY, date_add('day', 3, timestamp), " +
+                        "date_add('month', -2, timestamp), timestamp + 4 * INTERVAL '1' DAY, " +
+                        "from_unixtime(epoch), CAST(to_unixtime(timestamp) AS bigint), " +
+                        "with_timezone(CAST(timestamp AS timestamp(0)), 'UTC'), date_format(timestamp, '%Y-%m-%d'), " +
+                        "at_timezone(timestamp, 'UTC'), TRY_CAST(text AS timestamp(3)) FROM records"));
+    }
+
+    @Test
     public void testCompilerEnforcesV0FunctionArities()
     {
         assertThat(new HogQlCompiler().compile(envelope("SELECT coalesce('value')")).statement())
