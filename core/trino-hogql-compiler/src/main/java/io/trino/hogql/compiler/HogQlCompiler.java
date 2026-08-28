@@ -279,11 +279,27 @@ public final class HogQlCompiler
         HogQlQuery resolved = query;
         if (semanticCandidate) {
             HogQlQuery functionsResolved = v0Profile ? HogQlFunctionResolver.resolveV0(query) : HogQlFunctionResolver.resolve(pinned, query);
-            resolved = HogQlSemanticResolver.resolve(pinned, functionsResolved)
-                    .map(HogQlSemanticResolver.ResolvedQuery::query)
-                    .orElse(functionsResolved);
+            if (hasSemanticDefinitions(pinned.snapshot())) {
+                resolved = HogQlSemanticResolver.resolve(pinned, functionsResolved)
+                        .map(HogQlSemanticResolver.ResolvedQuery::query)
+                        .orElse(functionsResolved);
+            }
+            else {
+                resolved = functionsResolved;
+            }
         }
         return new ResolvedQuery(resolved, Optional.of(pinned));
+    }
+
+    private static boolean hasSemanticDefinitions(io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot snapshot)
+    {
+        return !snapshot.logicalTables().isEmpty() ||
+                !snapshot.virtualTables().isEmpty() ||
+                !snapshot.savedQueries().isEmpty() ||
+                !snapshot.materializedViews().isEmpty() ||
+                !snapshot.expressionFields().isEmpty() ||
+                !snapshot.actions().isEmpty() ||
+                !snapshot.cohorts().isEmpty();
     }
 
     private static boolean containsSemanticCandidate(HogQlQuery query)
