@@ -352,6 +352,17 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testCompilerLowersFinalStockAliases()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT floor(score), toDayOfMonth(timestamp), mapFromArrays(keys, values_array), " +
+                        "date_part('hour', timestamp), isNull(value) FROM records"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT floor(score), day(timestamp), map(keys, values_array), hour(timestamp), value IS NULL FROM records"));
+    }
+
+    @Test
     public void testCompilerEnforcesV0FunctionArities()
     {
         assertThat(new HogQlCompiler().compile(envelope("SELECT coalesce('value')")).statement())

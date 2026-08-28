@@ -92,6 +92,8 @@ lower to stock Trino nodes.
 Additional scalar coverage includes array slicing/enumeration, UUID and integer
 conversion, JSON existence/value/serialization, hashing, powers, UTF-8
 substrings, banker-rounding aliases, and conditional median aggregation.
+Simple floor, calendar-part, map construction, and null-predicate aliases are
+mapped to their stock equivalents.
 
 Function aliases are resolved before Trino analysis. Unknown functions fail as
 HogQL resolution errors. Actions, cohorts, saved queries, explicit modifiers,

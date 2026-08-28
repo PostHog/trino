@@ -481,7 +481,27 @@ final class HogQlFunctionResolver
                     false,
                     arguments.get(1),
                     span);
+            case DATE_PART -> datePart(function, arguments);
         };
+    }
+
+    private static Expression datePart(FunctionCall function, List<Expression> arguments)
+    {
+        Literal unit = stringLiteral(function, arguments.getFirst(), "date part");
+        String trinoFunction = switch (unit.value().toLowerCase(Locale.ENGLISH)) {
+            case "year" -> "year";
+            case "quarter" -> "quarter";
+            case "month" -> "month";
+            case "week" -> "week";
+            case "day" -> "day";
+            case "dow", "dayofweek" -> "day_of_week";
+            case "doy", "dayofyear" -> "day_of_year";
+            case "hour" -> "hour";
+            case "minute" -> "minute";
+            case "second" -> "second";
+            default -> throw unsupportedError(function, "Unsupported HogQL date part: " + unit.value());
+        };
+        return call(trinoFunction, List.of(arguments.get(1)), function.span());
     }
 
     private static Expression and(List<Expression> arguments, HogQlQuery.SourceSpan span)
