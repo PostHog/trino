@@ -227,6 +227,37 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testCompilerLowersExtendedRegexCompatibilityFunctions()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT extractAll(name, '([a-z]+)'), extractAll(name, '[a-z]+'), " +
+                        "replaceRegexpOne(name, '([a-z])', 'x_') FROM records"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT regexp_extract_all(name, '([a-z]+)', 1), regexp_extract_all(name, '[a-z]+', 0), " +
+                        "regexp_replace(name, '(?s)^(.*?)(([a-z]))', '$1x_') FROM records"));
+    }
+
+    @Test
+    public void testCompilerLowersExtendedJsonCompatibilityFunctions()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT JSONExtractBool(payload, 'active'), JSONExtractUInt(payload, 'count'), " +
+                        "JSONExtractArrayRaw(payload_text), JSONExtractArrayRaw(payload, 'items'), " +
+                        "JSONExtractKeysAndValuesRaw(payload, 'object') FROM records"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT coalesce(TRY_CAST(json_extract_scalar(payload, '$[\"active\"]') AS boolean), false), " +
+                        "coalesce(TRY_CAST(json_extract_scalar(payload, '$[\"count\"]') AS bigint), 0), " +
+                        "transform(coalesce(TRY_CAST(json_parse(payload_text) AS array(json)), CAST(ARRAY[] AS array(json))), " +
+                        "_hogql_json_item -> json_format(_hogql_json_item)), " +
+                        "transform(coalesce(TRY_CAST(json_extract(payload, '$[\"items\"]') AS array(json)), CAST(ARRAY[] AS array(json))), " +
+                        "_hogql_json_item -> json_format(_hogql_json_item)), " +
+                        "map_entries(transform_values(coalesce(TRY_CAST(json_extract(payload, '$[\"object\"]') AS map(varchar, json)), " +
+                        "CAST(map(ARRAY[], ARRAY[]) AS map(varchar, json))), (key, value) -> json_format(value))) FROM records"));
+    }
+
+    @Test
     public void testCompilerLowersAggregateCombinators()
     {
         HogQlCompilationResult result = new HogQlCompiler().compile(envelope(

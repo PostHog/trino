@@ -79,6 +79,8 @@ float conversions, Decimal64 casts, and integer division lower to stock casts
 and arithmetic.
 Literal regex extraction preserves HogQL's capture-group and empty-default
 behavior; matching and replace-all lower to Trino regex functions.
+The extended profile also lowers extract-all and first-match replacement, plus
+boolean, unsigned-integer, raw-array, and nested raw-map JSON extraction.
 Common array transforms, predicates, indexing, summation, ranges, tuple
 indexing, splitting, and membership lower to Trino higher-order functions.
 Range and membership rewrites preserve empty-range and null-search behavior.

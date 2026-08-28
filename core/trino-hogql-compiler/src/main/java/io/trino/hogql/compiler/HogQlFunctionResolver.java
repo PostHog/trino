@@ -428,13 +428,16 @@ final class HogQlFunctionResolver
             case JSON_EXTRACT_STRING -> jsonExtractScalar(function, arguments, "varchar", new Literal(HogQlQuery.LiteralKind.STRING, "", span));
             case JSON_EXTRACT_INT -> jsonExtractScalar(function, arguments, "bigint", new Literal(HogQlQuery.LiteralKind.INTEGER, "0", span));
             case JSON_EXTRACT_FLOAT -> jsonExtractScalar(function, arguments, "double", new Literal(HogQlQuery.LiteralKind.FLOAT, "0.0", span));
+            case JSON_EXTRACT_BOOL -> jsonExtractScalar(function, arguments, "boolean", new Literal(HogQlQuery.LiteralKind.BOOLEAN, "false", span));
+            case JSON_EXTRACT_UINT -> jsonExtractScalar(function, arguments, "bigint", integerLiteral("0", span));
+            case JSON_EXTRACT_ARRAY_RAW -> jsonExtractArrayRaw(function, arguments);
             case JSON_EXTRACT_RAW -> coalesce(
                     call("json_format", List.of(call("json_extract", List.of(arguments.getFirst(), jsonPath(function, arguments.subList(1, arguments.size()))), span)), span),
                     new Literal(HogQlQuery.LiteralKind.STRING, "", span),
                     span);
             case JSON_EXTRACT_TYPED -> jsonExtractTyped(function, arguments);
             case JSON_KEYS_AND_VALUES -> jsonExtractKeysAndValues(function, arguments);
-            case JSON_KEYS_AND_VALUES_RAW -> jsonExtractKeysAndValuesRaw(function, arguments.getFirst());
+            case JSON_KEYS_AND_VALUES_RAW -> jsonExtractKeysAndValuesRaw(function, arguments);
             case JSON_LENGTH -> coalesce(
                     call("json_size", List.of(arguments.getFirst(), jsonPath(function, arguments.subList(1, arguments.size()))), span),
                     new Literal(HogQlQuery.LiteralKind.INTEGER, "0", span),
@@ -453,7 +456,9 @@ final class HogQlFunctionResolver
             case GREATER -> new BinaryExpression(HogQlQuery.BinaryOperator.GREATER_THAN, arguments.getFirst(), arguments.get(1), span);
             case LIKE -> new BinaryExpression(HogQlQuery.BinaryOperator.LIKE, arguments.getFirst(), arguments.get(1), span);
             case REGEX_EXTRACT -> regexExtract(function, arguments);
+            case REGEX_EXTRACT_ALL -> regexExtractAll(function, arguments);
             case REGEX_REPLACE_ALL -> regexReplaceAll(function, arguments);
+            case REGEX_REPLACE_ONE -> regexReplaceOne(function, arguments);
         };
     }
 
@@ -468,24 +473,46 @@ final class HogQlFunctionResolver
         return coalesce(extracted, new Literal(HogQlQuery.LiteralKind.STRING, "", function.span()), function.span());
     }
 
+    private static Expression regexExtractAll(FunctionCall function, List<Expression> arguments)
+    {
+        Literal pattern = stringLiteral(function, arguments.get(1), "regular expression");
+        Literal group = integerLiteral(hasCapturingGroup(pattern.value()) ? "1" : "0", function.span());
+        return call("regexp_extract_all", List.of(arguments.getFirst(), pattern, group), function.span());
+    }
+
     private static Expression regexReplaceAll(FunctionCall function, List<Expression> arguments)
     {
         Literal pattern = stringLiteral(function, arguments.get(1), "regular expression");
         Literal replacement = stringLiteral(function, arguments.get(2), "regular expression replacement");
-        String trinoReplacement = regexReplacement(replacement.value());
+        String trinoReplacement = regexReplacement(replacement.value(), 0);
         return call(
                 "regexp_replace",
                 List.of(arguments.getFirst(), pattern, new Literal(HogQlQuery.LiteralKind.STRING, trinoReplacement, replacement.span())),
                 function.span());
     }
 
-    private static String regexReplacement(String replacement)
+    private static Expression regexReplaceOne(FunctionCall function, List<Expression> arguments)
+    {
+        Literal pattern = stringLiteral(function, arguments.get(1), "regular expression");
+        Literal replacement = stringLiteral(function, arguments.get(2), "regular expression replacement");
+        Literal firstPattern = new Literal(
+                HogQlQuery.LiteralKind.STRING,
+                "(?s)^(.*?)(" + pattern.value() + ")",
+                pattern.span());
+        Literal firstReplacement = new Literal(
+                HogQlQuery.LiteralKind.STRING,
+                "$1" + regexReplacement(replacement.value(), 2),
+                replacement.span());
+        return call("regexp_replace", List.of(arguments.getFirst(), firstPattern, firstReplacement), function.span());
+    }
+
+    private static String regexReplacement(String replacement, int groupOffset)
     {
         StringBuilder result = new StringBuilder(replacement.length());
         for (int index = 0; index < replacement.length(); index++) {
             char current = replacement.charAt(index);
             if (current == '\\' && index + 1 < replacement.length() && Character.isDigit(replacement.charAt(index + 1))) {
-                result.append('$').append(replacement.charAt(++index));
+                result.append('$').append(Character.digit(replacement.charAt(++index), 10) + groupOffset);
             }
             else {
                 result.append(current);
@@ -600,7 +627,7 @@ final class HogQlFunctionResolver
         return call("map_entries", List.of(typedJsonMap(arguments.getFirst(), "double", function.span())), function.span());
     }
 
-    private static Expression jsonExtractKeysAndValuesRaw(FunctionCall function, Expression value)
+    private static Expression jsonExtractKeysAndValuesRaw(FunctionCall function, List<Expression> arguments)
     {
         HogQlQuery.SourceSpan span = function.span();
         Identifier key = new Identifier("key", false, span);
@@ -611,15 +638,34 @@ final class HogQlFunctionResolver
                 span);
         Expression formatted = call(
                 "transform_values",
-                List.of(typedJsonMap(value, "json", span), formatValue),
+                List.of(typedJsonMapFromJson(jsonValue(function, arguments), "json", span), formatValue),
                 span);
         return call("map_entries", List.of(formatted), span);
     }
 
+    private static Expression jsonExtractArrayRaw(FunctionCall function, List<Expression> arguments)
+    {
+        HogQlQuery.SourceSpan span = function.span();
+        String type = "array(json)";
+        Expression converted = tryCast(jsonValue(function, arguments), type, span);
+        Expression empty = cast(new ArrayExpression(List.of(), span), type, span);
+        Expression values = coalesce(converted, empty, span);
+        Identifier item = new Identifier("_hogql_json_item", false, span);
+        LambdaExpression format = new LambdaExpression(
+                List.of(item),
+                call("json_format", List.of(new ColumnReference(List.of(item), span)), span),
+                span);
+        return call("transform", List.of(values, format), span);
+    }
+
     private static Expression typedJsonMap(Expression value, String valueType, HogQlQuery.SourceSpan span)
     {
+        return typedJsonMapFromJson(call("json_parse", List.of(value), span), valueType, span);
+    }
+
+    private static Expression typedJsonMapFromJson(Expression parsed, String valueType, HogQlQuery.SourceSpan span)
+    {
         String type = "map(varchar," + valueType + ")";
-        Expression parsed = call("json_parse", List.of(value), span);
         Expression converted = new CastExpression(parsed, new Identifier(type, false, span), true, span);
         Expression empty = new CastExpression(
                 call("map", List.of(new ArrayExpression(List.of(), span), new ArrayExpression(List.of(), span)), span),
@@ -627,6 +673,17 @@ final class HogQlFunctionResolver
                 false,
                 span);
         return coalesce(converted, empty, span);
+    }
+
+    private static Expression jsonValue(FunctionCall function, List<Expression> arguments)
+    {
+        if (arguments.size() == 1) {
+            return call("json_parse", List.of(arguments.getFirst()), function.span());
+        }
+        return call(
+                "json_extract",
+                List.of(arguments.getFirst(), jsonPath(function, arguments.subList(1, arguments.size()))),
+                function.span());
     }
 
     private static String jsonType(FunctionCall function, Expression expression)
