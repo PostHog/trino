@@ -110,6 +110,16 @@ public class TestHogQlCompiler
         assertThat(statement).isEqualTo(sqlParser.createStatement("(SELECT 1 ORDER BY 1 LIMIT 1) UNION ALL SELECT 2"));
     }
 
+    @Test
+    public void testPreservesUnqualifiedOutputReferencesInDerivedSetQueries()
+    {
+        Statement statement = compiler.compile(
+                "SELECT * FROM (SELECT 1 AS value UNION ALL SELECT 2 ORDER BY value) AS nested");
+
+        assertThat(statement).isEqualTo(sqlParser.createStatement(
+                "SELECT * FROM (SELECT 1 AS value UNION ALL SELECT 2 ORDER BY value) AS nested"));
+    }
+
     @ParameterizedTest
     @CsvSource(delimiter = '|', textBlock = """
                                             SELECT [1, 2, 3]                 | SELECT ARRAY[1, 2, 3]

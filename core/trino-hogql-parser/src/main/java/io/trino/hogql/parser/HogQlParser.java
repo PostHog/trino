@@ -1871,7 +1871,7 @@ public final class HogQlParser
         {
             query.with().forEach(commonTable -> validateQueryScope(commonTable.query(), forbiddenOuterRelations));
             if (query.body() instanceof SetOperation setOperation) {
-                query.orderBy().forEach(item -> validateExpressionScope(item.expression(), forbiddenOuterRelations, Set.of()));
+                query.orderBy().forEach(item -> validateExpressionScope(item.expression(), forbiddenOuterRelations, Set.of("__hogql_set_output")));
                 query.limit().ifPresent(expression -> validateExpressionScope(expression, forbiddenOuterRelations, Set.of()));
                 query.offset().ifPresent(expression -> validateExpressionScope(expression, forbiddenOuterRelations, Set.of()));
                 validateQueryScope(setOperation.left(), forbiddenOuterRelations);
