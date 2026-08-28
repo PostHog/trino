@@ -76,6 +76,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.WindowSpecification;
 import io.trino.spi.Location;
 import io.trino.spi.TrinoException;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -376,7 +377,37 @@ final class HogQlFunctionResolver
             case DATE_TRUNC_HOUR -> dateTrunc("hour", arguments.getFirst(), span);
             case DATE_TRUNC_MONTH -> dateTrunc("month", arguments.getFirst(), span);
             case DATE_TRUNC_WEEK -> dateTrunc("week", arguments.getFirst(), span);
+            case COUNT_IF -> aggregate("count", List.of(), false, arguments.getFirst(), span);
+            case SUM_IF -> aggregate("sum", List.of(arguments.getFirst()), false, arguments.get(1), span);
+            case MAX_IF -> aggregate("max", List.of(arguments.getFirst()), false, arguments.get(1), span);
+            case UNIQ_IF -> aggregate("approx_distinct", List.of(arguments.getFirst()), false, arguments.get(1), span);
+            case UNIQ_EXACT -> aggregate("count", List.of(arguments.getFirst()), true, null, span);
+            case GROUP_UNIQ_ARRAY -> aggregate("array_agg", List.of(arguments.getFirst()), true, null, span);
+            case MULTI_IF -> multiIf(function, arguments);
         };
+    }
+
+    private static FunctionCall aggregate(String name, List<Expression> arguments, boolean distinct, Expression filter, HogQlQuery.SourceSpan span)
+    {
+        return new FunctionCall(
+                new Identifier(name, false, span),
+                arguments,
+                distinct,
+                List.of(),
+                Optional.ofNullable(filter),
+                span);
+    }
+
+    private static CaseExpression multiIf(FunctionCall function, List<Expression> arguments)
+    {
+        if (arguments.size() % 2 == 0) {
+            throw resolutionError(function, "HogQL function " + function.name().value() + " requires condition/result pairs followed by a default value");
+        }
+        List<CaseWhen> clauses = new ArrayList<>((arguments.size() - 1) / 2);
+        for (int index = 0; index < arguments.size() - 1; index += 2) {
+            clauses.add(new CaseWhen(arguments.get(index), arguments.get(index + 1), function.span()));
+        }
+        return new CaseExpression(Optional.empty(), clauses, Optional.of(arguments.getLast()), function.span());
     }
 
     private static CastExpression cast(Expression value, String type, HogQlQuery.SourceSpan span)

@@ -59,6 +59,11 @@ The MVP lowers a frozen, fail-closed subset directly to stock Trino AST nodes:
   `max`, `avg`, `any`, `argMin`, `argMax`, `array_agg`), and windows
   (`first_value`, `rank`, `row_number`).
 
+The compatibility extension also lowers conditional aggregates (`countIf`,
+`sumIf`, `maxIf`, and `uniqIf`), distinct aggregates (`uniqExact` and
+`groupUniqArray`), and `multiIf` directly to stock Trino aggregate filters,
+DISTINCT aggregates, and searched CASE expressions.
+
 Function aliases are resolved before Trino analysis. Unknown functions fail as
 HogQL resolution errors. Actions, cohorts, saved queries, explicit modifiers,
 HogQLX, PIVOT/UNPIVOT execution, ClickHouse-only clauses, advanced lambda and

@@ -51,6 +51,7 @@ final class HogQlV0FunctionRegistry
             rewrite("toStartOfDay", FunctionRewrite.DATE_TRUNC_DAY, "timestamp", signature(1)),
             rewrite("toStartOfHour", FunctionRewrite.DATE_TRUNC_HOUR, "timestamp", signature(1)),
             rewrite("toMonday", FunctionRewrite.DATE_TRUNC_WEEK, "timestamp", signature(1)),
+            rewrite("multiIf", FunctionRewrite.MULTI_IF, "any", variadicSignature(3)),
             scalar("map", "map", signature(2)),
             scalar("dateDiff", "date_diff", signature(3)),
             scalar("dateAdd", "date_add", signature(3)),
@@ -66,6 +67,12 @@ final class HogQlV0FunctionRegistry
             aggregate("avg", "avg", true, signature(1)),
             aggregateWithOrderBy("array_agg", "array_agg", true, signature(1)),
             aggregateWithOrderBy("groupArray", "array_agg", false, signature(1)),
+            aggregateRewrite("countIf", FunctionRewrite.COUNT_IF, "bigint", signature(1)),
+            aggregateRewrite("sumIf", FunctionRewrite.SUM_IF, "any", signature(2)),
+            aggregateRewrite("maxIf", FunctionRewrite.MAX_IF, "any", signature(2)),
+            aggregateRewrite("uniqIf", FunctionRewrite.UNIQ_IF, "bigint", signature(2)),
+            aggregateRewrite("uniqExact", FunctionRewrite.UNIQ_EXACT, "bigint", signature(1)),
+            aggregateRewrite("groupUniqArray", FunctionRewrite.GROUP_UNIQ_ARRAY, "array(any)", signature(1)),
             nondeterministicAggregate("uniq", "approx_distinct", false, signature(1)),
             nondeterministicAggregate("any", "arbitrary", false, signature(1)),
             nondeterministicAggregate("argMin", "min_by", false, signature(2)),
@@ -124,6 +131,24 @@ final class HogQlV0FunctionRegistry
     private static FunctionCapabilityDefinition aggregate(String hogQlName, String trinoName, boolean supportsDistinct, FunctionSignature... signatures)
     {
         return function(hogQlName, trinoName, FunctionKind.AGGREGATE, supportsDistinct, false, true, true, true, signatures);
+    }
+
+    private static FunctionCapabilityDefinition aggregateRewrite(String hogQlName, FunctionRewrite rewrite, String returnType, FunctionSignature... signatures)
+    {
+        return new FunctionCapabilityDefinition(
+                hogQlName,
+                FunctionKind.AGGREGATE,
+                FunctionImplementation.REWRITE,
+                List.of(),
+                java.util.Optional.of(rewrite),
+                java.util.Arrays.stream(signatures)
+                        .map(signature -> new FunctionSignature(signature.argumentTypes(), returnType, signature.variadic()))
+                        .toList(),
+                true,
+                false,
+                false,
+                false,
+                false);
     }
 
     private static FunctionCapabilityDefinition aggregateWithOrderBy(String hogQlName, String trinoName, boolean supportsDistinct, FunctionSignature... signatures)

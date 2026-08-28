@@ -125,7 +125,9 @@ public class TestHogQlFunctionResolver
                         "nullIf(value, ''), ifNull(value, 'fallback'), trim(value), round(score, 2), " +
                         "now(), current_timestamp(), isNotNull(value), groupArray(value), uniq(value), " +
                         "toInt(value), toFloat(value), toString(value), toDate(timestamp), toDateTime(timestamp), " +
-                        "toStartOfMonth(timestamp), toStartOfDay(timestamp), toStartOfHour(timestamp), toMonday(timestamp) FROM metrics"));
+                        "toStartOfMonth(timestamp), toStartOfDay(timestamp), toStartOfHour(timestamp), toMonday(timestamp), " +
+                        "countIf(active), sumIf(value, active), maxIf(value, active), uniqIf(value, active), " +
+                        "uniqExact(value), groupUniqArray(value), multiIf(first, 'one', second, 'two', 'other') FROM metrics"));
 
         assertThat(result.catalogGeneration()).isEmpty();
         assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
@@ -134,7 +136,10 @@ public class TestHogQlFunctionResolver
                         "nullif(value, ''), coalesce(value, 'fallback'), \"trim\"(value), round(score, 2), " +
                         "now(), now(), value IS NOT NULL, array_agg(value), approx_distinct(value), " +
                         "CAST(value AS bigint), CAST(value AS double), CAST(value AS varchar), CAST(timestamp AS date), CAST(timestamp AS timestamp(0)), " +
-                        "date_trunc('month', timestamp), date_trunc('day', timestamp), date_trunc('hour', timestamp), date_trunc('week', timestamp) FROM metrics"));
+                        "date_trunc('month', timestamp), date_trunc('day', timestamp), date_trunc('hour', timestamp), date_trunc('week', timestamp), " +
+                        "count(*) FILTER (WHERE active), sum(value) FILTER (WHERE active), max(value) FILTER (WHERE active), " +
+                        "approx_distinct(value) FILTER (WHERE active), count(DISTINCT value), array_agg(DISTINCT value), " +
+                        "CASE WHEN first THEN 'one' WHEN second THEN 'two' ELSE 'other' END FROM metrics"));
     }
 
     @Test
@@ -162,6 +167,13 @@ public class TestHogQlFunctionResolver
             assertThat(exception.getErrorCode()).isEqualTo(HOGQL_RESOLUTION_ERROR.toErrorCode());
             assertThat(exception).hasMessageContaining("does not accept");
         }
+
+        TrinoException exception = catchThrowableOfType(
+                TrinoException.class,
+                () -> new HogQlCompiler().compile(envelope("SELECT multiIf(first, 1, second, 2)")));
+
+        assertThat(exception.getErrorCode()).isEqualTo(HOGQL_RESOLUTION_ERROR.toErrorCode());
+        assertThat(exception).hasMessageContaining("requires condition/result pairs followed by a default value");
     }
 
     @ParameterizedTest

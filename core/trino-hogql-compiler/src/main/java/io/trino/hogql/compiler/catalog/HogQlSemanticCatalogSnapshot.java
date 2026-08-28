@@ -248,8 +248,9 @@ public record HogQlSemanticCatalogSnapshot(
                 if (function.rewrite().isEmpty()) {
                     throw new IllegalArgumentException("rewrite function must declare a rewrite");
                 }
-                if (function.kind() != FunctionKind.SCALAR) {
-                    throw new IllegalArgumentException("rewrite function must be scalar");
+                FunctionRewrite rewrite = function.rewrite().orElseThrow();
+                if (rewriteFunctionKind(rewrite) != function.kind()) {
+                    throw new IllegalArgumentException("rewrite function kind must be " + rewriteFunctionKind(rewrite).name().toLowerCase(Locale.ENGLISH));
                 }
                 if (!function.deterministic()) {
                     throw new IllegalArgumentException("rewrite function must be deterministic");
@@ -266,10 +267,10 @@ public record HogQlSemanticCatalogSnapshot(
                 if (function.supportsWindow()) {
                     throw new IllegalArgumentException("rewrite function cannot support window invocation");
                 }
-                if (function.signatures().stream().anyMatch(signature -> signature.variadic() || signature.argumentTypes().size() != 1)) {
-                    throw new IllegalArgumentException("rewrite function must declare unary signatures");
+                if (function.signatures().stream().anyMatch(signature -> !validRewriteSignature(rewrite, signature))) {
+                    throw new IllegalArgumentException("rewrite function declares an invalid signature");
                 }
-                if ((function.rewrite().orElseThrow() == FunctionRewrite.IS_NULL || function.rewrite().orElseThrow() == FunctionRewrite.IS_NOT_NULL) &&
+                if ((rewrite == FunctionRewrite.IS_NULL || rewrite == FunctionRewrite.IS_NOT_NULL) &&
                         function.signatures().stream().anyMatch(signature -> !signature.returnType().equalsIgnoreCase("boolean"))) {
                     throw new IllegalArgumentException("null predicate rewrite function signatures must return boolean");
                 }
@@ -284,6 +285,26 @@ public record HogQlSemanticCatalogSnapshot(
             }
         }
         return Map.copyOf(functions);
+    }
+
+    private static FunctionKind rewriteFunctionKind(FunctionRewrite rewrite)
+    {
+        return switch (rewrite) {
+            case COUNT_IF, GROUP_UNIQ_ARRAY, MAX_IF, SUM_IF, UNIQ_EXACT, UNIQ_IF -> FunctionKind.AGGREGATE;
+            default -> FunctionKind.SCALAR;
+        };
+    }
+
+    private static boolean validRewriteSignature(FunctionRewrite rewrite, FunctionSignature signature)
+    {
+        return switch (rewrite) {
+            case CAST_BIGINT, CAST_DATE, CAST_DOUBLE, CAST_TIMESTAMP, CAST_VARCHAR,
+                    DATE_TRUNC_DAY, DATE_TRUNC_HOUR, DATE_TRUNC_MONTH, DATE_TRUNC_WEEK,
+                    GROUP_UNIQ_ARRAY, IS_NOT_NULL, IS_NULL, COUNT_IF, UNIQ_EXACT ->
+                !signature.variadic() && signature.argumentTypes().size() == 1;
+            case MAX_IF, SUM_IF, UNIQ_IF -> !signature.variadic() && signature.argumentTypes().size() == 2;
+            case MULTI_IF -> signature.variadic() && signature.argumentTypes().size() == 4;
+        };
     }
 
     private static Map<String, ExpressionFieldDefinition> indexExpressionFields(List<ExpressionFieldDefinition> definitions, Map<String, LogicalTableDefinition> tables)
@@ -1277,8 +1298,15 @@ public record HogQlSemanticCatalogSnapshot(
         DATE_TRUNC_HOUR,
         DATE_TRUNC_MONTH,
         DATE_TRUNC_WEEK,
+        COUNT_IF,
+        GROUP_UNIQ_ARRAY,
         IS_NULL,
-        IS_NOT_NULL
+        IS_NOT_NULL,
+        MAX_IF,
+        MULTI_IF,
+        SUM_IF,
+        UNIQ_EXACT,
+        UNIQ_IF
     }
 
     public enum ModifierBehavior

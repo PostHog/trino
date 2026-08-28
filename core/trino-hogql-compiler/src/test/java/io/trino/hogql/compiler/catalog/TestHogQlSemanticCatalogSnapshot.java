@@ -168,11 +168,17 @@ public class TestHogQlSemanticCatalogSnapshot
     {
         FunctionCapabilityDefinition isNull = rewriteFunction("isNull", FunctionKind.SCALAR, List.of(), Optional.of(FunctionRewrite.IS_NULL), List.of(new FunctionSignature(List.of("varchar"), "boolean", false)));
         FunctionCapabilityDefinition isNotNull = rewriteFunction("isNotNull", FunctionKind.SCALAR, List.of(), Optional.of(FunctionRewrite.IS_NOT_NULL), List.of(new FunctionSignature(List.of("varchar"), "boolean", false)));
+        FunctionCapabilityDefinition countIf = rewriteFunction("countIf", FunctionKind.AGGREGATE, List.of(), Optional.of(FunctionRewrite.COUNT_IF), List.of(new FunctionSignature(List.of("boolean"), "bigint", false)));
+        FunctionCapabilityDefinition multiIf = rewriteFunction("multiIf", FunctionKind.SCALAR, List.of(), Optional.of(FunctionRewrite.MULTI_IF), List.of(new FunctionSignature(List.of("boolean", "any", "boolean", "any"), "any", true)));
 
-        HogQlSemanticCatalogSnapshot snapshot = semanticSnapshot(List.of(), List.of(isNull, isNotNull));
+        HogQlSemanticCatalogSnapshot snapshot = semanticSnapshot(List.of(), List.of(isNull, isNotNull, countIf, multiIf));
 
         assertThat(snapshot.functions()).extracting(FunctionCapabilityDefinition::rewrite)
-                .containsExactly(Optional.of(FunctionRewrite.IS_NULL), Optional.of(FunctionRewrite.IS_NOT_NULL));
+                .containsExactly(
+                        Optional.of(FunctionRewrite.IS_NULL),
+                        Optional.of(FunctionRewrite.IS_NOT_NULL),
+                        Optional.of(FunctionRewrite.COUNT_IF),
+                        Optional.of(FunctionRewrite.MULTI_IF));
         assertThatThrownBy(() -> semanticSnapshot(List.of(), List.of(
                 rewriteFunction("missing", FunctionKind.SCALAR, List.of(), Optional.empty(), List.of(new FunctionSignature(List.of("varchar"), "boolean", false))))))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -203,7 +209,15 @@ public class TestHogQlSemanticCatalogSnapshot
         assertThatThrownBy(() -> semanticSnapshot(List.of(), List.of(
                 rewriteFunction("binary", FunctionKind.SCALAR, List.of(), Optional.of(FunctionRewrite.IS_NULL), List.of(new FunctionSignature(List.of("varchar", "varchar"), "boolean", false))))))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("unary signatures");
+                .hasMessageContaining("invalid signature");
+        assertThatThrownBy(() -> semanticSnapshot(List.of(), List.of(
+                rewriteFunction("scalarCountIf", FunctionKind.SCALAR, List.of(), Optional.of(FunctionRewrite.COUNT_IF), List.of(new FunctionSignature(List.of("boolean"), "bigint", false))))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("kind must be aggregate");
+        assertThatThrownBy(() -> semanticSnapshot(List.of(), List.of(
+                rewriteFunction("fixedMultiIf", FunctionKind.SCALAR, List.of(), Optional.of(FunctionRewrite.MULTI_IF), List.of(new FunctionSignature(List.of("boolean", "any", "any"), "any", false))))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("invalid signature");
         assertInvalidRewrite(rewriteFunction(false, false, false, false, false, "boolean"), "must be deterministic");
         assertInvalidRewrite(rewriteFunction(true, true, false, false, false, "boolean"), "cannot support DISTINCT");
         assertInvalidRewrite(rewriteFunction(true, false, true, false, false, "boolean"), "cannot support ORDER BY");
