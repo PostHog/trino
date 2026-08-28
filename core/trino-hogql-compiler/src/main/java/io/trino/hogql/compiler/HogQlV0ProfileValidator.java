@@ -136,9 +136,6 @@ final class HogQlV0ProfileValidator
         }
         String name = canonical(table.parts().getFirst().value());
         HogQlSemanticCatalogSnapshot catalog = snapshot.orElseThrow();
-        if (catalog.logicalTable(name).isPresent() && !name.equals("events") && !name.equals("persons")) {
-            throw unsupported(table.span(), "Logical table " + table.parts().getFirst().value() + " is outside the HogQL v0 profile");
-        }
         boolean deferredRelation = catalog.virtualTables().stream().anyMatch(tableDefinition -> canonical(tableDefinition.name()).equals(name)) ||
                 catalog.savedQueries().stream().anyMatch(query -> canonical(query.name()).equals(name)) ||
                 catalog.materializedViews().stream().anyMatch(view -> canonical(view.name()).equals(name));
@@ -173,9 +170,6 @@ final class HogQlV0ProfileValidator
             case FunctionCall function -> {
                 if (function.nameParts().size() != 1) {
                     throw unsupported(function.span(), "Qualified functions are outside the HogQL v0 profile");
-                }
-                if (canonical(function.name().value()).equals("matchesaction")) {
-                    throw unsupported(function.span(), "Actions are outside the HogQL v0 profile");
                 }
                 function.arguments().forEach(argument -> validate(argument, snapshot));
                 function.orderBy().forEach(sortItem -> validate(sortItem.expression(), snapshot));

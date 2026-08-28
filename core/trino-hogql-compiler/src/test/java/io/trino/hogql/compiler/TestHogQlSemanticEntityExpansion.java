@@ -94,6 +94,15 @@ public class TestHogQlSemanticEntityExpansion
     }
 
     @Test
+    public void testV0ExpandsActionPredicate()
+    {
+        assertThat(compileV0("SELECT event FROM events WHERE matchesAction(17)").statement())
+                .isEqualTo(sqlParser.createStatement(
+                        "SELECT event_name AS event FROM analytics.data.raw_events " +
+                                "WHERE raw_events.event_name = CAST('purchase' AS varchar)"));
+    }
+
+    @Test
     public void testExpandsCohortPredicate()
     {
         assertThat(compile("SELECT event FROM events WHERE event NOT IN COHORT 24").statement())
@@ -140,6 +149,20 @@ public class TestHogQlSemanticEntityExpansion
     {
         HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
         return compiler.compile(new HogQlCompileEnvelope(
+                query,
+                HogQlCompileEnvelope.PROTOCOL_VERSION,
+                HogQlLanguageContract.current().languageVersion(),
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                OptionalLong.of(11)), Optional.of(context));
+    }
+
+    private HogQlCompilationResult compileV0(String query)
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+        return compiler.compileV0(new HogQlCompileEnvelope(
                 query,
                 HogQlCompileEnvelope.PROTOCOL_VERSION,
                 HogQlLanguageContract.current().languageVersion(),

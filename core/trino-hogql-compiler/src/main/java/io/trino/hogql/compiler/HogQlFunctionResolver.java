@@ -102,14 +102,15 @@ final class HogQlFunctionResolver
 
     private HogQlFunctionResolver(
             Optional<PinnedSnapshot> snapshot,
-            Optional<HogQlExchangeRateSnapshotProvider> exchangeRateSnapshotProvider)
+            Optional<HogQlExchangeRateSnapshotProvider> exchangeRateSnapshotProvider,
+            boolean semanticCatalogAvailable)
     {
         Map<String, FunctionCapabilityDefinition> functions = new LinkedHashMap<>(HogQlV0FunctionRegistry.functions());
         snapshot.stream()
                 .flatMap(pinned -> pinned.snapshot().functions().stream())
                 .forEach(function -> functions.putIfAbsent(canonical(function.name()), function));
         this.functions = Map.copyOf(functions);
-        semanticCatalogAvailable = snapshot.isPresent();
+        this.semanticCatalogAvailable = semanticCatalogAvailable;
         this.exchangeRateSnapshotProvider = requireNonNull(exchangeRateSnapshotProvider, "exchangeRateSnapshotProvider is null");
     }
 
@@ -127,7 +128,7 @@ final class HogQlFunctionResolver
     {
         requireNonNull(snapshot, "snapshot is null");
         requireNonNull(query, "query is null");
-        return new HogQlFunctionResolver(Optional.of(snapshot), exchangeRateSnapshotProvider).resolveWithMetadata(query);
+        return new HogQlFunctionResolver(Optional.of(snapshot), exchangeRateSnapshotProvider, true).resolveWithMetadata(query);
     }
 
     public static HogQlQuery resolve(HogQlQuery query)
@@ -139,7 +140,7 @@ final class HogQlFunctionResolver
     static Resolution resolve(HogQlQuery query, Optional<HogQlExchangeRateSnapshotProvider> exchangeRateSnapshotProvider)
     {
         requireNonNull(query, "query is null");
-        return new HogQlFunctionResolver(Optional.empty(), exchangeRateSnapshotProvider).resolveWithMetadata(query);
+        return new HogQlFunctionResolver(Optional.empty(), exchangeRateSnapshotProvider, false).resolveWithMetadata(query);
     }
 
     public static HogQlQuery resolveV0(HogQlQuery query)
@@ -150,8 +151,16 @@ final class HogQlFunctionResolver
 
     static Resolution resolveV0(HogQlQuery query, Optional<HogQlExchangeRateSnapshotProvider> exchangeRateSnapshotProvider)
     {
+        return resolveV0(query, exchangeRateSnapshotProvider, false);
+    }
+
+    static Resolution resolveV0(
+            HogQlQuery query,
+            Optional<HogQlExchangeRateSnapshotProvider> exchangeRateSnapshotProvider,
+            boolean semanticCatalogAvailable)
+    {
         requireNonNull(query, "query is null");
-        return new HogQlFunctionResolver(Optional.empty(), exchangeRateSnapshotProvider).resolveWithMetadata(query);
+        return new HogQlFunctionResolver(Optional.empty(), exchangeRateSnapshotProvider, semanticCatalogAvailable).resolveWithMetadata(query);
     }
 
     private Resolution resolveWithMetadata(HogQlQuery query)

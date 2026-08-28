@@ -135,6 +135,52 @@ public class TestHogQlSemanticResolution
     }
 
     @Test
+    public void testV0ResolvesDeclaredLogicalTables()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+
+        HogQlCompilationResult result = compiler.compileV0(
+                envelope("SELECT * FROM persons", OptionalLong.of(7)),
+                Optional.of(context));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT person_id AS \"personId\", full_name AS \"name\" FROM analytics.\"Hog Data\".\"raw-persons\""));
+    }
+
+    @Test
+    public void testKeepsOrderingOutputsNeededByLimitByInPrunedSubquery()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+
+        HogQlCompilationResult result = compiler.compileV0(
+                envelope(
+                        "SELECT personId FROM (SELECT * FROM events ORDER BY event LIMIT 1 BY personId) AS nested",
+                        OptionalLong.of(7)),
+                Optional.of(context));
+
+        assertThat(result.statement()).isInstanceOf(Query.class);
+        assertThat(result.catalogGeneration()).hasValue(7);
+    }
+
+    @Test
+    public void testInfersStarsAcrossUnaliasedNestedDerivedTables()
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+
+        HogQlCompilationResult result = compiler.compileV0(
+                envelope(
+                        "WITH nested AS (SELECT * FROM (SELECT * FROM events)) " +
+                                "SELECT event FROM nested",
+                        OptionalLong.of(7)),
+                Optional.of(context));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "WITH nested AS (SELECT * FROM (" +
+                        "SELECT event_name AS \"event\" FROM analytics.\"Hog Data\".\"raw-events\")) " +
+                        "SELECT \"event\" AS event FROM nested"));
+    }
+
+    @Test
     public void testExpandsQualifiedLogicalStarsWithExclusionsInManifestOrder()
     {
         HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));

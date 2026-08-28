@@ -324,7 +324,7 @@ public final class HogQlCompiler
         OptionalLong exchangeRateGeneration = OptionalLong.empty();
         if (semanticCandidate) {
             HogQlFunctionResolver.Resolution functionResolution = v0Profile
-                    ? HogQlFunctionResolver.resolveV0(query, exchangeRateSnapshotProvider)
+                    ? HogQlFunctionResolver.resolveV0(query, exchangeRateSnapshotProvider, true)
                     : HogQlFunctionResolver.resolve(pinned, query, exchangeRateSnapshotProvider);
             exchangeRateGeneration = functionResolution.exchangeRateGeneration();
             HogQlQuery functionsResolved = functionResolution.query();

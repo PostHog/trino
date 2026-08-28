@@ -161,6 +161,16 @@ final class HogQlProjectionDemand
         return builder.build();
     }
 
+    public static RequiredOutputs collectOrderingOutputs(HogQlQuery query)
+    {
+        Builder builder = new Builder();
+        if (query.body() instanceof SelectQueryBody select) {
+            select.limitBy().ifPresent(limitBy -> limitBy.partitionBy().forEach(expression -> collect(expression, builder)));
+        }
+        query.orderBy().forEach(sortItem -> collect(sortItem.expression(), builder));
+        return builder.build().asRequiredOutputs();
+    }
+
     public static HogQlProjectionDemand collect(Expression expression)
     {
         Builder builder = new Builder();
@@ -202,6 +212,16 @@ final class HogQlProjectionDemand
             return RequiredOutputs.allOutputs();
         }
         return new RequiredOutputs(false, unqualified);
+    }
+
+    private RequiredOutputs asRequiredOutputs()
+    {
+        if (all || !allQualifiers.isEmpty()) {
+            return RequiredOutputs.allOutputs();
+        }
+        Set<String> names = new HashSet<>(unqualified);
+        qualified.values().forEach(names::addAll);
+        return new RequiredOutputs(false, names);
     }
 
     public HogQlProjectionDemand merge(HogQlProjectionDemand other)
