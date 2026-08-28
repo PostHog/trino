@@ -24,7 +24,8 @@ public record HogQlCompilationResult(
         Statement statement,
         List<String> parameterNames,
         List<HogQlModifierBinding> modifierBindings,
-        OptionalLong catalogGeneration)
+        OptionalLong catalogGeneration,
+        OptionalLong exchangeRateGeneration)
 {
     public HogQlCompilationResult
     {
@@ -32,10 +33,16 @@ public record HogQlCompilationResult(
         parameterNames = List.copyOf(requireNonNull(parameterNames, "parameterNames is null"));
         modifierBindings = List.copyOf(requireNonNull(modifierBindings, "modifierBindings is null"));
         catalogGeneration = requireNonNull(catalogGeneration, "catalogGeneration is null");
+        exchangeRateGeneration = requireNonNull(exchangeRateGeneration, "exchangeRateGeneration is null");
     }
 
     public HogQlCompilationResult(Statement statement, List<String> parameterNames, OptionalLong catalogGeneration)
     {
-        this(statement, parameterNames, List.of(), catalogGeneration);
+        this(statement, parameterNames, List.of(), catalogGeneration, OptionalLong.empty());
+    }
+
+    public HogQlCompilationResult(Statement statement, List<String> parameterNames, List<HogQlModifierBinding> modifierBindings, OptionalLong catalogGeneration)
+    {
+        this(statement, parameterNames, modifierBindings, catalogGeneration, OptionalLong.empty());
     }
 }

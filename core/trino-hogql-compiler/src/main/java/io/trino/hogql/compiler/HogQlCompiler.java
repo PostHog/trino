@@ -13,6 +13,7 @@
  */
 package io.trino.hogql.compiler;
 
+import io.trino.hogql.compiler.catalog.HogQlExchangeRateSnapshotProvider;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogException;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogException.Failure;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider.PinRequest;
@@ -85,15 +86,27 @@ import static java.util.Objects.requireNonNull;
 public final class HogQlCompiler
 {
     private final HogQlParser parser;
+    private final Optional<HogQlExchangeRateSnapshotProvider> exchangeRateSnapshotProvider;
 
     public HogQlCompiler()
     {
-        this(new HogQlParser());
+        this(new HogQlParser(), Optional.empty());
     }
 
     HogQlCompiler(HogQlParser parser)
     {
+        this(parser, Optional.empty());
+    }
+
+    public HogQlCompiler(HogQlExchangeRateSnapshotProvider exchangeRateSnapshotProvider)
+    {
+        this(new HogQlParser(), Optional.of(requireNonNull(exchangeRateSnapshotProvider, "exchangeRateSnapshotProvider is null")));
+    }
+
+    private HogQlCompiler(HogQlParser parser, Optional<HogQlExchangeRateSnapshotProvider> exchangeRateSnapshotProvider)
+    {
         this.parser = requireNonNull(parser, "parser is null");
+        this.exchangeRateSnapshotProvider = requireNonNull(exchangeRateSnapshotProvider, "exchangeRateSnapshotProvider is null");
     }
 
     public Statement compile(String hogql)
@@ -117,7 +130,8 @@ public final class HogQlCompiler
                 catalogContext,
                 envelope.languageVersion(),
                 envelope.catalogGeneration(),
-                false);
+                false,
+                exchangeRateSnapshotProvider);
     }
 
     public HogQlCompilationResult compileV0(HogQlCompileEnvelope envelope, Optional<HogQlSemanticCatalogContext> catalogContext)
@@ -134,7 +148,8 @@ public final class HogQlCompiler
                 catalogContext,
                 envelope.languageVersion(),
                 envelope.catalogGeneration(),
-                true);
+                true,
+                exchangeRateSnapshotProvider);
     }
 
     public HogQlCompilationResult compile(String hogql, Map<String, HogQlTypedValue> parameters)
@@ -156,7 +171,8 @@ public final class HogQlCompiler
                 Optional.empty(),
                 HogQlLanguageContract.current().languageVersion(),
                 OptionalLong.empty(),
-                false);
+                false,
+                exchangeRateSnapshotProvider);
     }
 
     private HogQlQuery parse(String hogql)
@@ -181,7 +197,8 @@ public final class HogQlCompiler
             Optional<HogQlSemanticCatalogContext> catalogContext,
             HogQlLanguageVersion languageVersion,
             OptionalLong expectedCatalogGeneration,
-            boolean v0Profile)
+            boolean v0Profile,
+            Optional<HogQlExchangeRateSnapshotProvider> exchangeRateSnapshotProvider)
     {
         validateParameters(query, envelope.parameters());
         validateQuery(query);
@@ -223,7 +240,7 @@ public final class HogQlCompiler
         if (v0Profile) {
             HogQlV0ProfileValidator.validate(query, Optional.empty());
         }
-        ResolvedQuery resolved = resolveQuery(query, catalogContext, languageVersion, expectedCatalogGeneration, !modifiers.isEmpty(), v0Profile);
+        ResolvedQuery resolved = resolveQuery(query, catalogContext, languageVersion, expectedCatalogGeneration, !modifiers.isEmpty(), v0Profile, exchangeRateSnapshotProvider);
         Statement statement = TrinoAstFactory.createStatement(resolved.query(), parameterIds);
         List<HogQlModifierBinding> modifierBindings = resolved.pinnedSnapshot()
                 .map(snapshot -> HogQlModifierResolver.resolve(snapshot, modifiers, query.span()))
@@ -234,7 +251,8 @@ public final class HogQlCompiler
                         .map(Placeholder::name)
                         .toList(),
                 modifierBindings,
-                resolved.catalogGeneration());
+                resolved.catalogGeneration(),
+                resolved.exchangeRateGeneration());
     }
 
     private static void collectPlaceholders(HogQlQuery query, List<Placeholder> placeholders)
@@ -277,17 +295,22 @@ public final class HogQlCompiler
             HogQlLanguageVersion languageVersion,
             OptionalLong expectedCatalogGeneration,
             boolean modifiersRequireSnapshot,
-            boolean v0Profile)
+            boolean v0Profile,
+            Optional<HogQlExchangeRateSnapshotProvider> exchangeRateSnapshotProvider)
     {
         boolean semanticCandidate = containsSemanticCandidate(query);
         if (!semanticCandidate && !modifiersRequireSnapshot) {
-            return new ResolvedQuery(query, Optional.empty());
+            return new ResolvedQuery(query, Optional.empty(), OptionalLong.empty());
         }
         if (catalogContext.isEmpty()) {
             if (modifiersRequireSnapshot) {
                 throw new HogQlSemanticCatalogException(Failure.UNAVAILABLE, "HogQL semantic catalog snapshot is required for modifiers");
             }
-            return new ResolvedQuery(containsFunctionCall(query) ? HogQlFunctionResolver.resolve(query) : query, Optional.empty());
+            if (!containsFunctionCall(query)) {
+                return new ResolvedQuery(query, Optional.empty(), OptionalLong.empty());
+            }
+            HogQlFunctionResolver.Resolution resolution = HogQlFunctionResolver.resolve(query, exchangeRateSnapshotProvider);
+            return new ResolvedQuery(resolution.query(), Optional.empty(), resolution.exchangeRateGeneration());
         }
         HogQlSemanticCatalogContext context = catalogContext.orElseThrow();
         PinnedSnapshot pinned = context.snapshotProvider().pin(new PinRequest(
@@ -298,8 +321,13 @@ public final class HogQlCompiler
             HogQlV0ProfileValidator.validate(query, Optional.of(pinned.snapshot()));
         }
         HogQlQuery resolved = query;
+        OptionalLong exchangeRateGeneration = OptionalLong.empty();
         if (semanticCandidate) {
-            HogQlQuery functionsResolved = v0Profile ? HogQlFunctionResolver.resolveV0(query) : HogQlFunctionResolver.resolve(pinned, query);
+            HogQlFunctionResolver.Resolution functionResolution = v0Profile
+                    ? HogQlFunctionResolver.resolveV0(query, exchangeRateSnapshotProvider)
+                    : HogQlFunctionResolver.resolve(pinned, query, exchangeRateSnapshotProvider);
+            exchangeRateGeneration = functionResolution.exchangeRateGeneration();
+            HogQlQuery functionsResolved = functionResolution.query();
             if (hasSemanticDefinitions(pinned.snapshot())) {
                 resolved = HogQlSemanticResolver.resolve(pinned, functionsResolved)
                         .map(HogQlSemanticResolver.ResolvedQuery::query)
@@ -309,7 +337,7 @@ public final class HogQlCompiler
                 resolved = functionsResolved;
             }
         }
-        return new ResolvedQuery(resolved, Optional.of(pinned));
+        return new ResolvedQuery(resolved, Optional.of(pinned), exchangeRateGeneration);
     }
 
     private static boolean hasSemanticDefinitions(io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot snapshot)
@@ -450,12 +478,13 @@ public final class HogQlCompiler
         return expression.map(HogQlCompiler::containsFunctionCall).orElse(false);
     }
 
-    private record ResolvedQuery(HogQlQuery query, Optional<PinnedSnapshot> pinnedSnapshot)
+    private record ResolvedQuery(HogQlQuery query, Optional<PinnedSnapshot> pinnedSnapshot, OptionalLong exchangeRateGeneration)
     {
         private ResolvedQuery
         {
             query = requireNonNull(query, "query is null");
             pinnedSnapshot = requireNonNull(pinnedSnapshot, "pinnedSnapshot is null");
+            exchangeRateGeneration = requireNonNull(exchangeRateGeneration, "exchangeRateGeneration is null");
         }
 
         public OptionalLong catalogGeneration()

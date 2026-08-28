@@ -31,6 +31,12 @@ public final class HogQlExchangeRateException
         this.failure = failure;
     }
 
+    public HogQlExchangeRateException(Failure failure, String message, Throwable cause)
+    {
+        super(errorCode(requireNonNull(failure, "failure is null")), message, cause);
+        this.failure = failure;
+    }
+
     public Failure failure()
     {
         return failure;

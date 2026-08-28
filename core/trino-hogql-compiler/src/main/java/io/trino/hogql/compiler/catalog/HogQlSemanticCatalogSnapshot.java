@@ -320,6 +320,8 @@ public record HogQlSemanticCatalogSnapshot(
                 !signature.variadic() && signature.argumentTypes().size() == 2;
             case ARG_MAX_IF, ARG_MIN_IF, ARRAY_SLICE, QUANTILE_IF, REGEX_REPLACE_ALL, REGEX_REPLACE_ONE ->
                 !signature.variadic() && signature.argumentTypes().size() == 3;
+            case CONVERT_CURRENCY -> !signature.variadic() &&
+                    (signature.argumentTypes().size() == 3 || signature.argumentTypes().size() == 4);
             case GROUP_ARRAY_IF -> !signature.variadic() &&
                     (signature.argumentTypes().size() == 2 || signature.argumentTypes().size() == 3);
             case CAST_TIMESTAMP -> !signature.variadic() &&
@@ -331,7 +333,7 @@ public record HogQlSemanticCatalogSnapshot(
             case JSON_EXTRACT_ARRAY_RAW, JSON_EXTRACT_KEYS, JSON_EXTRACT_STRING, JSON_KEYS_AND_VALUES_RAW, JSON_LENGTH ->
                 (!signature.variadic() && signature.argumentTypes().size() == 1) ||
                     (signature.variadic() && signature.argumentTypes().size() == 3);
-            case AND -> (!signature.variadic() && signature.argumentTypes().size() == 2) ||
+            case AND, OR -> (!signature.variadic() && signature.argumentTypes().size() == 2) ||
                     (signature.variadic() && signature.argumentTypes().size() == 3);
             case ARRAY_SORT, RANGE -> !signature.variadic() &&
                     (signature.argumentTypes().size() == 1 || signature.argumentTypes().size() == 2);
@@ -1356,6 +1358,7 @@ public record HogQlSemanticCatalogSnapshot(
         DATE_TRUNC_WEEK,
         COUNT_IF,
         COUNT_DISTINCT,
+        CONVERT_CURRENCY,
         DECIMAL_CAST,
         DIVIDE_DECIMAL,
         EMPTY,
@@ -1401,6 +1404,7 @@ public record HogQlSemanticCatalogSnapshot(
         MULTIPLY_DECIMAL,
         MULTI_IF,
         NOT,
+        OR,
         NOT_EQUALS,
         NOT_EMPTY,
         PARSE_TIMESTAMP,

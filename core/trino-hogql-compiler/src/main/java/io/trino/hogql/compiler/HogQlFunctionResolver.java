@@ -13,6 +13,7 @@
  */
 package io.trino.hogql.compiler;
 
+import io.trino.hogql.compiler.catalog.HogQlExchangeRateSnapshotProvider;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionCapabilityDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionImplementation;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FunctionKind;
@@ -83,6 +84,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_RESOLUTION_ERROR;
 import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_UNSUPPORTED_FEATURE;
@@ -94,9 +96,13 @@ final class HogQlFunctionResolver
 
     private final Map<String, FunctionCapabilityDefinition> functions;
     private final boolean semanticCatalogAvailable;
+    private final Optional<HogQlExchangeRateSnapshotProvider> exchangeRateSnapshotProvider;
+    private OptionalLong exchangeRateGeneration = OptionalLong.empty();
     private ArrayList<UnnestRelation> activeArrayJoins;
 
-    private HogQlFunctionResolver(Optional<PinnedSnapshot> snapshot)
+    private HogQlFunctionResolver(
+            Optional<PinnedSnapshot> snapshot,
+            Optional<HogQlExchangeRateSnapshotProvider> exchangeRateSnapshotProvider)
     {
         Map<String, FunctionCapabilityDefinition> functions = new LinkedHashMap<>(HogQlV0FunctionRegistry.functions());
         snapshot.stream()
@@ -104,25 +110,54 @@ final class HogQlFunctionResolver
                 .forEach(function -> functions.putIfAbsent(canonical(function.name()), function));
         this.functions = Map.copyOf(functions);
         semanticCatalogAvailable = snapshot.isPresent();
+        this.exchangeRateSnapshotProvider = requireNonNull(exchangeRateSnapshotProvider, "exchangeRateSnapshotProvider is null");
     }
 
     public static HogQlQuery resolve(PinnedSnapshot snapshot, HogQlQuery query)
     {
         requireNonNull(snapshot, "snapshot is null");
         requireNonNull(query, "query is null");
-        return new HogQlFunctionResolver(Optional.of(snapshot)).resolveQuery(query);
+        return resolve(snapshot, query, Optional.empty()).query();
+    }
+
+    static Resolution resolve(
+            PinnedSnapshot snapshot,
+            HogQlQuery query,
+            Optional<HogQlExchangeRateSnapshotProvider> exchangeRateSnapshotProvider)
+    {
+        requireNonNull(snapshot, "snapshot is null");
+        requireNonNull(query, "query is null");
+        return new HogQlFunctionResolver(Optional.of(snapshot), exchangeRateSnapshotProvider).resolveWithMetadata(query);
     }
 
     public static HogQlQuery resolve(HogQlQuery query)
     {
         requireNonNull(query, "query is null");
-        return new HogQlFunctionResolver(Optional.empty()).resolveQuery(query);
+        return resolve(query, Optional.empty()).query();
+    }
+
+    static Resolution resolve(HogQlQuery query, Optional<HogQlExchangeRateSnapshotProvider> exchangeRateSnapshotProvider)
+    {
+        requireNonNull(query, "query is null");
+        return new HogQlFunctionResolver(Optional.empty(), exchangeRateSnapshotProvider).resolveWithMetadata(query);
     }
 
     public static HogQlQuery resolveV0(HogQlQuery query)
     {
         requireNonNull(query, "query is null");
-        return new HogQlFunctionResolver(Optional.empty()).resolveQuery(query);
+        return resolveV0(query, Optional.empty()).query();
+    }
+
+    static Resolution resolveV0(HogQlQuery query, Optional<HogQlExchangeRateSnapshotProvider> exchangeRateSnapshotProvider)
+    {
+        requireNonNull(query, "query is null");
+        return new HogQlFunctionResolver(Optional.empty(), exchangeRateSnapshotProvider).resolveWithMetadata(query);
+    }
+
+    private Resolution resolveWithMetadata(HogQlQuery query)
+    {
+        HogQlQuery resolved = resolveQuery(query);
+        return new Resolution(resolved, exchangeRateGeneration);
     }
 
     private HogQlQuery resolveQuery(HogQlQuery query)
@@ -499,6 +534,7 @@ final class HogQlFunctionResolver
             case UNIQ_EXACT_IF -> aggregate(function, "count", List.of(arguments.getFirst()), true, arguments.get(1), span);
             case GROUP_UNIQ_ARRAY_IF -> aggregate(function, "array_agg", List.of(arguments.getFirst()), true, arguments.get(1), span);
             case COUNT_DISTINCT -> aggregate(function, "count", List.of(arguments.getFirst()), true, null, span);
+            case CONVERT_CURRENCY -> convertCurrency(function, arguments);
             case MULTI_IF -> multiIf(function, arguments);
             case JSON_EXTRACT_STRING -> jsonExtractScalar(function, arguments, "varchar", new Literal(HogQlQuery.LiteralKind.STRING, "", span));
             case JSON_EXTRACT_INT -> jsonExtractScalar(function, arguments, "bigint", new Literal(HogQlQuery.LiteralKind.INTEGER, "0", span));
@@ -531,7 +567,8 @@ final class HogQlFunctionResolver
             case TO_UNIX_TIMESTAMP -> cast(call("to_unixtime", arguments, span), "bigint", span);
             case PARSE_TIMESTAMP -> new CastExpression(arguments.getFirst(), new Identifier("timestamp(3)", false, span), true, span);
             case NOT -> new UnaryExpression(HogQlQuery.UnaryOperator.NOT, arguments.getFirst(), span);
-            case AND -> and(arguments, span);
+            case AND -> logical(arguments, HogQlQuery.BinaryOperator.AND, span);
+            case OR -> logical(arguments, HogQlQuery.BinaryOperator.OR, span);
             case GREATER -> new BinaryExpression(HogQlQuery.BinaryOperator.GREATER_THAN, arguments.getFirst(), arguments.get(1), span);
             case GREATER_OR_EQUAL -> new BinaryExpression(HogQlQuery.BinaryOperator.GREATER_THAN_OR_EQUAL, arguments.getFirst(), arguments.get(1), span);
             case LESS_OR_EQUAL -> new BinaryExpression(HogQlQuery.BinaryOperator.LESS_THAN_OR_EQUAL, arguments.getFirst(), arguments.get(1), span);
@@ -596,11 +633,11 @@ final class HogQlFunctionResolver
         return call(trinoFunction, List.of(arguments.get(1)), function.span());
     }
 
-    private static Expression and(List<Expression> arguments, HogQlQuery.SourceSpan span)
+    private static Expression logical(List<Expression> arguments, HogQlQuery.BinaryOperator operator, HogQlQuery.SourceSpan span)
     {
         Expression result = arguments.getFirst();
         for (int index = 1; index < arguments.size(); index++) {
-            result = new BinaryExpression(HogQlQuery.BinaryOperator.AND, result, arguments.get(index), span);
+            result = new BinaryExpression(operator, result, arguments.get(index), span);
         }
         return result;
     }
@@ -930,6 +967,30 @@ final class HogQlFunctionResolver
     private static FunctionCall coalesce(Expression value, Expression defaultValue, HogQlQuery.SourceSpan span)
     {
         return call("coalesce", List.of(value, defaultValue), span);
+    }
+
+    private Expression convertCurrency(FunctionCall function, List<Expression> arguments)
+    {
+        if (exchangeRateGeneration.isEmpty()) {
+            HogQlExchangeRateSnapshotProvider provider = exchangeRateSnapshotProvider
+                    .orElseThrow(() -> resolutionError(function, "HogQL function convertCurrency requires an exchange-rate snapshot"));
+            exchangeRateGeneration = OptionalLong.of(provider.pin(OptionalLong.empty()).generation());
+        }
+
+        HogQlQuery.SourceSpan span = function.span();
+        Expression effectiveDate = cast(
+                arguments.size() == 4 ? arguments.get(3) : call("now", List.of(), span),
+                "date",
+                span);
+        return call(
+                "hogql_convert_currency",
+                List.of(
+                        integerLiteral(Long.toString(exchangeRateGeneration.orElseThrow()), span),
+                        cast(arguments.get(0), "varchar", span),
+                        cast(arguments.get(1), "varchar", span),
+                        cast(arguments.get(2), "decimal(38,10)", span),
+                        effectiveDate),
+                span);
     }
 
     private static FunctionCall call(String name, List<Expression> arguments, HogQlQuery.SourceSpan span)
@@ -1268,5 +1329,14 @@ final class HogQlFunctionResolver
                 Optional.of(new Location(function.span().startLine(), function.span().startColumn())),
                 message,
                 null);
+    }
+
+    record Resolution(HogQlQuery query, OptionalLong exchangeRateGeneration)
+    {
+        Resolution
+        {
+            query = requireNonNull(query, "query is null");
+            exchangeRateGeneration = requireNonNull(exchangeRateGeneration, "exchangeRateGeneration is null");
+        }
     }
 }
