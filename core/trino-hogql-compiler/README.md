@@ -79,6 +79,8 @@ float conversions, Decimal64 casts, and integer division lower to stock casts
 and arithmetic.
 Literal regex extraction preserves HogQL's capture-group and empty-default
 behavior; matching and replace-all lower to Trino regex functions.
+Common array transforms, predicates, indexing, summation, ranges, tuple
+indexing, splitting, and membership lower to Trino higher-order functions.
 
 Function aliases are resolved before Trino analysis. Unknown functions fail as
 HogQL resolution errors. Actions, cohorts, saved queries, explicit modifiers,

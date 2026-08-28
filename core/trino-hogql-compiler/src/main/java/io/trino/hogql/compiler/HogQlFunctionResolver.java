@@ -374,6 +374,23 @@ final class HogQlFunctionResolver
             case FLOAT_OR_DEFAULT -> coalesce(tryCast(arguments.getFirst(), "double", span), cast(arguments.get(1), "double", span), span);
             case DECIMAL_CAST -> tryCast(arguments.getFirst(), decimalType(function, arguments.get(1)), span);
             case INT_DIV -> intDiv(arguments, span);
+            case ARRAY_ELEMENT -> call("element_at", arguments, span);
+            case ARRAY_FILTER -> call("filter", List.of(arguments.get(1), arguments.getFirst()), span);
+            case ARRAY_FIRST -> call(
+                    "element_at",
+                    List.of(call("filter", List.of(arguments.get(1), arguments.getFirst()), span), integerLiteral("1", span)),
+                    span);
+            case ARRAY_MAP -> call("transform", List.of(arguments.get(1), arguments.getFirst()), span);
+            case ARRAY_SUM -> arraySum(arguments.getFirst(), span);
+            case RANGE -> call(
+                    "sequence",
+                    List.of(
+                            integerLiteral("0", span),
+                            new BinaryExpression(HogQlQuery.BinaryOperator.SUBTRACT, arguments.getFirst(), integerLiteral("1", span), span)),
+                    span);
+            case TUPLE_ELEMENT -> new SubscriptExpression(arguments.getFirst(), arguments.get(1), span);
+            case SPLIT_CHAR -> call("split", List.of(arguments.get(1), arguments.getFirst()), span);
+            case HAS -> call("contains", arguments, span);
             case CAST_BIGINT -> cast(arguments.getFirst(), "bigint", span);
             case CAST_TIMESTAMP -> arguments.size() == 1
                     ? cast(arguments.getFirst(), "timestamp(0)", span)
@@ -705,6 +722,28 @@ final class HogQlFunctionResolver
                 new BinaryExpression(HogQlQuery.BinaryOperator.DIVIDE, dividend, divisor, span),
                 adjustment,
                 span);
+    }
+
+    private static Expression arraySum(Expression array, HogQlQuery.SourceSpan span)
+    {
+        Identifier sum = new Identifier("_hogql_sum", false, span);
+        Identifier item = new Identifier("_hogql_item", false, span);
+        Expression sumReference = new ColumnReference(List.of(sum), span);
+        LambdaExpression add = new LambdaExpression(
+                List.of(sum, item),
+                new BinaryExpression(
+                        HogQlQuery.BinaryOperator.ADD,
+                        sumReference,
+                        new ColumnReference(List.of(item), span),
+                        span),
+                span);
+        LambdaExpression finish = new LambdaExpression(List.of(sum), sumReference, span);
+        return call("reduce", List.of(array, integerLiteral("0", span), add, finish), span);
+    }
+
+    private static Literal integerLiteral(String value, HogQlQuery.SourceSpan span)
+    {
+        return new Literal(HogQlQuery.LiteralKind.INTEGER, value, span);
     }
 
     private static FunctionCall dateTrunc(String unit, Expression value, HogQlQuery.SourceSpan span)

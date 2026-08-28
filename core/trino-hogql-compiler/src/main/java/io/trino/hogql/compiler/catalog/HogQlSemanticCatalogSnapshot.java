@@ -300,15 +300,17 @@ public record HogQlSemanticCatalogSnapshot(
     private static boolean validRewriteSignature(FunctionRewrite rewrite, FunctionSignature signature)
     {
         return switch (rewrite) {
-            case CAST_BIGINT, CAST_DATE, CAST_DOUBLE, CAST_VARCHAR, FLOAT_OR_ZERO,
+            case ARRAY_SUM, CAST_BIGINT, CAST_DATE, CAST_DOUBLE, CAST_VARCHAR, FLOAT_OR_ZERO, RANGE,
                     DATE_TRUNC_DAY, DATE_TRUNC_HOUR, DATE_TRUNC_MONTH, DATE_TRUNC_WEEK,
                     GROUP_UNIQ_ARRAY, INTERVAL_DAY, IS_NOT_NULL, IS_NULL, COUNT_IF,
                     JSON_KEYS_AND_VALUES_RAW, NOT, PARSE_TIMESTAMP, TO_UNIX_TIMESTAMP,
                     COUNT_DISTINCT, UNIQ_EXACT ->
                 !signature.variadic() && signature.argumentTypes().size() == 1;
-            case ADD_DAYS, ADD_MONTHS, AND, ANY_IF, AVG_IF, DECIMAL_CAST, FLOAT_OR_DEFAULT, GREATER, GROUP_ARRAY_IF,
+            case ADD_DAYS, ADD_MONTHS, AND, ANY_IF, ARRAY_ELEMENT, ARRAY_FILTER, ARRAY_FIRST, ARRAY_MAP,
+                    AVG_IF, DECIMAL_CAST, FLOAT_OR_DEFAULT, GREATER, GROUP_ARRAY_IF, HAS,
                     GROUP_UNIQ_ARRAY_IF, JSON_EXTRACT_TYPED, JSON_KEYS_AND_VALUES,
-                    INT_DIV, LIKE, MAX_IF, MIN_IF, REGEX_EXTRACT, SUM_IF, UNIQ_EXACT_IF, UNIQ_IF ->
+                    INT_DIV, LIKE, MAX_IF, MIN_IF, REGEX_EXTRACT, SPLIT_CHAR, SUM_IF,
+                    TUPLE_ELEMENT, UNIQ_EXACT_IF, UNIQ_IF ->
                 !signature.variadic() && signature.argumentTypes().size() == 2;
             case ARG_MAX_IF, REGEX_REPLACE_ALL -> !signature.variadic() && signature.argumentTypes().size() == 3;
             case CAST_TIMESTAMP -> !signature.variadic() &&
@@ -1316,6 +1318,11 @@ public record HogQlSemanticCatalogSnapshot(
         AND,
         ANY_IF,
         ARG_MAX_IF,
+        ARRAY_ELEMENT,
+        ARRAY_FILTER,
+        ARRAY_FIRST,
+        ARRAY_MAP,
+        ARRAY_SUM,
         AVG_IF,
         DATE_ADD,
         DATE_TRUNC_DAY,
@@ -1331,6 +1338,7 @@ public record HogQlSemanticCatalogSnapshot(
         GREATER,
         GROUP_ARRAY_IF,
         GROUP_UNIQ_ARRAY_IF,
+        HAS,
         INTERVAL_DAY,
         INT_DIV,
         IS_NULL,
@@ -1351,9 +1359,12 @@ public record HogQlSemanticCatalogSnapshot(
         PARSE_TIMESTAMP,
         REGEX_EXTRACT,
         REGEX_REPLACE_ALL,
+        RANGE,
+        SPLIT_CHAR,
         SUM_IF,
         TODAY,
         TO_UNIX_TIMESTAMP,
+        TUPLE_ELEMENT,
         UNIQ_EXACT,
         UNIQ_EXACT_IF,
         UNIQ_IF

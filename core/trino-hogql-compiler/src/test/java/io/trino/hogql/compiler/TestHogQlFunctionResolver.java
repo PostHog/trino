@@ -265,6 +265,20 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testCompilerLowersArrayCompatibilityFunctions()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT arrayElement(items, -1), arrayFilter(x -> x > 0, items), arrayFirst(x -> x > 0, items), " +
+                        "arrayMap(x -> x + 1, items), arraySum(items), range(3), tupleElement(item, 2), " +
+                        "splitByChar(',', text), has(items, 3) FROM records"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT element_at(items, -1), filter(items, x -> x > 0), element_at(filter(items, x -> x > 0), 1), " +
+                        "transform(items, x -> x + 1), reduce(items, 0, (_hogql_sum, _hogql_item) -> _hogql_sum + _hogql_item, _hogql_sum -> _hogql_sum), " +
+                        "sequence(0, 3 - 1), item[2], split(text, ','), contains(items, 3) FROM records"));
+    }
+
+    @Test
     public void testCompilerEnforcesV0FunctionArities()
     {
         assertThat(new HogQlCompiler().compile(envelope("SELECT coalesce('value')")).statement())
