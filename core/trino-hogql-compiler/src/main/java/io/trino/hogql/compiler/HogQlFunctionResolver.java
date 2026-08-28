@@ -384,6 +384,20 @@ final class HogQlFunctionResolver
             case UNIQ_EXACT -> aggregate("count", List.of(arguments.getFirst()), true, null, span);
             case GROUP_UNIQ_ARRAY -> aggregate("array_agg", List.of(arguments.getFirst()), true, null, span);
             case MULTI_IF -> multiIf(function, arguments);
+            case JSON_EXTRACT_STRING -> jsonExtractScalar(function, arguments, "varchar", new Literal(HogQlQuery.LiteralKind.STRING, "", span));
+            case JSON_EXTRACT_INT -> jsonExtractScalar(function, arguments, "bigint", new Literal(HogQlQuery.LiteralKind.INTEGER, "0", span));
+            case JSON_EXTRACT_FLOAT -> jsonExtractScalar(function, arguments, "double", new Literal(HogQlQuery.LiteralKind.FLOAT, "0.0", span));
+            case JSON_EXTRACT_RAW -> coalesce(
+                    call("json_format", List.of(call("json_extract", List.of(arguments.getFirst(), jsonPath(function, arguments.subList(1, arguments.size()))), span)), span),
+                    new Literal(HogQlQuery.LiteralKind.STRING, "", span),
+                    span);
+            case JSON_EXTRACT_TYPED -> jsonExtractTyped(function, arguments);
+            case JSON_KEYS_AND_VALUES -> jsonExtractKeysAndValues(function, arguments);
+            case JSON_KEYS_AND_VALUES_RAW -> jsonExtractKeysAndValuesRaw(function, arguments.getFirst());
+            case JSON_LENGTH -> coalesce(
+                    call("json_size", List.of(arguments.getFirst(), jsonPath(function, arguments.subList(1, arguments.size()))), span),
+                    new Literal(HogQlQuery.LiteralKind.INTEGER, "0", span),
+                    span);
         };
     }
 
@@ -408,6 +422,108 @@ final class HogQlFunctionResolver
             clauses.add(new CaseWhen(arguments.get(index), arguments.get(index + 1), function.span()));
         }
         return new CaseExpression(Optional.empty(), clauses, Optional.of(arguments.getLast()), function.span());
+    }
+
+    private static Expression jsonExtractScalar(FunctionCall function, List<Expression> arguments, String type, Literal defaultValue)
+    {
+        HogQlQuery.SourceSpan span = function.span();
+        Expression extracted = call(
+                "json_extract_scalar",
+                List.of(arguments.getFirst(), jsonPath(function, arguments.subList(1, arguments.size()))),
+                span);
+        if (!type.equals("varchar")) {
+            extracted = new CastExpression(extracted, new Identifier(type, false, span), true, span);
+        }
+        return coalesce(extracted, defaultValue, span);
+    }
+
+    private static Expression jsonExtractTyped(FunctionCall function, List<Expression> arguments)
+    {
+        String type = jsonType(function, arguments.get(1));
+        return switch (type) {
+            case "Map(String, Float64)" -> typedJsonMap(arguments.getFirst(), "double", function.span());
+            default -> throw unsupportedError(function, "Unsupported HogQL JSON extraction type: " + type);
+        };
+    }
+
+    private static Expression jsonExtractKeysAndValues(FunctionCall function, List<Expression> arguments)
+    {
+        String type = jsonType(function, arguments.get(1));
+        if (!type.equals("Float64")) {
+            throw unsupportedError(function, "Unsupported HogQL JSON key/value type: " + type);
+        }
+        return call("map_entries", List.of(typedJsonMap(arguments.getFirst(), "double", function.span())), function.span());
+    }
+
+    private static Expression jsonExtractKeysAndValuesRaw(FunctionCall function, Expression value)
+    {
+        HogQlQuery.SourceSpan span = function.span();
+        Identifier key = new Identifier("key", false, span);
+        Identifier item = new Identifier("value", false, span);
+        LambdaExpression formatValue = new LambdaExpression(
+                List.of(key, item),
+                call("json_format", List.of(new ColumnReference(List.of(item), span)), span),
+                span);
+        Expression formatted = call(
+                "transform_values",
+                List.of(typedJsonMap(value, "json", span), formatValue),
+                span);
+        return call("map_entries", List.of(formatted), span);
+    }
+
+    private static Expression typedJsonMap(Expression value, String valueType, HogQlQuery.SourceSpan span)
+    {
+        String type = "map(varchar," + valueType + ")";
+        Expression parsed = call("json_parse", List.of(value), span);
+        Expression converted = new CastExpression(parsed, new Identifier(type, false, span), true, span);
+        Expression empty = new CastExpression(
+                call("map", List.of(new ArrayExpression(List.of(), span), new ArrayExpression(List.of(), span)), span),
+                new Identifier(type, false, span),
+                false,
+                span);
+        return coalesce(converted, empty, span);
+    }
+
+    private static String jsonType(FunctionCall function, Expression expression)
+    {
+        if (expression instanceof Literal literal && literal.kind() == HogQlQuery.LiteralKind.STRING) {
+            return literal.value();
+        }
+        throw unsupportedError(function, "HogQL JSON extraction type must be a string literal");
+    }
+
+    private static Literal jsonPath(FunctionCall function, List<Expression> segments)
+    {
+        StringBuilder path = new StringBuilder("$");
+        for (Expression segment : segments) {
+            if (!(segment instanceof Literal literal)) {
+                throw unsupportedError(function, "HogQL JSON path segments must be string or integer literals");
+            }
+            switch (literal.kind()) {
+                case STRING -> path.append("[\"")
+                        .append(literal.value().replace("\\", "\\\\").replace("\"", "\\\""))
+                        .append("\"]");
+                case INTEGER -> path.append('[').append(literal.value()).append(']');
+                default -> throw unsupportedError(function, "HogQL JSON path segments must be string or integer literals");
+            }
+        }
+        return new Literal(HogQlQuery.LiteralKind.STRING, path.toString(), function.span());
+    }
+
+    private static FunctionCall coalesce(Expression value, Expression defaultValue, HogQlQuery.SourceSpan span)
+    {
+        return call("coalesce", List.of(value, defaultValue), span);
+    }
+
+    private static FunctionCall call(String name, List<Expression> arguments, HogQlQuery.SourceSpan span)
+    {
+        return new FunctionCall(
+                new Identifier(name, false, span),
+                arguments,
+                false,
+                List.of(),
+                Optional.empty(),
+                span);
     }
 
     private static CastExpression cast(Expression value, String type, HogQlQuery.SourceSpan span)

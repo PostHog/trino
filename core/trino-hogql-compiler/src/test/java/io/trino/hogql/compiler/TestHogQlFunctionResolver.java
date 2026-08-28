@@ -154,6 +154,35 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testCompilerLowersJsonExtractionFunctions()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT JSONExtractString(payload, 'name'), JSONExtractInt(payload, 'items', 0), " +
+                        "JSONExtractFloat(payload, 'score'), JSONExtractRaw(payload, 'object'), " +
+                        "JSONLength(payload), JSONLength(payload, 'items'), " +
+                        "JSONExtract(payload_text, 'Map(String, Float64)'), " +
+                        "JSONExtractKeysAndValues(payload_text, 'Float64'), JSONExtractKeysAndValuesRaw(payload_text) FROM records"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT coalesce(json_extract_scalar(payload, '$[\"name\"]'), ''), " +
+                        "coalesce(TRY_CAST(json_extract_scalar(payload, '$[\"items\"][0]') AS bigint), 0), " +
+                        "coalesce(TRY_CAST(json_extract_scalar(payload, '$[\"score\"]') AS double), 0E0), " +
+                        "coalesce(json_format(json_extract(payload, '$[\"object\"]')), ''), " +
+                        "coalesce(json_size(payload, '$'), 0), coalesce(json_size(payload, '$[\"items\"]'), 0), " +
+                        "coalesce(TRY_CAST(json_parse(payload_text) AS map(varchar, double)), CAST(map(ARRAY[], ARRAY[]) AS map(varchar, double))), " +
+                        "map_entries(coalesce(TRY_CAST(json_parse(payload_text) AS map(varchar, double)), CAST(map(ARRAY[], ARRAY[]) AS map(varchar, double)))), " +
+                        "map_entries(transform_values(coalesce(TRY_CAST(json_parse(payload_text) AS map(varchar, json)), " +
+                        "CAST(map(ARRAY[], ARRAY[]) AS map(varchar, json))), (key, value) -> json_format(value))) FROM records"));
+
+        TrinoException exception = catchThrowableOfType(
+                TrinoException.class,
+                () -> new HogQlCompiler().compile(envelope("SELECT JSONExtractString(payload, dynamic_key)")));
+
+        assertThat(exception.getErrorCode()).isEqualTo(HOGQL_UNSUPPORTED_FEATURE.toErrorCode());
+        assertThat(exception).hasMessageContaining("JSON path segments must be string or integer literals");
+    }
+
+    @Test
     public void testCompilerEnforcesV0FunctionArities()
     {
         assertThat(new HogQlCompiler().compile(envelope("SELECT coalesce('value')")).statement())

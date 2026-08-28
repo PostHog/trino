@@ -300,9 +300,14 @@ public record HogQlSemanticCatalogSnapshot(
         return switch (rewrite) {
             case CAST_BIGINT, CAST_DATE, CAST_DOUBLE, CAST_TIMESTAMP, CAST_VARCHAR,
                     DATE_TRUNC_DAY, DATE_TRUNC_HOUR, DATE_TRUNC_MONTH, DATE_TRUNC_WEEK,
-                    GROUP_UNIQ_ARRAY, IS_NOT_NULL, IS_NULL, COUNT_IF, UNIQ_EXACT ->
+                    GROUP_UNIQ_ARRAY, IS_NOT_NULL, IS_NULL, COUNT_IF, JSON_KEYS_AND_VALUES_RAW, UNIQ_EXACT ->
                 !signature.variadic() && signature.argumentTypes().size() == 1;
-            case MAX_IF, SUM_IF, UNIQ_IF -> !signature.variadic() && signature.argumentTypes().size() == 2;
+            case JSON_EXTRACT_TYPED, JSON_KEYS_AND_VALUES, MAX_IF, SUM_IF, UNIQ_IF ->
+                !signature.variadic() && signature.argumentTypes().size() == 2;
+            case JSON_EXTRACT_FLOAT, JSON_EXTRACT_INT, JSON_EXTRACT_RAW, JSON_EXTRACT_STRING ->
+                signature.variadic() && signature.argumentTypes().size() == 3;
+            case JSON_LENGTH -> (!signature.variadic() && signature.argumentTypes().size() == 1) ||
+                    (signature.variadic() && signature.argumentTypes().size() == 3);
             case MULTI_IF -> signature.variadic() && signature.argumentTypes().size() == 4;
         };
     }
@@ -1302,6 +1307,14 @@ public record HogQlSemanticCatalogSnapshot(
         GROUP_UNIQ_ARRAY,
         IS_NULL,
         IS_NOT_NULL,
+        JSON_EXTRACT_FLOAT,
+        JSON_EXTRACT_INT,
+        JSON_EXTRACT_RAW,
+        JSON_EXTRACT_STRING,
+        JSON_EXTRACT_TYPED,
+        JSON_KEYS_AND_VALUES,
+        JSON_KEYS_AND_VALUES_RAW,
+        JSON_LENGTH,
         MAX_IF,
         MULTI_IF,
         SUM_IF,
