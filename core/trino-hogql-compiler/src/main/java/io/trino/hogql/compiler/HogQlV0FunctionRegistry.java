@@ -135,6 +135,7 @@ final class HogQlV0FunctionRegistry
             scalar("match", "regexp_like", signature(2)),
             scalar("floor", "floor", signature(1)),
             scalar("toDayOfMonth", "day", signature(1)),
+            scalar("toDayOfWeek", "day_of_week", signature(1)),
             scalar("mapFromArrays", "map", signature(2)),
             scalar("toMonth", "month", signature(1)),
             scalar("toYear", "year", signature(1)),
