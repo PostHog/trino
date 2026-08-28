@@ -389,6 +389,19 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testCompilerLowersParametricAggregates()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT quantile(0.25)(value), quantileExact(0.5)(value), " +
+                        "quantileIf(0.75)(value, active), groupArrayIf(20)(value, active) FROM records"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT approx_percentile(value, 2.5E-1), approx_percentile(value, 5E-1), " +
+                        "approx_percentile(value, 7.5E-1) FILTER (WHERE active), " +
+                        "slice(array_agg(value) FILTER (WHERE active), 1, 20) FROM records"));
+    }
+
+    @Test
     public void testCompilerLowersExpressionAndDateAliases()
     {
         HogQlCompilationResult result = new HogQlCompiler().compile(envelope(

@@ -102,6 +102,10 @@ subtraction aliases, calendar month/year extraction, ceiling aliases, narrow
 integer casts, and JSON object-key extraction also lower to stock expressions.
 The static-ID, single-choice `getSurveyResponse(index, question_id)` macro
 prefers the modern response property and falls back to the legacy index key.
+Parametric quantiles lower to Trino percentile aggregates, and limited
+conditional group arrays lower to filtered `array_agg` plus `slice`.
+Algorithm-level parity for `quantileExact` remains a compatibility-validation
+item even though its query shape has a stock AST lowering.
 
 Function aliases are resolved before Trino analysis. Unknown functions fail as
 HogQL resolution errors. Actions, cohorts, saved queries, explicit modifiers,

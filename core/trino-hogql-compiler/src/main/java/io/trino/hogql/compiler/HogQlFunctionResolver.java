@@ -474,7 +474,15 @@ final class HogQlFunctionResolver
             case ANY_IF -> aggregate(function, "arbitrary", List.of(arguments.getFirst()), false, arguments.get(1), span);
             case MIN_IF -> aggregate(function, "min", List.of(arguments.getFirst()), false, arguments.get(1), span);
             case AVG_IF -> aggregate(function, "avg", List.of(arguments.getFirst()), false, arguments.get(1), span);
-            case GROUP_ARRAY_IF -> aggregate(function, "array_agg", List.of(arguments.getFirst()), false, arguments.get(1), span);
+            case GROUP_ARRAY_IF -> arguments.size() == 2
+                    ? aggregate(function, "array_agg", List.of(arguments.getFirst()), false, arguments.get(1), span)
+                    : call(
+                            "slice",
+                            List.of(
+                                    aggregate(function, "array_agg", List.of(arguments.getFirst()), false, arguments.get(1), span),
+                                    integerLiteral("1", span),
+                                    arguments.get(2)),
+                            span);
             case UNIQ_EXACT_IF -> aggregate(function, "count", List.of(arguments.getFirst()), true, arguments.get(1), span);
             case GROUP_UNIQ_ARRAY_IF -> aggregate(function, "array_agg", List.of(arguments.getFirst()), true, arguments.get(1), span);
             case COUNT_DISTINCT -> aggregate(function, "count", List.of(arguments.getFirst()), true, null, span);
@@ -540,6 +548,14 @@ final class HogQlFunctionResolver
                     function,
                     "approx_percentile",
                     List.of(arguments.getFirst(), new Literal(HogQlQuery.LiteralKind.FLOAT, "0.5", span)),
+                    false,
+                    arguments.get(1),
+                    span);
+            case QUANTILE, QUANTILE_EXACT -> aggregate(function, "approx_percentile", arguments, false, null, span);
+            case QUANTILE_IF -> aggregate(
+                    function,
+                    "approx_percentile",
+                    List.of(arguments.getFirst(), arguments.get(2)),
                     false,
                     arguments.get(1),
                     span);

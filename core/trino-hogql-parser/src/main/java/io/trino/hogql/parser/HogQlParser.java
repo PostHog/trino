@@ -1461,15 +1461,19 @@ public final class HogQlParser
 
         private FunctionCall buildFunction(HogQLParser.ColumnExprFunctionContext context)
         {
-            if (context.columnExprs != null) {
+            Identifier name = buildIdentifier(context.identifier());
+            if (context.columnExprs != null && !Set.of("quantile", "quantileexact", "quantileif", "grouparrayif").contains(canonicalName(name))) {
                 throw unsupported(context, "parametric function");
             }
-            List<Expression> arguments = buildFunctionArguments(context);
+            List<Expression> arguments = new ArrayList<>(buildFunctionArguments(context));
+            if (context.columnExprs != null) {
+                arguments.addAll(buildExpressions(context.columnExprs));
+            }
             List<SortItem> orderBy = context.orderExprList() == null ? List.of() : buildSortItems(context.orderExprList());
             Optional<Expression> filter = Optional.ofNullable(context.filterExpr).map(this::buildExpression);
             return new FunctionCall(
-                    buildIdentifier(context.identifier()),
-                    arguments,
+                    name,
+                    List.copyOf(arguments),
                     context.DISTINCT() != null,
                     orderBy,
                     filter,

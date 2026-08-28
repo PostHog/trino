@@ -291,7 +291,7 @@ public record HogQlSemanticCatalogSnapshot(
     {
         return switch (rewrite) {
             case ANY_IF, ARG_MAX_IF, AVG_IF, COUNT_DISTINCT, COUNT_IF, GROUP_ARRAY_IF,
-                    GROUP_UNIQ_ARRAY, GROUP_UNIQ_ARRAY_IF, MAX_IF, MEDIAN_IF, MIN_IF, SUM_IF,
+                    GROUP_UNIQ_ARRAY, GROUP_UNIQ_ARRAY_IF, MAX_IF, MEDIAN_IF, MIN_IF, QUANTILE, QUANTILE_EXACT, QUANTILE_IF, SUM_IF,
                     UNIQ_EXACT, UNIQ_EXACT_IF, UNIQ_IF -> FunctionKind.AGGREGATE;
             default -> FunctionKind.SCALAR;
         };
@@ -309,15 +309,17 @@ public record HogQlSemanticCatalogSnapshot(
                     COUNT_DISTINCT, UNIQ_EXACT ->
                 !signature.variadic() && signature.argumentTypes().size() == 1;
             case ADD_DAYS, ADD_MONTHS, ANY_IF, ARRAY_ELEMENT, ARRAY_FILTER, ARRAY_FIRST, ARRAY_MAP,
-                    AVG_IF, DATE_PART, DECIMAL_CAST, DIVIDE_DECIMAL, EQUALS, FLOAT_OR_DEFAULT, GREATER, GREATER_OR_EQUAL, GROUP_ARRAY_IF, HAS,
+                    AVG_IF, DATE_PART, DECIMAL_CAST, DIVIDE_DECIMAL, EQUALS, FLOAT_OR_DEFAULT, GREATER, GREATER_OR_EQUAL, HAS,
                     GROUP_UNIQ_ARRAY_IF, JSON_EXTRACT_TYPED, JSON_HAS, JSON_KEYS_AND_VALUES, JSON_VALUE,
                     IN_ARRAY, INT_DIV, LESS_OR_EQUAL, LIKE, MAX_IF, MIN_IF, MULTIPLY, MULTIPLY_DECIMAL,
-                    MEDIAN_IF, MINUS, NOT_EQUALS, REGEX_EXTRACT, REGEX_EXTRACT_ALL, SPLIT_CHAR, SPLIT_STRING, SURVEY_RESPONSE,
+                    MEDIAN_IF, MINUS, NOT_EQUALS, QUANTILE, QUANTILE_EXACT, REGEX_EXTRACT, REGEX_EXTRACT_ALL, SPLIT_CHAR, SPLIT_STRING, SURVEY_RESPONSE,
                     SUBTRACT_MONTHS, SUBTRACT_YEARS, SUM_IF,
                     TUPLE_ELEMENT, UNIQ_EXACT_IF, UNIQ_IF ->
                 !signature.variadic() && signature.argumentTypes().size() == 2;
-            case ARG_MAX_IF, ARRAY_SLICE, REGEX_REPLACE_ALL, REGEX_REPLACE_ONE ->
+            case ARG_MAX_IF, ARRAY_SLICE, QUANTILE_IF, REGEX_REPLACE_ALL, REGEX_REPLACE_ONE ->
                 !signature.variadic() && signature.argumentTypes().size() == 3;
+            case GROUP_ARRAY_IF -> !signature.variadic() &&
+                    (signature.argumentTypes().size() == 2 || signature.argumentTypes().size() == 3);
             case CAST_TIMESTAMP -> !signature.variadic() &&
                     (signature.argumentTypes().size() == 1 || signature.argumentTypes().size() == 2);
             case DATE_ADD -> !signature.variadic() &&
@@ -1395,6 +1397,9 @@ public record HogQlSemanticCatalogSnapshot(
         NOT_EQUALS,
         NOT_EMPTY,
         PARSE_TIMESTAMP,
+        QUANTILE,
+        QUANTILE_EXACT,
+        QUANTILE_IF,
         REGEX_EXTRACT,
         REGEX_EXTRACT_ALL,
         REGEX_REPLACE_ALL,
