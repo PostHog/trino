@@ -84,6 +84,9 @@ indexing, splitting, and membership lower to Trino higher-order functions.
 Range and membership rewrites preserve empty-range and null-search behavior.
 Typed defaults for out-of-range and no-match element lookups require resolved
 element types and remain outside the frozen compatibility subset.
+Expression-form comparison, arithmetic, membership, tuples, nullability
+assertions, string splitting, month arithmetic, and common window aliases also
+lower to stock Trino nodes.
 
 Function aliases are resolved before Trino analysis. Unknown functions fail as
 HogQL resolution errors. Actions, cohorts, saved queries, explicit modifiers,

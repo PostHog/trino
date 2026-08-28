@@ -386,6 +386,21 @@ final class HogQlFunctionResolver
             case TUPLE_ELEMENT -> new SubscriptExpression(arguments.getFirst(), arguments.get(1), span);
             case SPLIT_CHAR -> call("split", List.of(arguments.get(1), arguments.getFirst()), span);
             case HAS -> has(arguments, span);
+            case ASSUME_NOT_NULL -> arguments.getFirst();
+            case EMPTY -> empty(arguments.getFirst(), true, span);
+            case NOT_EMPTY -> empty(arguments.getFirst(), false, span);
+            case EQUALS -> new BinaryExpression(HogQlQuery.BinaryOperator.EQUAL, arguments.getFirst(), arguments.get(1), span);
+            case MULTIPLY, MULTIPLY_DECIMAL -> new BinaryExpression(HogQlQuery.BinaryOperator.MULTIPLY, arguments.getFirst(), arguments.get(1), span);
+            case DIVIDE_DECIMAL -> new BinaryExpression(HogQlQuery.BinaryOperator.DIVIDE, arguments.getFirst(), arguments.get(1), span);
+            case IN_ARRAY -> call("contains", List.of(arguments.get(1), arguments.getFirst()), span);
+            case TUPLE -> new TupleExpression(arguments, span);
+            case SUBTRACT_MONTHS -> dateAdd(
+                    "month",
+                    List.of(arguments.getFirst(), new UnaryExpression(HogQlQuery.UnaryOperator.NEGATE, arguments.get(1), span)),
+                    span);
+            case INTERVAL_MONTH -> new IntervalExpression(arguments.getFirst(), HogQlQuery.IntervalUnit.MONTH, span);
+            case START_WEEK -> startOfWeek(arguments.getFirst(), span);
+            case SPLIT_STRING -> call("split", List.of(arguments.get(1), arguments.getFirst()), span);
             case CAST_BIGINT -> cast(arguments.getFirst(), "bigint", span);
             case CAST_TIMESTAMP -> arguments.size() == 1
                     ? cast(arguments.getFirst(), "timestamp(0)", span)
@@ -771,6 +786,32 @@ final class HogQlFunctionResolver
                 "if",
                 List.of(new IsNullExpression(value, false, span, span), findNull, contains),
                 span);
+    }
+
+    private static Expression empty(Expression value, boolean expectedEmpty, HogQlQuery.SourceSpan span)
+    {
+        Expression length = coalesce(
+                call("length", List.of(cast(value, "varchar", span)), span),
+                integerLiteral("0", span),
+                span);
+        return new BinaryExpression(
+                expectedEmpty ? HogQlQuery.BinaryOperator.EQUAL : HogQlQuery.BinaryOperator.GREATER_THAN,
+                length,
+                integerLiteral("0", span),
+                span);
+    }
+
+    private static Expression startOfWeek(Expression value, HogQlQuery.SourceSpan span)
+    {
+        Expression shifted = call("date_add", List.of(
+                new Literal(HogQlQuery.LiteralKind.STRING, "day", span),
+                integerLiteral("1", span),
+                value), span);
+        Expression monday = dateTrunc("week", shifted, span);
+        return call("date_add", List.of(
+                new Literal(HogQlQuery.LiteralKind.STRING, "day", span),
+                integerLiteral("-1", span),
+                monday), span);
     }
 
     private static FunctionCall dateTrunc(String unit, Expression value, HogQlQuery.SourceSpan span)

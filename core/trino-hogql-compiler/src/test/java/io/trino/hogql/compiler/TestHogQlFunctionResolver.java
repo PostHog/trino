@@ -282,6 +282,25 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testCompilerLowersExpressionAndDateAliases()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT assumeNotNull(name), empty(name), notEmpty(name), equals(first, second), multiply(amount, 2), " +
+                        "multiplyDecimal(amount, rate), divideDecimal(amount, rate), in(kind, ['a', 'b']), tuple(name, amount), " +
+                        "subtractMonths(timestamp, 2), toIntervalMonth(3), toStartOfWeek(timestamp), " +
+                        "splitByString('::', name), hasAny(first_array, second_array), parseDateTime(text, '%Y-%m-%d'), " +
+                        "toLastDayOfMonth(timestamp), anyLast(name), lag(name, 2) OVER (), lagInFrame(name) OVER () FROM records"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT name, coalesce(length(CAST(name AS varchar)), 0) = 0, coalesce(length(CAST(name AS varchar)), 0) > 0, " +
+                        "first = second, amount * 2, amount * rate, amount / rate, contains(ARRAY['a', 'b'], kind), ROW(name, amount), " +
+                        "date_add('month', -(2), timestamp), 3 * INTERVAL '1' MONTH, " +
+                        "date_add('day', -1, date_trunc('week', date_add('day', 1, timestamp))), split(name, '::'), " +
+                        "arrays_overlap(first_array, second_array), date_parse(text, '%Y-%m-%d'), last_day_of_month(timestamp), " +
+                        "arbitrary(name), lag(name, 2) OVER (), lag(name) OVER () FROM records"));
+    }
+
+    @Test
     public void testCompilerEnforcesV0FunctionArities()
     {
         assertThat(new HogQlCompiler().compile(envelope("SELECT coalesce('value')")).statement())
