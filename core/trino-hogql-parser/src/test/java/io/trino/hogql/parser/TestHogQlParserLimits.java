@@ -20,6 +20,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestHogQlParserLimits
 {
+    private static final int LARGE_VALID_QUERY_TOKEN_COUNT = 160_000;
+
     @Test
     public void testRejectsTokenBomb()
     {
@@ -58,5 +60,30 @@ public class TestHogQlParserLimits
 
         assertThatCode(() -> parser.parseSyntax("SELECT event FROM events WHERE event = 'signup'"))
                 .doesNotThrowAnyException();
+    }
+
+    @Test
+    public void testDefaultLimitsAcceptLargeValidQuery()
+    {
+        assertThatCode(() -> new HogQlParser().parseSyntax(queryWithTokenCount(LARGE_VALID_QUERY_TOKEN_COUNT)))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    public void testDefaultTokenLimitRemainsBounded()
+    {
+        int tokenCount = HogQlParserLimits.defaults().maxTokens() + 1;
+
+        assertThatThrownBy(() -> new HogQlParser().parseSyntax(queryWithTokenCount(tokenCount)))
+                .isInstanceOf(HogQlParsingException.class)
+                .hasMessageContaining("token limit exceeded");
+    }
+
+    private static String queryWithTokenCount(int tokenCount)
+    {
+        if (tokenCount < 3) {
+            throw new IllegalArgumentException("tokenCount must be at least 3");
+        }
+        return "SELECT" + " /**/".repeat(tokenCount - 3) + " 1";
     }
 }

@@ -521,6 +521,30 @@ public class TestHogQlCompiler
     }
 
     @Test
+    public void testLowersLargeSetOperation()
+    {
+        int operandCount = 3_000;
+        StringBuilder hogql = new StringBuilder("SELECT 0");
+        for (int operand = 1; operand < operandCount; operand++) {
+            hogql.append(" UNION ALL SELECT ").append(operand);
+        }
+
+        Query query = (Query) compiler.compile(hogql.toString());
+        Deque<Node> pending = new ArrayDeque<>();
+        pending.add(query);
+        int querySpecificationCount = 0;
+        while (!pending.isEmpty()) {
+            Node node = pending.removeFirst();
+            if (node instanceof QuerySpecification) {
+                querySpecificationCount++;
+            }
+            pending.addAll(node.getChildren());
+        }
+
+        assertThat(querySpecificationCount).isEqualTo(operandCount);
+    }
+
+    @Test
     public void testBindsPlaceholdersAcrossSetBranchesAndValuesRows()
     {
         HogQlCompilationResult result = compiler.compile(

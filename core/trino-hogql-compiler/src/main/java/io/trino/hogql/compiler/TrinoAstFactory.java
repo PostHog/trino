@@ -126,7 +126,10 @@ import io.trino.sql.tree.WhenClause;
 import io.trino.sql.tree.With;
 import io.trino.sql.tree.WithQuery;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -196,9 +199,37 @@ final class TrinoAstFactory
 
     private static QueryBody createSetOperation(SetOperation setOperation, Map<SourceSpan, Integer> parameterIds)
     {
+        Deque<SetOperationFrame> pending = new ArrayDeque<>();
+        Map<SetOperation, QueryBody> lowered = new IdentityHashMap<>();
+        pending.push(new SetOperationFrame(setOperation, false));
+
+        while (!pending.isEmpty()) {
+            SetOperationFrame frame = pending.pop();
+            if (!frame.operandsLowered()) {
+                pending.push(new SetOperationFrame(frame.operation(), true));
+                addInlineSetOperand(pending, frame.operation().right(), frame.operation().rightParenthesized());
+                addInlineSetOperand(pending, frame.operation().left(), frame.operation().leftParenthesized());
+                continue;
+            }
+
+            SetOperation operation = frame.operation();
+            QueryBody left = createSetOperand(operation.left(), operation.leftParenthesized(), parameterIds, lowered);
+            QueryBody right = createSetOperand(operation.right(), operation.rightParenthesized(), parameterIds, lowered);
+            lowered.put(operation, createSetOperation(operation, left, right));
+        }
+        return lowered.get(setOperation);
+    }
+
+    private static void addInlineSetOperand(Deque<SetOperationFrame> pending, HogQlQuery query, boolean parenthesized)
+    {
+        if (!requiresQueryWrapper(query, parenthesized) && query.body() instanceof SetOperation operation) {
+            pending.push(new SetOperationFrame(operation, false));
+        }
+    }
+
+    private static QueryBody createSetOperation(SetOperation setOperation, QueryBody left, QueryBody right)
+    {
         NodeLocation location = location(setOperation.operatorSpan());
-        QueryBody left = createSetOperand(setOperation.left(), setOperation.leftParenthesized(), parameterIds);
-        QueryBody right = createSetOperand(setOperation.right(), setOperation.rightParenthesized(), parameterIds);
         return switch (setOperation.type()) {
             case EXCEPT -> new Except(location, left, right, setOperation.distinct(), Optional.empty());
             case INTERSECT -> new Intersect(location, List.of(left, right), setOperation.distinct(), Optional.empty());
@@ -209,13 +240,28 @@ final class TrinoAstFactory
     private static QueryBody createSetOperand(
             HogQlQuery query,
             boolean parenthesized,
-            Map<SourceSpan, Integer> parameterIds)
+            Map<SourceSpan, Integer> parameterIds,
+            Map<SetOperation, QueryBody> lowered)
     {
-        if (parenthesized || !query.with().isEmpty() || !query.orderBy().isEmpty() || query.limit().isPresent() || query.offset().isPresent()) {
+        if (requiresQueryWrapper(query, parenthesized)) {
             return new TableSubquery(location(query.span()), createQuery(query, parameterIds));
+        }
+        if (query.body() instanceof SetOperation setOperation) {
+            QueryBody result = lowered.get(setOperation);
+            if (result == null) {
+                throw new IllegalStateException("set operation operand has not been lowered");
+            }
+            return result;
         }
         return createQueryBody(query, parameterIds);
     }
+
+    private static boolean requiresQueryWrapper(HogQlQuery query, boolean parenthesized)
+    {
+        return parenthesized || !query.with().isEmpty() || !query.orderBy().isEmpty() || query.limit().isPresent() || query.offset().isPresent();
+    }
+
+    private record SetOperationFrame(SetOperation operation, boolean operandsLowered) {}
 
     private static Optional<With> createWith(HogQlQuery query, Map<SourceSpan, Integer> parameterIds)
     {

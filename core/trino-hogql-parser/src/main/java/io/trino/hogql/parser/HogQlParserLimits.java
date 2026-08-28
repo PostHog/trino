@@ -15,7 +15,7 @@ package io.trino.hogql.parser;
 
 public record HogQlParserLimits(int maxTokens, int maxParseDepth, int maxParseTreeNodes)
 {
-    private static final HogQlParserLimits DEFAULTS = new HogQlParserLimits(100_000, 256, 500_000);
+    private static final HogQlParserLimits DEFAULTS = new HogQlParserLimits(200_000, 256, 500_000);
 
     public HogQlParserLimits
     {
