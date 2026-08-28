@@ -374,11 +374,15 @@ public class TestHogQlFunctionResolver
                 "SELECT plus(total, surcharge), minus(total, discount), divide(total, count), notEquals(status, 'ignored'), " +
                         "greaterOrEquals(total, minimum), lessOrEquals(total, maximum), " +
                 "toMonth(timestamp), toYear(timestamp), toDayOfWeek(timestamp), ceil(score), _toInt16(value), cityHash64(value), " +
+                        "formatReadableTimeDelta(duration), formatReadableTimeDelta(duration, 'days'), " +
+                        "formatReadableTimeDelta(duration, 'hours', 'minutes'), " +
                         "JSONExtractKeys(payload), JSONExtractKeys(payload, 'nested') FROM records"));
 
         assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
                 "SELECT total + surcharge, total - discount, total / count, status <> 'ignored', total >= minimum, total <= maximum, " +
                         "month(timestamp), year(timestamp), day_of_week(timestamp), ceiling(score), CAST(value AS smallint), cityhash64(value), " +
+                        "format_readable_time_delta(duration), format_readable_time_delta(duration, 'days'), " +
+                        "format_readable_time_delta(duration, 'hours', 'minutes'), " +
                         "map_keys(coalesce(TRY_CAST(json_parse(payload) AS map(varchar, json)), CAST(map(ARRAY[], ARRAY[]) AS map(varchar, json)))), " +
                         "map_keys(coalesce(TRY_CAST(json_extract(payload, '$[\"nested\"]') AS map(varchar, json)), CAST(map(ARRAY[], ARRAY[]) AS map(varchar, json)))) " +
                         "FROM records"));
@@ -465,11 +469,19 @@ public class TestHogQlFunctionResolver
     public void testCompilerLowersFinalStockAliases()
     {
         HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
-                "SELECT floor(score), toDayOfMonth(timestamp), mapFromArrays(keys, values_array), " +
-                        "date_part('hour', timestamp), isNull(value) FROM records"));
+                "SELECT floor(score), toDayOfMonth(timestamp), mapFromArrays(keys, values_array), mapUpdate(existing, updates), " +
+                        "map(), map('a', 1, 'b', 2), date_part('hour', timestamp), isNull(value) FROM records"));
 
         assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
-                "SELECT floor(score), day(timestamp), map(keys, values_array), hour(timestamp), value IS NULL FROM records"));
+                "SELECT floor(score), day(timestamp), map(keys, values_array), map_concat(existing, updates), " +
+                        "map(), map(ARRAY['a', 'b'], ARRAY[1, 2]), hour(timestamp), value IS NULL FROM records"));
+
+        TrinoException exception = catchThrowableOfType(
+                TrinoException.class,
+                () -> new HogQlCompiler().compile(envelope("SELECT map('a', 1, 'b')")));
+
+        assertThat(exception.getErrorCode()).isEqualTo(HOGQL_RESOLUTION_ERROR.toErrorCode());
+        assertThat(exception).hasMessageContaining("requires key/value argument pairs");
     }
 
     @Test

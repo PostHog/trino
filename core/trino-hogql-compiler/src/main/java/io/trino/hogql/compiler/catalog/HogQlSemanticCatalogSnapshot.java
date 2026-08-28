@@ -333,6 +333,8 @@ public record HogQlSemanticCatalogSnapshot(
                     (signature.variadic() && signature.argumentTypes().size() == 3);
             case ARRAY_SORT, RANGE -> !signature.variadic() &&
                     (signature.argumentTypes().size() == 1 || signature.argumentTypes().size() == 2);
+            case MAP_CONSTRUCTOR -> (!signature.variadic() && signature.argumentTypes().isEmpty()) ||
+                    (signature.variadic() && signature.argumentTypes().size() == 3);
             case MULTI_IF -> signature.variadic() && signature.argumentTypes().size() == 4;
             case TUPLE -> signature.variadic() && signature.argumentTypes().size() == 2;
             case TODAY -> !signature.variadic() && signature.argumentTypes().isEmpty();
@@ -1388,6 +1390,7 @@ public record HogQlSemanticCatalogSnapshot(
         LIKE,
         LESS_OR_EQUAL,
         MAX_IF,
+        MAP_CONSTRUCTOR,
         MD5,
         MEDIAN_IF,
         MIN_IF,

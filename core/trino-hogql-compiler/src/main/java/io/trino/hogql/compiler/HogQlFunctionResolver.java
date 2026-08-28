@@ -454,6 +454,7 @@ final class HogQlFunctionResolver
             case MULTIPLY, MULTIPLY_DECIMAL -> new BinaryExpression(HogQlQuery.BinaryOperator.MULTIPLY, arguments.getFirst(), arguments.get(1), span);
             case DIVIDE_DECIMAL -> new BinaryExpression(HogQlQuery.BinaryOperator.DIVIDE, arguments.getFirst(), arguments.get(1), span);
             case IN_ARRAY -> call("contains", List.of(arguments.get(1), arguments.getFirst()), span);
+            case MAP_CONSTRUCTOR -> map(function, arguments);
             case TUPLE -> new TupleExpression(arguments, span);
             case SUBTRACT_MONTHS -> dateAdd(
                     "month",
@@ -897,6 +898,29 @@ final class HogQlFunctionResolver
             pathParts.add(stringLiteral(path.toString(), function.span()));
         }
         return call("concat", pathParts, function.span());
+    }
+
+    private static Expression map(FunctionCall function, List<Expression> arguments)
+    {
+        if (arguments.isEmpty()) {
+            return call("map", List.of(), function.span());
+        }
+        if (arguments.getFirst() instanceof LambdaExpression) {
+            return call("map", arguments, function.span());
+        }
+        if (arguments.size() % 2 != 0) {
+            throw resolutionError(function, "HogQL function map requires key/value argument pairs");
+        }
+        List<Expression> keys = new ArrayList<>(arguments.size() / 2);
+        List<Expression> values = new ArrayList<>(arguments.size() / 2);
+        for (int index = 0; index < arguments.size(); index += 2) {
+            keys.add(arguments.get(index));
+            values.add(arguments.get(index + 1));
+        }
+        return call(
+                "map",
+                List.of(new ArrayExpression(keys, function.span()), new ArrayExpression(values, function.span())),
+                function.span());
     }
 
     private static FunctionCall coalesce(Expression value, Expression defaultValue, HogQlQuery.SourceSpan span)
