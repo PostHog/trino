@@ -58,6 +58,7 @@ import io.trino.execution.executor.timesharing.TimeSharingTaskExecutor;
 import io.trino.execution.scheduler.NodeSchedulerConfig;
 import io.trino.hogql.HogQlConfig;
 import io.trino.hogql.HogQlExchangeRateModule;
+import io.trino.hogql.HogQlFunctionModule;
 import io.trino.hogql.HogQlSemanticCatalogConfig;
 import io.trino.jsonpath.ir.IrJsonPath;
 import io.trino.memory.LocalMemoryManager;
@@ -205,6 +206,9 @@ public class ServerMainModule
 
         configBinder(binder).bindConfig(HogQlConfig.class);
         configBinder(binder).bindConfig(HogQlSemanticCatalogConfig.class);
+        if (buildConfigObject(HogQlConfig.class).isEnabled()) {
+            install(new HogQlFunctionModule());
+        }
         if (buildConfigObject(HogQlSemanticCatalogConfig.class).getUri() != null) {
             install(new HogQlExchangeRateModule());
         }

@@ -1221,15 +1221,14 @@ final class HogQlFunctionResolver
 
     private static Expression empty(Expression value, boolean expectedEmpty, HogQlQuery.SourceSpan span)
     {
-        Expression length = coalesce(
-                call("length", List.of(cast(value, "varchar", span)), span),
-                integerLiteral("0", span),
+        Expression isEmpty = coalesce(
+                call("hogql_empty", List.of(value), span),
+                new Literal(HogQlQuery.LiteralKind.BOOLEAN, "true", span),
                 span);
-        return new BinaryExpression(
-                expectedEmpty ? HogQlQuery.BinaryOperator.EQUAL : HogQlQuery.BinaryOperator.GREATER_THAN,
-                length,
-                integerLiteral("0", span),
-                span);
+        if (expectedEmpty) {
+            return isEmpty;
+        }
+        return new UnaryExpression(HogQlQuery.UnaryOperator.NOT, isEmpty, span);
     }
 
     private static Expression startOfWeek(FunctionCall function, List<Expression> arguments)

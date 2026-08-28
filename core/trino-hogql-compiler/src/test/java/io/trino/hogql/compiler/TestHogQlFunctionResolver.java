@@ -458,7 +458,7 @@ public class TestHogQlFunctionResolver
                         "toLastDayOfMonth(timestamp), anyLast(name), lag(name, 2) OVER (), lagInFrame(name) OVER () FROM records"));
 
         assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
-                "SELECT name, coalesce(length(CAST(name AS varchar)), 0) = 0, coalesce(length(CAST(name AS varchar)), 0) > 0, " +
+                "SELECT name, coalesce(hogql_empty(name), true), NOT coalesce(hogql_empty(name), true), " +
                         "first = second, amount * 2, amount * rate, amount / rate, contains(ARRAY['a', 'b'], kind), ROW(name, amount), " +
                         "date_add('month', -(2), timestamp), 3 * INTERVAL '1' MONTH, " +
                         "date_add('day', -1, date_trunc('week', date_add('day', 1, timestamp))), split(name, '::'), " +
