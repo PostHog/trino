@@ -88,6 +88,13 @@ public class TestHogQlCompiler
     }
 
     @Test
+    public void testQuotesHogQlPropertyIdentifiersForTrino()
+    {
+        assertThat(compiler.compile("SELECT properties.$user_id, properties.$host FROM events"))
+                .isEqualTo(sqlParser.createStatement("SELECT properties.\"$user_id\", properties.\"$host\" FROM events"));
+    }
+
+    @Test
     public void testLowersDistinctOrderingAndClickHousePaginationOrder()
     {
         Statement statement = compiler.compile("SELECT DISTINCT event FROM events ORDER BY event DESC NULLS FIRST LIMIT 10 OFFSET 2");

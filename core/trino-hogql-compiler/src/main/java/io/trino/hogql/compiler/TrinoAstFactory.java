@@ -798,7 +798,31 @@ final class TrinoAstFactory
 
     private static io.trino.sql.tree.Identifier createIdentifier(Identifier identifier)
     {
-        return new io.trino.sql.tree.Identifier(location(identifier.span()), identifier.value(), identifier.delimited());
+        return new io.trino.sql.tree.Identifier(
+                location(identifier.span()),
+                identifier.value(),
+                identifier.delimited() || !isValidTrinoIdentifier(identifier.value()));
+    }
+
+    private static boolean isValidTrinoIdentifier(String value)
+    {
+        if (value.isEmpty() || !isValidTrinoIdentifierFirstCharacter(value.charAt(0))) {
+            return false;
+        }
+        for (int index = 1; index < value.length(); index++) {
+            char character = value.charAt(index);
+            if (!isValidTrinoIdentifierFirstCharacter(character) && (character < '0' || character > '9')) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isValidTrinoIdentifierFirstCharacter(char character)
+    {
+        return (character >= 'a' && character <= 'z') ||
+                (character >= 'A' && character <= 'Z') ||
+                character == '_';
     }
 
     private static NodeLocation location(SourceSpan span)
