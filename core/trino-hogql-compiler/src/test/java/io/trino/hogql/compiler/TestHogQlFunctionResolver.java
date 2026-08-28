@@ -214,6 +214,19 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testCompilerLowersRegexCompatibilityFunctions()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT extract(name, '([a-z]+)'), extract(name, '[a-z]+'), match(name, '^prefix'), " +
+                        "replaceRegexpAll(name, '([a-z])', 'x_') FROM records"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT coalesce(regexp_extract(name, '([a-z]+)', 1), ''), " +
+                        "coalesce(regexp_extract(name, '[a-z]+', 0), ''), regexp_like(name, '^prefix'), " +
+                        "regexp_replace(name, '([a-z])', 'x_') FROM records"));
+    }
+
+    @Test
     public void testCompilerEnforcesV0FunctionArities()
     {
         assertThat(new HogQlCompiler().compile(envelope("SELECT coalesce('value')")).statement())

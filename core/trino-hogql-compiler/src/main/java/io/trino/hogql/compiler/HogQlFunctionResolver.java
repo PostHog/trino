@@ -413,7 +413,90 @@ final class HogQlFunctionResolver
             case AND -> new BinaryExpression(HogQlQuery.BinaryOperator.AND, arguments.getFirst(), arguments.get(1), span);
             case GREATER -> new BinaryExpression(HogQlQuery.BinaryOperator.GREATER_THAN, arguments.getFirst(), arguments.get(1), span);
             case LIKE -> new BinaryExpression(HogQlQuery.BinaryOperator.LIKE, arguments.getFirst(), arguments.get(1), span);
+            case REGEX_EXTRACT -> regexExtract(function, arguments);
+            case REGEX_REPLACE_ALL -> regexReplaceAll(function, arguments);
         };
+    }
+
+    private static Expression regexExtract(FunctionCall function, List<Expression> arguments)
+    {
+        Literal pattern = stringLiteral(function, arguments.get(1), "regular expression");
+        Literal group = new Literal(
+                HogQlQuery.LiteralKind.INTEGER,
+                hasCapturingGroup(pattern.value()) ? "1" : "0",
+                function.span());
+        Expression extracted = call("regexp_extract", List.of(arguments.getFirst(), pattern, group), function.span());
+        return coalesce(extracted, new Literal(HogQlQuery.LiteralKind.STRING, "", function.span()), function.span());
+    }
+
+    private static Expression regexReplaceAll(FunctionCall function, List<Expression> arguments)
+    {
+        Literal pattern = stringLiteral(function, arguments.get(1), "regular expression");
+        Literal replacement = stringLiteral(function, arguments.get(2), "regular expression replacement");
+        String trinoReplacement = regexReplacement(replacement.value());
+        return call(
+                "regexp_replace",
+                List.of(arguments.getFirst(), pattern, new Literal(HogQlQuery.LiteralKind.STRING, trinoReplacement, replacement.span())),
+                function.span());
+    }
+
+    private static String regexReplacement(String replacement)
+    {
+        StringBuilder result = new StringBuilder(replacement.length());
+        for (int index = 0; index < replacement.length(); index++) {
+            char current = replacement.charAt(index);
+            if (current == '\\' && index + 1 < replacement.length() && Character.isDigit(replacement.charAt(index + 1))) {
+                result.append('$').append(replacement.charAt(++index));
+            }
+            else {
+                result.append(current);
+            }
+        }
+        return result.toString();
+    }
+
+    private static Literal stringLiteral(FunctionCall function, Expression expression, String description)
+    {
+        if (expression instanceof Literal literal && literal.kind() == HogQlQuery.LiteralKind.STRING) {
+            return literal;
+        }
+        throw unsupportedError(function, "HogQL " + description + " must be a string literal");
+    }
+
+    private static boolean hasCapturingGroup(String pattern)
+    {
+        boolean escaped = false;
+        boolean characterClass = false;
+        for (int index = 0; index < pattern.length(); index++) {
+            char current = pattern.charAt(index);
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (current == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (current == '[') {
+                characterClass = true;
+                continue;
+            }
+            if (current == ']' && characterClass) {
+                characterClass = false;
+                continue;
+            }
+            if (current != '(' || characterClass) {
+                continue;
+            }
+            if (index + 1 >= pattern.length() || pattern.charAt(index + 1) != '?') {
+                return true;
+            }
+            if (index + 2 < pattern.length() && pattern.charAt(index + 2) == '<' &&
+                    (index + 3 >= pattern.length() || (pattern.charAt(index + 3) != '=' && pattern.charAt(index + 3) != '!'))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static FunctionCall dateAdd(String unit, List<Expression> arguments, HogQlQuery.SourceSpan span)

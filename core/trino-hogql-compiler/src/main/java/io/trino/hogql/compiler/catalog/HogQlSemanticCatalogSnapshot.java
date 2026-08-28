@@ -304,8 +304,9 @@ public record HogQlSemanticCatalogSnapshot(
                     JSON_KEYS_AND_VALUES_RAW, NOT, PARSE_TIMESTAMP, TO_UNIX_TIMESTAMP, UNIQ_EXACT ->
                 !signature.variadic() && signature.argumentTypes().size() == 1;
             case ADD_DAYS, ADD_MONTHS, AND, GREATER, JSON_EXTRACT_TYPED, JSON_KEYS_AND_VALUES,
-                    LIKE, MAX_IF, SUM_IF, UNIQ_IF ->
+                    LIKE, MAX_IF, REGEX_EXTRACT, SUM_IF, UNIQ_IF ->
                 !signature.variadic() && signature.argumentTypes().size() == 2;
+            case REGEX_REPLACE_ALL -> !signature.variadic() && signature.argumentTypes().size() == 3;
             case CAST_TIMESTAMP -> !signature.variadic() &&
                     (signature.argumentTypes().size() == 1 || signature.argumentTypes().size() == 2);
             case DATE_ADD -> !signature.variadic() &&
@@ -1333,6 +1334,8 @@ public record HogQlSemanticCatalogSnapshot(
         MULTI_IF,
         NOT,
         PARSE_TIMESTAMP,
+        REGEX_EXTRACT,
+        REGEX_REPLACE_ALL,
         SUM_IF,
         TODAY,
         TO_UNIX_TIMESTAMP,

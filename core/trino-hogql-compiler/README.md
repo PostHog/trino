@@ -73,6 +73,8 @@ Array-form membership and the nullish operator lower to stock `IN`, `IF`, and
 `COALESCE` nodes, including nullable empty-membership behavior.
 Function-form boolean/comparison operators and common string/math aliases
 lower to their equivalent stock operators and functions.
+Literal regex extraction preserves HogQL's capture-group and empty-default
+behavior; matching and replace-all lower to Trino regex functions.
 
 Function aliases are resolved before Trino analysis. Unknown functions fail as
 HogQL resolution errors. Actions, cohorts, saved queries, explicit modifiers,
