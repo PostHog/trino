@@ -81,6 +81,9 @@ Literal regex extraction preserves HogQL's capture-group and empty-default
 behavior; matching and replace-all lower to Trino regex functions.
 Common array transforms, predicates, indexing, summation, ranges, tuple
 indexing, splitting, and membership lower to Trino higher-order functions.
+Range and membership rewrites preserve empty-range and null-search behavior.
+Typed defaults for out-of-range and no-match element lookups require resolved
+element types and remain outside the frozen compatibility subset.
 
 Function aliases are resolved before Trino analysis. Unknown functions fail as
 HogQL resolution errors. Actions, cohorts, saved queries, explicit modifiers,

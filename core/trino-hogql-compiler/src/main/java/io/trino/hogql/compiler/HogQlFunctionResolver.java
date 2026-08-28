@@ -382,15 +382,10 @@ final class HogQlFunctionResolver
                     span);
             case ARRAY_MAP -> call("transform", List.of(arguments.get(1), arguments.getFirst()), span);
             case ARRAY_SUM -> arraySum(arguments.getFirst(), span);
-            case RANGE -> call(
-                    "sequence",
-                    List.of(
-                            integerLiteral("0", span),
-                            new BinaryExpression(HogQlQuery.BinaryOperator.SUBTRACT, arguments.getFirst(), integerLiteral("1", span), span)),
-                    span);
+            case RANGE -> range(arguments.getFirst(), span);
             case TUPLE_ELEMENT -> new SubscriptExpression(arguments.getFirst(), arguments.get(1), span);
             case SPLIT_CHAR -> call("split", List.of(arguments.get(1), arguments.getFirst()), span);
-            case HAS -> call("contains", arguments, span);
+            case HAS -> has(arguments, span);
             case CAST_BIGINT -> cast(arguments.getFirst(), "bigint", span);
             case CAST_TIMESTAMP -> arguments.size() == 1
                     ? cast(arguments.getFirst(), "timestamp(0)", span)
@@ -744,6 +739,38 @@ final class HogQlFunctionResolver
     private static Literal integerLiteral(String value, HogQlQuery.SourceSpan span)
     {
         return new Literal(HogQlQuery.LiteralKind.INTEGER, value, span);
+    }
+
+    private static Expression range(Expression end, HogQlQuery.SourceSpan span)
+    {
+        Literal zero = integerLiteral("0", span);
+        Expression isEmpty = new BinaryExpression(HogQlQuery.BinaryOperator.LESS_THAN_OR_EQUAL, end, zero, span);
+        Expression empty = cast(new ArrayExpression(List.of(), span), "array(bigint)", span);
+        Expression sequence = call(
+                "sequence",
+                List.of(zero, new BinaryExpression(HogQlQuery.BinaryOperator.SUBTRACT, end, integerLiteral("1", span), span)),
+                span);
+        return call("if", List.of(isEmpty, empty, sequence), span);
+    }
+
+    private static Expression has(List<Expression> arguments, HogQlQuery.SourceSpan span)
+    {
+        Expression array = arguments.getFirst();
+        Expression value = arguments.get(1);
+        Identifier item = new Identifier("_hogql_item", false, span);
+        LambdaExpression isNull = new LambdaExpression(
+                List.of(item),
+                new IsNullExpression(new ColumnReference(List.of(item), span), false, span, span),
+                span);
+        Expression findNull = call("any_match", List.of(array, isNull), span);
+        Expression contains = coalesce(
+                call("contains", List.of(array, value), span),
+                new Literal(HogQlQuery.LiteralKind.BOOLEAN, "false", span),
+                span);
+        return call(
+                "if",
+                List.of(new IsNullExpression(value, false, span, span), findNull, contains),
+                span);
     }
 
     private static FunctionCall dateTrunc(String unit, Expression value, HogQlQuery.SourceSpan span)
