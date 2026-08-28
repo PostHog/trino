@@ -393,12 +393,14 @@ public class TestHogQlFunctionResolver
     {
         HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
                 "SELECT quantile(0.25)(value), quantileExact(0.5)(value), " +
-                        "quantileIf(0.75)(value, active), groupArrayIf(20)(value, active) FROM records"));
+                        "quantileIf(0.75)(value, active), groupArrayIf(20)(value, active), " +
+                        "argMinIf(value, timestamp, active), replaceAll(name, 'old', 'new') FROM records"));
 
         assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
                 "SELECT approx_percentile(value, 2.5E-1), approx_percentile(value, 5E-1), " +
                         "approx_percentile(value, 7.5E-1) FILTER (WHERE active), " +
-                        "slice(array_agg(value) FILTER (WHERE active), 1, 20) FROM records"));
+                        "slice(array_agg(value) FILTER (WHERE active), 1, 20), " +
+                        "min_by(value, timestamp) FILTER (WHERE active), replace(name, 'old', 'new') FROM records"));
     }
 
     @Test

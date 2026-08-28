@@ -290,7 +290,7 @@ public record HogQlSemanticCatalogSnapshot(
     private static FunctionKind rewriteFunctionKind(FunctionRewrite rewrite)
     {
         return switch (rewrite) {
-            case ANY_IF, ARG_MAX_IF, AVG_IF, COUNT_DISTINCT, COUNT_IF, GROUP_ARRAY_IF,
+            case ANY_IF, ARG_MAX_IF, ARG_MIN_IF, AVG_IF, COUNT_DISTINCT, COUNT_IF, GROUP_ARRAY_IF,
                     GROUP_UNIQ_ARRAY, GROUP_UNIQ_ARRAY_IF, MAX_IF, MEDIAN_IF, MIN_IF, QUANTILE, QUANTILE_EXACT, QUANTILE_IF, SUM_IF,
                     UNIQ_EXACT, UNIQ_EXACT_IF, UNIQ_IF -> FunctionKind.AGGREGATE;
             default -> FunctionKind.SCALAR;
@@ -316,7 +316,7 @@ public record HogQlSemanticCatalogSnapshot(
                     SUBTRACT_MONTHS, SUBTRACT_YEARS, SUM_IF,
                     TUPLE_ELEMENT, UNIQ_EXACT_IF, UNIQ_IF ->
                 !signature.variadic() && signature.argumentTypes().size() == 2;
-            case ARG_MAX_IF, ARRAY_SLICE, QUANTILE_IF, REGEX_REPLACE_ALL, REGEX_REPLACE_ONE ->
+            case ARG_MAX_IF, ARG_MIN_IF, ARRAY_SLICE, QUANTILE_IF, REGEX_REPLACE_ALL, REGEX_REPLACE_ONE ->
                 !signature.variadic() && signature.argumentTypes().size() == 3;
             case GROUP_ARRAY_IF -> !signature.variadic() &&
                     (signature.argumentTypes().size() == 2 || signature.argumentTypes().size() == 3);
@@ -1333,6 +1333,7 @@ public record HogQlSemanticCatalogSnapshot(
         AND,
         ANY_IF,
         ARG_MAX_IF,
+        ARG_MIN_IF,
         ARRAY_ELEMENT,
         ARRAY_ENUMERATE,
         ARRAY_FILTER,

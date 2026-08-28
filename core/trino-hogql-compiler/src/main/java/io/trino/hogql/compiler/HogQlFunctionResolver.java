@@ -471,6 +471,7 @@ final class HogQlFunctionResolver
             case UNIQ_EXACT -> aggregate(function, "count", List.of(arguments.getFirst()), true, null, span);
             case GROUP_UNIQ_ARRAY -> aggregate(function, "array_agg", List.of(arguments.getFirst()), true, null, span);
             case ARG_MAX_IF -> aggregate(function, "max_by", List.of(arguments.getFirst(), arguments.get(1)), false, arguments.get(2), span);
+            case ARG_MIN_IF -> aggregate(function, "min_by", List.of(arguments.getFirst(), arguments.get(1)), false, arguments.get(2), span);
             case ANY_IF -> aggregate(function, "arbitrary", List.of(arguments.getFirst()), false, arguments.get(1), span);
             case MIN_IF -> aggregate(function, "min", List.of(arguments.getFirst()), false, arguments.get(1), span);
             case AVG_IF -> aggregate(function, "avg", List.of(arguments.getFirst()), false, arguments.get(1), span);
