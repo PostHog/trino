@@ -237,7 +237,7 @@ class TestHogQlStatementResource
                         "SELECT value FROM (VALUES (2), (1), (2)) AS numbers(value) UNION SELECT 3 ORDER BY value"),
                 Arguments.of(
                         "arrays, maps, and rows",
-                        "SELECT ARRAY[1, 2, 3][2] AS array_value, MAP(ARRAY['k'], ARRAY[7])['k'] AS map_value, (11, 'x').1 AS row_value",
+                        "SELECT ARRAY[1, 2, 3][2] AS array_value, mapFromArrays(['k'], [7])['k'] AS map_value, (11, 'x').1 AS row_value",
                         "SELECT ARRAY[1, 2, 3][2] AS array_value, MAP(ARRAY['k'], ARRAY[7])['k'] AS map_value, ROW(11, 'x')[1] AS row_value"),
                 Arguments.of(
                         "timestamp precision",
@@ -274,7 +274,122 @@ class TestHogQlStatementResource
                 Arguments.of(
                         "v0 value window function",
                         "SELECT first_value(name) OVER (ORDER BY nationkey) FROM tpch.tiny.nation WHERE nationkey < 3 ORDER BY nationkey",
-                        "SELECT first_value(name) OVER (ORDER BY nationkey) FROM tpch.tiny.nation WHERE nationkey < 3 ORDER BY nationkey"));
+                        "SELECT first_value(name) OVER (ORDER BY nationkey) FROM tpch.tiny.nation WHERE nationkey < 3 ORDER BY nationkey"),
+                Arguments.of(
+                        "corpus temporal rewrites",
+                        "SELECT addDays(CAST('2024-01-15 12:34:56' AS Timestamp), 2), " +
+                                "subtractDays(CAST('2024-01-15 12:34:56' AS Timestamp), 3), " +
+                                "addMonths(CAST('2024-01-15 12:34:56' AS Timestamp), 1), " +
+                                "subtractMonths(CAST('2024-01-15 12:34:56' AS Timestamp), 2), " +
+                                "subtractYears(CAST('2024-01-15 12:34:56' AS Timestamp), 1), " +
+                                "toStartOfDay(CAST('2024-01-15 12:34:56' AS Timestamp)), " +
+                                "toStartOfHour(CAST('2024-01-15 12:34:56' AS Timestamp)), " +
+                                "toStartOfMonth(CAST('2024-01-15 12:34:56' AS Timestamp)), " +
+                                "toStartOfWeek(CAST('2024-01-15 12:34:56' AS Timestamp), 1), " +
+                                "toDayOfMonth(CAST('2024-01-15' AS Date)), toDayOfWeek(CAST('2024-01-15' AS Date)), " +
+                                "toMonth(CAST('2024-01-15' AS Date)), toYear(CAST('2024-01-15' AS Date)), " +
+                                "toLastDayOfMonth(CAST('2024-01-15' AS Date)), " +
+                                "formatDateTime(CAST('2024-01-15 12:34:56' AS Timestamp), '%Y-%m-%d'), " +
+                                "parseDateTime('2024-01-15', '%Y-%m-%d'), parseDateTimeBestEffort('2024-01-15 12:34:56')",
+                        "SELECT date_add('day', 2, CAST('2024-01-15 12:34:56' AS timestamp(0))), " +
+                                "date_add('day', -3, CAST('2024-01-15 12:34:56' AS timestamp(0))), " +
+                                "date_add('month', 1, CAST('2024-01-15 12:34:56' AS timestamp(0))), " +
+                                "date_add('month', -2, CAST('2024-01-15 12:34:56' AS timestamp(0))), " +
+                                "date_add('year', -1, CAST('2024-01-15 12:34:56' AS timestamp(0))), " +
+                                "date_trunc('day', CAST('2024-01-15 12:34:56' AS timestamp(0))), " +
+                                "date_trunc('hour', CAST('2024-01-15 12:34:56' AS timestamp(0))), " +
+                                "date_trunc('month', CAST('2024-01-15 12:34:56' AS timestamp(0))), " +
+                                "date_trunc('week', CAST('2024-01-15 12:34:56' AS timestamp(0))), " +
+                                "day(CAST('2024-01-15' AS date)), day_of_week(CAST('2024-01-15' AS date)), " +
+                                "month(CAST('2024-01-15' AS date)), year(CAST('2024-01-15' AS date)), " +
+                                "last_day_of_month(CAST('2024-01-15' AS date)), " +
+                                "date_format(CAST('2024-01-15 12:34:56' AS timestamp(0)), '%Y-%m-%d'), " +
+                                "date_parse('2024-01-15', '%Y-%m-%d'), TRY_CAST('2024-01-15 12:34:56' AS timestamp(3))"),
+                Arguments.of(
+                        "corpus JSON regex and string rewrites",
+                        "SELECT JSONExtractString(payload, 'name'), JSONExtractInt(payload, 'items', 0), " +
+                                "JSONExtractFloat(payload, 'score'), JSONExtractBool(payload, 'active'), " +
+                                "JSONExtractUInt(payload, 'items', 1), JSONExtractRaw(payload, 'object'), " +
+                                "JSONLength(payload, 'items'), JSONHas(payload, 'object'), JSONExtractKeys(payload, 'object'), " +
+                                "extract(sample, '([a-z]+)'), extractAll(sample, '([a-z]+)'), match(sample, '^[a-z]+'), " +
+                                "replaceRegexpAll(sample, '[0-9]', 'x'), replaceRegexpOne(sample, '[0-9]+', 'x'), " +
+                                "splitByString('123', sample), substringUTF8(sample, 2, 3), position(sample, '123') " +
+                                "FROM (VALUES ('{\"name\":\"Ada\",\"items\":[2,3],\"active\":true,\"score\":1.5,\"object\":{\"k\":7}}', 'abc123abc')) AS t(payload, sample)",
+                        "SELECT coalesce(json_extract_scalar(payload, '$[\"name\"]'), ''), " +
+                                "coalesce(TRY_CAST(json_extract_scalar(payload, '$[\"items\"][0]') AS bigint), 0), " +
+                                "coalesce(TRY_CAST(json_extract_scalar(payload, '$[\"score\"]') AS double), 0E0), " +
+                                "coalesce(TRY_CAST(json_extract_scalar(payload, '$[\"active\"]') AS boolean), false), " +
+                                "coalesce(TRY_CAST(json_extract_scalar(payload, '$[\"items\"][1]') AS bigint), 0), " +
+                                "coalesce(json_format(json_extract(payload, '$[\"object\"]')), ''), " +
+                                "coalesce(json_size(payload, '$[\"items\"]'), 0), json_extract(payload, '$[\"object\"]') IS NOT NULL, " +
+                                "map_keys(coalesce(TRY_CAST(json_extract(payload, '$[\"object\"]') AS map(varchar, json)), CAST(map(ARRAY[], ARRAY[]) AS map(varchar, json)))), " +
+                                "coalesce(regexp_extract(sample, '([a-z]+)', 1), ''), regexp_extract_all(sample, '([a-z]+)', 1), " +
+                                "regexp_like(sample, '^[a-z]+'), regexp_replace(sample, '[0-9]', 'x'), " +
+                                "regexp_replace(sample, '(?s)^(.*?)(([0-9]+))', '$1x'), split(sample, '123'), substring(sample, 2, 3), strpos(sample, '123') " +
+                                "FROM (VALUES ('{\"name\":\"Ada\",\"items\":[2,3],\"active\":true,\"score\":1.5,\"object\":{\"k\":7}}', 'abc123abc')) AS t(payload, sample)"),
+                Arguments.of(
+                        "corpus collection and lambda rewrites",
+                        "SELECT arrayElement([1, 2, 3], -1), arrayFilter(x -> x > 1, [1, 2, 3]), " +
+                                "arrayFirst(x -> x > 1, [1, 2, 3]), arrayMap(x -> x + 1, [1, 2, 3]), " +
+                                "arraySum([1, 2, 3]), arrayMin([3, 1, 2]), arraySlice([1, 2, 3, 4], 2, 2), " +
+                                "arrayEnumerate(['a', 'b']), range(2, 5), tupleElement(tuple('x', 7), 2), " +
+                                "splitByChar(',', 'a,b'), has([1, 2], 2), hasAny([1, 2], [2, 3]), " +
+                                "map('a', 1, 'b', 2)['b'], mapUpdate(map('a', 1), map('a', 2))['a']",
+                        "SELECT element_at(ARRAY[1, 2, 3], -1), filter(ARRAY[1, 2, 3], x -> x > 1), " +
+                                "element_at(filter(ARRAY[1, 2, 3], x -> x > 1), 1), transform(ARRAY[1, 2, 3], x -> x + 1), " +
+                                "reduce(ARRAY[1, 2, 3], 0, (total, item) -> total + item, total -> total), " +
+                                "array_min(ARRAY[3, 1, 2]), slice(ARRAY[1, 2, 3, 4], 2, 2), sequence(1, cardinality(ARRAY['a', 'b'])), " +
+                                "sequence(2, 5 - 1), ROW('x', 7)[2], split('a,b', ','), " +
+                                "coalesce(contains(ARRAY[1, 2], 2), false), arrays_overlap(ARRAY[1, 2], ARRAY[2, 3]), " +
+                                "map(ARRAY['a', 'b'], ARRAY[1, 2])['b'], map_concat(map(ARRAY['a'], ARRAY[1]), map(ARRAY['a'], ARRAY[2]))['a']"),
+                Arguments.of(
+                        "corpus arrayJoin lowering",
+                        "SELECT id, arrayJoin(values_array) AS value " +
+                                "FROM (VALUES (2, [3, 1]), (1, [2])) AS t(id, values_array) ORDER BY id, value",
+                        "SELECT id, value FROM (VALUES (2, ARRAY[3, 1]), (1, ARRAY[2])) AS t(id, values_array) " +
+                                "CROSS JOIN UNNEST(values_array) AS u(value) ORDER BY id, value"),
+                Arguments.of(
+                        "corpus nested LIMIT BY lowering",
+                        "SELECT nested.* FROM (" +
+                                "SELECT category, value FROM (VALUES ('a', 2), ('a', 1), ('b', 4), ('b', 3)) AS t(category, value) " +
+                                "ORDER BY value DESC LIMIT 1 BY category) AS nested ORDER BY category",
+                        "SELECT category, value FROM (" +
+                                "SELECT category, value, row_number() OVER (PARTITION BY category ORDER BY value DESC) AS row_number " +
+                                "FROM (VALUES ('a', 2), ('a', 1), ('b', 4), ('b', 3)) AS t(category, value)) " +
+                                "WHERE row_number <= 1 ORDER BY category"),
+                Arguments.of(
+                        "corpus aggregate rewrites",
+                        "SELECT countIf(active), sumIf(value, active), minIf(value, active), maxIf(value, active), " +
+                                "avgIf(value, active), uniqExactIf(value, active), countDistinct(value), " +
+                                "argMaxIf(value, weight, active), argMinIf(value, weight, active), " +
+                                "quantile(0.5)(value), quantileIf(0.5)(value, active) " +
+                                "FROM (VALUES (1, true, 10), (1, false, 20), (2, true, 30), (3, true, 40)) AS t(value, active, weight)",
+                        "SELECT count(*) FILTER (WHERE active), sum(value) FILTER (WHERE active), min(value) FILTER (WHERE active), " +
+                                "max(value) FILTER (WHERE active), avg(value) FILTER (WHERE active), " +
+                                "count(DISTINCT value) FILTER (WHERE active), count(DISTINCT value), " +
+                                "max_by(value, weight) FILTER (WHERE active), min_by(value, weight) FILTER (WHERE active), " +
+                                "approx_percentile(value, 0.5), approx_percentile(value, 0.5) FILTER (WHERE active) " +
+                                "FROM (VALUES (1, true, 10), (1, false, 20), (2, true, 30), (3, true, 40)) AS t(value, active, weight)"),
+                Arguments.of(
+                        "corpus numeric conversion and operator rewrites",
+                        "SELECT toFloatOrZero('bad'), toFloatOrDefault('bad', 1), toDecimal('1.25', 2), intDiv(-5, 2), " +
+                                "toInt('4'), toIntOrZero('bad'), _toInt16('3'), " +
+                                "toUUID('00000000-0000-0000-0000-000000000001'), roundBankers(1.25, 1), " +
+                                "plus(4, 2), minus(4, 2), multiply(4, 2), divide(5, 2), " +
+                                "greater(4, 2), greaterOrEquals(4, 4), lessOrEquals(2, 4), notEquals(1, 2), " +
+                                "and(true, true, false), or(false, false, true), not(false), empty(''), notEmpty([1]), " +
+                                "empty(mapFromArrays(['key'], [1])), empty(CAST(NULL AS Array(Int64)))",
+                        "SELECT coalesce(TRY_CAST('bad' AS double), 0E0), coalesce(TRY_CAST('bad' AS double), CAST(1 AS double)), " +
+                                "TRY_CAST('1.25' AS decimal(18, 2)), " +
+                                "CAST(-5 AS bigint) / CAST(2 AS bigint) - if(CAST(-5 AS bigint) % CAST(2 AS bigint) <> 0 AND " +
+                                "(CAST(-5 AS bigint) < 0 AND CAST(2 AS bigint) > 0 OR CAST(-5 AS bigint) > 0 AND CAST(2 AS bigint) < 0), 1, 0), " +
+                                "CAST('4' AS bigint), coalesce(TRY_CAST('bad' AS bigint), 0), CAST('3' AS smallint), " +
+                                "TRY_CAST('00000000-0000-0000-0000-000000000001' AS uuid), round(DOUBLE '1.25', 1), " +
+                                "4 + 2, 4 - 2, 4 * 2, 5 / 2, 4 > 2, 4 >= 4, 2 <= 4, 1 <> 2, " +
+                                "(true AND true) AND false, (false OR false) OR true, NOT false, " +
+                                "coalesce(length(CAST('' AS varchar)), 0) = 0, coalesce(cardinality(ARRAY[1]), 0) > 0, " +
+                                "coalesce(cardinality(map(ARRAY['key'], ARRAY[1])), 0) = 0, " +
+                                "coalesce(cardinality(CAST(NULL AS array(bigint))), 0) = 0"));
     }
 
     @Test
@@ -393,7 +508,7 @@ class TestHogQlStatementResource
         List<QueryResults> invalidResults = runHogQlToCompletion(hogQlRequest("SELECT ("));
         assertThat(invalidResults.getLast().getError().getErrorName()).isEqualTo("HOGQL_SYNTAX_ERROR");
 
-        List<QueryResults> unsupportedFunction = runHogQlToCompletion(hogQlRequest("SELECT uniq(1)"));
+        List<QueryResults> unsupportedFunction = runHogQlToCompletion(hogQlRequest("SELECT unsupportedHogQlFunction(1)"));
         assertThat(unsupportedFunction.getLast().getError().getErrorName()).isEqualTo("HOGQL_RESOLUTION_ERROR");
 
         List<QueryResults> pivot = runHogQlToCompletion(hogQlRequest(

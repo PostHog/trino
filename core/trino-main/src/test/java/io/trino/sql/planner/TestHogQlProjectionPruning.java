@@ -19,6 +19,7 @@ import io.trino.hogql.compiler.HogQlCompileEnvelope;
 import io.trino.hogql.compiler.HogQlCompiler;
 import io.trino.hogql.compiler.HogQlSemanticCatalogContext;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ActionReference;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ArgumentReferenceRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionArgument;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FieldReferenceRecipe;
@@ -28,14 +29,18 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LazyTableDef
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalFieldDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalTableDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalType;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LiteralEncoding;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LiteralRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.OperatorRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalQualifiedName;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PredicateRepresentation;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyStorage;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipCardinality;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.SemanticOperator;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.TypedLiteral;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider.PinnedSnapshot;
 import io.trino.hogql.parser.HogQlLanguageContract;
 import io.trino.sql.SqlFormatter;
@@ -162,6 +167,15 @@ public class TestHogQlProjectionPruning
         assertThat(nodes(plan, FilterNode.class)).hasSize(1);
     }
 
+    @Test
+    public void testV0ActionPredicateReachesStockPlanner()
+    {
+        Plan plan = plan(compileV0("SELECT event FROM events WHERE matchesAction(42)"));
+
+        assertThat(nodes(plan, TableScanNode.class)).hasSize(1);
+        assertThat(nodes(plan, FilterNode.class)).hasSize(1);
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"UNION ALL", "INTERSECT ALL", "EXCEPT ALL"})
     public void testSetOperationDemandIsMappedByBranchPosition(String operator)
@@ -188,6 +202,21 @@ public class TestHogQlProjectionPruning
     {
         HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
         HogQlCompilationResult result = compiler.compile(new HogQlCompileEnvelope(
+                query,
+                HogQlCompileEnvelope.PROTOCOL_VERSION,
+                HogQlLanguageContract.current().languageVersion(),
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                OptionalLong.of(1)), Optional.of(context));
+        return SqlFormatter.formatSql(result.statement());
+    }
+
+    private String compileV0(String query)
+    {
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(SNAPSHOT));
+        HogQlCompilationResult result = compiler.compileV0(new HogQlCompileEnvelope(
                 query,
                 HogQlCompileEnvelope.PROTOCOL_VERSION,
                 HogQlLanguageContract.current().languageVersion(),
@@ -273,7 +302,15 @@ public class TestHogQlProjectionPruning
                 List.of(),
                 List.of(),
                 List.of(personProfile),
-                List.of(),
+                List.of(new ActionReference(
+                        "Synthetic order",
+                        "42",
+                        "events",
+                        new PredicateRepresentation(new OperatorRecipe(
+                                SemanticOperator.EQUAL,
+                                List.of(
+                                        new FieldReferenceRecipe("events", "event"),
+                                        new LiteralRecipe(new TypedLiteral("bigint", LiteralEncoding.INTEGER, "1"))))))),
                 List.of());
     }
 

@@ -43,7 +43,7 @@ explicit error for valid constructs that do not yet have a stock Trino AST
 mapping. Adding syntax support therefore cannot silently claim semantic or
 execution parity.
 
-## MVP executable contract
+## Executable contract
 
 The MVP lowers a frozen, fail-closed subset directly to stock Trino AST nodes:
 
@@ -113,9 +113,12 @@ Algorithm-level parity for `quantileExact` remains a compatibility-validation
 item even though its query shape has a stock AST lowering.
 
 Function aliases are resolved before Trino analysis. Unknown functions fail as
-HogQL resolution errors. Actions, cohorts, saved queries, explicit modifiers,
-HogQLX, PIVOT/UNPIVOT execution, ClickHouse-only clauses, advanced lambda and
-table functions, and complete type/function parity remain outside the MVP.
+HogQL resolution errors. The corpus compatibility extension also accepts every
+logical table declared by the pinned manifest and expands declarative actions
+by name or ID into stock predicates or relation membership. Cohorts, saved
+queries, explicit modifiers without an enabled behavior, HogQLX,
+PIVOT/UNPIVOT execution, unsupported ClickHouse clauses, and complete
+type/function parity remain outside the endpoint profile.
 
 Set `hogql.enabled=true` on the coordinator to register `POST /v1/hogql`. The
 request body is the versioned JSON envelope containing the raw HogQL query,

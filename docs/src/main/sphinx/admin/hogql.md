@@ -16,11 +16,11 @@ Compilation runs on a dedicated fixed-size executor. Configure
 `hogql.compilation-timeout`; saturation and timeout fail with retryable
 insufficient-resource errors without affecting standard SQL submission.
 
-The MVP profile supports read-only queries over the logical `events` and
-`persons` tables, scalar reads from their VARCHAR JSON `properties` columns,
-and the lazy `events.person` relationship. It also supports the frozen
-fail-closed function set documented below. Physical tables remain available
-through normal Trino names.
+The executable profile supports read-only queries over logical tables declared
+by the pinned manifest, including ordered star expansion, properties, lazy
+relationships, and declarative actions. Physical tables remain available
+through normal Trino names. Unsupported functions and semantic definitions
+fail before Trino analysis.
 
 The endpoint accepts a JSON request envelope. Identity, catalog, schema, time
 zone, source, tags, and allowed session properties continue to use the standard
@@ -135,10 +135,9 @@ Clients can set `catalogGeneration` in the request envelope to require an exact
 immutable generation. Exact-generation cache entries never fall back to the
 latest manifest. A missing, expired, or mismatched generation fails closed.
 
-## MVP function profile
+## Function profile
 
-The compiler accepts only the following unqualified function names. Unknown
-names fail before Trino analysis.
+The original MVP function set remains supported:
 
 | Family | HogQL names |
 | --- | --- |
@@ -148,9 +147,18 @@ names fail before Trino analysis.
 | Aggregates | `count`, `sum`, `min`, `max`, `avg`, `any`, `argMin`, `argMax`, `array_agg` |
 | Windows | `first_value`, `rank`, `row_number` |
 
-The MVP intentionally excludes actions, cohorts, saved queries, explicit
-modifiers, HogQLX, PIVOT/UNPIVOT execution, ClickHouse-only clauses, advanced
-lambda and table functions, and complete HogQL type/function parity. These
+The Team 2 materialized-view compatibility extension adds the exact scalar,
+aggregate, JSON, collection, date/time, regular-expression, conversion, and
+window rewrites exercised by its frozen query corpus. The in-tree
+`HogQlV0FunctionRegistry` is the source of truth for accepted names, arities,
+determinism, and lowering strategy. Catalog function declarations do not
+silently broaden this fail-closed profile.
+
+Declarative actions resolve by name or ID from the pinned manifest and lower
+to optimizer-visible predicates or relation membership. Cohorts, saved
+queries, explicit modifiers without an enabled behavior, HogQLX,
+PIVOT/UNPIVOT execution, unsupported ClickHouse clauses, and complete
+type/function parity remain outside this endpoint profile. Unsupported
 constructs return typed compatibility errors; they do not fall through as
 Trino functions.
 
