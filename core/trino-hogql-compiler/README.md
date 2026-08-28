@@ -85,6 +85,8 @@ The extended profile also lowers extract-all and first-match replacement, plus
 boolean, unsigned-integer, raw-array, and nested raw-map JSON extraction.
 Common array transforms, predicates, indexing, summation, ranges, tuple
 indexing, splitting, and membership lower to Trino higher-order functions.
+The row-expanding `arrayJoin` function is hoisted to a generated lateral
+`CROSS JOIN UNNEST`; repeated calls remain independent row expansions.
 Range and membership rewrites preserve empty-range and null-search behavior.
 Typed defaults for out-of-range and no-match element lookups require resolved
 element types and remain outside the frozen compatibility subset.

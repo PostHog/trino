@@ -285,6 +285,29 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testCompilerHoistsArrayJoinToCrossJoinUnnest()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT arrayJoin(items) AS item, upper(arrayJoin(names)) FROM records " +
+                        "WHERE arrayJoin(flags) ORDER BY arrayJoin(scores)"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT __hogql_array_join_0.__hogql_value_0 AS item, upper(__hogql_array_join_1.__hogql_value_1) " +
+                        "FROM records " +
+                        "CROSS JOIN UNNEST(items) AS __hogql_array_join_0 (__hogql_value_0) " +
+                        "CROSS JOIN UNNEST(names) AS __hogql_array_join_1 (__hogql_value_1) " +
+                        "CROSS JOIN UNNEST(flags) AS __hogql_array_join_2 (__hogql_value_2) " +
+                        "CROSS JOIN UNNEST(scores) AS __hogql_array_join_3 (__hogql_value_3) " +
+                        "WHERE __hogql_array_join_2.__hogql_value_2 " +
+                        "ORDER BY __hogql_array_join_3.__hogql_value_3"));
+
+        assertThat(new HogQlCompiler().compile(envelope("SELECT arrayJoin([1, 2])")).statement())
+                .isEqualTo(sqlParser.createStatement(
+                        "SELECT __hogql_array_join_0.__hogql_value_0 " +
+                                "FROM UNNEST(ARRAY[1, 2]) AS __hogql_array_join_0 (__hogql_value_0)"));
+    }
+
+    @Test
     public void testCompilerLowersNumericConversions()
     {
         HogQlCompilationResult result = new HogQlCompiler().compile(envelope(

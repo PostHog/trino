@@ -93,6 +93,7 @@ final class HogQlFunctionResolver
 
     private final Map<String, FunctionCapabilityDefinition> functions;
     private final boolean semanticCatalogAvailable;
+    private ArrayList<UnnestRelation> activeArrayJoins;
 
     private HogQlFunctionResolver(Optional<PinnedSnapshot> snapshot)
     {
@@ -132,17 +133,13 @@ final class HogQlFunctionResolver
                         resolveQuery(commonTable.query()),
                         commonTable.span()))
                 .toList();
-        HogQlQuery.QueryBody body = switch (query.body()) {
-            case SelectQueryBody select -> new SelectQueryBody(
-                    select.distinct(),
-                    select.projections().stream().map(this::resolveProjection).toList(),
-                    select.from().map(this::resolveRelation),
-                    select.where().map(this::resolveExpression),
-                    select.groupBy().stream().map(this::resolveExpression).toList(),
-                    select.having().map(this::resolveExpression),
-                    select.windows().stream().map(this::resolveWindowDefinition).toList(),
-                    select.span());
-            case SetOperation set -> new SetOperation(
+        if (query.body() instanceof SelectQueryBody select) {
+            return resolveSelectQuery(query, commonTables, select);
+        }
+        SetOperation set = (SetOperation) query.body();
+        return new HogQlQuery(
+                commonTables,
+                new SetOperation(
                     set.type(),
                     set.distinct(),
                     resolveQuery(set.left()),
@@ -150,15 +147,43 @@ final class HogQlFunctionResolver
                     set.leftParenthesized(),
                     set.rightParenthesized(),
                     set.operatorSpan(),
-                    set.span());
-        };
-        return new HogQlQuery(
-                commonTables,
-                body,
+                    set.span()),
                 resolveSortItems(query.orderBy()),
                 query.limit().map(this::resolveExpression),
                 query.offset().map(this::resolveExpression),
                 query.span());
+    }
+
+    private HogQlQuery resolveSelectQuery(HogQlQuery query, List<CommonTableExpression> commonTables, SelectQueryBody select)
+    {
+        ArrayList<UnnestRelation> parentArrayJoins = activeArrayJoins;
+        activeArrayJoins = new ArrayList<>();
+        try {
+            Optional<Relation> from = select.from().map(this::resolveRelation);
+            List<Projection> projections = select.projections().stream().map(this::resolveProjection).toList();
+            Optional<Expression> where = select.where().map(this::resolveExpression);
+            List<Expression> groupBy = select.groupBy().stream().map(this::resolveExpression).toList();
+            Optional<Expression> having = select.having().map(this::resolveExpression);
+            List<WindowDefinition> windows = select.windows().stream().map(this::resolveWindowDefinition).toList();
+            List<SortItem> orderBy = resolveSortItems(query.orderBy());
+            Optional<Expression> limit = query.limit().map(this::resolveExpression);
+            Optional<Expression> offset = query.offset().map(this::resolveExpression);
+            for (UnnestRelation unnest : activeArrayJoins) {
+                from = Optional.of(from
+                        .<Relation>map(left -> new JoinRelation(HogQlQuery.JoinType.CROSS, left, unnest, Optional.empty(), unnest.span()))
+                        .orElse(unnest));
+            }
+            return new HogQlQuery(
+                    commonTables,
+                    new SelectQueryBody(select.distinct(), projections, from, where, groupBy, having, windows, select.span()),
+                    orderBy,
+                    limit,
+                    offset,
+                    query.span());
+        }
+        finally {
+            activeArrayJoins = parentArrayJoins;
+        }
     }
 
     private Projection resolveProjection(Projection projection)
@@ -304,6 +329,9 @@ final class HogQlFunctionResolver
         if (function.nameParts().size() != 1) {
             throw unsupportedError(function, "Qualified HogQL functions are not supported");
         }
+        if (canonical(name).equals("arrayjoin")) {
+            return resolveArrayJoin(function);
+        }
         if (semanticCatalogAvailable && function.nameParts().size() == 1 && canonical(name).equals(MATCHES_ACTION)) {
             return new FunctionCall(
                     function.nameParts(),
@@ -360,6 +388,29 @@ final class HogQlFunctionResolver
                 function.nullTreatment(),
                 function.window().map(this::resolveWindow),
                 function.span());
+    }
+
+    private Expression resolveArrayJoin(FunctionCall function)
+    {
+        if (function.arguments().size() != 1) {
+            throw resolutionError(function, "HogQL function " + function.name().value() + " does not accept " + function.arguments().size() + " arguments");
+        }
+        if (function.distinct() || !function.orderBy().isEmpty() || function.filter().isPresent() ||
+                function.nullTreatment().isPresent() || function.window().isPresent()) {
+            throw unsupportedError(function, "HogQL arrayJoin does not accept function modifiers");
+        }
+        if (activeArrayJoins == null) {
+            throw unsupportedError(function, "HogQL arrayJoin requires a SELECT query context");
+        }
+        int index = activeArrayJoins.size();
+        Identifier alias = new Identifier("__hogql_array_join_" + index, false, function.span());
+        Identifier column = new Identifier("__hogql_value_" + index, false, function.span());
+        activeArrayJoins.add(new UnnestRelation(
+                List.of(resolveExpression(function.arguments().getFirst())),
+                alias,
+                List.of(column),
+                function.span()));
+        return new ColumnReference(List.of(alias, column), function.span());
     }
 
     private Expression rewrite(FunctionCall function, FunctionRewrite rewrite, List<Expression> arguments)
