@@ -11,10 +11,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.trino.plugin.ducklake.function.currency;
+package io.trino.hogql;
 
 import com.google.common.collect.ImmutableMap;
-import io.trino.plugin.ducklake.function.currency.ExchangeRateSnapshot.ExchangeRate;
+import io.trino.hogql.compiler.catalog.HogQlExchangeRateSnapshot;
+import io.trino.hogql.compiler.catalog.HogQlExchangeRateSnapshot.ExchangeRate;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -27,17 +28,17 @@ import java.util.NavigableMap;
 import java.util.Optional;
 import java.util.TreeMap;
 
-import static io.trino.plugin.ducklake.function.currency.ExchangeRateSnapshot.DECIMAL_SCALE;
+import static io.trino.hogql.compiler.catalog.HogQlExchangeRateSnapshot.DECIMAL_SCALE;
 import static java.util.Objects.requireNonNull;
 
-public final class ExchangeRateConversionEngine
+public final class HogQlExchangeRateConversionEngine
 {
     private static final BigDecimal ZERO = BigDecimal.ZERO.setScale(DECIMAL_SCALE);
 
     private final long generation;
     private final Map<String, NavigableMap<LocalDate, BigDecimal>> ratesByCurrency;
 
-    public ExchangeRateConversionEngine(ExchangeRateSnapshot snapshot)
+    public HogQlExchangeRateConversionEngine(HogQlExchangeRateSnapshot snapshot)
     {
         requireNonNull(snapshot, "snapshot is null");
         generation = snapshot.generation();
@@ -57,9 +58,8 @@ public final class ExchangeRateConversionEngine
         return generation;
     }
 
-    public Optional<BigDecimal> rate(long expectedGeneration, String currency, LocalDate date)
+    public Optional<BigDecimal> rate(String currency, LocalDate date)
     {
-        verifyGeneration(expectedGeneration);
         requireNonNull(currency, "currency is null");
         requireNonNull(date, "date is null");
         NavigableMap<LocalDate, BigDecimal> currencyRates = ratesByCurrency.get(currency);
@@ -70,9 +70,8 @@ public final class ExchangeRateConversionEngine
         return rate == null ? Optional.empty() : Optional.of(rate.getValue());
     }
 
-    public BigDecimal convert(long expectedGeneration, String sourceCurrency, String targetCurrency, BigDecimal amount, LocalDate date)
+    public BigDecimal convert(String sourceCurrency, String targetCurrency, BigDecimal amount, LocalDate date)
     {
-        verifyGeneration(expectedGeneration);
         requireNonNull(sourceCurrency, "sourceCurrency is null");
         requireNonNull(targetCurrency, "targetCurrency is null");
         requireNonNull(amount, "amount is null");
@@ -83,8 +82,8 @@ public final class ExchangeRateConversionEngine
             return decimalAmount;
         }
 
-        BigDecimal sourceRate = rate(expectedGeneration, sourceCurrency, date).orElse(ZERO);
-        BigDecimal targetRate = rate(expectedGeneration, targetCurrency, date).orElse(ZERO);
+        BigDecimal sourceRate = rate(sourceCurrency, date).orElse(ZERO);
+        BigDecimal targetRate = rate(targetCurrency, date).orElse(ZERO);
         if (sourceRate.signum() == 0 || targetRate.signum() == 0) {
             return ZERO;
         }
@@ -93,12 +92,5 @@ public final class ExchangeRateConversionEngine
                 .divide(sourceRate, DECIMAL_SCALE, RoundingMode.DOWN)
                 .multiply(targetRate)
                 .setScale(DECIMAL_SCALE, RoundingMode.DOWN);
-    }
-
-    private void verifyGeneration(long expectedGeneration)
-    {
-        if (expectedGeneration != generation) {
-            throw new IllegalArgumentException("exchange-rate snapshot generation mismatch");
-        }
     }
 }

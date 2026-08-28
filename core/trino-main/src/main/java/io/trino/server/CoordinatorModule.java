@@ -107,6 +107,7 @@ import io.trino.hogql.HogQlPhysicalCatalogProvider;
 import io.trino.hogql.HogQlSemanticCatalogConfig;
 import io.trino.hogql.HogQlSemanticCatalogModule;
 import io.trino.hogql.compiler.HogQlCompiler;
+import io.trino.hogql.compiler.catalog.HogQlExchangeRateSnapshotProvider;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider;
 import io.trino.memory.ClusterMemoryManager;
 import io.trino.memory.ForMemoryManager;
@@ -152,6 +153,7 @@ import io.trino.sql.rewrite.StatementRewrite;
 import io.trino.sql.rewrite.StatementRewrite.Rewrite;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
@@ -186,9 +188,7 @@ public class CoordinatorModule
         jsonCodecBinder(binder).bindJsonCodec(TaskInfo.class);
         jaxrsBinder(binder).bind(QueuedStatementResource.class);
         jaxrsBinder(binder).bind(ExecutingStatementResource.class);
-        configBinder(binder).bindConfig(HogQlConfig.class);
-        configBinder(binder).bindConfig(HogQlSemanticCatalogConfig.class);
-        binder.bind(HogQlCompiler.class).in(Scopes.SINGLETON);
+        OptionalBinder.newOptionalBinder(binder, HogQlExchangeRateSnapshotProvider.class);
         binder.bind(HogQlPhysicalCatalogProvider.class).in(Scopes.SINGLETON);
         binder.bind(HogQlCompilationExecutor.class).in(Scopes.SINGLETON);
         binder.bind(HogQlCompilationStats.class).in(Scopes.SINGLETON);
@@ -461,6 +461,15 @@ public class CoordinatorModule
         closingBinder(binder).registerExecutor(Key.get(ScheduledExecutorService.class, ForStatementResource.class));
         closingBinder(binder).registerExecutor(Key.get(ExecutorService.class, ForQueryExecution.class));
         closingBinder(binder).registerExecutor(Key.get(ScheduledExecutorService.class, ForScheduler.class));
+    }
+
+    @Provides
+    @Singleton
+    public static HogQlCompiler provideHogQlCompiler(Optional<HogQlExchangeRateSnapshotProvider> exchangeRateSnapshotProvider)
+    {
+        return exchangeRateSnapshotProvider
+                .map(HogQlCompiler::new)
+                .orElseGet(HogQlCompiler::new);
     }
 
     // working around circular dependency Metadata <-> PlannerContext

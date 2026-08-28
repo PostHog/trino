@@ -14,6 +14,7 @@
 package io.trino.hogql;
 
 import com.google.common.net.MediaType;
+import com.google.inject.Inject;
 import io.airlift.http.client.HttpClient;
 import io.airlift.http.client.Request;
 import io.airlift.http.client.Response;
@@ -27,6 +28,9 @@ import io.trino.hogql.compiler.catalog.HogQlExchangeRateSnapshotLoader.LoadReque
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.Supplier;
@@ -45,12 +49,24 @@ public final class HogQlExchangeRateHttpTransport
 {
     private static final String METADATA_PATH = "v1/hogql/compatibility/exchange-rates";
     private static final String AUTHENTICATION_HEADER = "X-Duckgres-Internal-Secret";
+    private static final int MAXIMUM_AUTHENTICATION_TOKEN_BYTES = 4096;
     private static final MediaType JSON = JSON_UTF_8.withoutParameters();
 
     private final URI baseUri;
     private final HttpClient httpClient;
     private final int maximumResponseBytes;
     private final Supplier<String> authenticationTokenSupplier;
+
+    @Inject
+    public HogQlExchangeRateHttpTransport(
+            HogQlSemanticCatalogConfig config,
+            @ForHogQlExchangeRate HttpClient httpClient)
+    {
+        this(requireNonNull(config, "config is null").getUri(),
+                httpClient,
+                Math.toIntExact(config.getMaximumResponseSize().toBytes()),
+                tokenSupplier(config.getAuthenticationTokenFile()));
+    }
 
     HogQlExchangeRateHttpTransport(URI baseUri, HttpClient httpClient, Supplier<String> authenticationTokenSupplier)
     {
@@ -94,6 +110,26 @@ public final class HogQlExchangeRateHttpTransport
                 .addParameter("protocolVersion", Integer.toString(1));
         request.expectedGeneration().ifPresent(generation -> uriBuilder.addParameter("generation", Long.toString(generation)));
         return uriBuilder.build();
+    }
+
+    private static Supplier<String> tokenSupplier(String authenticationTokenFile)
+    {
+        if (authenticationTokenFile == null || authenticationTokenFile.isBlank()) {
+            throw new IllegalArgumentException("HogQL exchange-rate authentication token file is not configured");
+        }
+        Path path = Path.of(authenticationTokenFile);
+        return () -> {
+            try (InputStream input = Files.newInputStream(path)) {
+                byte[] token = input.readNBytes(MAXIMUM_AUTHENTICATION_TOKEN_BYTES + 1);
+                if (token.length > MAXIMUM_AUTHENTICATION_TOKEN_BYTES) {
+                    throw new IllegalArgumentException("invalid HogQL exchange-rate authentication token");
+                }
+                return new String(token, StandardCharsets.UTF_8).strip();
+            }
+            catch (IOException e) {
+                throw new IllegalStateException("HogQL exchange-rate authentication token is unavailable", e);
+            }
+        };
     }
 
     private static String validateAuthenticationToken(String token)
