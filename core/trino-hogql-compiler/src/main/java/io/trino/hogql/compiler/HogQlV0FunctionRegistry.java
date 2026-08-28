@@ -72,6 +72,7 @@ final class HogQlV0FunctionRegistry
             rewrite("in", FunctionRewrite.IN_ARRAY, "boolean", signature(2)),
             rewrite("tuple", FunctionRewrite.TUPLE, "row", variadicSignature(1)),
             rewrite("subtractMonths", FunctionRewrite.SUBTRACT_MONTHS, "any", signature(2)),
+            rewrite("subtractDays", FunctionRewrite.SUBTRACT_DAYS, "any", signature(2)),
             rewrite("toIntervalMonth", FunctionRewrite.INTERVAL_MONTH, "interval year to month", signature(1)),
             rewrite("toStartOfWeek", FunctionRewrite.START_WEEK, "timestamp", signature(1), signature(2)),
             rewrite("subtractYears", FunctionRewrite.SUBTRACT_YEARS, "any", signature(2)),

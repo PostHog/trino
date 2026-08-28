@@ -460,6 +460,10 @@ final class HogQlFunctionResolver
                     "month",
                     List.of(arguments.getFirst(), new UnaryExpression(HogQlQuery.UnaryOperator.NEGATE, arguments.get(1), span)),
                     span);
+            case SUBTRACT_DAYS -> dateAdd(
+                    "day",
+                    List.of(arguments.getFirst(), new UnaryExpression(HogQlQuery.UnaryOperator.NEGATE, arguments.get(1), span)),
+                    span);
             case INTERVAL_MONTH -> new IntervalExpression(arguments.getFirst(), HogQlQuery.IntervalUnit.MONTH, span);
             case START_WEEK -> startOfWeek(function, arguments);
             case SPLIT_STRING -> call("split", List.of(arguments.get(1), arguments.getFirst()), span);

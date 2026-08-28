@@ -315,7 +315,7 @@ public record HogQlSemanticCatalogSnapshot(
                     GROUP_UNIQ_ARRAY_IF, JSON_EXTRACT_TYPED, JSON_HAS, JSON_KEYS_AND_VALUES, JSON_VALUE,
                     IN_ARRAY, INT_DIV, LESS_OR_EQUAL, LIKE, MAX_IF, MIN_IF, MULTIPLY, MULTIPLY_DECIMAL,
                     MEDIAN_IF, MINUS, NOT_EQUALS, PLUS, QUANTILE, QUANTILE_EXACT, REGEX_EXTRACT, REGEX_EXTRACT_ALL, SPLIT_CHAR, SPLIT_STRING, SURVEY_RESPONSE,
-                    SUBTRACT_MONTHS, SUBTRACT_YEARS, SUM_IF,
+                    SUBTRACT_DAYS, SUBTRACT_MONTHS, SUBTRACT_YEARS, SUM_IF,
                     TUPLE_ELEMENT, UNIQ_EXACT_IF, UNIQ_IF ->
                 !signature.variadic() && signature.argumentTypes().size() == 2;
             case ARG_MAX_IF, ARG_MIN_IF, ARRAY_SLICE, QUANTILE_IF, REGEX_REPLACE_ALL, REGEX_REPLACE_ONE ->
@@ -1416,6 +1416,7 @@ public record HogQlSemanticCatalogSnapshot(
         SPLIT_CHAR,
         SPLIT_STRING,
         START_WEEK,
+        SUBTRACT_DAYS,
         SUBTRACT_MONTHS,
         SUBTRACT_YEARS,
         SUM_IF,
