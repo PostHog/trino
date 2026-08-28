@@ -650,10 +650,44 @@ public final class HogQlParser
             unionAndExceptOperands.add(current);
 
             current = unionAndExceptOperands.getFirst();
-            for (int index = 0; index < unionAndExceptOperators.size(); index++) {
-                current = combineSetOperation(current, unionAndExceptOperators.get(index), unionAndExceptOperands.get(index + 1));
+            for (int index = 0; index < unionAndExceptOperators.size(); ) {
+                SetOperator operator = unionAndExceptOperators.get(index);
+                if (operator.type() != SetOperationType.UNION) {
+                    current = combineSetOperation(current, operator, unionAndExceptOperands.get(index + 1));
+                    index++;
+                    continue;
+                }
+
+                int runEnd = index + 1;
+                while (runEnd < unionAndExceptOperators.size()) {
+                    SetOperator next = unionAndExceptOperators.get(runEnd);
+                    if (next.type() != SetOperationType.UNION || next.distinct() != operator.distinct()) {
+                        break;
+                    }
+                    runEnd++;
+                }
+                List<QueryOperand> runOperands = new ArrayList<>(runEnd - index + 1);
+                runOperands.add(current);
+                runOperands.addAll(unionAndExceptOperands.subList(index + 1, runEnd + 1));
+                current = combineAssociativeSetOperations(
+                        runOperands,
+                        unionAndExceptOperators.subList(index, runEnd),
+                        0,
+                        runOperands.size());
+                index = runEnd;
             }
             return current;
+        }
+
+        private QueryOperand combineAssociativeSetOperations(List<QueryOperand> operands, List<SetOperator> operators, int start, int end)
+        {
+            if (end - start == 1) {
+                return operands.get(start);
+            }
+            int split = (start + end) / 2;
+            QueryOperand left = combineAssociativeSetOperations(operands, operators, start, split);
+            QueryOperand right = combineAssociativeSetOperations(operands, operators, split, end);
+            return combineSetOperation(left, operators.get(split - 1), right);
         }
 
         private QueryOperand combineSetOperation(QueryOperand left, SetOperator operator, QueryOperand right)

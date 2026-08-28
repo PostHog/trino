@@ -71,7 +71,7 @@ public final class ExplainRewrite
             WarningCollector warningCollector,
             PlanOptimizersStatsCollector planOptimizersStatsCollector)
     {
-        return (Statement) new Visitor(session, sessionPropertyResolver, queryPreparer, queryExplainerFactory.createQueryExplainer(analyzerFactory), warningCollector, planOptimizersStatsCollector).process(node, null);
+        return (Statement) new Visitor(session, sessionPropertyResolver, queryPreparer, queryExplainerFactory.createQueryExplainer(analyzerFactory), parameter, warningCollector, planOptimizersStatsCollector).process(node, null);
     }
 
     private static final class Visitor
@@ -81,6 +81,7 @@ public final class ExplainRewrite
         private final SessionPropertyResolver sessionPropertyResolver;
         private final QueryPreparer queryPreparer;
         private final QueryExplainer queryExplainer;
+        private final List<Expression> parameters;
         private final WarningCollector warningCollector;
         private final PlanOptimizersStatsCollector planOptimizersStatsCollector;
 
@@ -89,6 +90,7 @@ public final class ExplainRewrite
                 SessionPropertyResolver sessionPropertyResolver,
                 QueryPreparer queryPreparer,
                 QueryExplainer queryExplainer,
+                List<Expression> parameters,
                 WarningCollector warningCollector,
                 PlanOptimizersStatsCollector planOptimizersStatsCollector)
         {
@@ -96,6 +98,7 @@ public final class ExplainRewrite
             this.sessionPropertyResolver = requireNonNull(sessionPropertyResolver, "sessionPropertyResolver is null");
             this.queryPreparer = requireNonNull(queryPreparer, "queryPreparer is null");
             this.queryExplainer = requireNonNull(queryExplainer, "queryExplainer is null");
+            this.parameters = List.copyOf(requireNonNull(parameters, "parameters is null"));
             this.warningCollector = requireNonNull(warningCollector, "warningCollector is null");
             this.planOptimizersStatsCollector = planOptimizersStatsCollector;
         }
@@ -138,7 +141,9 @@ public final class ExplainRewrite
         private Node getQueryPlan(Explain node, ExplainType.Type planType, ExplainFormat.Type planFormat)
                 throws IllegalArgumentException
         {
-            PreparedQuery preparedQuery = queryPreparer.prepareQuery(session, node.getStatement());
+            PreparedQuery preparedQuery = parameters.isEmpty()
+                    ? queryPreparer.prepareQuery(session, node.getStatement())
+                    : queryPreparer.prepareQuery(session, node.getStatement(), parameters);
             Session resolvedSession = sessionPropertyResolver
                     .getSessionPropertiesApplier(preparedQuery)
                     .apply(session);

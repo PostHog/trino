@@ -194,6 +194,12 @@ public class QueryPreparer
         return prepareQuery(session, wrappedStatement, Optional.empty());
     }
 
+    public PreparedQuery prepareQuery(Session session, Statement wrappedStatement, List<Expression> suppliedParameters)
+            throws ParsingException, TrinoException
+    {
+        return prepareQuery(session, wrappedStatement, Optional.of(ImmutableList.copyOf(suppliedParameters)));
+    }
+
     private PreparedQuery prepareQuery(Session session, Statement wrappedStatement, Optional<List<Expression>> suppliedParameters)
             throws ParsingException, TrinoException
     {

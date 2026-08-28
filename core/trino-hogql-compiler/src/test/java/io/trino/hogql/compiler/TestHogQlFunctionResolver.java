@@ -143,6 +143,16 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testToIntConvertsDateToUnixDayNumber()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT toInt(toDate('2022-01-01')), toInt(value) FROM metrics"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT date_diff('day', CAST('1970-01-01' AS date), CAST('2022-01-01' AS date)), CAST(value AS bigint) FROM metrics"));
+    }
+
+    @Test
     public void testCompilerResolvesExponentialAndWeekStartModes()
     {
         HogQlCompilationResult result = new HogQlCompiler().compile(envelope(

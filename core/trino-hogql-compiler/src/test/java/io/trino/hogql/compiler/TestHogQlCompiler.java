@@ -95,6 +95,23 @@ public class TestHogQlCompiler
     }
 
     @Test
+    public void testExpandsSelectAliasesInClausesOutsideTrinoAliasScope()
+    {
+        assertThat(compiler.compile(
+                "SELECT number + 1 AS next FROM numbers(3) WHERE next > 1 GROUP BY next HAVING next < 4 ORDER BY next"))
+                .isEqualTo(compiler.compile(
+                        "SELECT number + 1 AS next FROM numbers(3) WHERE number + 1 > 1 GROUP BY number + 1 HAVING number + 1 < 4 ORDER BY number + 1"));
+    }
+
+    @Test
+    public void testDoesNotExpandQualifiedReferencesMatchingSelectAliases()
+    {
+        Statement statement = compiler.compile("SELECT number + 1 AS next FROM numbers(3) AS source WHERE source.next > 1");
+
+        assertThat(SqlFormatter.formatSql(statement)).contains("source.next > 1");
+    }
+
+    @Test
     public void testLowersDistinctOrderingAndClickHousePaginationOrder()
     {
         Statement statement = compiler.compile("SELECT DISTINCT event FROM events ORDER BY event DESC NULLS FIRST LIMIT 10 OFFSET 2");
@@ -530,18 +547,26 @@ public class TestHogQlCompiler
         }
 
         Query query = (Query) compiler.compile(hogql.toString());
-        Deque<Node> pending = new ArrayDeque<>();
-        pending.add(query);
+        Deque<NodeDepth> pending = new ArrayDeque<>();
+        pending.add(new NodeDepth(query, 0));
         int querySpecificationCount = 0;
+        int maximumUnionDepth = 0;
         while (!pending.isEmpty()) {
-            Node node = pending.removeFirst();
+            NodeDepth current = pending.removeFirst();
+            Node node = current.node();
             if (node instanceof QuerySpecification) {
                 querySpecificationCount++;
             }
-            pending.addAll(node.getChildren());
+            if (node instanceof Union) {
+                maximumUnionDepth = Math.max(maximumUnionDepth, current.depth());
+            }
+            for (Node child : node.getChildren()) {
+                pending.add(new NodeDepth(child, current.depth() + 1));
+            }
         }
 
         assertThat(querySpecificationCount).isEqualTo(operandCount);
+        assertThat(maximumUnionDepth).isLessThan(20);
     }
 
     @Test
@@ -876,4 +901,6 @@ public class TestHogQlCompiler
                 .sorted(Comparator.comparingInt(Parameter::getId))
                 .toList();
     }
+
+    private record NodeDepth(Node node, int depth) {}
 }

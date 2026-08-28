@@ -564,6 +564,44 @@ class TestHogQlStatementResource
     }
 
     @Test
+    public void testExplainBindsScopedVariables()
+            throws Exception
+    {
+        List<QueryResults> results = runHogQlToCompletion(hogQlExplainRequestWithScopedBinding(
+                "SELECT nationkey FROM tpch.tiny.nation WHERE name = {variables.name}"));
+
+        assertThat(results.getLast().getError()).isNull();
+        assertThat(rows(results)).singleElement().satisfies(row ->
+                assertThat(row).singleElement().asString().contains("ALGERIA"));
+    }
+
+    @Test
+    public void testExplainExpandsSelectAliasInWhere()
+            throws Exception
+    {
+        List<QueryResults> results = runHogQlToCompletion(hogQlExplainRequest(
+                "SELECT nationkey + 1 AS next_key FROM tpch.tiny.nation WHERE next_key > 1",
+                "DISTRIBUTED",
+                "TEXT"));
+
+        assertThat(results.getLast().getError()).isNull();
+        assertThat(rows(results)).singleElement().satisfies(row ->
+                assertThat(row).singleElement().asString().contains("nationkey"));
+    }
+
+    @Test
+    public void testExplainExpandsSelectAliasContainingScopedVariable()
+            throws Exception
+    {
+        List<QueryResults> results = runHogQlToCompletion(hogQlExplainRequestWithScopedBinding(
+                "SELECT nationkey + length({variables.name}) AS next_key FROM tpch.tiny.nation WHERE next_key > 1"));
+
+        assertThat(results.getLast().getError()).isNull();
+        assertThat(rows(results)).singleElement().satisfies(row ->
+                assertThat(row).singleElement().asString().contains("bigint '7'"));
+    }
+
+    @Test
     public void testEndpointRequiresJsonContentType()
     {
         StringResponse response = post(hogQlRequest("SELECT 1"), "text/plain");
@@ -751,6 +789,19 @@ class TestHogQlStatementResource
                  "languageVersion": "%s",
                  "variables": {"organization_id": {"type": "bigint", "value": 42}},
                  "filters": {"date_from": {"type": "varchar", "value": "2026-01-01"}}
+               }
+               """.formatted(STRING_CODEC.toJson(query), HogQlLanguageContract.current().languageVersion());
+    }
+
+    private static String hogQlExplainRequestWithScopedBinding(String query)
+    {
+        return """
+               {
+                 "query": %s,
+                 "protocolVersion": 1,
+                 "languageVersion": "%s",
+                 "variables": {"name": {"type": "varchar", "value": "ALGERIA"}},
+                 "explain": {"type": "LOGICAL", "format": "TEXT"}
                }
                """.formatted(STRING_CODEC.toJson(query), HogQlLanguageContract.current().languageVersion());
     }

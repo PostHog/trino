@@ -511,7 +511,7 @@ final class HogQlFunctionResolver
             case INTERVAL_MONTH -> new IntervalExpression(arguments.getFirst(), HogQlQuery.IntervalUnit.MONTH, span);
             case START_WEEK -> startOfWeek(function, arguments);
             case SPLIT_STRING -> call("split", List.of(arguments.get(1), arguments.getFirst()), span);
-            case CAST_BIGINT -> cast(arguments.getFirst(), "bigint", span);
+            case CAST_BIGINT -> castBigint(arguments.getFirst(), span);
             case CAST_TIMESTAMP -> arguments.size() == 1
                     ? cast(arguments.getFirst(), "timestamp(0)", span)
                     : call("with_timezone", List.of(cast(arguments.getFirst(), "timestamp(0)", span), arguments.get(1)), span);
@@ -1011,6 +1011,20 @@ final class HogQlFunctionResolver
                 List.of(),
                 Optional.empty(),
                 span);
+    }
+
+    private static Expression castBigint(Expression value, HogQlQuery.SourceSpan span)
+    {
+        if (value instanceof CastExpression cast && canonical(cast.type().value()).equals("date")) {
+            return call(
+                    "date_diff",
+                    List.of(
+                            stringLiteral("day", span),
+                            cast(stringLiteral("1970-01-01", span), "date", span),
+                            value),
+                    span);
+        }
+        return cast(value, "bigint", span);
     }
 
     private static CastExpression cast(Expression value, String type, HogQlQuery.SourceSpan span)

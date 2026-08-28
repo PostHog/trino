@@ -233,21 +233,24 @@ public final class HogQlCompiler
             throw bindingError(query.span(), "Unused HogQL parameter bindings: " + String.join(", ", extra));
         }
 
-        Map<SourceSpan, Integer> parameterIds = new HashMap<>();
-        for (int index = 0; index < placeholders.size(); index++) {
-            parameterIds.put(placeholders.get(index).span(), index);
-        }
         if (v0Profile) {
             HogQlV0ProfileValidator.validate(query, Optional.empty());
         }
         ResolvedQuery resolved = resolveQuery(query, catalogContext, languageVersion, expectedCatalogGeneration, !modifiers.isEmpty(), v0Profile, exchangeRateSnapshotProvider);
+        List<Placeholder> resolvedPlaceholders = new ArrayList<>();
+        collectPlaceholders(resolved.query(), resolvedPlaceholders);
+        resolvedPlaceholders.sort(Comparator.comparingInt(placeholder -> placeholder.span().startOffset()));
+        Map<SourceSpan, Integer> parameterIds = new HashMap<>();
+        for (int index = 0; index < resolvedPlaceholders.size(); index++) {
+            parameterIds.put(resolvedPlaceholders.get(index).span(), index);
+        }
         Statement statement = TrinoAstFactory.createStatement(resolved.query(), parameterIds);
         List<HogQlModifierBinding> modifierBindings = resolved.pinnedSnapshot()
                 .map(snapshot -> HogQlModifierResolver.resolve(snapshot, modifiers, query.span()))
                 .orElseGet(List::of);
         return new HogQlCompilationResult(
                 statement,
-                placeholders.stream()
+                resolvedPlaceholders.stream()
                         .map(Placeholder::name)
                         .toList(),
                 modifierBindings,
@@ -300,7 +303,7 @@ public final class HogQlCompiler
     {
         boolean semanticCandidate = containsSemanticCandidate(query);
         if (!semanticCandidate && !modifiersRequireSnapshot) {
-            return new ResolvedQuery(query, Optional.empty(), OptionalLong.empty());
+            return new ResolvedQuery(HogQlSelectAliasRewriter.rewrite(query), Optional.empty(), OptionalLong.empty());
         }
         if (catalogContext.isEmpty()) {
             if (modifiersRequireSnapshot) {
@@ -310,7 +313,7 @@ public final class HogQlCompiler
                 return new ResolvedQuery(query, Optional.empty(), OptionalLong.empty());
             }
             HogQlFunctionResolver.Resolution resolution = HogQlFunctionResolver.resolve(query, exchangeRateSnapshotProvider);
-            return new ResolvedQuery(resolution.query(), Optional.empty(), resolution.exchangeRateGeneration());
+            return new ResolvedQuery(HogQlSelectAliasRewriter.rewrite(resolution.query()), Optional.empty(), resolution.exchangeRateGeneration());
         }
         HogQlSemanticCatalogContext context = catalogContext.orElseThrow();
         PinnedSnapshot pinned = context.snapshotProvider().pin(new PinRequest(
@@ -320,14 +323,14 @@ public final class HogQlCompiler
         if (v0Profile) {
             HogQlV0ProfileValidator.validate(query, Optional.of(pinned.snapshot()));
         }
-        HogQlQuery resolved = query;
+        HogQlQuery resolved = HogQlSelectAliasRewriter.rewrite(query);
         OptionalLong exchangeRateGeneration = OptionalLong.empty();
         if (semanticCandidate) {
             HogQlFunctionResolver.Resolution functionResolution = v0Profile
                     ? HogQlFunctionResolver.resolveV0(query, exchangeRateSnapshotProvider, true)
                     : HogQlFunctionResolver.resolve(pinned, query, exchangeRateSnapshotProvider);
             exchangeRateGeneration = functionResolution.exchangeRateGeneration();
-            HogQlQuery functionsResolved = functionResolution.query();
+            HogQlQuery functionsResolved = HogQlSelectAliasRewriter.rewrite(functionResolution.query());
             if (hasSemanticDefinitions(pinned.snapshot())) {
                 resolved = HogQlSemanticResolver.resolve(pinned, functionsResolved)
                         .map(HogQlSemanticResolver.ResolvedQuery::query)
