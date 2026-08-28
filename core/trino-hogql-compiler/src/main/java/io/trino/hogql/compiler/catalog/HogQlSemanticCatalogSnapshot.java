@@ -301,9 +301,10 @@ public record HogQlSemanticCatalogSnapshot(
             case CAST_BIGINT, CAST_DATE, CAST_DOUBLE, CAST_VARCHAR,
                     DATE_TRUNC_DAY, DATE_TRUNC_HOUR, DATE_TRUNC_MONTH, DATE_TRUNC_WEEK,
                     GROUP_UNIQ_ARRAY, INTERVAL_DAY, IS_NOT_NULL, IS_NULL, COUNT_IF,
-                    JSON_KEYS_AND_VALUES_RAW, PARSE_TIMESTAMP, TO_UNIX_TIMESTAMP, UNIQ_EXACT ->
+                    JSON_KEYS_AND_VALUES_RAW, NOT, PARSE_TIMESTAMP, TO_UNIX_TIMESTAMP, UNIQ_EXACT ->
                 !signature.variadic() && signature.argumentTypes().size() == 1;
-            case ADD_DAYS, ADD_MONTHS, JSON_EXTRACT_TYPED, JSON_KEYS_AND_VALUES, MAX_IF, SUM_IF, UNIQ_IF ->
+            case ADD_DAYS, ADD_MONTHS, AND, GREATER, JSON_EXTRACT_TYPED, JSON_KEYS_AND_VALUES,
+                    LIKE, MAX_IF, SUM_IF, UNIQ_IF ->
                 !signature.variadic() && signature.argumentTypes().size() == 2;
             case CAST_TIMESTAMP -> !signature.variadic() &&
                     (signature.argumentTypes().size() == 1 || signature.argumentTypes().size() == 2);
@@ -1307,6 +1308,7 @@ public record HogQlSemanticCatalogSnapshot(
         CAST_VARCHAR,
         ADD_DAYS,
         ADD_MONTHS,
+        AND,
         DATE_ADD,
         DATE_TRUNC_DAY,
         DATE_TRUNC_HOUR,
@@ -1314,6 +1316,7 @@ public record HogQlSemanticCatalogSnapshot(
         DATE_TRUNC_WEEK,
         COUNT_IF,
         GROUP_UNIQ_ARRAY,
+        GREATER,
         INTERVAL_DAY,
         IS_NULL,
         IS_NOT_NULL,
@@ -1325,8 +1328,10 @@ public record HogQlSemanticCatalogSnapshot(
         JSON_KEYS_AND_VALUES,
         JSON_KEYS_AND_VALUES_RAW,
         JSON_LENGTH,
+        LIKE,
         MAX_IF,
         MULTI_IF,
+        NOT,
         PARSE_TIMESTAMP,
         SUM_IF,
         TODAY,

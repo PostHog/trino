@@ -200,6 +200,20 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testCompilerLowersScalarCompatibilityFunctions()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT not(active), and(active, ready), greater(score, 10), like(name, 'pro%'), " +
+                        "least(first, second), greatest(first, second), position(name, 'needle'), " +
+                        "startsWith(name, 'prefix'), substring(name, 2, 4), log10(score) FROM records"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT NOT active, active AND ready, score > 10, name LIKE 'pro%', " +
+                        "least(first, second), greatest(first, second), strpos(name, 'needle'), " +
+                        "starts_with(name, 'prefix'), substring(name, 2, 4), log10(score) FROM records"));
+    }
+
+    @Test
     public void testCompilerEnforcesV0FunctionArities()
     {
         assertThat(new HogQlCompiler().compile(envelope("SELECT coalesce('value')")).statement())

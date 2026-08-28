@@ -409,6 +409,10 @@ final class HogQlFunctionResolver
                     : call("date_add", arguments, span);
             case TO_UNIX_TIMESTAMP -> cast(call("to_unixtime", arguments, span), "bigint", span);
             case PARSE_TIMESTAMP -> new CastExpression(arguments.getFirst(), new Identifier("timestamp(3)", false, span), true, span);
+            case NOT -> new UnaryExpression(HogQlQuery.UnaryOperator.NOT, arguments.getFirst(), span);
+            case AND -> new BinaryExpression(HogQlQuery.BinaryOperator.AND, arguments.getFirst(), arguments.get(1), span);
+            case GREATER -> new BinaryExpression(HogQlQuery.BinaryOperator.GREATER_THAN, arguments.getFirst(), arguments.get(1), span);
+            case LIKE -> new BinaryExpression(HogQlQuery.BinaryOperator.LIKE, arguments.getFirst(), arguments.get(1), span);
         };
     }
 
