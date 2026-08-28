@@ -44,7 +44,7 @@ public class TestHogQlSemanticCatalogConfig
                 .setLoaderThreads(4)
                 .setLoaderQueueCapacity(64)
                 .setRequestTimeout(new Duration(10, SECONDS))
-                .setMaximumResponseSize(DataSize.of(32, MEGABYTE)));
+                .setMaximumResponseSize(DataSize.of(8, MEGABYTE)));
     }
 
     @Test

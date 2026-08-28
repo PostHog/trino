@@ -26,7 +26,7 @@ import jakarta.validation.constraints.NotNull;
 
 import java.net.URI;
 
-import static io.trino.hogql.compiler.catalog.HogQlExchangeRateSnapshotJsonDecoder.MAXIMUM_PAYLOAD_BYTES;
+import static io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotJsonDecoder.MAXIMUM_PAYLOAD_BYTES;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
@@ -172,7 +172,7 @@ public class HogQlSemanticCatalogConfig
 
     @NotNull
     @MinDataSize("1B")
-    @MaxDataSize("32MB")
+    @MaxDataSize("8MB")
     public DataSize getMaximumResponseSize()
     {
         return maximumResponseSize;
