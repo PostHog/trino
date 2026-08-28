@@ -442,6 +442,7 @@ final class HogQlFunctionResolver
             case EMPTY -> empty(arguments.getFirst(), true, span);
             case NOT_EMPTY -> empty(arguments.getFirst(), false, span);
             case EQUALS -> new BinaryExpression(HogQlQuery.BinaryOperator.EQUAL, arguments.getFirst(), arguments.get(1), span);
+            case PLUS -> new BinaryExpression(HogQlQuery.BinaryOperator.ADD, arguments.getFirst(), arguments.get(1), span);
             case MINUS -> new BinaryExpression(HogQlQuery.BinaryOperator.SUBTRACT, arguments.getFirst(), arguments.get(1), span);
             case NOT_EQUALS -> new BinaryExpression(HogQlQuery.BinaryOperator.NOT_EQUAL, arguments.getFirst(), arguments.get(1), span);
             case MULTIPLY, MULTIPLY_DECIMAL -> new BinaryExpression(HogQlQuery.BinaryOperator.MULTIPLY, arguments.getFirst(), arguments.get(1), span);

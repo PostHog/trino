@@ -64,6 +64,7 @@ final class HogQlV0FunctionRegistry
             rewrite("empty", FunctionRewrite.EMPTY, "boolean", signature(1)),
             rewrite("notEmpty", FunctionRewrite.NOT_EMPTY, "boolean", signature(1)),
             rewrite("equals", FunctionRewrite.EQUALS, "boolean", signature(2)),
+            rewrite("plus", FunctionRewrite.PLUS, "any", signature(2)),
             rewrite("multiply", FunctionRewrite.MULTIPLY, "any", signature(2)),
             rewrite("multiplyDecimal", FunctionRewrite.MULTIPLY_DECIMAL, "decimal", signature(2)),
             rewrite("divideDecimal", FunctionRewrite.DIVIDE_DECIMAL, "decimal", signature(2)),
