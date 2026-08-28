@@ -2081,47 +2081,48 @@ public final class HogQlParser
             }
 
             Set<String> localRelations = relationNames(query.from());
+            boolean hasLocalRelation = query.from().isPresent();
             query.projections().forEach(projection -> {
                 if (projection instanceof ExpressionProjection expression) {
-                    validateExpressionScope(expression.expression(), forbiddenOuterRelations, localRelations);
+                    validateExpressionScope(expression.expression(), forbiddenOuterRelations, localRelations, hasLocalRelation);
                 }
             });
-            query.where().ifPresent(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations));
-            query.groupBy().forEach(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations));
-            query.having().ifPresent(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations));
-            query.orderBy().forEach(item -> validateExpressionScope(item.expression(), forbiddenOuterRelations, localRelations));
-            query.limit().ifPresent(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations));
-            query.offset().ifPresent(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations));
-            query.from().ifPresent(relation -> validateRelationExpressionScopes(relation, forbiddenOuterRelations, localRelations));
+            query.where().ifPresent(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations, hasLocalRelation));
+            query.groupBy().forEach(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations, hasLocalRelation));
+            query.having().ifPresent(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations, hasLocalRelation));
+            query.orderBy().forEach(item -> validateExpressionScope(item.expression(), forbiddenOuterRelations, localRelations, hasLocalRelation));
+            query.limit().ifPresent(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations, hasLocalRelation));
+            query.offset().ifPresent(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations, hasLocalRelation));
+            query.from().ifPresent(relation -> validateRelationExpressionScopes(relation, forbiddenOuterRelations, localRelations, hasLocalRelation));
 
             Set<String> nestedForbiddenRelations = new LinkedHashSet<>(forbiddenOuterRelations);
             nestedForbiddenRelations.addAll(localRelations);
             query.from().ifPresent(relation -> validateNestedRelationScopes(relation, Set.copyOf(nestedForbiddenRelations)));
         }
 
-        private void validateRelationExpressionScopes(Relation relation, Set<String> forbiddenOuterRelations, Set<String> localRelations)
+        private void validateRelationExpressionScopes(Relation relation, Set<String> forbiddenOuterRelations, Set<String> localRelations, boolean hasLocalRelation)
         {
             switch (relation) {
-                case AliasedRelation alias -> validateRelationExpressionScopes(alias.relation(), forbiddenOuterRelations, localRelations);
+                case AliasedRelation alias -> validateRelationExpressionScopes(alias.relation(), forbiddenOuterRelations, localRelations, hasLocalRelation);
                 case JoinRelation join -> {
-                    validateRelationExpressionScopes(join.left(), forbiddenOuterRelations, localRelations);
-                    validateRelationExpressionScopes(join.right(), forbiddenOuterRelations, localRelations);
+                    validateRelationExpressionScopes(join.left(), forbiddenOuterRelations, localRelations, hasLocalRelation);
+                    validateRelationExpressionScopes(join.right(), forbiddenOuterRelations, localRelations, hasLocalRelation);
                     join.criteria().ifPresent(criteria -> {
                         if (criteria instanceof JoinOn on) {
-                            validateExpressionScope(on.expression(), forbiddenOuterRelations, localRelations);
+                            validateExpressionScope(on.expression(), forbiddenOuterRelations, localRelations, hasLocalRelation);
                         }
                     });
                 }
                 case PivotRelation pivot -> {
-                    validateRelationExpressionScopes(pivot.input(), forbiddenOuterRelations, localRelations);
+                    validateRelationExpressionScopes(pivot.input(), forbiddenOuterRelations, localRelations, hasLocalRelation);
                     pivot.aggregations().forEach(aggregation ->
-                            validateExpressionScope(aggregation.expression(), forbiddenOuterRelations, localRelations));
-                    pivot.pivotColumns().forEach(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations));
+                            validateExpressionScope(aggregation.expression(), forbiddenOuterRelations, localRelations, hasLocalRelation));
+                    pivot.pivotColumns().forEach(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations, hasLocalRelation));
                     pivot.valueGroups().forEach(group -> group.values().forEach(expression ->
-                            validateExpressionScope(expression, forbiddenOuterRelations, localRelations)));
-                    pivot.groupBy().forEach(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations));
+                            validateExpressionScope(expression, forbiddenOuterRelations, localRelations, hasLocalRelation)));
+                    pivot.groupBy().forEach(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations, hasLocalRelation));
                 }
-                case UnnestRelation unnest -> unnest.expressions().forEach(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations));
+                case UnnestRelation unnest -> unnest.expressions().forEach(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations, hasLocalRelation));
                 case CommonTableReference _, SubqueryRelation _, TablePlaceholder _, TableReference _, ValuesRelation _ -> {}
             }
         }
@@ -2167,28 +2168,33 @@ public final class HogQlParser
 
         private void validateExpressionScope(Expression expression, Set<String> forbiddenOuterRelations, Set<String> localRelations)
         {
+            validateExpressionScope(expression, forbiddenOuterRelations, localRelations, !localRelations.isEmpty());
+        }
+
+        private void validateExpressionScope(Expression expression, Set<String> forbiddenOuterRelations, Set<String> localRelations, boolean hasLocalRelation)
+        {
             switch (expression) {
-                case ArrayExpression array -> array.values().forEach(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations));
+                case ArrayExpression array -> array.values().forEach(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations, hasLocalRelation));
                 case BetweenExpression between -> {
-                    validateExpressionScope(between.value(), forbiddenOuterRelations, localRelations);
-                    validateExpressionScope(between.min(), forbiddenOuterRelations, localRelations);
-                    validateExpressionScope(between.max(), forbiddenOuterRelations, localRelations);
+                    validateExpressionScope(between.value(), forbiddenOuterRelations, localRelations, hasLocalRelation);
+                    validateExpressionScope(between.min(), forbiddenOuterRelations, localRelations, hasLocalRelation);
+                    validateExpressionScope(between.max(), forbiddenOuterRelations, localRelations, hasLocalRelation);
                 }
                 case BinaryExpression binary -> {
-                    validateExpressionScope(binary.left(), forbiddenOuterRelations, localRelations);
-                    validateExpressionScope(binary.right(), forbiddenOuterRelations, localRelations);
+                    validateExpressionScope(binary.left(), forbiddenOuterRelations, localRelations, hasLocalRelation);
+                    validateExpressionScope(binary.right(), forbiddenOuterRelations, localRelations, hasLocalRelation);
                 }
                 case CaseExpression caseExpression -> {
-                    caseExpression.operand().ifPresent(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations));
+                    caseExpression.operand().ifPresent(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations, hasLocalRelation));
                     caseExpression.whenClauses().forEach(when -> {
-                        validateExpressionScope(when.operand(), forbiddenOuterRelations, localRelations);
-                        validateExpressionScope(when.result(), forbiddenOuterRelations, localRelations);
+                        validateExpressionScope(when.operand(), forbiddenOuterRelations, localRelations, hasLocalRelation);
+                        validateExpressionScope(when.result(), forbiddenOuterRelations, localRelations, hasLocalRelation);
                     });
-                    caseExpression.defaultValue().ifPresent(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations));
+                    caseExpression.defaultValue().ifPresent(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations, hasLocalRelation));
                 }
-                case CastExpression cast -> validateExpressionScope(cast.value(), forbiddenOuterRelations, localRelations);
+                case CastExpression cast -> validateExpressionScope(cast.value(), forbiddenOuterRelations, localRelations, hasLocalRelation);
                 case ColumnReference reference -> {
-                    if (reference.parts().size() == 1 && !forbiddenOuterRelations.isEmpty() && localRelations.isEmpty()) {
+                    if (reference.parts().size() == 1 && !forbiddenOuterRelations.isEmpty() && !hasLocalRelation) {
                         throw unsupported(reference.span(), "correlated relation subquery");
                     }
                     if (reference.parts().size() > 1) {
@@ -2199,34 +2205,34 @@ public final class HogQlParser
                     }
                 }
                 case FunctionCall function -> {
-                    function.arguments().forEach(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations));
-                    function.orderBy().forEach(item -> validateExpressionScope(item.expression(), forbiddenOuterRelations, localRelations));
-                    function.filter().ifPresent(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations));
+                    function.arguments().forEach(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations, hasLocalRelation));
+                    function.orderBy().forEach(item -> validateExpressionScope(item.expression(), forbiddenOuterRelations, localRelations, hasLocalRelation));
+                    function.filter().ifPresent(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations, hasLocalRelation));
                 }
                 case InExpression in -> {
-                    validateExpressionScope(in.value(), forbiddenOuterRelations, localRelations);
-                    in.values().forEach(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations));
+                    validateExpressionScope(in.value(), forbiddenOuterRelations, localRelations, hasLocalRelation);
+                    in.values().forEach(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations, hasLocalRelation));
                 }
                 case InCohortExpression in -> {
-                    validateExpressionScope(in.value(), forbiddenOuterRelations, localRelations);
-                    validateExpressionScope(in.cohort(), forbiddenOuterRelations, localRelations);
+                    validateExpressionScope(in.value(), forbiddenOuterRelations, localRelations, hasLocalRelation);
+                    validateExpressionScope(in.cohort(), forbiddenOuterRelations, localRelations, hasLocalRelation);
                 }
                 case InSubqueryExpression in -> {
-                    validateExpressionScope(in.value(), forbiddenOuterRelations, localRelations);
+                    validateExpressionScope(in.value(), forbiddenOuterRelations, localRelations, hasLocalRelation);
                     validateQueryScope(in.query(), Set.of());
                 }
-                case IntervalExpression interval -> validateExpressionScope(interval.value(), forbiddenOuterRelations, localRelations);
-                case IsNullExpression isNull -> validateExpressionScope(isNull.value(), forbiddenOuterRelations, localRelations);
-                case LambdaExpression lambda -> validateExpressionScope(lambda.body(), forbiddenOuterRelations, localRelations);
+                case IntervalExpression interval -> validateExpressionScope(interval.value(), forbiddenOuterRelations, localRelations, hasLocalRelation);
+                case IsNullExpression isNull -> validateExpressionScope(isNull.value(), forbiddenOuterRelations, localRelations, hasLocalRelation);
+                case LambdaExpression lambda -> validateExpressionScope(lambda.body(), forbiddenOuterRelations, localRelations, hasLocalRelation);
                 case Literal _, Placeholder _ -> {}
-                case MemberAccessExpression memberAccess -> validateExpressionScope(memberAccess.base(), forbiddenOuterRelations, localRelations);
+                case MemberAccessExpression memberAccess -> validateExpressionScope(memberAccess.base(), forbiddenOuterRelations, localRelations, hasLocalRelation);
                 case ScalarSubqueryExpression subquery -> validateQueryScope(subquery.query(), Set.of());
                 case SubscriptExpression subscript -> {
-                    validateExpressionScope(subscript.base(), forbiddenOuterRelations, localRelations);
-                    validateExpressionScope(subscript.index(), forbiddenOuterRelations, localRelations);
+                    validateExpressionScope(subscript.base(), forbiddenOuterRelations, localRelations, hasLocalRelation);
+                    validateExpressionScope(subscript.index(), forbiddenOuterRelations, localRelations, hasLocalRelation);
                 }
-                case TupleExpression tuple -> tuple.values().forEach(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations));
-                case UnaryExpression unary -> validateExpressionScope(unary.operand(), forbiddenOuterRelations, localRelations);
+                case TupleExpression tuple -> tuple.values().forEach(value -> validateExpressionScope(value, forbiddenOuterRelations, localRelations, hasLocalRelation));
+                case UnaryExpression unary -> validateExpressionScope(unary.operand(), forbiddenOuterRelations, localRelations, hasLocalRelation);
             }
         }
 

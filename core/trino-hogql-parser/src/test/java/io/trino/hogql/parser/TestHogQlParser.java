@@ -448,6 +448,17 @@ public class TestHogQlParser
     }
 
     @Test
+    public void testAllowsUnqualifiedColumnsFromUnaliasedNestedDerivedTables()
+    {
+        HogQlQuery query = parser.parseStatement(
+                "SELECT left_source.id FROM first_table left_source " +
+                        "JOIN (SELECT id FROM (SELECT id FROM second_table)) right_source " +
+                        "ON left_source.id = right_source.id");
+
+        assertThat(query.from()).get().isInstanceOf(JoinRelation.class);
+    }
+
+    @Test
     public void testBuildsCorrelatedInSubqueryWithSourceSpans()
     {
         HogQlQuery query = parser.parseStatement(
