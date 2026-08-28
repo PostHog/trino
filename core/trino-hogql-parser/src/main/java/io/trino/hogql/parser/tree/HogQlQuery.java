@@ -886,6 +886,7 @@ public record HogQlQuery(
         CROSS,
         INNER,
         LEFT,
+        LEFT_ANY,
         RIGHT,
         FULL,
     }

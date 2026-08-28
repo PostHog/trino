@@ -2144,8 +2144,14 @@ public final class HogQlParser
                 return JoinType.INNER;
             }
             if (context instanceof HogQLParser.JoinOpLeftRightContext outer) {
-                if (outer.ANTI() != null || outer.SEMI() != null || outer.ASOF() != null || outer.ALL() != null || outer.ANY() != null) {
+                if (outer.ANTI() != null || outer.SEMI() != null || outer.ASOF() != null || outer.ALL() != null) {
                     throw unsupported(context, "HogQL-specific outer join modifier");
+                }
+                if (outer.ANY() != null) {
+                    if (outer.LEFT() == null) {
+                        throw unsupported(context, "RIGHT ANY JOIN");
+                    }
+                    return JoinType.LEFT_ANY;
                 }
                 return outer.LEFT() != null ? JoinType.LEFT : JoinType.RIGHT;
             }

@@ -70,6 +70,15 @@ public class TestHogQlCorrelatedSubquery
     }
 
     @Test
+    public void testAnalyzerPlansLeftAnyJoinLateralLimit()
+    {
+        assertThatCode(() -> plan(compile(
+                "SELECT r.regionkey, n.nationkey FROM region r " +
+                        "LEFT ANY JOIN nation n ON r.regionkey = n.regionkey")))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
     public void testAnalyzerRejectsMissingCorrelatedOuterColumn()
     {
         AssertionError failure = catchThrowableOfType(

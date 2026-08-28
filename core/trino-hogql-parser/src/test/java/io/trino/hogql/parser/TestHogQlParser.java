@@ -333,6 +333,18 @@ public class TestHogQlParser
         assertThat(criteria.span()).isEqualTo(new HogQlQuery.SourceSpan(52, 73, 3, 24, 3, 45));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"LEFT ANY JOIN", "ANY LEFT JOIN"})
+    public void testBuildsLeftAnyJoinAst(String joinOperator)
+    {
+        HogQlQuery query = parser.parseStatement(
+                "SELECT e.id FROM events e " + joinOperator + " persons p ON e.person_id = p.id");
+
+        JoinRelation join = (JoinRelation) query.from().orElseThrow();
+        assertThat(join.type()).isEqualTo(JoinType.LEFT_ANY);
+        assertThat(join.criteria()).hasValueSatisfying(JoinOn.class::isInstance);
+    }
+
     @Test
     public void testBuildsPivotAstWithCompositeKeysAliasesAndSourceSpans()
     {

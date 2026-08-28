@@ -87,6 +87,7 @@ import io.trino.sql.tree.Intersect;
 import io.trino.sql.tree.IntervalField;
 import io.trino.sql.tree.IntervalLiteral;
 import io.trino.sql.tree.IsNullPredicate;
+import io.trino.sql.tree.Lateral;
 import io.trino.sql.tree.Limit;
 import io.trino.sql.tree.LambdaArgumentDeclaration;
 import io.trino.sql.tree.LambdaExpression;
@@ -750,23 +751,7 @@ final class TrinoAstFactory
             case CommonTableReference commonTable -> new Table(
                     location(commonTable.span()),
                     QualifiedName.of(List.of(createIdentifier(commonTable.name()))));
-            case JoinRelation join -> new io.trino.sql.tree.Join(
-                    location(join.span()),
-                    switch (join.type()) {
-                        case CROSS -> io.trino.sql.tree.Join.Type.CROSS;
-                        case INNER -> io.trino.sql.tree.Join.Type.INNER;
-                        case LEFT -> io.trino.sql.tree.Join.Type.LEFT;
-                        case RIGHT -> io.trino.sql.tree.Join.Type.RIGHT;
-                        case FULL -> io.trino.sql.tree.Join.Type.FULL;
-                    },
-                    createRelation(join.left(), parameterIds),
-                    createRelation(join.right(), parameterIds),
-                    join.criteria().map(criteria -> switch (criteria) {
-                        case JoinOn on -> new io.trino.sql.tree.JoinOn(createExpression(on.expression(), parameterIds));
-                        case JoinUsing using -> new io.trino.sql.tree.JoinUsing(using.columns().stream()
-                                .map(TrinoAstFactory::createIdentifier)
-                                .toList());
-                    }));
+            case JoinRelation join -> createJoin(join, parameterIds);
             case PivotRelation pivot -> new io.trino.sql.tree.Pivot(
                     location(pivot.span()),
                     createRelation(pivot.input(), parameterIds),
@@ -800,6 +785,136 @@ final class TrinoAstFactory
                     createIdentifier(unnest.alias()),
                     unnest.columnAliases().stream().map(TrinoAstFactory::createIdentifier).toList());
             case ValuesRelation values -> createValuesRelation(values, parameterIds);
+        };
+    }
+
+    private static io.trino.sql.tree.Relation createJoin(JoinRelation join, Map<SourceSpan, Integer> parameterIds)
+    {
+        if (join.type() == HogQlQuery.JoinType.LEFT_ANY) {
+            return createLeftAnyJoin(join, parameterIds);
+        }
+        return new io.trino.sql.tree.Join(
+                location(join.span()),
+                switch (join.type()) {
+                    case CROSS -> io.trino.sql.tree.Join.Type.CROSS;
+                    case INNER -> io.trino.sql.tree.Join.Type.INNER;
+                    case LEFT -> io.trino.sql.tree.Join.Type.LEFT;
+                    case LEFT_ANY -> throw new IllegalStateException("LEFT ANY JOIN must be lowered as a lateral join");
+                    case RIGHT -> io.trino.sql.tree.Join.Type.RIGHT;
+                    case FULL -> io.trino.sql.tree.Join.Type.FULL;
+                },
+                createRelation(join.left(), parameterIds),
+                createRelation(join.right(), parameterIds),
+                join.criteria().map(criteria -> switch (criteria) {
+                    case JoinOn on -> new io.trino.sql.tree.JoinOn(createExpression(on.expression(), parameterIds));
+                    case JoinUsing using -> new io.trino.sql.tree.JoinUsing(using.columns().stream()
+                            .map(TrinoAstFactory::createIdentifier)
+                            .toList());
+                }));
+    }
+
+    private static io.trino.sql.tree.Relation createLeftAnyJoin(JoinRelation join, Map<SourceSpan, Integer> parameterIds)
+    {
+        HogQlQuery.JoinCriteria criteria = join.criteria().orElseThrow();
+        if (!(criteria instanceof JoinOn on)) {
+            throw unsupportedSemanticExpression(criteria.span(), "HogQL LEFT ANY JOIN with USING cannot preserve merged-column semantics in Trino");
+        }
+
+        Identifier alias = leftAnyJoinAlias(join.right())
+                .orElseThrow(() -> unsupportedSemanticExpression(
+                        join.right().span(),
+                        "HogQL LEFT ANY JOIN requires a right relation alias for Trino correlation"));
+        HogQlQuery.Expression orderingKey = leftAnyJoinOrderingKey(on.expression(), alias)
+                .orElseThrow(() -> unsupportedSemanticExpression(
+                        on.span(),
+                        "HogQL LEFT ANY JOIN requires an equality predicate on a qualified right column for Trino decorrelation"));
+        NodeLocation rightLocation = location(join.right().span());
+        QuerySpecification matches = new QuerySpecification(
+                rightLocation,
+                new Select(rightLocation, false, List.of(new AllColumns(rightLocation))),
+                Optional.of(createRelation(join.right(), parameterIds)),
+                Optional.of(createExpression(on.expression(), parameterIds)),
+                Optional.empty(),
+                Optional.empty(),
+                List.of(),
+                Optional.of(new OrderBy(
+                        location(orderingKey.span()),
+                        List.of(new io.trino.sql.tree.SortItem(
+                                location(orderingKey.span()),
+                                createExpression(orderingKey, parameterIds),
+                                Ordering.ASCENDING,
+                                NullOrdering.UNDEFINED)))),
+                Optional.empty(),
+                Optional.of(new Limit(rightLocation, new LongLiteral(rightLocation, "1"))));
+        Query query = new Query(
+                rightLocation,
+                List.of(),
+                List.of(),
+                Optional.empty(),
+                matches,
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty());
+        io.trino.sql.tree.Relation lateral = new Lateral(rightLocation, query);
+        lateral = new io.trino.sql.tree.AliasedRelation(
+                rightLocation,
+                lateral,
+                createIdentifier(alias),
+                null);
+        return new io.trino.sql.tree.Join(
+                location(join.span()),
+                io.trino.sql.tree.Join.Type.LEFT,
+                createRelation(join.left(), parameterIds),
+                lateral,
+                Optional.of(new io.trino.sql.tree.JoinOn(new BooleanLiteral(location(join.span()), "true"))));
+    }
+
+    private static Optional<HogQlQuery.Expression> leftAnyJoinOrderingKey(HogQlQuery.Expression expression, Identifier rightAlias)
+    {
+        if (!(expression instanceof BinaryExpression binary)) {
+            return Optional.empty();
+        }
+        if (binary.operator() == HogQlQuery.BinaryOperator.AND) {
+            return leftAnyJoinOrderingKey(binary.left(), rightAlias)
+                    .or(() -> leftAnyJoinOrderingKey(binary.right(), rightAlias));
+        }
+        if (binary.operator() != HogQlQuery.BinaryOperator.EQUAL) {
+            return Optional.empty();
+        }
+        if (isQualifiedBy(binary.left(), rightAlias)) {
+            return Optional.of(binary.left());
+        }
+        if (isQualifiedBy(binary.right(), rightAlias)) {
+            return Optional.of(binary.right());
+        }
+        return Optional.empty();
+    }
+
+    private static boolean isQualifiedBy(HogQlQuery.Expression expression, Identifier qualifier)
+    {
+        return expression instanceof ColumnReference reference &&
+                reference.parts().size() > 1 &&
+                reference.parts().getFirst().value().equalsIgnoreCase(qualifier.value());
+    }
+
+    private static Optional<Identifier> leftAnyJoinAlias(Relation relation)
+    {
+        return switch (relation) {
+            case AliasedRelation alias -> Optional.of(alias.alias());
+            case CommonTableReference commonTable -> Optional.of(commonTable.name());
+            case JoinRelation join -> throw unsupportedSemanticExpression(
+                    join.span(),
+                    "HogQL LEFT ANY JOIN with a compound right relation cannot preserve relation qualifiers in Trino");
+            case TableReference table -> {
+                if (table.parts().size() > 1) {
+                    throw unsupportedSemanticExpression(
+                            table.span(),
+                            "HogQL LEFT ANY JOIN with an unaliased qualified table cannot preserve its qualifier in Trino");
+                }
+                yield Optional.of(table.parts().getLast());
+            }
+            case UnnestRelation unnest -> Optional.of(unnest.alias());
+            case PivotRelation _, SubqueryRelation _, TablePlaceholder _, ValuesRelation _ -> Optional.empty();
         };
     }
 
