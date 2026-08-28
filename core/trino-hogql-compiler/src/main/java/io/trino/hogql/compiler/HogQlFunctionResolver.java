@@ -46,6 +46,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinUsing;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
+import io.trino.hogql.parser.tree.HogQlQuery.LambdaExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.PivotAggregation;
 import io.trino.hogql.parser.tree.HogQlQuery.PivotRelation;
@@ -65,6 +66,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.UnnestRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.ValuesRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.Window;
 import io.trino.hogql.parser.tree.HogQlQuery.WindowDefinition;
@@ -208,6 +210,11 @@ final class HogQlFunctionResolver
             case SubqueryRelation subquery -> new SubqueryRelation(resolveQuery(subquery.query()), subquery.span());
             case TablePlaceholder placeholder -> placeholder;
             case TableReference table -> table;
+            case UnnestRelation unnest -> new UnnestRelation(
+                    unnest.expressions().stream().map(this::resolveExpression).toList(),
+                    unnest.alias(),
+                    unnest.columnAliases(),
+                    unnest.span());
             case ValuesRelation values -> new ValuesRelation(
                     values.rows().stream()
                             .map(row -> row.stream().map(this::resolveExpression).toList())
@@ -273,6 +280,7 @@ final class HogQlFunctionResolver
                     isNull.negated(),
                     isNull.predicateSpan(),
                     isNull.span());
+            case LambdaExpression lambda -> new LambdaExpression(lambda.arguments(), resolveExpression(lambda.body()), lambda.span());
             case Literal literal -> literal;
             case MemberAccessExpression memberAccess -> new MemberAccessExpression(
                     resolveExpression(memberAccess.base()),

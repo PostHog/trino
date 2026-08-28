@@ -55,6 +55,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.UnnestRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.ValuesRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.Window;
 import io.trino.hogql.parser.tree.HogQlQuery.WindowDefinition;
@@ -75,6 +76,7 @@ import io.trino.sql.tree.Cast;
 import io.trino.sql.tree.CoalesceExpression;
 import io.trino.sql.tree.ComparisonPredicate;
 import io.trino.sql.tree.DereferenceExpression;
+import io.trino.sql.tree.DoubleLiteral;
 import io.trino.sql.tree.Except;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.GroupBy;
@@ -86,6 +88,9 @@ import io.trino.sql.tree.IntervalField;
 import io.trino.sql.tree.IntervalLiteral;
 import io.trino.sql.tree.IsNullPredicate;
 import io.trino.sql.tree.Limit;
+import io.trino.sql.tree.LambdaArgumentDeclaration;
+import io.trino.sql.tree.LambdaExpression;
+import io.trino.sql.tree.LikePredicate;
 import io.trino.sql.tree.LogicalExpression;
 import io.trino.sql.tree.LongLiteral;
 import io.trino.sql.tree.NodeLocation;
@@ -114,6 +119,7 @@ import io.trino.sql.tree.StringLiteral;
 import io.trino.sql.tree.Table;
 import io.trino.sql.tree.TableSubquery;
 import io.trino.sql.tree.Union;
+import io.trino.sql.tree.Unnest;
 import io.trino.sql.tree.Values;
 import io.trino.sql.tree.WhenClause;
 import io.trino.sql.tree.With;
@@ -350,6 +356,12 @@ final class TrinoAstFactory
                     location(isNull.predicateSpan()),
                     createExpression(isNull.value(), parameterIds),
                     new IsNullPredicate(location(isNull.predicateSpan()), isNull.negated()));
+            case HogQlQuery.LambdaExpression lambda -> new LambdaExpression(
+                    location(lambda.span()),
+                    lambda.arguments().stream()
+                            .map(argument -> new LambdaArgumentDeclaration(location(argument.span()), createIdentifier(argument)))
+                            .toList(),
+                    createExpression(lambda.body(), parameterIds));
             case Literal literal -> createLiteral(literal);
             case MemberAccessExpression memberAccess -> new DereferenceExpression(
                     location(memberAccess.span()),
@@ -596,6 +608,10 @@ final class TrinoAstFactory
             case DIVIDE -> new ArithmeticBinaryExpression(location, ArithmeticBinaryExpression.Operator.DIVIDE, left, right);
             case MODULO -> new ArithmeticBinaryExpression(location, ArithmeticBinaryExpression.Operator.MODULO, left, right);
             case AND -> new LogicalExpression(location, LogicalExpression.Operator.AND, List.of(left, right));
+            case CONCAT -> new io.trino.sql.tree.FunctionCall(
+                    location,
+                    QualifiedName.of("concat"),
+                    List.of(left, right));
             case OR -> new LogicalExpression(location, LogicalExpression.Operator.OR, List.of(left, right));
             case EQUAL -> comparison(location, ComparisonPredicate.Operator.EQUAL, left, right);
             case NOT_EQUAL -> comparison(location, ComparisonPredicate.Operator.NOT_EQUAL, left, right);
@@ -603,7 +619,34 @@ final class TrinoAstFactory
             case LESS_THAN_OR_EQUAL -> comparison(location, ComparisonPredicate.Operator.LESS_THAN_OR_EQUAL, left, right);
             case GREATER_THAN -> comparison(location, ComparisonPredicate.Operator.GREATER_THAN, left, right);
             case GREATER_THAN_OR_EQUAL -> comparison(location, ComparisonPredicate.Operator.GREATER_THAN_OR_EQUAL, left, right);
+            case LIKE -> like(location, left, right, false, false);
+            case NOT_LIKE -> like(location, left, right, true, false);
+            case ILIKE -> like(location, left, right, false, true);
+            case NOT_ILIKE -> like(location, left, right, true, true);
         };
+    }
+
+    private static Expression like(NodeLocation location, Expression value, Expression pattern, boolean negated, boolean caseInsensitive)
+    {
+        if (caseInsensitive) {
+            value = lower(location, value);
+            pattern = lower(location, pattern);
+        }
+        return new Predicated(location, value, new LikePredicate(location, negated, pattern, Optional.empty()));
+    }
+
+    private static Expression lower(NodeLocation location, Expression value)
+    {
+        return new io.trino.sql.tree.FunctionCall(
+                location,
+                QualifiedName.of("lower"),
+                Optional.empty(),
+                Optional.empty(),
+                Optional.empty(),
+                false,
+                Optional.empty(),
+                Optional.empty(),
+                List.of(new CallArgument(location, Optional.empty(), value)));
     }
 
     private static Expression comparison(NodeLocation location, ComparisonPredicate.Operator operator, Expression left, Expression right)
@@ -616,6 +659,7 @@ final class TrinoAstFactory
         NodeLocation location = location(literal.span());
         return switch (literal.kind()) {
             case BOOLEAN -> new BooleanLiteral(location, literal.value());
+            case FLOAT -> new DoubleLiteral(location, literal.value());
             case INTEGER -> new LongLiteral(location, literal.value());
             case NULL -> new NullLiteral(location);
             case STRING -> new StringLiteral(location, literal.value());
@@ -688,6 +732,14 @@ final class TrinoAstFactory
             case SubqueryRelation subquery -> new TableSubquery(location(subquery.span()), createQuery(subquery.query(), parameterIds));
             case TablePlaceholder _ -> throw new IllegalArgumentException("table placeholder was not validated");
             case TableReference table -> createTable(table);
+            case UnnestRelation unnest -> new io.trino.sql.tree.AliasedRelation(
+                    location(unnest.span()),
+                    new Unnest(
+                            location(unnest.span()),
+                            unnest.expressions().stream().map(expression -> createExpression(expression, parameterIds)).toList(),
+                            false),
+                    createIdentifier(unnest.alias()),
+                    unnest.columnAliases().stream().map(TrinoAstFactory::createIdentifier).toList());
             case ValuesRelation values -> createValuesRelation(values, parameterIds);
         };
     }

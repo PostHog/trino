@@ -48,6 +48,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinType;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinUsing;
+import io.trino.hogql.parser.tree.HogQlQuery.LambdaExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.NullPlacement;
@@ -72,6 +73,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.UnnestRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.ValuesRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.Window;
 import io.trino.hogql.parser.tree.HogQlQuery.WindowDefinition;
@@ -111,14 +113,19 @@ import java.util.Set;
 
 import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.ADD;
 import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.AND;
+import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.CONCAT;
 import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.DIVIDE;
 import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.EQUAL;
 import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.GREATER_THAN;
 import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.GREATER_THAN_OR_EQUAL;
+import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.ILIKE;
 import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.LESS_THAN;
 import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.LESS_THAN_OR_EQUAL;
+import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.LIKE;
 import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.MODULO;
 import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.MULTIPLY;
+import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.NOT_ILIKE;
+import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.NOT_LIKE;
 import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.NOT_EQUAL;
 import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.OR;
 import static io.trino.hogql.parser.tree.HogQlQuery.BinaryOperator.SUBTRACT;
@@ -740,6 +747,9 @@ public final class HogQlParser
                 Optional<Relation> from = Optional.ofNullable(select.fromClause())
                         .map(HogQLParser.FromClauseContext::joinExpr)
                         .map(this::buildRelation);
+                if (select.arrayJoinClause() != null) {
+                    from = Optional.of(buildArrayJoin(from, select.arrayJoinClause()));
+                }
                 Optional<Expression> where = Optional.ofNullable(select.whereClause())
                         .map(HogQLParser.WhereClauseContext::columnExpr)
                         .map(this::buildExpression);
@@ -838,7 +848,6 @@ public final class HogQlParser
         {
             List<ParserRuleContext> clauses = new ArrayList<>();
             clauses.add(context.topClause());
-            clauses.add(context.arrayJoinClause());
             clauses.add(context.prewhereClause());
             clauses.addAll(context.sampleClause());
             clauses.add(context.qualifyClause());
@@ -850,6 +859,32 @@ public final class HogQlParser
             if (firstClause.isPresent()) {
                 throw unsupported(firstClause.orElseThrow(), "query clause");
             }
+        }
+
+        private Relation buildArrayJoin(Optional<Relation> from, HogQLParser.ArrayJoinClauseContext context)
+        {
+            List<Expression> expressions = new ArrayList<>();
+            List<Identifier> columnAliases = new ArrayList<>();
+            for (HogQLParser.ColumnExprContext expression : context.columnExprList().columnExpr()) {
+                if (!(expression instanceof HogQLParser.ColumnExprAliasContext alias) || alias.identifier() == null) {
+                    throw unsupported(expression, "ARRAY JOIN expression without an identifier alias");
+                }
+                expressions.add(buildExpression(alias.columnExpr()));
+                columnAliases.add(buildIdentifier(alias.identifier()));
+            }
+            Identifier relationAlias = buildIdentifier("__hogql_array_join", context);
+            UnnestRelation unnest = new UnnestRelation(expressions, relationAlias, columnAliases, sourceSpan(context));
+            if (from.isEmpty()) {
+                if (context.LEFT() != null) {
+                    throw unsupported(context, "LEFT ARRAY JOIN without FROM");
+                }
+                return unnest;
+            }
+            JoinType type = context.LEFT() == null ? JoinType.CROSS : JoinType.LEFT;
+            Optional<JoinCriteria> criteria = context.LEFT() == null
+                    ? Optional.empty()
+                    : Optional.of(new JoinOn(new Literal(HogQlQuery.LiteralKind.BOOLEAN, "true", sourceSpan(context)), sourceSpan(context)));
+            return new JoinRelation(type, from.orElseThrow(), unnest, criteria, sourceSpan(context));
         }
 
         private List<SortItem> buildOrderBy(HogQLParser.OrderByClauseContext context)
@@ -1174,6 +1209,7 @@ public final class HogQlParser
                 BinaryOperator operator = switch (binary.operator.getType()) {
                     case HogQLParser.PLUS -> ADD;
                     case HogQLParser.DASH -> SUBTRACT;
+                    case HogQLParser.CONCAT -> CONCAT;
                     default -> throw unsupported(binary, "additive operator");
                 };
                 return binary(operator, binary.left, binary.right, binary);
@@ -1205,6 +1241,12 @@ public final class HogQlParser
                             binary.NOT() != null,
                             sourceSpan(binary.NOT() == null ? binary.IN().getSymbol() : binary.NOT().getSymbol(), binary.getStop()),
                             sourceSpan(binary));
+                }
+                if (binary.LIKE() != null) {
+                    return binary(binary.NOT() == null ? LIKE : NOT_LIKE, binary.left, binary.right, binary);
+                }
+                if (binary.ILIKE() != null) {
+                    return binary(binary.NOT() == null ? ILIKE : NOT_ILIKE, binary.left, binary.right, binary);
                 }
                 if (binary.operator == null) {
                     throw unsupported(binary, "comparison operator");
@@ -1274,6 +1316,31 @@ public final class HogQlParser
                         function.columnArgList,
                         function.filterExpr,
                         new WindowReference(buildIdentifier(function.identifier(1)), sourceSpan(function.identifier(1))));
+            }
+            if (context instanceof HogQLParser.ColumnExprLambdaContext lambda) {
+                HogQLParser.ColumnLambdaExprContext lambdaExpression = lambda.columnLambdaExpr();
+                if (lambdaExpression instanceof HogQLParser.ArrowLambdaContext arrow) {
+                    if (arrow.block() != null) {
+                        throw unsupported(arrow.block(), "lambda block");
+                    }
+                    return new LambdaExpression(
+                            arrow.identifier().stream().map(this::buildIdentifier).toList(),
+                            buildExpression(arrow.columnExpr()),
+                            sourceSpan(arrow));
+                }
+                if (lambdaExpression instanceof HogQLParser.ColonLambdaContext colon) {
+                    return new LambdaExpression(
+                            colon.identifier().stream().map(this::buildIdentifier).toList(),
+                            buildExpression(colon.columnExpr()),
+                            sourceSpan(colon));
+                }
+                throw unsupported(lambdaExpression, "lambda expression");
+            }
+            if (context instanceof HogQLParser.ColumnExprColonLambdaContext lambda) {
+                return new LambdaExpression(
+                        lambda.identifier().stream().map(this::buildIdentifier).toList(),
+                        buildExpression(lambda.columnExpr()),
+                        sourceSpan(lambda));
             }
             throw unsupported(context, "expression " + context.getClass().getSimpleName());
         }
@@ -1524,17 +1591,27 @@ public final class HogQlParser
             }
 
             String value = context.numberLiteral().getText();
-            if (!value.matches("[+-]?[0-9]+")) {
+            if (value.matches("[+-]?[0-9]+")) {
+                if (value.startsWith("-")) {
+                    return new Literal(INTEGER, "-" + normalizeInteger(value.substring(1)), sourceSpan(context));
+                }
+                if (value.startsWith("+")) {
+                    Literal magnitude = new Literal(INTEGER, normalizeInteger(value.substring(1)), sourceSpan(context));
+                    return new UnaryExpression(POSITIVE, magnitude, sourceSpan(context));
+                }
+                return new Literal(INTEGER, normalizeInteger(value), sourceSpan(context));
+            }
+            if (!value.matches("[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?")) {
                 throw unsupported(context, "numeric literal");
             }
             if (value.startsWith("-")) {
-                return new Literal(INTEGER, "-" + normalizeInteger(value.substring(1)), sourceSpan(context));
+                return new Literal(HogQlQuery.LiteralKind.FLOAT, value, sourceSpan(context));
             }
             if (value.startsWith("+")) {
-                Literal magnitude = new Literal(INTEGER, normalizeInteger(value.substring(1)), sourceSpan(context));
+                Literal magnitude = new Literal(HogQlQuery.LiteralKind.FLOAT, value.substring(1), sourceSpan(context));
                 return new UnaryExpression(POSITIVE, magnitude, sourceSpan(context));
             }
-            return new Literal(INTEGER, normalizeInteger(value), sourceSpan(context));
+            return new Literal(HogQlQuery.LiteralKind.FLOAT, value, sourceSpan(context));
         }
 
         private Expression buildColumnReference(HogQLParser.ColumnIdentifierContext context)
@@ -1835,6 +1912,7 @@ public final class HogQlParser
                             validateExpressionScope(expression, forbiddenOuterRelations, localRelations)));
                     pivot.groupBy().forEach(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations));
                 }
+                case UnnestRelation unnest -> unnest.expressions().forEach(expression -> validateExpressionScope(expression, forbiddenOuterRelations, localRelations));
                 case CommonTableReference _, SubqueryRelation _, TablePlaceholder _, TableReference _, ValuesRelation _ -> {}
             }
         }
@@ -1849,6 +1927,7 @@ public final class HogQlParser
                 }
                 case PivotRelation pivot -> validateNestedRelationScopes(pivot.input(), forbiddenOuterRelations);
                 case SubqueryRelation subquery -> validateQueryScope(subquery.query(), forbiddenOuterRelations);
+                case UnnestRelation _ -> {}
                 case ValuesRelation values -> values.rows().forEach(row -> row.forEach(expression -> validateExpressionScope(expression, forbiddenOuterRelations, Set.of())));
                 case CommonTableReference _, TablePlaceholder _, TableReference _ -> {}
             }
@@ -1871,6 +1950,7 @@ public final class HogQlParser
                     collectRelationNames(join.right(), names);
                 }
                 case PivotRelation pivot -> collectRelationNames(pivot.input(), names);
+                case UnnestRelation unnest -> names.add(canonicalName(unnest.alias()));
                 case SubqueryRelation _, TablePlaceholder _, ValuesRelation _ -> {}
                 case TableReference table -> names.add(canonicalName(table.parts().getLast()));
             }
@@ -1928,6 +2008,7 @@ public final class HogQlParser
                 }
                 case IntervalExpression interval -> validateExpressionScope(interval.value(), forbiddenOuterRelations, localRelations);
                 case IsNullExpression isNull -> validateExpressionScope(isNull.value(), forbiddenOuterRelations, localRelations);
+                case LambdaExpression lambda -> validateExpressionScope(lambda.body(), forbiddenOuterRelations, localRelations);
                 case Literal _, Placeholder _ -> {}
                 case MemberAccessExpression memberAccess -> validateExpressionScope(memberAccess.base(), forbiddenOuterRelations, localRelations);
                 case ScalarSubqueryExpression subquery -> validateQueryScope(subquery.query(), Set.of());

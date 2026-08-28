@@ -35,6 +35,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinUsing;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
+import io.trino.hogql.parser.tree.HogQlQuery.LambdaExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
@@ -45,6 +46,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.Star;
 import io.trino.hogql.parser.tree.HogQlQuery.SubscriptExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.UnnestRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.Window;
 import io.trino.hogql.parser.tree.HogQlQuery.WindowFrame;
 import io.trino.hogql.parser.tree.HogQlQuery.WindowReference;
@@ -255,6 +257,7 @@ final class HogQlProjectionDemand
                 pivot.valueGroups().forEach(group -> group.values().forEach(value -> collect(value, builder)));
                 pivot.groupBy().forEach(expression -> collect(expression, builder));
             }
+            case UnnestRelation unnest -> unnest.expressions().forEach(expression -> collect(expression, builder));
         }
     }
 
@@ -298,6 +301,9 @@ final class HogQlProjectionDemand
             }
             case IntervalExpression interval -> collect(interval.value(), builder);
             case IsNullExpression isNull -> collect(isNull.value(), builder);
+            case LambdaExpression lambda -> builder.withSuppressed(
+                    lambda.arguments().stream().map(Identifier::value).map(HogQlProjectionDemand::canonical).collect(java.util.stream.Collectors.toSet()),
+                    () -> collect(lambda.body(), builder));
             case Literal _, Placeholder _ -> {}
             case MemberAccessExpression member -> collect(member.base(), builder);
             case ScalarSubqueryExpression _ -> builder.all = true;
@@ -365,16 +371,36 @@ final class HogQlProjectionDemand
         private final Set<String> unqualified = new HashSet<>();
         private final Set<String> allQualifiers = new HashSet<>();
         private final Map<String, Set<String>> qualified = new HashMap<>();
+        private final Set<String> suppressed = new HashSet<>();
 
         public void add(ColumnReference reference)
         {
             if (reference.parts().size() == 1) {
-                unqualified.add(canonical(reference.parts().getFirst().value()));
+                String name = canonical(reference.parts().getFirst().value());
+                if (!suppressed.contains(name)) {
+                    unqualified.add(name);
+                }
                 return;
             }
             String qualifier = canonical(reference.parts().getFirst().value());
+            if (suppressed.contains(qualifier)) {
+                return;
+            }
             String field = canonical(reference.parts().get(1).value());
             qualified.computeIfAbsent(qualifier, _ -> new HashSet<>()).add(field);
+        }
+
+        public void withSuppressed(Set<String> names, Runnable action)
+        {
+            Set<String> previous = Set.copyOf(suppressed);
+            suppressed.addAll(names);
+            try {
+                action.run();
+            }
+            finally {
+                suppressed.clear();
+                suppressed.addAll(previous);
+            }
         }
 
         public void addUnqualified(Identifier identifier)

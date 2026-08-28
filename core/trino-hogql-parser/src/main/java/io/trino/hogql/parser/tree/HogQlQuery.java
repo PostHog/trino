@@ -307,6 +307,7 @@ public record HogQlQuery(
                     InSubqueryExpression,
                     IntervalExpression,
                     IsNullExpression,
+                    LambdaExpression,
                     Literal,
                     MemberAccessExpression,
                     Placeholder,
@@ -385,6 +386,17 @@ public record HogQlQuery(
         {
             value = requireNonNull(value, "value is null");
             unit = requireNonNull(unit, "unit is null");
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record LambdaExpression(List<Identifier> arguments, Expression body, SourceSpan span)
+            implements Expression
+    {
+        public LambdaExpression
+        {
+            arguments = List.copyOf(requireNonNull(arguments, "arguments is null"));
+            body = requireNonNull(body, "body is null");
             span = requireNonNull(span, "span is null");
         }
     }
@@ -681,14 +693,19 @@ public record HogQlQuery(
     {
         ADD,
         AND,
+        CONCAT,
         DIVIDE,
         EQUAL,
         GREATER_THAN,
         GREATER_THAN_OR_EQUAL,
+        ILIKE,
         LESS_THAN,
         LESS_THAN_OR_EQUAL,
+        LIKE,
         MODULO,
         MULTIPLY,
+        NOT_ILIKE,
+        NOT_LIKE,
         NOT_EQUAL,
         OR,
         SUBTRACT,
@@ -734,6 +751,7 @@ public record HogQlQuery(
     public enum LiteralKind
     {
         BOOLEAN,
+        FLOAT,
         INTEGER,
         NULL,
         STRING,
@@ -747,6 +765,7 @@ public record HogQlQuery(
                     SubqueryRelation,
                     TablePlaceholder,
                     TableReference,
+                    UnnestRelation,
                     ValuesRelation
     {
         SourceSpan span();
@@ -765,6 +784,24 @@ public record HogQlQuery(
             relation = requireNonNull(relation, "relation is null");
             alias = requireNonNull(alias, "alias is null");
             columnAliases = List.copyOf(requireNonNull(columnAliases, "columnAliases is null"));
+            span = requireNonNull(span, "span is null");
+        }
+    }
+
+    public record UnnestRelation(List<Expression> expressions, Identifier alias, List<Identifier> columnAliases, SourceSpan span)
+            implements Relation
+    {
+        public UnnestRelation
+        {
+            expressions = List.copyOf(requireNonNull(expressions, "expressions is null"));
+            if (expressions.isEmpty()) {
+                throw new IllegalArgumentException("expressions is empty");
+            }
+            alias = requireNonNull(alias, "alias is null");
+            columnAliases = List.copyOf(requireNonNull(columnAliases, "columnAliases is null"));
+            if (expressions.size() != columnAliases.size()) {
+                throw new IllegalArgumentException("expressions and columnAliases sizes differ");
+            }
             span = requireNonNull(span, "span is null");
         }
     }

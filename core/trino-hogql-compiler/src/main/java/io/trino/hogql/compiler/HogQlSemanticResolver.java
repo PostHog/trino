@@ -75,6 +75,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinUsing;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
+import io.trino.hogql.parser.tree.HogQlQuery.LambdaExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.PivotAggregation;
 import io.trino.hogql.parser.tree.HogQlQuery.PivotRelation;
@@ -94,6 +95,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.UnnestRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.ValuesRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.Window;
 import io.trino.hogql.parser.tree.HogQlQuery.WindowDefinition;
@@ -137,6 +139,7 @@ final class HogQlSemanticResolver
     private Set<String> localRelationQualifiers = Set.of();
     private boolean allRelationsLogical;
     private Optional<Relation> expandedRelation = Optional.empty();
+    private final Set<String> lambdaArguments = new HashSet<>();
     private int generatedRelationId;
 
     private HogQlSemanticResolver(PinnedSnapshot snapshot)
@@ -458,7 +461,7 @@ final class HogQlSemanticResolver
                       .map(definition -> resolveLogicalTable(definition, table.span()).bindings())
                       .orElse(List.of())
                     : List.of();
-            case SubqueryRelation _, TablePlaceholder _, ValuesRelation _ -> List.of();
+            case SubqueryRelation _, TablePlaceholder _, UnnestRelation _, ValuesRelation _ -> List.of();
         };
     }
 
@@ -643,7 +646,7 @@ final class HogQlSemanticResolver
                     HogQlProjectionDemand.preserveAll(),
                     availableBindings,
                     demands);
-            case SubqueryRelation _, TablePlaceholder _, TableReference _, ValuesRelation _ -> {}
+            case SubqueryRelation _, TablePlaceholder _, TableReference _, UnnestRelation _, ValuesRelation _ -> {}
         }
     }
 
@@ -1009,6 +1012,7 @@ final class HogQlSemanticResolver
             case SubqueryRelation _ -> Set.of();
             case TablePlaceholder _ -> Set.of();
             case TableReference table -> Set.of(canonical(table.parts().getLast().value()));
+            case UnnestRelation unnest -> Set.of(canonical(unnest.alias().value()));
             case ValuesRelation _ -> Set.of();
         };
     }
@@ -1048,7 +1052,20 @@ final class HogQlSemanticResolver
                     .orElseGet(() -> new ResolvedRelation(commonTable, List.of(), false));
             case JoinRelation join -> {
                 ResolvedRelation left = resolveRelation(join.left(), projectionDemand);
-                ResolvedRelation right = resolveRelation(join.right(), projectionDemand);
+                List<TableBinding> bindingsBeforeRight = bindings;
+                boolean allRelationsLogicalBeforeRight = allRelationsLogical;
+                if (join.right() instanceof UnnestRelation) {
+                    bindings = left.bindings();
+                    allRelationsLogical = left.allLogical();
+                }
+                ResolvedRelation right;
+                try {
+                    right = resolveRelation(join.right(), projectionDemand);
+                }
+                finally {
+                    bindings = bindingsBeforeRight;
+                    allRelationsLogical = allRelationsLogicalBeforeRight;
+                }
                 List<TableBinding> joinBindings = new ArrayList<>(left.bindings());
                 joinBindings.addAll(right.bindings());
                 List<TableBinding> previousBindings = bindings;
@@ -1100,6 +1117,14 @@ final class HogQlSemanticResolver
             case SubqueryRelation subquery -> resolveSubquery(subquery, projectionDemand.unqualified());
             case TablePlaceholder placeholder -> new ResolvedRelation(placeholder, List.of(), false);
             case TableReference table -> resolveTable(table);
+            case UnnestRelation unnest -> new ResolvedRelation(
+                    new UnnestRelation(
+                            unnest.expressions().stream().map(this::resolveExpression).toList(),
+                            unnest.alias(),
+                            unnest.columnAliases(),
+                            unnest.span()),
+                    List.of(),
+                    false);
             case ValuesRelation values -> new ResolvedRelation(values, List.of(), false);
         };
     }
@@ -1414,6 +1439,7 @@ final class HogQlSemanticResolver
                     isNull.negated(),
                     isNull.predicateSpan(),
                     isNull.span());
+            case LambdaExpression lambda -> resolveLambda(lambda);
             case Literal literal -> literal;
             case MemberAccessExpression memberAccess -> resolveMemberAccess(memberAccess);
             case Placeholder placeholder -> placeholder;
@@ -1424,6 +1450,22 @@ final class HogQlSemanticResolver
             case TupleExpression tuple -> new TupleExpression(tuple.values().stream().map(this::resolveExpression).toList(), tuple.span());
             case UnaryExpression unary -> new UnaryExpression(unary.operator(), resolveExpression(unary.operand()), unary.span());
         };
+    }
+
+    private LambdaExpression resolveLambda(LambdaExpression lambda)
+    {
+        Set<String> previous = Set.copyOf(lambdaArguments);
+        lambda.arguments().stream()
+                .map(Identifier::value)
+                .map(HogQlSemanticResolver::canonical)
+                .forEach(lambdaArguments::add);
+        try {
+            return new LambdaExpression(lambda.arguments(), resolveExpression(lambda.body()), lambda.span());
+        }
+        finally {
+            lambdaArguments.clear();
+            lambdaArguments.addAll(previous);
+        }
     }
 
     private Expression resolveFunctionExpression(FunctionCall function)
@@ -1642,6 +1684,9 @@ final class HogQlSemanticResolver
     private Expression resolveColumn(ColumnReference reference)
     {
         List<Identifier> parts = reference.parts();
+        if (lambdaArguments.contains(canonical(parts.getFirst().value()))) {
+            return reference;
+        }
         Optional<Expression> semanticPath = resolveSemanticPath(reference);
         if (semanticPath.isPresent()) {
             return semanticPath.orElseThrow();

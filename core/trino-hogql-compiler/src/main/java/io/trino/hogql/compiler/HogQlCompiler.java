@@ -43,6 +43,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
+import io.trino.hogql.parser.tree.HogQlQuery.LambdaExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
@@ -57,6 +58,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.SubscriptExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.UnnestRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.ValuesRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.Window;
 import io.trino.hogql.parser.tree.HogQlQuery.WindowDefinition;
@@ -305,6 +307,7 @@ public final class HogQlCompiler
             case SubqueryRelation subquery -> containsSemanticCandidate(subquery.query());
             case TablePlaceholder _ -> false;
             case HogQlQuery.TableReference table -> table.parts().size() == 1;
+            case UnnestRelation unnest -> unnest.expressions().stream().anyMatch(HogQlCompiler::containsFunctionCall);
             case ValuesRelation _ -> false;
         };
     }
@@ -347,6 +350,7 @@ public final class HogQlCompiler
                     pivot.groupBy().stream().anyMatch(HogQlCompiler::containsFunctionCall);
             case SubqueryRelation subquery -> containsFunctionCall(subquery.query());
             case TablePlaceholder _, HogQlQuery.TableReference _ -> false;
+            case UnnestRelation unnest -> unnest.expressions().stream().anyMatch(HogQlCompiler::containsFunctionCall);
             case ValuesRelation values -> values.rows().stream()
                     .flatMap(List::stream)
                     .anyMatch(HogQlCompiler::containsFunctionCall);
@@ -380,6 +384,7 @@ public final class HogQlCompiler
             case InSubqueryExpression in -> containsFunctionCall(in.value()) || containsFunctionCall(in.query());
             case IntervalExpression interval -> containsFunctionCall(interval.value());
             case IsNullExpression isNull -> containsFunctionCall(isNull.value());
+            case LambdaExpression lambda -> containsFunctionCall(lambda.body());
             case MemberAccessExpression memberAccess -> containsFunctionCall(memberAccess.base());
             case ScalarSubqueryExpression subquery -> containsSemanticCandidate(subquery.query());
             case SubscriptExpression subscript -> containsFunctionCall(subscript.base()) || containsFunctionCall(subscript.index());
@@ -487,6 +492,7 @@ public final class HogQlCompiler
             }
             case IntervalExpression interval -> collectPlaceholders(interval.value(), placeholders);
             case IsNullExpression isNull -> collectPlaceholders(isNull.value(), placeholders);
+            case LambdaExpression lambda -> collectPlaceholders(lambda.body(), placeholders);
             case Literal _ -> {}
             case MemberAccessExpression memberAccess -> collectPlaceholders(memberAccess.base(), placeholders);
             case Placeholder placeholder -> placeholders.add(placeholder);
@@ -530,6 +536,7 @@ public final class HogQlCompiler
                     tablePlaceholder.span(),
                     "HogQL parameter placeholders are not supported in table positions: " + tablePlaceholder.placeholder().name());
             case HogQlQuery.TableReference _ -> {}
+            case UnnestRelation _ -> {}
             case ValuesRelation _ -> {}
         }
     }
@@ -558,6 +565,7 @@ public final class HogQlCompiler
             case SubqueryRelation subquery -> collectPlaceholders(subquery.query(), placeholders);
             case TablePlaceholder _ -> {}
             case HogQlQuery.TableReference _ -> {}
+            case UnnestRelation unnest -> unnest.expressions().forEach(expression -> collectPlaceholders(expression, placeholders));
             case ValuesRelation values -> values.rows().forEach(row -> row.forEach(expression -> collectPlaceholders(expression, placeholders)));
         }
     }

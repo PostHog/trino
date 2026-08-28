@@ -113,8 +113,40 @@ public class TestHogQlCompiler
                                             SELECT value IN (1, 2, 3)        | SELECT value IN (1, 2, 3)
                                             SELECT value IN (1)              | SELECT value IN (1)
                                             SELECT value NOT IN (1, 2, 3)    | SELECT value NOT IN (1, 2, 3)
+                                            SELECT value LIKE 'pro%'         | SELECT value LIKE 'pro%'
+                                            SELECT value NOT LIKE 'pro%'     | SELECT value NOT LIKE 'pro%'
+                                            SELECT value ILIKE 'Pro%'        | SELECT lower(value) LIKE lower('Pro%')
+                                            SELECT value NOT ILIKE 'Pro%'    | SELECT lower(value) NOT LIKE lower('Pro%')
+                                            SELECT 1.5                       | SELECT 1.5E0
+                                            SELECT .5                        | SELECT .5E0
+                                            SELECT 1.                        | SELECT 1E0
+                                            SELECT -1.5                      | SELECT -1.5E0
+                                            SELECT +1.5                      | SELECT +1.5E0
+                                            SELECT 1e3                       | SELECT 1E3
+                                            SELECT map(x -> x + 1, [1])      | SELECT map(x -> x + 1, ARRAY[1])
+                                            SELECT map((x, y) -> x + y, [1]) | SELECT map((x, y) -> x + y, ARRAY[1])
+                                            SELECT map(lambda x: x + 1, [1]) | SELECT map(x -> x + 1, ARRAY[1])
                                             """)
     public void testLowersCollectionAndPredicateExpressions(String hogql, String trinoSql)
+    {
+        assertThat(compiler.compile(hogql)).isEqualTo(sqlParser.createStatement(trinoSql));
+    }
+
+    @Test
+    public void testLowersConcatenationOperator()
+    {
+        assertThat(compiler.compile("SELECT first || second"))
+                .isEqualTo(sqlParser.createStatement("SELECT first || second"));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+                                            SELECT item FROM events ARRAY JOIN attributes AS item                  | SELECT item FROM events CROSS JOIN UNNEST(attributes) AS __hogql_array_join(item)
+                                            SELECT item FROM events LEFT ARRAY JOIN attributes AS item             | SELECT item FROM events LEFT JOIN UNNEST(attributes) AS __hogql_array_join(item) ON TRUE
+                                            SELECT item, key FROM events ARRAY JOIN attributes AS item, keys AS key | SELECT item, key FROM events CROSS JOIN UNNEST(attributes, keys) AS __hogql_array_join(item, key)
+                                            SELECT item ARRAY JOIN [1] AS item                                      | SELECT item FROM UNNEST(ARRAY[1]) AS __hogql_array_join(item)
+                                            """)
+    public void testLowersArrayJoin(String hogql, String trinoSql)
     {
         assertThat(compiler.compile(hogql)).isEqualTo(sqlParser.createStatement(trinoSql));
     }

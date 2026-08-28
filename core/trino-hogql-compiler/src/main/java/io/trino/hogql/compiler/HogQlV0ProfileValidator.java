@@ -36,6 +36,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
+import io.trino.hogql.parser.tree.HogQlQuery.LambdaExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
 import io.trino.hogql.parser.tree.HogQlQuery.Projection;
@@ -51,6 +52,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.TablePlaceholder;
 import io.trino.hogql.parser.tree.HogQlQuery.TableReference;
 import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.UnnestRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.ValuesRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.Window;
 import io.trino.hogql.parser.tree.HogQlQuery.WindowReference;
@@ -117,6 +119,7 @@ final class HogQlV0ProfileValidator
             case HogQlQuery.PivotRelation pivot -> throw unsupported(pivot.span(), "PIVOT is outside the HogQL v0 profile");
             case SubqueryRelation subquery -> validate(subquery.query(), snapshot);
             case TableReference table -> validateTable(table, snapshot);
+            case UnnestRelation unnest -> unnest.expressions().forEach(expression -> validate(expression, snapshot));
             case ValuesRelation values -> values.rows().forEach(row -> row.forEach(expression -> validate(expression, snapshot)));
         }
     }
@@ -185,6 +188,7 @@ final class HogQlV0ProfileValidator
             }
             case IntervalExpression interval -> validate(interval.value(), snapshot);
             case IsNullExpression isNull -> validate(isNull.value(), snapshot);
+            case LambdaExpression lambda -> validate(lambda.body(), snapshot);
             case MemberAccessExpression memberAccess -> validate(memberAccess.base(), snapshot);
             case ScalarSubqueryExpression subquery -> validate(subquery.query(), snapshot);
             case SubscriptExpression subscript -> {
