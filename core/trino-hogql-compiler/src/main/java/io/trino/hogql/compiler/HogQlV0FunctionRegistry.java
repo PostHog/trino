@@ -153,6 +153,7 @@ final class HogQlV0FunctionRegistry
             scalar("toLastDayOfMonth", "last_day_of_month", signature(1)),
             rewrite("map", FunctionRewrite.MAP_CONSTRUCTOR, "map(any,any)", signature(0), variadicSignature(2)),
             scalar("dateDiff", "date_diff", signature(3)),
+            scalar("date_diff", "date_diff", signature(3)),
             scalar("dateTrunc", "date_trunc", signature(2)),
             rewrite("arraySort", FunctionRewrite.ARRAY_SORT, "array(any)", signature(1), signature(2)),
             scalar("arrayMin", "array_min", signature(1)),

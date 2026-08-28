@@ -138,6 +138,7 @@ import static io.trino.hogql.parser.tree.HogQlQuery.UnaryOperator.NOT;
 import static io.trino.hogql.parser.tree.HogQlQuery.UnaryOperator.POSITIVE;
 import static java.lang.Character.digit;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.joining;
 
 public final class HogQlParser
 {
@@ -1181,6 +1182,9 @@ public final class HogQlParser
                 List<Expression> values = array.columnExprList() == null ? List.of() : buildExpressions(array.columnExprList());
                 return new ArrayExpression(values, sourceSpan(array));
             }
+            if (context instanceof HogQLParser.ColumnExprTemplateStringContext template) {
+                return buildTemplateString(template.templateString());
+            }
             if (context instanceof HogQLParser.ColumnExprTupleContext tuple) {
                 return new TupleExpression(buildExpressions(tuple.columnExprList()), sourceSpan(tuple));
             }
@@ -1368,6 +1372,46 @@ public final class HogQlParser
                         sourceSpan(lambda));
             }
             throw unsupported(context, "expression " + context.getClass().getSimpleName());
+        }
+
+        private Expression buildTemplateString(HogQLParser.TemplateStringContext context)
+        {
+            List<Expression> parts = new ArrayList<>();
+            boolean interpolated = false;
+            for (HogQLParser.StringContentsContext contents : context.stringContents()) {
+                if (contents.STRING_TEXT() != null) {
+                    Token token = contents.STRING_TEXT().getSymbol();
+                    parts.add(new Literal(STRING, decodeQuoted("'" + token.getText() + "'"), sourceSpan(token, token)));
+                }
+                else {
+                    interpolated = true;
+                    Expression value = buildExpression(contents.columnExpr());
+                    parts.add(new FunctionCall(
+                            new Identifier("toString", false, value.span()),
+                            List.of(value),
+                            false,
+                            List.of(),
+                            Optional.empty(),
+                            value.span()));
+                }
+            }
+            if (!interpolated) {
+                String value = parts.stream()
+                        .map(Literal.class::cast)
+                        .map(Literal::value)
+                        .collect(joining());
+                return new Literal(STRING, value, sourceSpan(context));
+            }
+            if (parts.size() == 1) {
+                return parts.getFirst();
+            }
+            return new FunctionCall(
+                    new Identifier("concat", false, sourceSpan(context)),
+                    parts,
+                    false,
+                    List.of(),
+                    Optional.empty(),
+                    sourceSpan(context));
         }
 
         private IntervalExpression buildStringInterval(HogQLParser.ColumnExprIntervalStringContext context)
