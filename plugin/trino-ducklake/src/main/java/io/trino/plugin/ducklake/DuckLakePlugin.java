@@ -14,8 +14,12 @@
 package io.trino.plugin.ducklake;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
+import io.trino.plugin.ducklake.function.CityHash64Function;
 import io.trino.spi.Plugin;
 import io.trino.spi.connector.ConnectorFactory;
+
+import java.util.Set;
 
 public class DuckLakePlugin
         implements Plugin
@@ -24,5 +28,11 @@ public class DuckLakePlugin
     public Iterable<ConnectorFactory> getConnectorFactories()
     {
         return ImmutableList.of(new DuckLakeConnectorFactory());
+    }
+
+    @Override
+    public Set<Class<?>> getFunctions()
+    {
+        return ImmutableSet.of(CityHash64Function.class);
     }
 }
