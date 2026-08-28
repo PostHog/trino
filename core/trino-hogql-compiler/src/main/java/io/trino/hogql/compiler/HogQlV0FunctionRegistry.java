@@ -67,6 +67,7 @@ final class HogQlV0FunctionRegistry
             rewrite("multiply", FunctionRewrite.MULTIPLY, "any", signature(2)),
             rewrite("multiplyDecimal", FunctionRewrite.MULTIPLY_DECIMAL, "decimal", signature(2)),
             rewrite("divideDecimal", FunctionRewrite.DIVIDE_DECIMAL, "decimal", signature(2)),
+            rewrite("divide", FunctionRewrite.DIVIDE_DECIMAL, "any", signature(2)),
             rewrite("in", FunctionRewrite.IN_ARRAY, "boolean", signature(2)),
             rewrite("tuple", FunctionRewrite.TUPLE, "row", variadicSignature(1)),
             rewrite("subtractMonths", FunctionRewrite.SUBTRACT_MONTHS, "any", signature(2)),
