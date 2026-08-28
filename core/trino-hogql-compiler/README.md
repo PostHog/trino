@@ -52,6 +52,8 @@ The MVP lowers a frozen, fail-closed subset directly to stock Trino AST nodes:
 - parameters, CTEs, subqueries, joins, set operations, arrays, maps, rows,
   intervals, grouping, ordering, limits, and windows that have exact stock
   Trino representations;
+- `LIMIT BY` over explicit projected outputs, lowered through a partitioned
+  `row_number` query while preserving global ordering and pagination;
 - numeric/conditional/string functions (`abs`, `coalesce`, `if`, `lower`, `upper`, `length`,
   `concat`, `replace`), collection functions (`map`, `arraySort`,
   `arrayDistinct`, `arrayFlatten`, `arrayStringConcat`), date functions

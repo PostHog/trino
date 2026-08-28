@@ -99,6 +99,11 @@ public record HogQlQuery(
         return selectBody().having();
     }
 
+    public Optional<LimitBy> limitBy()
+    {
+        return selectBody().limitBy();
+    }
+
     public List<WindowDefinition> windows()
     {
         return selectBody().windows();
@@ -126,6 +131,7 @@ public record HogQlQuery(
             List<Expression> groupBy,
             Optional<Expression> having,
             List<WindowDefinition> windows,
+            Optional<LimitBy> limitBy,
             SourceSpan span)
             implements QueryBody
     {
@@ -137,7 +143,21 @@ public record HogQlQuery(
             groupBy = List.copyOf(requireNonNull(groupBy, "groupBy is null"));
             having = requireNonNull(having, "having is null");
             windows = List.copyOf(requireNonNull(windows, "windows is null"));
+            limitBy = requireNonNull(limitBy, "limitBy is null");
             span = requireNonNull(span, "span is null");
+        }
+
+        public SelectQueryBody(
+                boolean distinct,
+                List<Projection> projections,
+                Optional<Relation> from,
+                Optional<Expression> where,
+                List<Expression> groupBy,
+                Optional<Expression> having,
+                List<WindowDefinition> windows,
+                SourceSpan span)
+        {
+            this(distinct, projections, from, where, groupBy, having, windows, Optional.empty(), span);
         }
 
         public SelectQueryBody(
@@ -149,7 +169,21 @@ public record HogQlQuery(
                 Optional<Expression> having,
                 SourceSpan span)
         {
-            this(distinct, projections, from, where, groupBy, having, List.of(), span);
+            this(distinct, projections, from, where, groupBy, having, List.of(), Optional.empty(), span);
+        }
+    }
+
+    public record LimitBy(Expression limit, Optional<Expression> offset, List<Expression> partitionBy, SourceSpan span)
+    {
+        public LimitBy
+        {
+            limit = requireNonNull(limit, "limit is null");
+            offset = requireNonNull(offset, "offset is null");
+            partitionBy = List.copyOf(requireNonNull(partitionBy, "partitionBy is null"));
+            if (partitionBy.isEmpty()) {
+                throw new IllegalArgumentException("partitionBy is empty");
+            }
+            span = requireNonNull(span, "span is null");
         }
     }
 

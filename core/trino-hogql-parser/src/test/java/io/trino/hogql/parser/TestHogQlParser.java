@@ -249,6 +249,25 @@ public class TestHogQlParser
     }
 
     @Test
+    public void testBuildsLimitByAst()
+    {
+        HogQlQuery query = parser.parseStatement("SELECT event FROM events LIMIT 2, 3 BY event, properties.plan LIMIT 10");
+
+        assertThat(query.limitBy()).get().satisfies(limitBy -> {
+            assertThat(limitBy.limit()).extracting(HogQlQuery.Literal.class::cast).extracting(HogQlQuery.Literal::value).isEqualTo("3");
+            assertThat(limitBy.offset()).get().extracting(HogQlQuery.Literal.class::cast).extracting(HogQlQuery.Literal::value).isEqualTo("2");
+            assertThat(limitBy.partitionBy()).hasSize(2);
+        });
+        assertThat(query.limit()).get().extracting(HogQlQuery.Literal.class::cast).extracting(HogQlQuery.Literal::value).isEqualTo("10");
+
+        HogQlQuery offsetQuery = parser.parseStatement("SELECT event FROM events LIMIT 3 OFFSET 2 BY event");
+        assertThat(offsetQuery.limitBy()).get().satisfies(limitBy -> {
+            assertThat(limitBy.limit()).extracting(HogQlQuery.Literal.class::cast).extracting(HogQlQuery.Literal::value).isEqualTo("3");
+            assertThat(limitBy.offset()).get().extracting(HogQlQuery.Literal.class::cast).extracting(HogQlQuery.Literal::value).isEqualTo("2");
+        });
+    }
+
+    @Test
     public void testBuildsCollectionAccessWithSourceSpans()
     {
         HogQlQuery query = parser.parseStatement("SELECT [10,{element}][{index}], (1, 'two').2, {payload}.plan");

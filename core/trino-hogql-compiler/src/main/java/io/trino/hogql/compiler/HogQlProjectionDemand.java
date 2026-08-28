@@ -86,6 +86,11 @@ final class HogQlProjectionDemand
             select.groupBy().forEach(expression -> collect(expression, builder));
             select.having().ifPresent(expression -> collect(expression, builder));
             select.windows().forEach(window -> collect(window.specification(), builder));
+            select.limitBy().ifPresent(limitBy -> {
+                collect(limitBy.limit(), builder);
+                limitBy.offset().ifPresent(expression -> collect(expression, builder));
+                limitBy.partitionBy().forEach(expression -> collect(expression, builder));
+            });
             select.from().ifPresent(relation -> collectJoinCriteria(relation, builder));
         }
         query.orderBy().forEach(sortItem -> collect(sortItem.expression(), builder));
@@ -143,6 +148,11 @@ final class HogQlProjectionDemand
             select.groupBy().forEach(expression -> collect(expression, builder));
             select.having().ifPresent(expression -> collect(expression, builder));
             select.windows().forEach(window -> collect(window.specification(), builder));
+            select.limitBy().ifPresent(limitBy -> {
+                collect(limitBy.limit(), builder);
+                limitBy.offset().ifPresent(expression -> collect(expression, builder));
+                limitBy.partitionBy().forEach(expression -> collect(expression, builder));
+            });
             select.from().ifPresent(relation -> collectJoinCriteria(relation, builder));
         }
         query.orderBy().forEach(sortItem -> collect(sortItem.expression(), builder));

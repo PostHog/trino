@@ -147,6 +147,7 @@ final class TrinoAstFactory
 
     private static Query createQuery(HogQlQuery query, Map<SourceSpan, Integer> parameterIds)
     {
+        query = HogQlLimitByRewriter.rewrite(query);
         NodeLocation location = location(query.span());
         QueryBody queryBody = createQueryBody(query, parameterIds);
         boolean setOperation = query.body() instanceof SetOperation;

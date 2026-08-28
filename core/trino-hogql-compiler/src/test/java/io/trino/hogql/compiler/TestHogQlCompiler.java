@@ -103,6 +103,28 @@ public class TestHogQlCompiler
     }
 
     @Test
+    public void testLowersLimitByToPartitionedRowNumber()
+    {
+        Statement statement = compiler.compile(
+                "SELECT event, created_at AS ts FROM events ORDER BY ts DESC LIMIT 1, 2 BY event LIMIT 10");
+
+        assertThat(statement).isEqualTo(sqlParser.createStatement(
+                "SELECT __hogql_limit_by_ranked.__hogql_limit_by_column_0 AS event, " +
+                        "__hogql_limit_by_ranked.__hogql_limit_by_column_1 AS ts " +
+                        "FROM (" +
+                        "SELECT __hogql_limit_by_base.__hogql_limit_by_column_0 AS __hogql_limit_by_column_0, " +
+                        "__hogql_limit_by_base.__hogql_limit_by_column_1 AS __hogql_limit_by_column_1, " +
+                        "row_number() OVER (PARTITION BY __hogql_limit_by_base.__hogql_limit_by_column_0 " +
+                        "ORDER BY __hogql_limit_by_base.__hogql_limit_by_column_1 DESC) AS __hogql_limit_by_row_number " +
+                        "FROM (SELECT event AS __hogql_limit_by_column_0, created_at AS __hogql_limit_by_column_1 FROM events) " +
+                        "AS __hogql_limit_by_base" +
+                        ") AS __hogql_limit_by_ranked " +
+                        "WHERE __hogql_limit_by_ranked.__hogql_limit_by_row_number > 1 " +
+                        "AND __hogql_limit_by_ranked.__hogql_limit_by_row_number <= 1 + 2 " +
+                        "ORDER BY __hogql_limit_by_ranked.__hogql_limit_by_column_1 DESC LIMIT 10"));
+    }
+
+    @Test
     public void testWrapsSetOperandsWithLocalClauses()
     {
         Statement statement = compiler.compile("SELECT 1 ORDER BY 1 LIMIT 1 UNION ALL SELECT 2");

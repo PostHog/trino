@@ -239,6 +239,11 @@ public final class HogQlCompiler
                 select.groupBy().forEach(expression -> collectPlaceholders(expression, placeholders));
                 select.having().ifPresent(expression -> collectPlaceholders(expression, placeholders));
                 select.windows().forEach(window -> collectPlaceholders(window.specification(), placeholders));
+                select.limitBy().ifPresent(limitBy -> {
+                    collectPlaceholders(limitBy.limit(), placeholders);
+                    limitBy.offset().ifPresent(expression -> collectPlaceholders(expression, placeholders));
+                    limitBy.partitionBy().forEach(expression -> collectPlaceholders(expression, placeholders));
+                });
             }
             case SetOperation setOperation -> {
                 collectPlaceholders(setOperation.left(), placeholders);
@@ -337,7 +342,11 @@ public final class HogQlCompiler
                             select.where().map(HogQlCompiler::containsFunctionCall).orElse(false) ||
                             select.groupBy().stream().anyMatch(HogQlCompiler::containsFunctionCall) ||
                             select.having().map(HogQlCompiler::containsFunctionCall).orElse(false) ||
-                            select.windows().stream().map(WindowDefinition::specification).anyMatch(HogQlCompiler::containsFunctionCall);
+                            select.windows().stream().map(WindowDefinition::specification).anyMatch(HogQlCompiler::containsFunctionCall) ||
+                            select.limitBy().map(limitBy ->
+                                    containsFunctionCall(limitBy.limit()) ||
+                                            containsFunctionCall(limitBy.offset()) ||
+                                            limitBy.partitionBy().stream().anyMatch(HogQlCompiler::containsFunctionCall)).orElse(false);
                     case SetOperation set -> containsFunctionCall(set.left()) || containsFunctionCall(set.right());
                 } ||
                 query.orderBy().stream().anyMatch(sortItem -> containsFunctionCall(sortItem.expression())) ||

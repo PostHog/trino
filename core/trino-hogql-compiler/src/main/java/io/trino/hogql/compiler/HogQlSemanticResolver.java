@@ -76,6 +76,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinUsing;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.LambdaExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.LimitBy;
 import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.PivotAggregation;
 import io.trino.hogql.parser.tree.HogQlQuery.PivotRelation;
@@ -224,13 +225,16 @@ final class HogQlSemanticResolver
         if (bindings.isEmpty() && outerBindingScopes.isEmpty()) {
             return new HogQlQuery(
                     commonTables,
-                    select.distinct(),
-                    select.projections(),
-                    relation.map(ResolvedRelation::relation),
-                    select.where(),
-                    select.groupBy(),
-                    select.having(),
-                    select.windows(),
+                    new SelectQueryBody(
+                            select.distinct(),
+                            select.projections(),
+                            relation.map(ResolvedRelation::relation),
+                            select.where(),
+                            select.groupBy(),
+                            select.having(),
+                            select.windows(),
+                            select.limitBy(),
+                            select.span()),
                     query.orderBy(),
                     query.limit(),
                     query.offset(),
@@ -677,18 +681,26 @@ final class HogQlSemanticResolver
         List<Expression> groupBy = query.groupBy().stream().map(this::resolveExpression).toList();
         Optional<Expression> having = query.having().map(this::resolveExpression);
         List<WindowDefinition> windows = query.windows().stream().map(this::resolveWindowDefinition).toList();
+        Optional<LimitBy> limitBy = query.limitBy().map(clause -> new LimitBy(
+                resolveExpression(clause.limit()),
+                clause.offset().map(this::resolveExpression),
+                clause.partitionBy().stream().map(this::resolveExpression).toList(),
+                clause.span()));
         List<SortItem> orderBy = resolveSortItems(query.orderBy());
         Optional<Expression> limit = query.limit().map(this::resolveExpression);
         Optional<Expression> offset = query.offset().map(this::resolveExpression);
         return new HogQlQuery(
                 commonTables,
-                query.distinct(),
-                projections,
-                expandedRelation,
-                where,
-                groupBy,
-                having,
-                windows,
+                new SelectQueryBody(
+                        query.distinct(),
+                        projections,
+                        expandedRelation,
+                        where,
+                        groupBy,
+                        having,
+                        windows,
+                        limitBy,
+                        query.body().span()),
                 orderBy,
                 limit,
                 offset,

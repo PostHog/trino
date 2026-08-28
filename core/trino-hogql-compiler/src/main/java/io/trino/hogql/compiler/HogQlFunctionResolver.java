@@ -47,6 +47,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinUsing;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.LambdaExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.LimitBy;
 import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.PivotAggregation;
 import io.trino.hogql.parser.tree.HogQlQuery.PivotRelation;
@@ -165,6 +166,11 @@ final class HogQlFunctionResolver
             List<Expression> groupBy = select.groupBy().stream().map(this::resolveExpression).toList();
             Optional<Expression> having = select.having().map(this::resolveExpression);
             List<WindowDefinition> windows = select.windows().stream().map(this::resolveWindowDefinition).toList();
+            Optional<LimitBy> limitBy = select.limitBy().map(clause -> new LimitBy(
+                    resolveExpression(clause.limit()),
+                    clause.offset().map(this::resolveExpression),
+                    clause.partitionBy().stream().map(this::resolveExpression).toList(),
+                    clause.span()));
             List<SortItem> orderBy = resolveSortItems(query.orderBy());
             Optional<Expression> limit = query.limit().map(this::resolveExpression);
             Optional<Expression> offset = query.offset().map(this::resolveExpression);
@@ -175,7 +181,7 @@ final class HogQlFunctionResolver
             }
             return new HogQlQuery(
                     commonTables,
-                    new SelectQueryBody(select.distinct(), projections, from, where, groupBy, having, windows, select.span()),
+                    new SelectQueryBody(select.distinct(), projections, from, where, groupBy, having, windows, limitBy, select.span()),
                     orderBy,
                     limit,
                     offset,

@@ -49,6 +49,7 @@ import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinType;
 import io.trino.hogql.parser.tree.HogQlQuery.JoinUsing;
 import io.trino.hogql.parser.tree.HogQlQuery.LambdaExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.LimitBy;
 import io.trino.hogql.parser.tree.HogQlQuery.Literal;
 import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
 import io.trino.hogql.parser.tree.HogQlQuery.NullPlacement;
@@ -754,19 +755,23 @@ public final class HogQlParser
                         .map(this::buildExpression);
                 List<WindowDefinition> windows = buildWindowDefinitions(select.windowClause());
                 List<SortItem> orderBy = buildOrderBy(selectedQuery.orderBy() != null ? selectedQuery.orderBy() : select.orderByClause());
+                Optional<LimitBy> limitBy = Optional.ofNullable(select.limitByClause()).map(this::buildLimitBy);
                 Pagination pagination = mergePagination(
                         buildPagination(select.limitAndOffsetClause(), select.offsetOnlyClause()),
                         selectedQuery.pagination() == null ? new Pagination(Optional.empty(), Optional.empty()) : buildPagination(selectedQuery.pagination()),
                         select);
                 return new HogQlQuery(
                         with,
-                        select.DISTINCT() != null,
-                        projections,
-                        from,
-                        where,
-                        groupBy,
-                        having,
-                        windows,
+                        new HogQlQuery.SelectQueryBody(
+                                select.DISTINCT() != null,
+                                projections,
+                                from,
+                                where,
+                                groupBy,
+                                having,
+                                windows,
+                                limitBy,
+                                sourceSpan(select)),
                         orderBy,
                         pagination.limit(),
                         pagination.offset(),
@@ -846,7 +851,6 @@ public final class HogQlParser
             clauses.add(context.prewhereClause());
             clauses.addAll(context.sampleClause());
             clauses.add(context.qualifyClause());
-            clauses.add(context.limitByClause());
             clauses.add(context.settingsClause());
             Optional<ParserRuleContext> firstClause = clauses.stream()
                     .filter(requireNonNullClause -> requireNonNullClause != null)
@@ -854,6 +858,22 @@ public final class HogQlParser
             if (firstClause.isPresent()) {
                 throw unsupported(firstClause.orElseThrow(), "query clause");
             }
+        }
+
+        private LimitBy buildLimitBy(HogQLParser.LimitByClauseContext context)
+        {
+            List<HogQLParser.ColumnExprContext> limitExpressions = context.limitExpr().columnExpr();
+            Expression limit = buildPaginationExpression(
+                    limitExpressions.size() == 2 && context.limitExpr().COMMA() != null
+                            ? limitExpressions.getLast()
+                            : limitExpressions.getFirst());
+            Optional<Expression> offset = limitExpressions.size() == 2
+                    ? Optional.of(buildPaginationExpression(
+                            context.limitExpr().COMMA() != null
+                                    ? limitExpressions.getFirst()
+                                    : limitExpressions.getLast()))
+                    : Optional.empty();
+            return new LimitBy(limit, offset, buildExpressions(context.columnExprList()), sourceSpan(context));
         }
 
         private Relation buildArrayJoin(Optional<Relation> from, HogQLParser.ArrayJoinClauseContext context)

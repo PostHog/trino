@@ -83,6 +83,11 @@ final class HogQlV0ProfileValidator
                 select.groupBy().forEach(expression -> validate(expression, snapshot));
                 select.having().ifPresent(expression -> validate(expression, snapshot));
                 select.windows().forEach(window -> validate(window.specification(), snapshot));
+                select.limitBy().ifPresent(limitBy -> {
+                    validate(limitBy.limit(), snapshot);
+                    limitBy.offset().ifPresent(expression -> validate(expression, snapshot));
+                    limitBy.partitionBy().forEach(expression -> validate(expression, snapshot));
+                });
             }
             case SetOperation setOperation -> {
                 validate(setOperation.left(), snapshot);
