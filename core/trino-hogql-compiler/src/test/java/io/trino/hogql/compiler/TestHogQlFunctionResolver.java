@@ -143,6 +143,27 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testCompilerResolvesExponentialAndWeekStartModes()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT exp(value), toStartOfWeek(timestamp, 1), toStartOfWeek(timestamp, 3) FROM metrics"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT exp(value), date_trunc('week', timestamp), date_trunc('week', timestamp) FROM metrics"));
+    }
+
+    @Test
+    public void testCompilerRejectsUnsupportedWeekStartMode()
+    {
+        TrinoException exception = catchThrowableOfType(
+                TrinoException.class,
+                () -> new HogQlCompiler().compile(envelope("SELECT toStartOfWeek(timestamp, 2) FROM metrics")));
+
+        assertThat(exception.getErrorCode()).isEqualTo(HOGQL_UNSUPPORTED_FEATURE.toErrorCode());
+        assertThat(exception).hasMessageContaining("mode must be 0, 1, or 3");
+    }
+
+    @Test
     public void testCompilerRejectsUnknownFunctionsWithoutCatalogContext()
     {
         TrinoException exception = catchThrowableOfType(

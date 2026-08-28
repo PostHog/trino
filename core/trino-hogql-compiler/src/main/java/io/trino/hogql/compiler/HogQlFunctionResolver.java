@@ -461,7 +461,7 @@ final class HogQlFunctionResolver
                     List.of(arguments.getFirst(), new UnaryExpression(HogQlQuery.UnaryOperator.NEGATE, arguments.get(1), span)),
                     span);
             case INTERVAL_MONTH -> new IntervalExpression(arguments.getFirst(), HogQlQuery.IntervalUnit.MONTH, span);
-            case START_WEEK -> startOfWeek(arguments.getFirst(), span);
+            case START_WEEK -> startOfWeek(function, arguments);
             case SPLIT_STRING -> call("split", List.of(arguments.get(1), arguments.getFirst()), span);
             case CAST_BIGINT -> cast(arguments.getFirst(), "bigint", span);
             case CAST_TIMESTAMP -> arguments.size() == 1
@@ -1158,8 +1158,24 @@ final class HogQlFunctionResolver
                 span);
     }
 
-    private static Expression startOfWeek(Expression value, HogQlQuery.SourceSpan span)
+    private static Expression startOfWeek(FunctionCall function, List<Expression> arguments)
     {
+        HogQlQuery.SourceSpan span = function.span();
+        String mode = "0";
+        if (arguments.size() == 2) {
+            Expression modeExpression = arguments.get(1);
+            if (!(modeExpression instanceof Literal literal) || literal.kind() != HogQlQuery.LiteralKind.INTEGER) {
+                throw unsupportedError(function, "HogQL toStartOfWeek mode must be an integer literal");
+            }
+            mode = literal.value();
+        }
+        if (mode.equals("1") || mode.equals("3")) {
+            return dateTrunc("week", arguments.getFirst(), span);
+        }
+        if (!mode.equals("0")) {
+            throw unsupportedError(function, "HogQL toStartOfWeek mode must be 0, 1, or 3");
+        }
+        Expression value = arguments.getFirst();
         Expression shifted = call("date_add", List.of(
                 new Literal(HogQlQuery.LiteralKind.STRING, "day", span),
                 integerLiteral("1", span),

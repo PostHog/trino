@@ -302,12 +302,14 @@ public record HogQlSemanticCatalogSnapshot(
         return switch (rewrite) {
             case ARRAY_ENUMERATE, ARRAY_SUM, ASSUME_NOT_NULL, CAST_BIGINT, CAST_DATE, CAST_DOUBLE, CAST_SMALLINT,
                     CAST_UUID, CAST_VARCHAR, EMPTY, FLOAT_OR_ZERO, INTERVAL_MONTH, INT_OR_ZERO,
-                    MD5, NOT_EMPTY, START_WEEK, TO_JSON_STRING,
+                    MD5, NOT_EMPTY, TO_JSON_STRING,
                     DATE_TRUNC_DAY, DATE_TRUNC_HOUR, DATE_TRUNC_MONTH, DATE_TRUNC_WEEK,
                     GROUP_UNIQ_ARRAY, INTERVAL_DAY, IS_NOT_NULL, IS_NULL, COUNT_IF,
                     NOT, PARSE_TIMESTAMP, TO_UNIX_TIMESTAMP,
                     COUNT_DISTINCT, UNIQ_EXACT ->
                 !signature.variadic() && signature.argumentTypes().size() == 1;
+            case START_WEEK ->
+                !signature.variadic() && (signature.argumentTypes().size() == 1 || signature.argumentTypes().size() == 2);
             case ADD_DAYS, ADD_MONTHS, ANY_IF, ARRAY_ELEMENT, ARRAY_FILTER, ARRAY_FIRST, ARRAY_MAP,
                     AVG_IF, DATE_PART, DECIMAL_CAST, DIVIDE_DECIMAL, EQUALS, FLOAT_OR_DEFAULT, GREATER, GREATER_OR_EQUAL, HAS,
                     GROUP_UNIQ_ARRAY_IF, JSON_EXTRACT_TYPED, JSON_HAS, JSON_KEYS_AND_VALUES, JSON_VALUE,
