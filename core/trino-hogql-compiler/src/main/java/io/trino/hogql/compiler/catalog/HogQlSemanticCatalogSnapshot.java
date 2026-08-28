@@ -300,15 +300,15 @@ public record HogQlSemanticCatalogSnapshot(
     private static boolean validRewriteSignature(FunctionRewrite rewrite, FunctionSignature signature)
     {
         return switch (rewrite) {
-            case CAST_BIGINT, CAST_DATE, CAST_DOUBLE, CAST_VARCHAR,
+            case CAST_BIGINT, CAST_DATE, CAST_DOUBLE, CAST_VARCHAR, FLOAT_OR_ZERO,
                     DATE_TRUNC_DAY, DATE_TRUNC_HOUR, DATE_TRUNC_MONTH, DATE_TRUNC_WEEK,
                     GROUP_UNIQ_ARRAY, INTERVAL_DAY, IS_NOT_NULL, IS_NULL, COUNT_IF,
                     JSON_KEYS_AND_VALUES_RAW, NOT, PARSE_TIMESTAMP, TO_UNIX_TIMESTAMP,
                     COUNT_DISTINCT, UNIQ_EXACT ->
                 !signature.variadic() && signature.argumentTypes().size() == 1;
-            case ADD_DAYS, ADD_MONTHS, AND, ANY_IF, AVG_IF, GREATER, GROUP_ARRAY_IF,
+            case ADD_DAYS, ADD_MONTHS, AND, ANY_IF, AVG_IF, DECIMAL_CAST, FLOAT_OR_DEFAULT, GREATER, GROUP_ARRAY_IF,
                     GROUP_UNIQ_ARRAY_IF, JSON_EXTRACT_TYPED, JSON_KEYS_AND_VALUES,
-                    LIKE, MAX_IF, MIN_IF, REGEX_EXTRACT, SUM_IF, UNIQ_EXACT_IF, UNIQ_IF ->
+                    INT_DIV, LIKE, MAX_IF, MIN_IF, REGEX_EXTRACT, SUM_IF, UNIQ_EXACT_IF, UNIQ_IF ->
                 !signature.variadic() && signature.argumentTypes().size() == 2;
             case ARG_MAX_IF, REGEX_REPLACE_ALL -> !signature.variadic() && signature.argumentTypes().size() == 3;
             case CAST_TIMESTAMP -> !signature.variadic() &&
@@ -1324,11 +1324,15 @@ public record HogQlSemanticCatalogSnapshot(
         DATE_TRUNC_WEEK,
         COUNT_IF,
         COUNT_DISTINCT,
+        DECIMAL_CAST,
+        FLOAT_OR_DEFAULT,
+        FLOAT_OR_ZERO,
         GROUP_UNIQ_ARRAY,
         GREATER,
         GROUP_ARRAY_IF,
         GROUP_UNIQ_ARRAY_IF,
         INTERVAL_DAY,
+        INT_DIV,
         IS_NULL,
         IS_NOT_NULL,
         JSON_EXTRACT_FLOAT,

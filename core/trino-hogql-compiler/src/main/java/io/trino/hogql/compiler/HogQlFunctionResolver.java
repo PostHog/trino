@@ -370,6 +370,10 @@ final class HogQlFunctionResolver
             case IS_NOT_NULL -> new IsNullExpression(arguments.getFirst(), true, span, span);
             case CAST_DATE -> cast(arguments.getFirst(), "date", span);
             case CAST_DOUBLE -> cast(arguments.getFirst(), "double", span);
+            case FLOAT_OR_ZERO -> coalesce(tryCast(arguments.getFirst(), "double", span), new Literal(HogQlQuery.LiteralKind.FLOAT, "0.0", span), span);
+            case FLOAT_OR_DEFAULT -> coalesce(tryCast(arguments.getFirst(), "double", span), cast(arguments.get(1), "double", span), span);
+            case DECIMAL_CAST -> tryCast(arguments.getFirst(), decimalType(function, arguments.get(1)), span);
+            case INT_DIV -> intDiv(arguments, span);
             case CAST_BIGINT -> cast(arguments.getFirst(), "bigint", span);
             case CAST_TIMESTAMP -> arguments.size() == 1
                     ? cast(arguments.getFirst(), "timestamp(0)", span)
@@ -643,6 +647,64 @@ final class HogQlFunctionResolver
     private static CastExpression cast(Expression value, String type, HogQlQuery.SourceSpan span)
     {
         return new CastExpression(value, new Identifier(type, false, span), false, span);
+    }
+
+    private static CastExpression tryCast(Expression value, String type, HogQlQuery.SourceSpan span)
+    {
+        return new CastExpression(value, new Identifier(type, false, span), true, span);
+    }
+
+    private static String decimalType(FunctionCall function, Expression scaleExpression)
+    {
+        if (!(scaleExpression instanceof Literal literal) || literal.kind() != HogQlQuery.LiteralKind.INTEGER) {
+            throw unsupportedError(function, "HogQL decimal scale must be an integer literal");
+        }
+        int scale;
+        try {
+            scale = Integer.parseInt(literal.value());
+        }
+        catch (NumberFormatException _) {
+            throw resolutionError(function, "HogQL decimal scale is outside the supported range");
+        }
+        if (scale < 0 || scale > 18) {
+            throw resolutionError(function, "HogQL Decimal64 scale must be between 0 and 18");
+        }
+        return "decimal(18," + scale + ")";
+    }
+
+    private static Expression intDiv(List<Expression> arguments, HogQlQuery.SourceSpan span)
+    {
+        Expression dividend = cast(arguments.getFirst(), "bigint", span);
+        Expression divisor = cast(arguments.get(1), "bigint", span);
+        Literal zero = new Literal(HogQlQuery.LiteralKind.INTEGER, "0", span);
+        Literal one = new Literal(HogQlQuery.LiteralKind.INTEGER, "1", span);
+        Expression hasRemainder = new BinaryExpression(
+                HogQlQuery.BinaryOperator.NOT_EQUAL,
+                new BinaryExpression(HogQlQuery.BinaryOperator.MODULO, dividend, divisor, span),
+                zero,
+                span);
+        Expression signsDiffer = new BinaryExpression(
+                HogQlQuery.BinaryOperator.OR,
+                new BinaryExpression(
+                        HogQlQuery.BinaryOperator.AND,
+                        new BinaryExpression(HogQlQuery.BinaryOperator.LESS_THAN, dividend, zero, span),
+                        new BinaryExpression(HogQlQuery.BinaryOperator.GREATER_THAN, divisor, zero, span),
+                        span),
+                new BinaryExpression(
+                        HogQlQuery.BinaryOperator.AND,
+                        new BinaryExpression(HogQlQuery.BinaryOperator.GREATER_THAN, dividend, zero, span),
+                        new BinaryExpression(HogQlQuery.BinaryOperator.LESS_THAN, divisor, zero, span),
+                        span),
+                span);
+        Expression adjustment = call(
+                "if",
+                List.of(new BinaryExpression(HogQlQuery.BinaryOperator.AND, hasRemainder, signsDiffer, span), one, zero),
+                span);
+        return new BinaryExpression(
+                HogQlQuery.BinaryOperator.SUBTRACT,
+                new BinaryExpression(HogQlQuery.BinaryOperator.DIVIDE, dividend, divisor, span),
+                adjustment,
+                span);
     }
 
     private static FunctionCall dateTrunc(String unit, Expression value, HogQlQuery.SourceSpan span)

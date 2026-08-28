@@ -74,7 +74,9 @@ best-effort timestamp parsing.
 Array-form membership and the nullish operator lower to stock `IN`, `IF`, and
 `COALESCE` nodes, including nullable empty-membership behavior.
 Function-form boolean/comparison operators and common string/math aliases
-lower to their equivalent stock operators and functions.
+lower to their equivalent stock operators and functions. Checked/defaulting
+float conversions, Decimal64 casts, and integer division lower to stock casts
+and arithmetic.
 Literal regex extraction preserves HogQL's capture-group and empty-default
 behavior; matching and replace-all lower to Trino regex functions.
 

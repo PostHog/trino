@@ -242,6 +242,29 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testCompilerLowersNumericConversions()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT toFloatOrZero(text), toFloatOrDefault(text, 1), toDecimal(text, 4), intDiv(total, 1000), intDiv(-5, 2) FROM records"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT coalesce(TRY_CAST(text AS double), 0E0), " +
+                        "coalesce(TRY_CAST(text AS double), CAST(1 AS double)), " +
+                        "TRY_CAST(text AS decimal(18, 4)), " +
+                        "CAST(total AS bigint) / CAST(1000 AS bigint) - if(CAST(total AS bigint) % CAST(1000 AS bigint) <> 0 AND " +
+                        "(CAST(total AS bigint) < 0 AND CAST(1000 AS bigint) > 0 OR CAST(total AS bigint) > 0 AND CAST(1000 AS bigint) < 0), 1, 0), " +
+                        "CAST(-5 AS bigint) / CAST(2 AS bigint) - if(CAST(-5 AS bigint) % CAST(2 AS bigint) <> 0 AND " +
+                        "(CAST(-5 AS bigint) < 0 AND CAST(2 AS bigint) > 0 OR CAST(-5 AS bigint) > 0 AND CAST(2 AS bigint) < 0), 1, 0) FROM records"));
+
+        TrinoException exception = catchThrowableOfType(
+                TrinoException.class,
+                () -> new HogQlCompiler().compile(envelope("SELECT toDecimal(value, scale)")));
+
+        assertThat(exception.getErrorCode()).isEqualTo(HOGQL_UNSUPPORTED_FEATURE.toErrorCode());
+        assertThat(exception).hasMessageContaining("decimal scale must be an integer literal");
+    }
+
+    @Test
     public void testCompilerEnforcesV0FunctionArities()
     {
         assertThat(new HogQlCompiler().compile(envelope("SELECT coalesce('value')")).statement())
