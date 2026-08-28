@@ -532,6 +532,7 @@ final class HogQlFunctionResolver
                     span,
                     span);
             case JSON_VALUE -> call("json_extract_scalar", arguments, span);
+            case SURVEY_RESPONSE -> surveyResponse(function, arguments);
             case MD5 -> call("md5", List.of(call("to_utf8", List.of(cast(arguments.getFirst(), "varchar", span)), span)), span);
             case MEDIAN_IF -> aggregate(
                     function,
@@ -719,6 +720,41 @@ final class HogQlFunctionResolver
             extracted = new CastExpression(extracted, new Identifier(type, false, span), true, span);
         }
         return coalesce(extracted, defaultValue, span);
+    }
+
+    private static Expression surveyResponse(FunctionCall function, List<Expression> arguments)
+    {
+        HogQlQuery.SourceSpan span = function.span();
+        int questionIndex = surveyQuestionIndex(function, arguments.getFirst());
+        if (!(arguments.get(1) instanceof Literal questionId) || questionId.kind() != HogQlQuery.LiteralKind.STRING || questionId.value().isEmpty()) {
+            throw unsupportedError(function, "HogQL getSurveyResponse question ID must be a non-empty string literal");
+        }
+        Expression properties = new ColumnReference(List.of(new Identifier("properties", false, span)), span);
+        Literal empty = new Literal(HogQlQuery.LiteralKind.STRING, "", span);
+        Expression idResponse = call(
+                "nullif",
+                List.of(jsonExtractScalar(function, List.of(properties, stringLiteral("$survey_response_" + questionId.value(), span)), "varchar", empty), empty),
+                span);
+        String indexKey = questionIndex == 0 ? "$survey_response" : "$survey_response_" + questionIndex;
+        Expression indexResponse = call(
+                "nullif",
+                List.of(jsonExtractScalar(function, List.of(properties, stringLiteral(indexKey, span)), "varchar", empty), empty),
+                span);
+        return call("coalesce", List.of(idResponse, indexResponse), span);
+    }
+
+    private static int surveyQuestionIndex(FunctionCall function, Expression expression)
+    {
+        if (!(expression instanceof Literal literal) ||
+                (literal.kind() != HogQlQuery.LiteralKind.INTEGER && literal.kind() != HogQlQuery.LiteralKind.STRING)) {
+            throw unsupportedError(function, "HogQL getSurveyResponse question index must be an integer literal");
+        }
+        try {
+            return Integer.parseInt(literal.value());
+        }
+        catch (NumberFormatException _) {
+            throw resolutionError(function, "HogQL getSurveyResponse question index is outside the supported range");
+        }
     }
 
     private static Expression jsonExtractTyped(FunctionCall function, List<Expression> arguments)
@@ -923,6 +959,11 @@ final class HogQlFunctionResolver
     private static Literal integerLiteral(String value, HogQlQuery.SourceSpan span)
     {
         return new Literal(HogQlQuery.LiteralKind.INTEGER, value, span);
+    }
+
+    private static Literal stringLiteral(String value, HogQlQuery.SourceSpan span)
+    {
+        return new Literal(HogQlQuery.LiteralKind.STRING, value, span);
     }
 
     private static Expression range(List<Expression> arguments, HogQlQuery.SourceSpan span)

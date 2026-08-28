@@ -312,7 +312,7 @@ public record HogQlSemanticCatalogSnapshot(
                     AVG_IF, DATE_PART, DECIMAL_CAST, DIVIDE_DECIMAL, EQUALS, FLOAT_OR_DEFAULT, GREATER, GROUP_ARRAY_IF, HAS,
                     GROUP_UNIQ_ARRAY_IF, JSON_EXTRACT_TYPED, JSON_HAS, JSON_KEYS_AND_VALUES, JSON_VALUE,
                     IN_ARRAY, INT_DIV, LIKE, MAX_IF, MIN_IF, MULTIPLY, MULTIPLY_DECIMAL,
-                    MEDIAN_IF, MINUS, NOT_EQUALS, REGEX_EXTRACT, REGEX_EXTRACT_ALL, SPLIT_CHAR, SPLIT_STRING,
+                    MEDIAN_IF, MINUS, NOT_EQUALS, REGEX_EXTRACT, REGEX_EXTRACT_ALL, SPLIT_CHAR, SPLIT_STRING, SURVEY_RESPONSE,
                     SUBTRACT_MONTHS, SUBTRACT_YEARS, SUM_IF,
                     TUPLE_ELEMENT, UNIQ_EXACT_IF, UNIQ_IF ->
                 !signature.variadic() && signature.argumentTypes().size() == 2;
@@ -1404,6 +1404,7 @@ public record HogQlSemanticCatalogSnapshot(
         SUBTRACT_MONTHS,
         SUBTRACT_YEARS,
         SUM_IF,
+        SURVEY_RESPONSE,
         TODAY,
         TO_JSON_STRING,
         TO_UNIX_TIMESTAMP,

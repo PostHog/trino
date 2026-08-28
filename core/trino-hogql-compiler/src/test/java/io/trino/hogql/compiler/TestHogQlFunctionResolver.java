@@ -363,6 +363,29 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testCompilerLowersStaticSurveyResponse()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT getSurveyResponse(0, 'question-id'), getSurveyResponse(2, 'another-id') FROM events"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT coalesce(" +
+                        "nullif(coalesce(json_extract_scalar(properties, '$[\"$survey_response_question-id\"]'), ''), ''), " +
+                        "nullif(coalesce(json_extract_scalar(properties, '$[\"$survey_response\"]'), ''), '')), " +
+                        "coalesce(" +
+                        "nullif(coalesce(json_extract_scalar(properties, '$[\"$survey_response_another-id\"]'), ''), ''), " +
+                        "nullif(coalesce(json_extract_scalar(properties, '$[\"$survey_response_2\"]'), ''), '')) " +
+                        "FROM events"));
+
+        TrinoException exception = catchThrowableOfType(
+                TrinoException.class,
+                () -> new HogQlCompiler().compile(envelope("SELECT getSurveyResponse(question_index, 'question-id') FROM events")));
+
+        assertThat(exception.getErrorCode()).isEqualTo(HOGQL_UNSUPPORTED_FEATURE.toErrorCode());
+        assertThat(exception).hasMessageContaining("question index must be an integer literal");
+    }
+
+    @Test
     public void testCompilerLowersExpressionAndDateAliases()
     {
         HogQlCompilationResult result = new HogQlCompiler().compile(envelope(

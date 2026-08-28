@@ -81,6 +81,7 @@ final class HogQlV0FunctionRegistry
             rewrite("JSONHas", FunctionRewrite.JSON_HAS, "boolean", signature(2)),
             rewrite("JSONExtractKeys", FunctionRewrite.JSON_EXTRACT_KEYS, "array(varchar)", signature(1), variadicSignature(2)),
             rewrite("JSON_VALUE", FunctionRewrite.JSON_VALUE, "varchar", signature(2)),
+            rewrite("getSurveyResponse", FunctionRewrite.SURVEY_RESPONSE, "varchar", signature(2)),
             rewrite("md5", FunctionRewrite.MD5, "varbinary", signature(1)),
             rewrite("date_part", FunctionRewrite.DATE_PART, "bigint", signature(2)),
             rewrite("minus", FunctionRewrite.MINUS, "any", signature(2)),

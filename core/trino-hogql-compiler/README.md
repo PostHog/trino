@@ -100,6 +100,8 @@ Simple floor, calendar-part, map construction, and null-predicate aliases are
 mapped to their stock equivalents. Two-bound ranges, comparison and
 subtraction aliases, calendar month/year extraction, ceiling aliases, narrow
 integer casts, and JSON object-key extraction also lower to stock expressions.
+The static-ID, single-choice `getSurveyResponse(index, question_id)` macro
+prefers the modern response property and falls back to the legacy index key.
 
 Function aliases are resolved before Trino analysis. Unknown functions fail as
 HogQL resolution errors. Actions, cohorts, saved queries, explicit modifiers,
