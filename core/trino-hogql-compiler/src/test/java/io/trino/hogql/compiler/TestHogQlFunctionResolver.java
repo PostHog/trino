@@ -352,11 +352,11 @@ public class TestHogQlFunctionResolver
     public void testCompilerLowersFinalStockCompatibilityFunctions()
     {
         HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
-                "SELECT minus(total, discount), toMonth(timestamp), ceil(score), " +
+                "SELECT minus(total, discount), notEquals(status, 'ignored'), toMonth(timestamp), toYear(timestamp), ceil(score), _toInt16(value), " +
                         "JSONExtractKeys(payload), JSONExtractKeys(payload, 'nested') FROM records"));
 
         assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
-                "SELECT total - discount, month(timestamp), ceiling(score), " +
+                "SELECT total - discount, status <> 'ignored', month(timestamp), year(timestamp), ceiling(score), CAST(value AS smallint), " +
                         "map_keys(coalesce(TRY_CAST(json_parse(payload) AS map(varchar, json)), CAST(map(ARRAY[], ARRAY[]) AS map(varchar, json)))), " +
                         "map_keys(coalesce(TRY_CAST(json_extract(payload, '$[\"nested\"]') AS map(varchar, json)), CAST(map(ARRAY[], ARRAY[]) AS map(varchar, json)))) " +
                         "FROM records"));

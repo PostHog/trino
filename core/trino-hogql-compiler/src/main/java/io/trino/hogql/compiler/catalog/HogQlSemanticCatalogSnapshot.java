@@ -300,7 +300,7 @@ public record HogQlSemanticCatalogSnapshot(
     private static boolean validRewriteSignature(FunctionRewrite rewrite, FunctionSignature signature)
     {
         return switch (rewrite) {
-            case ARRAY_ENUMERATE, ARRAY_SUM, ASSUME_NOT_NULL, CAST_BIGINT, CAST_DATE, CAST_DOUBLE,
+            case ARRAY_ENUMERATE, ARRAY_SUM, ASSUME_NOT_NULL, CAST_BIGINT, CAST_DATE, CAST_DOUBLE, CAST_SMALLINT,
                     CAST_UUID, CAST_VARCHAR, EMPTY, FLOAT_OR_ZERO, INTERVAL_MONTH, INT_OR_ZERO,
                     MD5, NOT_EMPTY, START_WEEK, TO_JSON_STRING,
                     DATE_TRUNC_DAY, DATE_TRUNC_HOUR, DATE_TRUNC_MONTH, DATE_TRUNC_WEEK,
@@ -312,7 +312,7 @@ public record HogQlSemanticCatalogSnapshot(
                     AVG_IF, DATE_PART, DECIMAL_CAST, DIVIDE_DECIMAL, EQUALS, FLOAT_OR_DEFAULT, GREATER, GROUP_ARRAY_IF, HAS,
                     GROUP_UNIQ_ARRAY_IF, JSON_EXTRACT_TYPED, JSON_HAS, JSON_KEYS_AND_VALUES, JSON_VALUE,
                     IN_ARRAY, INT_DIV, LIKE, MAX_IF, MIN_IF, MULTIPLY, MULTIPLY_DECIMAL,
-                    MEDIAN_IF, MINUS, REGEX_EXTRACT, REGEX_EXTRACT_ALL, SPLIT_CHAR, SPLIT_STRING,
+                    MEDIAN_IF, MINUS, NOT_EQUALS, REGEX_EXTRACT, REGEX_EXTRACT_ALL, SPLIT_CHAR, SPLIT_STRING,
                     SUBTRACT_MONTHS, SUBTRACT_YEARS, SUM_IF,
                     TUPLE_ELEMENT, UNIQ_EXACT_IF, UNIQ_IF ->
                 !signature.variadic() && signature.argumentTypes().size() == 2;
@@ -1321,6 +1321,7 @@ public record HogQlSemanticCatalogSnapshot(
     {
         CAST_DATE,
         CAST_DOUBLE,
+        CAST_SMALLINT,
         CAST_BIGINT,
         CAST_TIMESTAMP,
         CAST_UUID,
@@ -1389,6 +1390,7 @@ public record HogQlSemanticCatalogSnapshot(
         MULTIPLY_DECIMAL,
         MULTI_IF,
         NOT,
+        NOT_EQUALS,
         NOT_EMPTY,
         PARSE_TIMESTAMP,
         REGEX_EXTRACT,
