@@ -102,6 +102,14 @@ public class TestHogQlCompiler
         assertThat(statement).isEqualTo(sqlParser.createStatement("SELECT DISTINCT event FROM events ORDER BY event DESC NULLS FIRST OFFSET 2 LIMIT 10"));
     }
 
+    @Test
+    public void testWrapsSetOperandsWithLocalClauses()
+    {
+        Statement statement = compiler.compile("SELECT 1 ORDER BY 1 LIMIT 1 UNION ALL SELECT 2");
+
+        assertThat(statement).isEqualTo(sqlParser.createStatement("(SELECT 1 ORDER BY 1 LIMIT 1) UNION ALL SELECT 2"));
+    }
+
     @ParameterizedTest
     @CsvSource(delimiter = '|', textBlock = """
                                             SELECT [1, 2, 3]                 | SELECT ARRAY[1, 2, 3]

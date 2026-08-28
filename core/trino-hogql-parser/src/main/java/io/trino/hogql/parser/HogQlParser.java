@@ -542,11 +542,6 @@ public final class HogQlParser
                     operands.add(operand);
                 }
 
-                for (QueryOperand operand : operands.subList(0, operands.size() - 1)) {
-                    if (!operand.parenthesized() && hasQueryClauses(operand.query())) {
-                        throw unsupported(context, "unparenthesized set operand ORDER BY or pagination");
-                    }
-                }
                 List<SortItem> orderBy = buildOrderBy(context.orderByClause());
                 Pagination pagination = context.limitAndOffsetClauseOptional() == null
                         ? new Pagination(Optional.empty(), Optional.empty())
