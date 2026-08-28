@@ -116,6 +116,8 @@ final class HogQlV0FunctionRegistry
             rewrite("not", FunctionRewrite.NOT, "boolean", signature(1)),
             rewrite("and", FunctionRewrite.AND, "boolean", signature(2), variadicSignature(2)),
             rewrite("greater", FunctionRewrite.GREATER, "boolean", signature(2)),
+            rewrite("greaterOrEquals", FunctionRewrite.GREATER_OR_EQUAL, "boolean", signature(2)),
+            rewrite("lessOrEquals", FunctionRewrite.LESS_OR_EQUAL, "boolean", signature(2)),
             rewrite("like", FunctionRewrite.LIKE, "boolean", signature(2)),
             rewrite("extract", FunctionRewrite.REGEX_EXTRACT, "varchar", signature(2)),
             rewrite("replaceRegexpAll", FunctionRewrite.REGEX_REPLACE_ALL, "varchar", signature(3)),

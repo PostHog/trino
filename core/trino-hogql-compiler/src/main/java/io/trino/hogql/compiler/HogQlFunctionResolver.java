@@ -512,6 +512,8 @@ final class HogQlFunctionResolver
             case NOT -> new UnaryExpression(HogQlQuery.UnaryOperator.NOT, arguments.getFirst(), span);
             case AND -> and(arguments, span);
             case GREATER -> new BinaryExpression(HogQlQuery.BinaryOperator.GREATER_THAN, arguments.getFirst(), arguments.get(1), span);
+            case GREATER_OR_EQUAL -> new BinaryExpression(HogQlQuery.BinaryOperator.GREATER_THAN_OR_EQUAL, arguments.getFirst(), arguments.get(1), span);
+            case LESS_OR_EQUAL -> new BinaryExpression(HogQlQuery.BinaryOperator.LESS_THAN_OR_EQUAL, arguments.getFirst(), arguments.get(1), span);
             case LIKE -> new BinaryExpression(HogQlQuery.BinaryOperator.LIKE, arguments.getFirst(), arguments.get(1), span);
             case REGEX_EXTRACT -> regexExtract(function, arguments);
             case REGEX_EXTRACT_ALL -> regexExtractAll(function, arguments);
