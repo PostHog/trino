@@ -452,14 +452,45 @@ final class HogQlFunctionResolver
             case TO_UNIX_TIMESTAMP -> cast(call("to_unixtime", arguments, span), "bigint", span);
             case PARSE_TIMESTAMP -> new CastExpression(arguments.getFirst(), new Identifier("timestamp(3)", false, span), true, span);
             case NOT -> new UnaryExpression(HogQlQuery.UnaryOperator.NOT, arguments.getFirst(), span);
-            case AND -> new BinaryExpression(HogQlQuery.BinaryOperator.AND, arguments.getFirst(), arguments.get(1), span);
+            case AND -> and(arguments, span);
             case GREATER -> new BinaryExpression(HogQlQuery.BinaryOperator.GREATER_THAN, arguments.getFirst(), arguments.get(1), span);
             case LIKE -> new BinaryExpression(HogQlQuery.BinaryOperator.LIKE, arguments.getFirst(), arguments.get(1), span);
             case REGEX_EXTRACT -> regexExtract(function, arguments);
             case REGEX_EXTRACT_ALL -> regexExtractAll(function, arguments);
             case REGEX_REPLACE_ALL -> regexReplaceAll(function, arguments);
             case REGEX_REPLACE_ONE -> regexReplaceOne(function, arguments);
+            case ARRAY_SLICE -> call("slice", arguments, span);
+            case ARRAY_ENUMERATE -> arrayEnumerate(arguments.getFirst(), span);
+            case SUBTRACT_YEARS -> dateAdd(
+                    "year",
+                    List.of(arguments.getFirst(), new UnaryExpression(HogQlQuery.UnaryOperator.NEGATE, arguments.get(1), span)),
+                    span);
+            case INT_OR_ZERO -> coalesce(tryCast(arguments.getFirst(), "bigint", span), integerLiteral("0", span), span);
+            case CAST_UUID -> tryCast(arguments.getFirst(), "uuid", span);
+            case TO_JSON_STRING -> call("json_format", List.of(cast(arguments.getFirst(), "json", span)), span);
+            case JSON_HAS -> new IsNullExpression(
+                    call("json_extract", List.of(arguments.getFirst(), jsonPath(function, arguments.subList(1, arguments.size()))), span),
+                    true,
+                    span,
+                    span);
+            case JSON_VALUE -> call("json_extract_scalar", arguments, span);
+            case MD5 -> call("md5", List.of(call("to_utf8", List.of(cast(arguments.getFirst(), "varchar", span)), span)), span);
+            case MEDIAN_IF -> aggregate(
+                    "approx_percentile",
+                    List.of(arguments.getFirst(), new Literal(HogQlQuery.LiteralKind.FLOAT, "0.5", span)),
+                    false,
+                    arguments.get(1),
+                    span);
         };
+    }
+
+    private static Expression and(List<Expression> arguments, HogQlQuery.SourceSpan span)
+    {
+        Expression result = arguments.getFirst();
+        for (int index = 1; index < arguments.size(); index++) {
+            result = new BinaryExpression(HogQlQuery.BinaryOperator.AND, result, arguments.get(index), span);
+        }
+        return result;
     }
 
     private static Expression regexExtract(FunctionCall function, List<Expression> arguments)
@@ -823,6 +854,20 @@ final class HogQlFunctionResolver
                 List.of(zero, new BinaryExpression(HogQlQuery.BinaryOperator.SUBTRACT, end, integerLiteral("1", span), span)),
                 span);
         return call("if", List.of(isEmpty, empty, sequence), span);
+    }
+
+    private static Expression arrayEnumerate(Expression array, HogQlQuery.SourceSpan span)
+    {
+        Expression size = call("cardinality", List.of(array), span);
+        Expression empty = cast(new ArrayExpression(List.of(), span), "array(bigint)", span);
+        Expression sequence = call("sequence", List.of(integerLiteral("1", span), size), span);
+        return call(
+                "if",
+                List.of(
+                        new BinaryExpression(HogQlQuery.BinaryOperator.EQUAL, size, integerLiteral("0", span), span),
+                        empty,
+                        sequence),
+                span);
     }
 
     private static Expression has(List<Expression> arguments, HogQlQuery.SourceSpan span)

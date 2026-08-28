@@ -291,7 +291,7 @@ public record HogQlSemanticCatalogSnapshot(
     {
         return switch (rewrite) {
             case ANY_IF, ARG_MAX_IF, AVG_IF, COUNT_DISTINCT, COUNT_IF, GROUP_ARRAY_IF,
-                    GROUP_UNIQ_ARRAY, GROUP_UNIQ_ARRAY_IF, MAX_IF, MIN_IF, SUM_IF,
+                    GROUP_UNIQ_ARRAY, GROUP_UNIQ_ARRAY_IF, MAX_IF, MEDIAN_IF, MIN_IF, SUM_IF,
                     UNIQ_EXACT, UNIQ_EXACT_IF, UNIQ_IF -> FunctionKind.AGGREGATE;
             default -> FunctionKind.SCALAR;
         };
@@ -300,30 +300,34 @@ public record HogQlSemanticCatalogSnapshot(
     private static boolean validRewriteSignature(FunctionRewrite rewrite, FunctionSignature signature)
     {
         return switch (rewrite) {
-            case ARRAY_SUM, ASSUME_NOT_NULL, CAST_BIGINT, CAST_DATE, CAST_DOUBLE, CAST_VARCHAR,
-                    EMPTY, FLOAT_OR_ZERO, INTERVAL_MONTH, NOT_EMPTY, RANGE, START_WEEK,
+            case ARRAY_ENUMERATE, ARRAY_SUM, ASSUME_NOT_NULL, CAST_BIGINT, CAST_DATE, CAST_DOUBLE,
+                    CAST_UUID, CAST_VARCHAR, EMPTY, FLOAT_OR_ZERO, INTERVAL_MONTH, INT_OR_ZERO,
+                    MD5, NOT_EMPTY, RANGE, START_WEEK, TO_JSON_STRING,
                     DATE_TRUNC_DAY, DATE_TRUNC_HOUR, DATE_TRUNC_MONTH, DATE_TRUNC_WEEK,
                     GROUP_UNIQ_ARRAY, INTERVAL_DAY, IS_NOT_NULL, IS_NULL, COUNT_IF,
                     NOT, PARSE_TIMESTAMP, TO_UNIX_TIMESTAMP,
                     COUNT_DISTINCT, UNIQ_EXACT ->
                 !signature.variadic() && signature.argumentTypes().size() == 1;
-            case ADD_DAYS, ADD_MONTHS, AND, ANY_IF, ARRAY_ELEMENT, ARRAY_FILTER, ARRAY_FIRST, ARRAY_MAP,
+            case ADD_DAYS, ADD_MONTHS, ANY_IF, ARRAY_ELEMENT, ARRAY_FILTER, ARRAY_FIRST, ARRAY_MAP,
                     AVG_IF, DECIMAL_CAST, DIVIDE_DECIMAL, EQUALS, FLOAT_OR_DEFAULT, GREATER, GROUP_ARRAY_IF, HAS,
-                    GROUP_UNIQ_ARRAY_IF, JSON_EXTRACT_TYPED, JSON_KEYS_AND_VALUES,
+                    GROUP_UNIQ_ARRAY_IF, JSON_EXTRACT_TYPED, JSON_HAS, JSON_KEYS_AND_VALUES, JSON_VALUE,
                     IN_ARRAY, INT_DIV, LIKE, MAX_IF, MIN_IF, MULTIPLY, MULTIPLY_DECIMAL,
-                    REGEX_EXTRACT, REGEX_EXTRACT_ALL, SPLIT_CHAR, SPLIT_STRING, SUBTRACT_MONTHS, SUM_IF,
+                    MEDIAN_IF, REGEX_EXTRACT, REGEX_EXTRACT_ALL, SPLIT_CHAR, SPLIT_STRING,
+                    SUBTRACT_MONTHS, SUBTRACT_YEARS, SUM_IF,
                     TUPLE_ELEMENT, UNIQ_EXACT_IF, UNIQ_IF ->
                 !signature.variadic() && signature.argumentTypes().size() == 2;
-            case ARG_MAX_IF, REGEX_REPLACE_ALL, REGEX_REPLACE_ONE -> !signature.variadic() && signature.argumentTypes().size() == 3;
+            case ARG_MAX_IF, ARRAY_SLICE, REGEX_REPLACE_ALL, REGEX_REPLACE_ONE ->
+                !signature.variadic() && signature.argumentTypes().size() == 3;
             case CAST_TIMESTAMP -> !signature.variadic() &&
                     (signature.argumentTypes().size() == 1 || signature.argumentTypes().size() == 2);
             case DATE_ADD -> !signature.variadic() &&
                     (signature.argumentTypes().size() == 2 || signature.argumentTypes().size() == 3);
-            case JSON_EXTRACT_BOOL, JSON_EXTRACT_FLOAT, JSON_EXTRACT_INT,
-                    JSON_EXTRACT_RAW, JSON_EXTRACT_STRING, JSON_EXTRACT_UINT ->
+            case JSON_EXTRACT_BOOL, JSON_EXTRACT_FLOAT, JSON_EXTRACT_INT, JSON_EXTRACT_RAW, JSON_EXTRACT_UINT ->
                 signature.variadic() && signature.argumentTypes().size() == 3;
-            case JSON_EXTRACT_ARRAY_RAW, JSON_KEYS_AND_VALUES_RAW, JSON_LENGTH ->
+            case JSON_EXTRACT_ARRAY_RAW, JSON_EXTRACT_STRING, JSON_KEYS_AND_VALUES_RAW, JSON_LENGTH ->
                 (!signature.variadic() && signature.argumentTypes().size() == 1) ||
+                    (signature.variadic() && signature.argumentTypes().size() == 3);
+            case AND -> (!signature.variadic() && signature.argumentTypes().size() == 2) ||
                     (signature.variadic() && signature.argumentTypes().size() == 3);
             case MULTI_IF -> signature.variadic() && signature.argumentTypes().size() == 4;
             case TUPLE -> signature.variadic() && signature.argumentTypes().size() == 2;
@@ -1317,6 +1321,7 @@ public record HogQlSemanticCatalogSnapshot(
         CAST_DOUBLE,
         CAST_BIGINT,
         CAST_TIMESTAMP,
+        CAST_UUID,
         CAST_VARCHAR,
         ADD_DAYS,
         ADD_MONTHS,
@@ -1324,9 +1329,11 @@ public record HogQlSemanticCatalogSnapshot(
         ANY_IF,
         ARG_MAX_IF,
         ARRAY_ELEMENT,
+        ARRAY_ENUMERATE,
         ARRAY_FILTER,
         ARRAY_FIRST,
         ARRAY_MAP,
+        ARRAY_SLICE,
         ARRAY_SUM,
         ASSUME_NOT_NULL,
         AVG_IF,
@@ -1351,6 +1358,7 @@ public record HogQlSemanticCatalogSnapshot(
         IN_ARRAY,
         INTERVAL_DAY,
         INT_DIV,
+        INT_OR_ZERO,
         INTERVAL_MONTH,
         IS_NULL,
         IS_NOT_NULL,
@@ -1362,11 +1370,15 @@ public record HogQlSemanticCatalogSnapshot(
         JSON_EXTRACT_STRING,
         JSON_EXTRACT_TYPED,
         JSON_EXTRACT_UINT,
+        JSON_HAS,
         JSON_KEYS_AND_VALUES,
         JSON_KEYS_AND_VALUES_RAW,
         JSON_LENGTH,
+        JSON_VALUE,
         LIKE,
         MAX_IF,
+        MD5,
+        MEDIAN_IF,
         MIN_IF,
         MULTIPLY,
         MULTIPLY_DECIMAL,
@@ -1383,8 +1395,10 @@ public record HogQlSemanticCatalogSnapshot(
         SPLIT_STRING,
         START_WEEK,
         SUBTRACT_MONTHS,
+        SUBTRACT_YEARS,
         SUM_IF,
         TODAY,
+        TO_JSON_STRING,
         TO_UNIX_TIMESTAMP,
         TUPLE,
         TUPLE_ELEMENT,

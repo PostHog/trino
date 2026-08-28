@@ -332,6 +332,26 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testCompilerLowersRemainingScalarAliases()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT arraySlice(items, 2, 3), arrayEnumerate(items), pow(2, exponent), substringUTF8(name, 2, 3), " +
+                        "arrayConcat(first_array, second_array), subtractYears(timestamp, 2), toIntOrZero(text), toUUID(uuid_text), " +
+                        "toJSONString(payload), JSONHas(payload, 'key'), JSON_VALUE(payload, '$.key'), md5(name), roundBankers(score, 2), " +
+                        "and(first, second, third), JSONExtractString(payload), medianIf(score, active) FROM records"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT slice(items, 2, 3), " +
+                        "if(cardinality(items) = 0, CAST(ARRAY[] AS array(bigint)), sequence(1, cardinality(items))), " +
+                        "power(2, exponent), substring(name, 2, 3), concat(first_array, second_array), " +
+                        "date_add('year', -(2), timestamp), coalesce(TRY_CAST(text AS bigint), 0), TRY_CAST(uuid_text AS uuid), " +
+                        "json_format(CAST(payload AS json)), json_extract(payload, '$[\"key\"]') IS NOT NULL, " +
+                        "json_extract_scalar(payload, '$.key'), md5(to_utf8(CAST(name AS varchar))), round(score, 2), " +
+                        "(first AND second) AND third, coalesce(json_extract_scalar(payload, '$'), ''), " +
+                        "approx_percentile(score, 5E-1) FILTER (WHERE active) FROM records"));
+    }
+
+    @Test
     public void testCompilerEnforcesV0FunctionArities()
     {
         assertThat(new HogQlCompiler().compile(envelope("SELECT coalesce('value')")).statement())

@@ -89,6 +89,9 @@ element types and remain outside the frozen compatibility subset.
 Expression-form comparison, arithmetic, membership, tuples, nullability
 assertions, string splitting, month arithmetic, and common window aliases also
 lower to stock Trino nodes.
+Additional scalar coverage includes array slicing/enumeration, UUID and integer
+conversion, JSON existence/value/serialization, hashing, powers, UTF-8
+substrings, banker-rounding aliases, and conditional median aggregation.
 
 Function aliases are resolved before Trino analysis. Unknown functions fail as
 HogQL resolution errors. Actions, cohorts, saved queries, explicit modifiers,
