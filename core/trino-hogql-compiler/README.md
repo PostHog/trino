@@ -69,6 +69,8 @@ key/value extraction forms through checked JSON-to-map casts.
 Date/time compatibility includes calendar arithmetic, interval-day values,
 epoch conversion, timezone attachment/conversion, formatting, and checked
 best-effort timestamp parsing.
+Array-form membership and the nullish operator lower to stock `IN`, `IF`, and
+`COALESCE` nodes, including nullable empty-membership behavior.
 
 Function aliases are resolved before Trino analysis. Unknown functions fail as
 HogQL resolution errors. Actions, cohorts, saved queries, explicit modifiers,

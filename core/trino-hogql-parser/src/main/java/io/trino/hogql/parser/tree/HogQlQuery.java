@@ -466,9 +466,6 @@ public record HogQlQuery(
         {
             value = requireNonNull(value, "value is null");
             values = List.copyOf(requireNonNull(values, "values is null"));
-            if (values.isEmpty()) {
-                throw new IllegalArgumentException("values is empty");
-            }
             predicateSpan = requireNonNull(predicateSpan, "predicateSpan is null");
             span = requireNonNull(span, "span is null");
         }

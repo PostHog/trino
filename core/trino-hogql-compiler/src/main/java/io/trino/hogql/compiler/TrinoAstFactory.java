@@ -575,9 +575,17 @@ final class TrinoAstFactory
     private static Expression createInExpression(InExpression in, Map<SourceSpan, Integer> parameterIds)
     {
         NodeLocation location = location(in.predicateSpan());
+        Expression testedValue = createExpression(in.value(), parameterIds);
+        if (in.values().isEmpty()) {
+            return new IfExpression(
+                    location,
+                    new Predicated(location, testedValue, new IsNullPredicate(location, false)),
+                    new NullLiteral(location),
+                    new BooleanLiteral(location, Boolean.toString(in.negated())));
+        }
         return new Predicated(
                 location,
-                createExpression(in.value(), parameterIds),
+                testedValue,
                 new InPredicate(
                         location,
                         in.negated(),

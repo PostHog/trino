@@ -113,6 +113,12 @@ public class TestHogQlCompiler
                                             SELECT value IN (1, 2, 3)        | SELECT value IN (1, 2, 3)
                                             SELECT value IN (1)              | SELECT value IN (1)
                                             SELECT value NOT IN (1, 2, 3)    | SELECT value NOT IN (1, 2, 3)
+                                            SELECT value IN [1, 2, 3]        | SELECT value IN (1, 2, 3)
+                                            SELECT value NOT IN [1]          | SELECT value NOT IN (1)
+                                            SELECT value IN []               | SELECT IF(value IS NULL, NULL, false)
+                                            SELECT value NOT IN []           | SELECT IF(value IS NULL, NULL, true)
+                                            SELECT value ?? fallback         | SELECT coalesce(value, fallback)
+                                            SELECT first ?? second ?? third   | SELECT coalesce(coalesce(first, second), third)
                                             SELECT value LIKE 'pro%'         | SELECT value LIKE 'pro%'
                                             SELECT value NOT LIKE 'pro%'     | SELECT value NOT LIKE 'pro%'
                                             SELECT value ILIKE 'Pro%'        | SELECT lower(value) LIKE lower('Pro%')

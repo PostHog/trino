@@ -1269,6 +1269,16 @@ public final class HogQlParser
                         sourceSpan(isNull.IS().getSymbol(), isNull.getStop()),
                         sourceSpan(isNull));
             }
+            if (context instanceof HogQLParser.ColumnExprNullishContext nullish) {
+                Token operator = nullish.NULLISH().getSymbol();
+                return new FunctionCall(
+                        new Identifier("ifNull", false, sourceSpan(operator, operator)),
+                        List.of(buildExpression(nullish.columnExprValue(0)), buildExpression(nullish.columnExprValue(1))),
+                        false,
+                        List.of(),
+                        Optional.empty(),
+                        sourceSpan(nullish));
+            }
             if (context instanceof HogQLParser.ColumnExprBetweenContext between) {
                 return new BetweenExpression(
                         buildExpression(between.columnExprValue(0)),
@@ -1432,6 +1442,9 @@ public final class HogQlParser
 
         private List<Expression> buildInValues(HogQLParser.ColumnExprValueContext context)
         {
+            if (context instanceof HogQLParser.ColumnExprArrayContext array) {
+                return array.columnExprList() == null ? List.of() : buildExpressions(array.columnExprList());
+            }
             if (context instanceof HogQLParser.ColumnExprTupleContext tuple) {
                 return buildExpressions(tuple.columnExprList());
             }
