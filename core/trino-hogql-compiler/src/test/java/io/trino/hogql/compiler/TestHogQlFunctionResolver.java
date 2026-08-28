@@ -349,6 +349,18 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testCompilerLowersArrayExtremaAndKeySorting()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT arrayMin(items), arraySort(item -> item.1, tuples) FROM records"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT array_min(items), array_sort(tuples, (__hogql_array_sort_left, __hogql_array_sort_right) -> " +
+                        "CASE WHEN __hogql_array_sort_left[1] < __hogql_array_sort_right[1] THEN -(1) " +
+                        "WHEN __hogql_array_sort_left[1] > __hogql_array_sort_right[1] THEN 1 ELSE 0 END) FROM records"));
+    }
+
+    @Test
     public void testCompilerLowersFinalStockCompatibilityFunctions()
     {
         HogQlCompilationResult result = new HogQlCompiler().compile(envelope(

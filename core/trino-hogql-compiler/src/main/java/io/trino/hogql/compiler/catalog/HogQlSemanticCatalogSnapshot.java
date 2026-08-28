@@ -331,7 +331,7 @@ public record HogQlSemanticCatalogSnapshot(
                     (signature.variadic() && signature.argumentTypes().size() == 3);
             case AND -> (!signature.variadic() && signature.argumentTypes().size() == 2) ||
                     (signature.variadic() && signature.argumentTypes().size() == 3);
-            case RANGE -> !signature.variadic() &&
+            case ARRAY_SORT, RANGE -> !signature.variadic() &&
                     (signature.argumentTypes().size() == 1 || signature.argumentTypes().size() == 2);
             case MULTI_IF -> signature.variadic() && signature.argumentTypes().size() == 4;
             case TUPLE -> signature.variadic() && signature.argumentTypes().size() == 2;
@@ -1340,6 +1340,7 @@ public record HogQlSemanticCatalogSnapshot(
         ARRAY_FIRST,
         ARRAY_MAP,
         ARRAY_SLICE,
+        ARRAY_SORT,
         ARRAY_SUM,
         ASSUME_NOT_NULL,
         AVG_IF,

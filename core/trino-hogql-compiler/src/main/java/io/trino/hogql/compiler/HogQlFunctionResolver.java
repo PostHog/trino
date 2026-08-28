@@ -529,6 +529,7 @@ final class HogQlFunctionResolver
             case REGEX_REPLACE_ALL -> regexReplaceAll(function, arguments);
             case REGEX_REPLACE_ONE -> regexReplaceOne(function, arguments);
             case ARRAY_SLICE -> call("slice", arguments, span);
+            case ARRAY_SORT -> arraySort(function, arguments);
             case ARRAY_ENUMERATE -> arrayEnumerate(arguments.getFirst(), span);
             case SUBTRACT_YEARS -> dateAdd(
                     "year",
@@ -1010,6 +1011,75 @@ final class HogQlFunctionResolver
                         empty,
                         sequence),
                 span);
+    }
+
+    private static Expression arraySort(FunctionCall function, List<Expression> arguments)
+    {
+        if (arguments.size() == 1) {
+            return call("array_sort", arguments, function.span());
+        }
+        if (!(arguments.getFirst() instanceof LambdaExpression lambda) || lambda.arguments().size() != 1) {
+            throw unsupportedError(function, "HogQL arraySort key must be a single-argument lambda");
+        }
+        HogQlQuery.SourceSpan span = function.span();
+        Identifier left = new Identifier("__hogql_array_sort_left", false, span);
+        Identifier right = new Identifier("__hogql_array_sort_right", false, span);
+        String parameter = canonical(lambda.arguments().getFirst().value());
+        Expression leftKey = substituteArraySortParameter(function, lambda.body(), parameter, new ColumnReference(List.of(left), span));
+        Expression rightKey = substituteArraySortParameter(function, lambda.body(), parameter, new ColumnReference(List.of(right), span));
+        Expression comparator = new CaseExpression(
+                Optional.empty(),
+                List.of(
+                        new CaseWhen(
+                                new BinaryExpression(HogQlQuery.BinaryOperator.LESS_THAN, leftKey, rightKey, span),
+                                new UnaryExpression(HogQlQuery.UnaryOperator.NEGATE, integerLiteral("1", span), span),
+                                span),
+                        new CaseWhen(
+                                new BinaryExpression(HogQlQuery.BinaryOperator.GREATER_THAN, leftKey, rightKey, span),
+                                integerLiteral("1", span),
+                                span)),
+                Optional.of(integerLiteral("0", span)),
+                span);
+        return call(
+                "array_sort",
+                List.of(
+                        arguments.get(1),
+                        new LambdaExpression(List.of(left, right), comparator, span)),
+                span);
+    }
+
+    private static Expression substituteArraySortParameter(FunctionCall function, Expression expression, String parameter, Expression replacement)
+    {
+        return switch (expression) {
+            case ColumnReference reference -> reference.parts().size() == 1 && canonical(reference.parts().getFirst().value()).equals(parameter)
+                    ? replacement
+                    : reference;
+            case SubscriptExpression subscript -> new SubscriptExpression(
+                    substituteArraySortParameter(function, subscript.base(), parameter, replacement),
+                    substituteArraySortParameter(function, subscript.index(), parameter, replacement),
+                    subscript.span());
+            case MemberAccessExpression member -> new MemberAccessExpression(
+                    substituteArraySortParameter(function, member.base(), parameter, replacement),
+                    member.member(),
+                    member.span());
+            case CastExpression cast -> new CastExpression(
+                    substituteArraySortParameter(function, cast.value(), parameter, replacement),
+                    cast.type(),
+                    cast.safe(),
+                    cast.typeDialect(),
+                    cast.span());
+            case UnaryExpression unary -> new UnaryExpression(
+                    unary.operator(),
+                    substituteArraySortParameter(function, unary.operand(), parameter, replacement),
+                    unary.span());
+            case BinaryExpression binary -> new BinaryExpression(
+                    binary.operator(),
+                    substituteArraySortParameter(function, binary.left(), parameter, replacement),
+                    substituteArraySortParameter(function, binary.right(), parameter, replacement),
+                    binary.span());
+            case Literal literal -> literal;
+            default -> throw unsupportedError(function, "HogQL arraySort key expression is outside the supported subset");
+        };
     }
 
     private static Expression has(List<Expression> arguments, HogQlQuery.SourceSpan span)
