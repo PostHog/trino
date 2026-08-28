@@ -82,6 +82,21 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testV0CatalogFunctionsCannotExpandFrozenRegistry()
+    {
+        HogQlSemanticCatalogSnapshot snapshot = snapshot(List.of(
+                function("manifestOnly", FunctionKind.SCALAR, FunctionImplementation.STOCK, List.of("upper"), signature(1), false, false, false, false)));
+        HogQlSemanticCatalogContext context = new HogQlSemanticCatalogContext(CATALOG, _ -> new PinnedSnapshot(snapshot));
+
+        TrinoException exception = catchThrowableOfType(
+                TrinoException.class,
+                () -> new HogQlCompiler().compileV0(envelope("SELECT manifestOnly('value')"), Optional.of(context)));
+
+        assertThat(exception.getErrorCode()).isEqualTo(HOGQL_RESOLUTION_ERROR.toErrorCode());
+        assertThat(exception).hasMessage("line 1:8: Unknown HogQL function: manifestOnly");
+    }
+
+    @Test
     public void testCompilerRewritesNullPredicatesAndPreservesPlaceholders()
     {
         HogQlSemanticCatalogSnapshot snapshot = snapshot(List.of(
@@ -102,12 +117,43 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
-    public void testCompilerPreservesOrdinaryFunctionsWithoutCatalogContext()
+    public void testCompilerResolvesV0FunctionsWithoutCatalogContext()
     {
-        HogQlCompilationResult result = new HogQlCompiler().compile(envelope("SELECT ordinary(1)"));
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT coalesce(NULL, 'fallback'), any(value), argMin(value, timestamp), " +
+                        "arrayDistinct([1, 1]), dateDiff('day', start_time, end_time), rank() OVER () FROM metrics"));
 
         assertThat(result.catalogGeneration()).isEmpty();
-        assertThat(result.statement()).isEqualTo(sqlParser.createStatement("SELECT ordinary(1)"));
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT coalesce(NULL, 'fallback'), arbitrary(value), min_by(value, timestamp), " +
+                        "array_distinct(ARRAY[1, 1]), date_diff('day', start_time, end_time), rank() OVER () FROM metrics"));
+    }
+
+    @Test
+    public void testCompilerRejectsUnknownFunctionsWithoutCatalogContext()
+    {
+        TrinoException exception = catchThrowableOfType(
+                TrinoException.class,
+                () -> new HogQlCompiler().compile(envelope("SELECT ordinary(1)")));
+
+        assertThat(exception.getErrorCode()).isEqualTo(HOGQL_RESOLUTION_ERROR.toErrorCode());
+        assertThat(exception).hasMessage("line 1:8: Unknown HogQL function: ordinary");
+    }
+
+    @Test
+    public void testCompilerEnforcesV0FunctionArities()
+    {
+        assertThat(new HogQlCompiler().compile(envelope("SELECT coalesce('value')")).statement())
+                .isEqualTo(sqlParser.createStatement("SELECT 'value'"));
+
+        for (String query : List.of("SELECT if(true, 1)", "SELECT concat('value')")) {
+            TrinoException exception = catchThrowableOfType(
+                    TrinoException.class,
+                    () -> new HogQlCompiler().compile(envelope(query)));
+
+            assertThat(exception.getErrorCode()).isEqualTo(HOGQL_RESOLUTION_ERROR.toErrorCode());
+            assertThat(exception).hasMessageContaining("does not accept");
+        }
     }
 
     @ParameterizedTest

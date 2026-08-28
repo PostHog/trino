@@ -16,9 +16,18 @@ package io.trino.hogql.compiler.catalog;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
 
 import java.util.Optional;
+import java.util.OptionalLong;
+
+import static java.util.Objects.requireNonNull;
 
 @FunctionalInterface
 public interface HogQlSemanticCatalogSnapshotCache
 {
     Optional<HogQlSemanticCatalogSnapshot> currentSnapshot(PhysicalIdentifier catalog);
+
+    default Optional<HogQlSemanticCatalogSnapshot> currentSnapshot(PhysicalIdentifier catalog, OptionalLong expectedGeneration)
+    {
+        requireNonNull(expectedGeneration, "expectedGeneration is null");
+        return currentSnapshot(catalog);
+    }
 }

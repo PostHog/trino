@@ -214,9 +214,11 @@ class TestHogQlStatementResource
                                 "GROUP BY r.regionkey ORDER BY r.regionkey"),
                 Arguments.of(
                         "window frames",
-                        "SELECT nationkey, sum(nationkey) OVER (ORDER BY nationkey ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS running " +
+                        "SELECT nationkey, sum(nationkey) OVER (ORDER BY nationkey ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS running, " +
+                                "rank() OVER (ORDER BY nationkey) AS ranked, row_number() OVER (ORDER BY nationkey) AS numbered " +
                                 "FROM tpch.tiny.nation WHERE nationkey < 5 ORDER BY nationkey",
-                        "SELECT nationkey, sum(nationkey) OVER (ORDER BY nationkey ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS running " +
+                        "SELECT nationkey, sum(nationkey) OVER (ORDER BY nationkey ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS running, " +
+                                "rank() OVER (ORDER BY nationkey) AS ranked, row_number() OVER (ORDER BY nationkey) AS numbered " +
                                 "FROM tpch.tiny.nation WHERE nationkey < 5 ORDER BY nationkey"),
                 Arguments.of(
                         "values and set operations",
@@ -235,7 +237,33 @@ class TestHogQlStatementResource
                         "SELECT INTERVAL 2 WEEK AS weeks, INTERVAL '3 months' AS months, INTERVAL nationkey DAY AS dynamic " +
                                 "FROM tpch.tiny.nation WHERE nationkey = 2",
                         "SELECT 2 * INTERVAL '7' DAY AS weeks, 3 * INTERVAL '1' MONTH AS months, nationkey * INTERVAL '1' DAY AS dynamic " +
-                                "FROM tpch.tiny.nation WHERE nationkey = 2"));
+                                "FROM tpch.tiny.nation WHERE nationkey = 2"),
+                Arguments.of(
+                        "v0 scalar and collection functions",
+                        "SELECT abs(-2), coalesce(NULL, 'fallback'), if(true, 1, 2), lower('ABC'), upper('abc'), length('abc'), " +
+                                "concat('a', 'b'), replace('abc', 'b', 'x'), arrayDistinct([1, 1, 2]), arraySort([2, 1]), " +
+                                "arrayFlatten([[1], [2]]), arrayStringConcat(['a', 'b']), " +
+                                "dateAdd('day', 1, CAST('2024-01-01' AS Date)), " +
+                                "dateDiff('day', CAST('2024-01-01' AS Date), CAST('2024-01-03' AS Date)), " +
+                                "dateTrunc('day', CAST('2024-01-01 12:34:56' AS Timestamp(3)))",
+                        "SELECT abs(-2), coalesce(NULL, 'fallback'), if(true, 1, 2), lower('ABC'), upper('abc'), length('abc'), " +
+                                "concat('a', 'b'), replace('abc', 'b', 'x'), array_distinct(ARRAY[1, 1, 2]), array_sort(ARRAY[2, 1]), " +
+                                "flatten(ARRAY[ARRAY[1], ARRAY[2]]), array_join(ARRAY['a', 'b'], ''), " +
+                                "date_add('day', 1, CAST('2024-01-01' AS date)), " +
+                                "date_diff('day', CAST('2024-01-01' AS date), CAST('2024-01-03' AS date)), " +
+                                "date_trunc('day', CAST('2024-01-01 12:34:56' AS timestamp(3)))"),
+                Arguments.of(
+                        "v0 aggregate functions",
+                        "SELECT count(), sum(nationkey), min(nationkey), max(nationkey), avg(nationkey), any(nationkey), " +
+                                "argMin(name, nationkey), argMax(name, nationkey), array_agg(nationkey ORDER BY nationkey) " +
+                                "FROM tpch.tiny.nation WHERE nationkey < 3",
+                        "SELECT count(), sum(nationkey), min(nationkey), max(nationkey), avg(nationkey), arbitrary(nationkey), " +
+                                "min_by(name, nationkey), max_by(name, nationkey), array_agg(nationkey ORDER BY nationkey) " +
+                                "FROM tpch.tiny.nation WHERE nationkey < 3"),
+                Arguments.of(
+                        "v0 value window function",
+                        "SELECT first_value(name) OVER (ORDER BY nationkey) FROM tpch.tiny.nation WHERE nationkey < 3 ORDER BY nationkey",
+                        "SELECT first_value(name) OVER (ORDER BY nationkey) FROM tpch.tiny.nation WHERE nationkey < 3 ORDER BY nationkey"));
     }
 
     @Test
@@ -353,6 +381,18 @@ class TestHogQlStatementResource
 
         List<QueryResults> invalidResults = runHogQlToCompletion(hogQlRequest("SELECT ("));
         assertThat(invalidResults.getLast().getError().getErrorName()).isEqualTo("HOGQL_SYNTAX_ERROR");
+
+        List<QueryResults> unsupportedFunction = runHogQlToCompletion(hogQlRequest("SELECT uniq(1)"));
+        assertThat(unsupportedFunction.getLast().getError().getErrorName()).isEqualTo("HOGQL_RESOLUTION_ERROR");
+
+        List<QueryResults> pivot = runHogQlToCompletion(hogQlRequest(
+                "SELECT * FROM tpch.tiny.nation PIVOT (sum(nationkey) FOR regionkey IN (0))"));
+        assertThat(pivot.getLast().getError().getErrorName()).isEqualTo("HOGQL_UNSUPPORTED_FEATURE");
+        assertThat(pivot.getLast().getError().getMessage()).contains("PIVOT is outside the HogQL v0 profile");
+
+        List<QueryResults> modifier = runHogQlToCompletion(hogQlRequestWithModifier("SELECT 1"));
+        assertThat(modifier.getLast().getError().getErrorName()).isEqualTo("HOGQL_UNSUPPORTED_FEATURE");
+        assertThat(modifier.getLast().getError().getMessage()).contains("Modifiers are outside the HogQL v0 profile");
     }
 
     @Test
@@ -572,6 +612,18 @@ class TestHogQlStatementResource
                  "filters": {"object": {"type": "object", "value": {"nested": 2.5}}},
                  "modifiers": {},
                  "catalogGeneration": 1
+               }
+               """.formatted(STRING_CODEC.toJson(query), HogQlLanguageContract.current().languageVersion());
+    }
+
+    private static String hogQlRequestWithModifier(String query)
+    {
+        return """
+               {
+                 "query": %s,
+                 "protocolVersion": 1,
+                 "languageVersion": "%s",
+                 "modifiers": {"sampling": {"type": "boolean", "value": true}}
                }
                """.formatted(STRING_CODEC.toJson(query), HogQlLanguageContract.current().languageVersion());
     }

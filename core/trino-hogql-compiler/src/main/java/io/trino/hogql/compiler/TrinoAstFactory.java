@@ -72,11 +72,13 @@ import io.trino.sql.tree.BetweenPredicate;
 import io.trino.sql.tree.BooleanLiteral;
 import io.trino.sql.tree.CallArgument;
 import io.trino.sql.tree.Cast;
+import io.trino.sql.tree.CoalesceExpression;
 import io.trino.sql.tree.ComparisonPredicate;
 import io.trino.sql.tree.DereferenceExpression;
 import io.trino.sql.tree.Except;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.GroupBy;
+import io.trino.sql.tree.IfExpression;
 import io.trino.sql.tree.InListExpression;
 import io.trino.sql.tree.InPredicate;
 import io.trino.sql.tree.Intersect;
@@ -117,6 +119,7 @@ import io.trino.sql.tree.WhenClause;
 import io.trino.sql.tree.With;
 import io.trino.sql.tree.WithQuery;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -421,6 +424,29 @@ final class TrinoAstFactory
         if (function.nameParts().size() == 1 && function.name().value().equalsIgnoreCase("matchesAction")) {
             throw unsupportedSemanticExpression(function.span(), "HogQL matchesAction requires a semantic catalog snapshot and events relation");
         }
+        List<Expression> arguments = function.arguments().stream()
+                .map(argument -> createExpression(argument, parameterIds))
+                .toList();
+        if (function.nameParts().size() == 1 && function.name().value().equalsIgnoreCase("coalesce")) {
+            if (arguments.size() == 1) {
+                return arguments.getFirst();
+            }
+            return new CoalesceExpression(location(function.span()), arguments);
+        }
+        if (function.nameParts().size() == 1 && function.name().value().equalsIgnoreCase("if")) {
+            return new IfExpression(
+                    location(function.span()),
+                    arguments.get(0),
+                    arguments.get(1),
+                    arguments.size() == 3 ? arguments.get(2) : null);
+        }
+        List<CallArgument> callArguments = new ArrayList<>();
+        for (int index = 0; index < arguments.size(); index++) {
+            callArguments.add(new CallArgument(location(function.arguments().get(index).span()), Optional.empty(), arguments.get(index)));
+        }
+        if (function.nameParts().size() == 1 && function.name().value().equalsIgnoreCase("array_join") && callArguments.size() == 1) {
+            callArguments.add(new CallArgument(location(function.span()), Optional.empty(), new StringLiteral(location(function.span()), "")));
+        }
         return new io.trino.sql.tree.FunctionCall(
                 location(function.span()),
                 QualifiedName.of(function.nameParts().stream()
@@ -432,12 +458,7 @@ final class TrinoAstFactory
                 function.distinct(),
                 function.nullTreatment().map(_ -> io.trino.sql.tree.FunctionCall.NullTreatment.IGNORE),
                 Optional.empty(),
-                function.arguments().stream()
-                        .map(argument -> new CallArgument(
-                                location(argument.span()),
-                                Optional.empty(),
-                                createExpression(argument, parameterIds)))
-                        .toList());
+                callArguments);
     }
 
     private static io.trino.sql.tree.WindowDefinition createWindowDefinition(

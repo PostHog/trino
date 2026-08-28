@@ -19,6 +19,8 @@ import io.trino.hogql.compiler.HogQlCompileEnvelope;
 import io.trino.hogql.compiler.HogQlCompiler;
 import io.trino.hogql.compiler.HogQlSemanticCatalogContext;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ArgumentReferenceRecipe;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.ExpressionArgument;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.FieldReferenceRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.JoinKey;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LazyProjectionDefinition;
@@ -26,10 +28,14 @@ import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LazyTableDef
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalFieldDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalTableDefinition;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.LogicalType;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.OperatorRecipe;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalIdentifier;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PhysicalQualifiedName;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.PropertyStorage;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipCardinality;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.RelationshipDefinition;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshot.SemanticOperator;
 import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider.PinnedSnapshot;
 import io.trino.hogql.parser.HogQlLanguageContract;
 import io.trino.sql.SqlFormatter;
@@ -147,6 +153,15 @@ public class TestHogQlProjectionPruning
         assertThat(nodes(plan, JoinNode.class)).hasSize(1);
     }
 
+    @Test
+    public void testVarcharJsonPropertyPredicateReachesStockPlanner()
+    {
+        Plan plan = plan(compile("SELECT properties.plan FROM persons WHERE properties.plan = 'pro'"));
+
+        assertThat(nodes(plan, TableScanNode.class)).hasSize(1);
+        assertThat(nodes(plan, FilterNode.class)).hasSize(1);
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"UNION ALL", "INTERSECT ALL", "EXCEPT ALL"})
     public void testSetOperationDemandIsMappedByBranchPosition(String operator)
@@ -217,8 +232,21 @@ public class TestHogQlProjectionPruning
                 physicalName("customer"),
                 List.of(
                         field("personId", "custkey", "bigint", LogicalType.INTEGER),
-                        field("name", "name", "varchar", LogicalType.STRING)),
-                List.of(),
+                        field("name", "name", "varchar", LogicalType.STRING),
+                        field("properties", "comment", "varchar", LogicalType.STRING)),
+                List.of(new PropertyDefinition(
+                        "properties",
+                        "properties",
+                        PropertyStorage.JSON_OBJECT,
+                        LogicalType.STRING,
+                        true,
+                        Optional.of("varchar"),
+                        Optional.of("varchar"),
+                        Optional.of(new OperatorRecipe(
+                                SemanticOperator.JSON_OBJECT_LOOKUP,
+                                List.of(
+                                        new ArgumentReferenceRecipe(ExpressionArgument.PROPERTY_SOURCE),
+                                        new ArgumentReferenceRecipe(ExpressionArgument.PROPERTY_KEY)))))),
                 List.of());
         LazyTableDefinition personProfile = new LazyTableDefinition(
                 "events",

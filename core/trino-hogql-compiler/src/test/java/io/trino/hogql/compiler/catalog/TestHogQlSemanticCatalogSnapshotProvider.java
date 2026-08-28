@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import static io.trino.spi.ErrorType.EXTERNAL;
@@ -56,6 +57,31 @@ public class TestHogQlSemanticCatalogSnapshotProvider
         assertThat(pinned.snapshot().generation()).isEqualTo(1);
         assertThat(pinned.logicalTable("events")).isPresent();
         assertThat(reads).hasValue(1);
+    }
+
+    @Test
+    public void testExpectedGenerationIsPassedToExactCacheLookup()
+    {
+        AtomicReference<OptionalLong> requestedGeneration = new AtomicReference<>();
+        HogQlSemanticCatalogSnapshotCache cache = new HogQlSemanticCatalogSnapshotCache()
+        {
+            @Override
+            public Optional<HogQlSemanticCatalogSnapshot> currentSnapshot(PhysicalIdentifier catalog)
+            {
+                throw new AssertionError("expected exact cache lookup");
+            }
+
+            @Override
+            public Optional<HogQlSemanticCatalogSnapshot> currentSnapshot(PhysicalIdentifier catalog, OptionalLong expectedGeneration)
+            {
+                requestedGeneration.set(expectedGeneration);
+                return Optional.of(snapshot(7));
+            }
+        };
+        HogQlSemanticCatalogSnapshotProvider provider = HogQlSemanticCatalogSnapshotProvider.fromCache(cache);
+
+        assertThat(provider.pin(new PinRequest(CATALOG, LANGUAGE_VERSION, OptionalLong.of(7))).generation()).isEqualTo(7);
+        assertThat(requestedGeneration).hasValue(OptionalLong.of(7));
     }
 
     @ParameterizedTest(name = "{0}")

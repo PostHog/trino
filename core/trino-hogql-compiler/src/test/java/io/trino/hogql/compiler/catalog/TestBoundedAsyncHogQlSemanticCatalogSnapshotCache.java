@@ -97,6 +97,13 @@ public class TestBoundedAsyncHogQlSemanticCatalogSnapshotCache
 
         assertRefreshFailure(mismatchedRefresh, Failure.CATALOG_MISMATCH);
         assertThat(cache.currentSnapshot(CATALOG)).get().extracting(HogQlSemanticCatalogSnapshot::generation).isEqualTo(2L);
+
+        CompletableFuture<HogQlSemanticCatalogSnapshot> mutatedLoad = loader.expect(CATALOG);
+        CompletionStage<HogQlSemanticCatalogSnapshot> mutatedRefresh = cache.prewarm(CATALOG);
+        mutatedLoad.complete(snapshot(CATALOG, 2, "changed_id"));
+
+        assertRefreshFailure(mutatedRefresh, Failure.GENERATION_MISMATCH);
+        assertThat(cache.currentSnapshot(CATALOG)).get().extracting(snapshot -> snapshot.logicalTables().getFirst().fields().getFirst().name()).isEqualTo("id");
     }
 
     @Test
@@ -244,6 +251,106 @@ public class TestBoundedAsyncHogQlSemanticCatalogSnapshotCache
     }
 
     @Test
+    public void testColdExactGenerationLoadsPinnedEntry()
+    {
+        AtomicLong ticker = new AtomicLong();
+        ControlledLoader loader = new ControlledLoader();
+        CompletableFuture<HogQlSemanticCatalogSnapshot> exactLoad = loader.expect(CATALOG, OptionalLong.of(7));
+        BoundedAsyncHogQlSemanticCatalogSnapshotCache cache = cache(3, ticker, loader);
+
+        assertThat(cache.currentSnapshot(CATALOG, OptionalLong.of(7))).isEmpty();
+        assertThat(loader.loadCount(CATALOG, OptionalLong.of(7))).isEqualTo(1);
+        assertThat(loader.loadCount(CATALOG)).isZero();
+
+        exactLoad.complete(snapshot(CATALOG, 7));
+        assertThat(cache.currentSnapshot(CATALOG, OptionalLong.of(7)))
+                .get()
+                .extracting(HogQlSemanticCatalogSnapshot::generation)
+                .isEqualTo(7L);
+    }
+
+    @Test
+    public void testLatestCanAdvancePastCachedHistoricalGeneration()
+    {
+        AtomicLong ticker = new AtomicLong();
+        ControlledLoader loader = new ControlledLoader();
+        BoundedAsyncHogQlSemanticCatalogSnapshotCache cache = cache(3, ticker, loader);
+        completePrewarm(cache, loader, snapshot(CATALOG, 1));
+
+        assertThat(cache.currentSnapshot(CATALOG, OptionalLong.of(1)))
+                .get()
+                .extracting(HogQlSemanticCatalogSnapshot::generation)
+                .isEqualTo(1L);
+        assertThat(loader.loadCount(CATALOG, OptionalLong.of(1))).isZero();
+
+        CompletableFuture<HogQlSemanticCatalogSnapshot> latestRefresh = loader.expect(CATALOG);
+        ticker.set(REFRESH_AFTER.toNanos());
+        assertThat(cache.currentSnapshot(CATALOG)).isPresent();
+        latestRefresh.complete(snapshot(CATALOG, 2));
+
+        assertThat(cache.currentSnapshot(CATALOG))
+                .get()
+                .extracting(HogQlSemanticCatalogSnapshot::generation)
+                .isEqualTo(2L);
+        assertThat(cache.currentSnapshot(CATALOG, OptionalLong.of(1)))
+                .get()
+                .extracting(HogQlSemanticCatalogSnapshot::generation)
+                .isEqualTo(1L);
+    }
+
+    @Test
+    public void testExactGenerationChurnPreservesLatestAndCancelsEvictedLoad()
+    {
+        AtomicLong ticker = new AtomicLong();
+        ControlledLoader loader = new ControlledLoader();
+        BoundedAsyncHogQlSemanticCatalogSnapshotCache cache = cache(2, ticker, loader);
+        completePrewarm(cache, loader, snapshot(CATALOG, 1));
+
+        CompletableFuture<HogQlSemanticCatalogSnapshot> generationSevenLoad = loader.expect(CATALOG, OptionalLong.of(7));
+        CompletionStage<HogQlSemanticCatalogSnapshot> generationSeven = cache.prewarm(CATALOG, OptionalLong.of(7));
+
+        CompletableFuture<HogQlSemanticCatalogSnapshot> generationEightLoad = loader.expect(CATALOG, OptionalLong.of(8));
+        CompletionStage<HogQlSemanticCatalogSnapshot> generationEight = cache.prewarm(CATALOG, OptionalLong.of(8));
+
+        assertThat(generationSevenLoad).isCancelled();
+        assertThat(generationSeven.toCompletableFuture()).isCompletedExceptionally();
+        assertThat(cache.currentSnapshot(CATALOG))
+                .get()
+                .extracting(HogQlSemanticCatalogSnapshot::generation)
+                .isEqualTo(1L);
+
+        generationEightLoad.complete(snapshot(CATALOG, 8));
+        assertThat(generationEight.toCompletableFuture()).isCompletedWithValueMatching(snapshot -> snapshot.generation() == 8);
+    }
+
+    @Test
+    public void testExactGenerationOutageFailsClosedWithoutLatestFallback()
+    {
+        AtomicLong ticker = new AtomicLong();
+        ControlledLoader loader = new ControlledLoader();
+        BoundedAsyncHogQlSemanticCatalogSnapshotCache cache = cache(3, ticker, loader);
+
+        CompletableFuture<HogQlSemanticCatalogSnapshot> exactLoad = loader.expect(CATALOG, OptionalLong.of(7));
+        assertThat(cache.currentSnapshot(CATALOG, OptionalLong.of(7))).isEmpty();
+        exactLoad.complete(snapshot(CATALOG, 7));
+
+        ticker.set(11);
+        completePrewarm(cache, loader, snapshot(CATALOG, 8));
+
+        CompletableFuture<HogQlSemanticCatalogSnapshot> failedReload = loader.expect(CATALOG, OptionalLong.of(7));
+        ticker.set(EXPIRE_AFTER.toNanos());
+        assertThat(cache.currentSnapshot(CATALOG, OptionalLong.of(7))).isEmpty();
+        failedReload.completeExceptionally(new IllegalStateException("metadata unavailable"));
+
+        assertThat(cache.currentSnapshot(CATALOG, OptionalLong.of(7))).isEmpty();
+        assertThat(loader.loadCount(CATALOG, OptionalLong.of(7))).isEqualTo(2);
+        assertThat(cache.currentSnapshot(CATALOG))
+                .get()
+                .extracting(HogQlSemanticCatalogSnapshot::generation)
+                .isEqualTo(8L);
+    }
+
+    @Test
     public void testOrdinaryAndDelimitedCatalogIdentifiersHaveIsolatedEntries()
     {
         AtomicLong ticker = new AtomicLong();
@@ -272,7 +379,9 @@ public class TestBoundedAsyncHogQlSemanticCatalogSnapshotCache
         BoundedAsyncHogQlSemanticCatalogSnapshotCache cache = cache(
                 2,
                 ticker,
-                catalog -> jsonLoader.load(LoadRequest.latest(catalog, LANGUAGE_VERSION)));
+                (catalog, expectedGeneration) -> jsonLoader.load(expectedGeneration.isPresent()
+                        ? LoadRequest.pinned(catalog, LANGUAGE_VERSION, expectedGeneration.orElseThrow())
+                        : LoadRequest.latest(catalog, LANGUAGE_VERSION)));
 
         CompletableFuture<byte[]> initialPayload = new CompletableFuture<>();
         payloads.add(initialPayload);
@@ -343,6 +452,11 @@ public class TestBoundedAsyncHogQlSemanticCatalogSnapshotCache
 
     private static HogQlSemanticCatalogSnapshot snapshot(PhysicalIdentifier catalog, long generation)
     {
+        return snapshot(catalog, generation, "id");
+    }
+
+    private static HogQlSemanticCatalogSnapshot snapshot(PhysicalIdentifier catalog, long generation, String fieldName)
+    {
         return new HogQlSemanticCatalogSnapshot(
                 2,
                 LANGUAGE_VERSION,
@@ -352,8 +466,8 @@ public class TestBoundedAsyncHogQlSemanticCatalogSnapshotCache
                         "events",
                         new PhysicalQualifiedName(catalog, catalog("default"), catalog("events")),
                         List.of(new LogicalFieldDefinition(
-                                "id",
-                                catalog("id"),
+                                fieldName,
+                                catalog(fieldName),
                                 "varchar",
                                 LogicalType.STRING,
                                 false,
@@ -385,30 +499,43 @@ public class TestBoundedAsyncHogQlSemanticCatalogSnapshotCache
     private static final class ControlledLoader
             implements SnapshotLoader
     {
-        private final Map<PhysicalIdentifier, ArrayDeque<CompletableFuture<HogQlSemanticCatalogSnapshot>>> loads = new HashMap<>();
-        private final Map<PhysicalIdentifier, AtomicInteger> loadCounts = new HashMap<>();
+        private final Map<LoadKey, ArrayDeque<CompletableFuture<HogQlSemanticCatalogSnapshot>>> loads = new HashMap<>();
+        private final Map<LoadKey, AtomicInteger> loadCounts = new HashMap<>();
 
         public CompletableFuture<HogQlSemanticCatalogSnapshot> expect(PhysicalIdentifier catalog)
         {
+            return expect(catalog, OptionalLong.empty());
+        }
+
+        public CompletableFuture<HogQlSemanticCatalogSnapshot> expect(PhysicalIdentifier catalog, OptionalLong expectedGeneration)
+        {
             CompletableFuture<HogQlSemanticCatalogSnapshot> load = new CompletableFuture<>();
-            loads.computeIfAbsent(catalog, _ -> new ArrayDeque<>()).add(load);
+            loads.computeIfAbsent(new LoadKey(catalog, expectedGeneration), _ -> new ArrayDeque<>()).add(load);
             return load;
         }
 
         @Override
-        public CompletionStage<HogQlSemanticCatalogSnapshot> load(PhysicalIdentifier catalog)
+        public CompletionStage<HogQlSemanticCatalogSnapshot> load(PhysicalIdentifier catalog, OptionalLong expectedGeneration)
         {
-            loadCounts.computeIfAbsent(catalog, _ -> new AtomicInteger()).incrementAndGet();
-            return Optional.ofNullable(loads.get(catalog))
+            LoadKey key = new LoadKey(catalog, expectedGeneration);
+            loadCounts.computeIfAbsent(key, _ -> new AtomicInteger()).incrementAndGet();
+            return Optional.ofNullable(loads.get(key))
                     .map(ArrayDeque::poll)
-                    .orElseThrow(() -> new IllegalStateException("unexpected load for catalog " + catalog.value()));
+                    .orElseThrow(() -> new IllegalStateException("unexpected load for catalog " + catalog.value() + " and generation " + expectedGeneration));
         }
 
         public int loadCount(PhysicalIdentifier catalog)
         {
-            return Optional.ofNullable(loadCounts.get(catalog))
+            return loadCount(catalog, OptionalLong.empty());
+        }
+
+        public int loadCount(PhysicalIdentifier catalog, OptionalLong expectedGeneration)
+        {
+            return Optional.ofNullable(loadCounts.get(new LoadKey(catalog, expectedGeneration)))
                     .map(AtomicInteger::get)
                     .orElse(0);
         }
     }
+
+    private record LoadKey(PhysicalIdentifier catalog, OptionalLong expectedGeneration) {}
 }

@@ -144,7 +144,8 @@ public class QueryPreparer
                 try {
                     HogQlCompilationResult result = tracker.observe(COMPILATION, () -> hogQlCompilationExecutor.execute(() -> hogQlCompiler
                             .orElseThrow(() -> new TrinoException(NOT_SUPPORTED, "HogQL query submission is disabled"))
-                            .compile(envelope, semanticCatalogContext(session))));
+                            .compileV0(envelope, semanticCatalogContext(session))));
+                    tracker.catalogGeneration(result.catalogGeneration());
                     Statement statement = explain(result.statement(), submission.hogQlExplain());
                     preparedQuery = tracker.observe(PARAMETER_BINDING, () -> prepareQuery(
                             session,

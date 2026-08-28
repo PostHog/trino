@@ -95,6 +95,16 @@ public class TestHogQlRelationshipExpansion
     }
 
     @Test
+    public void testExpandsJsonObjectPropertyLookup()
+    {
+        HogQlCompilationResult result = compile("SELECT jsonProperties.plan FROM persons");
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT CAST(CAST(json_parse(properties_json) AS map(varchar, json))[CAST('plan' AS varchar)] AS varchar) AS plan " +
+                        "FROM analytics.data.raw_persons"));
+    }
+
+    @Test
     public void testPrunesUnusedLazyStarProjectionBeforeExpansion()
     {
         HogQlCompilationResult result = compile("SELECT sub.event FROM (SELECT e.personProfile.*, e.* FROM events e) sub");
@@ -193,20 +203,35 @@ public class TestHogQlRelationshipExpansion
                         field("workspaceId", "workspace_id"),
                         field("eventId", "event_id"),
                         field("name", "full_name"),
+                        new LogicalFieldDefinition("propertiesJson", new PhysicalIdentifier("properties_json", false), "varchar", LogicalType.STRING, true, false),
                         new LogicalFieldDefinition("propertiesMap", new PhysicalIdentifier("properties_map", false), "map(varchar, varchar)", LogicalType.MAP, true, false)),
-                List.of(new PropertyDefinition(
-                        "properties",
-                        "propertiesMap",
-                        PropertyStorage.MAP,
-                        LogicalType.STRING,
-                        true,
-                        Optional.of("varchar"),
-                        Optional.of("varchar"),
-                        Optional.of(new OperatorRecipe(
-                                SemanticOperator.SUBSCRIPT,
-                                List.of(
-                                        new ArgumentReferenceRecipe(ExpressionArgument.PROPERTY_SOURCE),
-                                        new ArgumentReferenceRecipe(ExpressionArgument.PROPERTY_KEY)))))),
+                List.of(
+                        new PropertyDefinition(
+                                "properties",
+                                "propertiesMap",
+                                PropertyStorage.MAP,
+                                LogicalType.STRING,
+                                true,
+                                Optional.of("varchar"),
+                                Optional.of("varchar"),
+                                Optional.of(new OperatorRecipe(
+                                        SemanticOperator.SUBSCRIPT,
+                                        List.of(
+                                                new ArgumentReferenceRecipe(ExpressionArgument.PROPERTY_SOURCE),
+                                                new ArgumentReferenceRecipe(ExpressionArgument.PROPERTY_KEY))))),
+                        new PropertyDefinition(
+                                "jsonProperties",
+                                "propertiesJson",
+                                PropertyStorage.JSON_OBJECT,
+                                LogicalType.STRING,
+                                true,
+                                Optional.of("varchar"),
+                                Optional.of("varchar"),
+                                Optional.of(new OperatorRecipe(
+                                        SemanticOperator.JSON_OBJECT_LOOKUP,
+                                        List.of(
+                                                new ArgumentReferenceRecipe(ExpressionArgument.PROPERTY_SOURCE),
+                                                new ArgumentReferenceRecipe(ExpressionArgument.PROPERTY_KEY)))))),
                 List.of(new RelationshipDefinition(
                         "event",
                         "events",

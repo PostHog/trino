@@ -2206,6 +2206,20 @@ final class HogQlSemanticResolver
             case IS_NULL -> new IsNullExpression(arguments.getFirst(), false, span, span);
             case IS_NOT_NULL -> new IsNullExpression(arguments.getFirst(), true, span, span);
             case SUBSCRIPT -> new SubscriptExpression(arguments.getFirst(), arguments.getLast(), span);
+            case JSON_OBJECT_LOOKUP -> new SubscriptExpression(
+                    new CastExpression(
+                            new FunctionCall(
+                                    new Identifier("json_parse", false, span),
+                                    List.of(arguments.getFirst()),
+                                    false,
+                                    List.of(),
+                                    Optional.empty(),
+                                    span),
+                            new Identifier("map(varchar, json)", false, span),
+                            false,
+                            span),
+                    arguments.getLast(),
+                    span);
             default -> new BinaryExpression(binaryOperator(operator.operator()), arguments.getFirst(), arguments.getLast(), span);
         };
     }
@@ -2290,7 +2304,7 @@ final class HogQlSemanticResolver
             case GREATER_THAN_OR_EQUAL -> HogQlQuery.BinaryOperator.GREATER_THAN_OR_EQUAL;
             case AND -> HogQlQuery.BinaryOperator.AND;
             case OR -> HogQlQuery.BinaryOperator.OR;
-            case NOT, NEGATE, IS_NULL, IS_NOT_NULL, SUBSCRIPT -> throw new IllegalArgumentException("operator cannot be lowered as binary");
+            case NOT, NEGATE, IS_NULL, IS_NOT_NULL, SUBSCRIPT, JSON_OBJECT_LOOKUP -> throw new IllegalArgumentException("operator cannot be lowered as binary");
         };
     }
 

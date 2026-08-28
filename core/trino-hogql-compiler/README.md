@@ -43,10 +43,37 @@ explicit error for valid constructs that do not yet have a stock Trino AST
 mapping. Adding syntax support therefore cannot silently claim semantic or
 execution parity.
 
+## MVP executable contract
+
+The MVP lowers a frozen, fail-closed subset directly to stock Trino AST nodes:
+
+- logical `events` and `persons` tables supplied by a pinned Duckgres manifest;
+- scalar VARCHAR JSON property reads and the `events.person` lazy relationship;
+- parameters, CTEs, subqueries, joins, set operations, arrays, maps, rows,
+  intervals, grouping, ordering, limits, and windows that have exact stock
+  Trino representations;
+- numeric/conditional/string functions (`abs`, `coalesce`, `if`, `lower`, `upper`, `length`,
+  `concat`, `replace`), collection functions (`map`, `arraySort`,
+  `arrayDistinct`, `arrayFlatten`, `arrayStringConcat`), date functions
+  (`dateAdd`, `dateDiff`, `dateTrunc`), aggregates (`count`, `sum`, `min`,
+  `max`, `avg`, `any`, `argMin`, `argMax`, `array_agg`), and windows
+  (`first_value`, `rank`, `row_number`).
+
+Function aliases are resolved before Trino analysis. Unknown functions fail as
+HogQL resolution errors. Actions, cohorts, saved queries, explicit modifiers,
+HogQLX, PIVOT/UNPIVOT execution, ClickHouse-only clauses, advanced lambda and
+table functions, and complete type/function parity remain outside the MVP.
+
 Set `hogql.enabled=true` on the coordinator to register `POST /v1/hogql`. The
-request body is raw HogQL text and the response uses Trino's existing statement
-protocol. Follow-up result and cancellation URIs remain under `/v1/statement`.
+request body is the versioned JSON envelope containing the raw HogQL query,
+language/protocol versions, and optional typed bindings. The response uses
+Trino's existing statement protocol. Follow-up result and cancellation URIs
+remain under `/v1/statement`.
 The endpoint is absent when the property is false, which is the default.
+Production compilation uses a dedicated fixed-size executor with a bounded
+queue and the `hogql.compilation-timeout` wall-time limit. Saturation and
+timeout return retryable insufficient-resource errors; standard SQL bypasses
+the compiler executor.
 
 Development is based on the fork's `ducklake-connector` integration branch. At
 the start of this milestone its head was `posthog-484-ducklake.9`, commit

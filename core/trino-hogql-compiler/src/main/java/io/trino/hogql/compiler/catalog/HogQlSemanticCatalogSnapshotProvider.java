@@ -32,7 +32,7 @@ public interface HogQlSemanticCatalogSnapshotProvider
     {
         requireNonNull(cache, "cache is null");
         return request -> {
-            HogQlSemanticCatalogSnapshot snapshot = cache.currentSnapshot(request.catalog())
+            HogQlSemanticCatalogSnapshot snapshot = cache.currentSnapshot(request.catalog(), request.expectedGeneration())
                     .orElseThrow(() -> new HogQlSemanticCatalogException(Failure.UNAVAILABLE, "HogQL semantic catalog snapshot is unavailable"));
             if (!snapshot.catalog().equals(request.catalog())) {
                 throw new HogQlSemanticCatalogException(Failure.CATALOG_MISMATCH, "HogQL semantic catalog snapshot does not match the requested catalog");

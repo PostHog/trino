@@ -74,12 +74,11 @@ import io.trino.hogql.parser.tree.HogQlQuery.WindowSpecification;
 import io.trino.spi.Location;
 import io.trino.spi.TrinoException;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
 import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_RESOLUTION_ERROR;
 import static io.trino.hogql.compiler.HogQlErrorCode.HOGQL_UNSUPPORTED_FEATURE;
@@ -90,18 +89,35 @@ final class HogQlFunctionResolver
     private static final String MATCHES_ACTION = "matchesaction";
 
     private final Map<String, FunctionCapabilityDefinition> functions;
+    private final boolean semanticCatalogAvailable;
 
-    private HogQlFunctionResolver(PinnedSnapshot snapshot)
+    private HogQlFunctionResolver(Optional<PinnedSnapshot> snapshot)
     {
-        functions = snapshot.snapshot().functions().stream()
-                .collect(Collectors.toUnmodifiableMap(function -> canonical(function.name()), Function.identity()));
+        Map<String, FunctionCapabilityDefinition> functions = new LinkedHashMap<>(HogQlV0FunctionRegistry.functions());
+        snapshot.stream()
+                .flatMap(pinned -> pinned.snapshot().functions().stream())
+                .forEach(function -> functions.putIfAbsent(canonical(function.name()), function));
+        this.functions = Map.copyOf(functions);
+        semanticCatalogAvailable = snapshot.isPresent();
     }
 
     public static HogQlQuery resolve(PinnedSnapshot snapshot, HogQlQuery query)
     {
         requireNonNull(snapshot, "snapshot is null");
         requireNonNull(query, "query is null");
-        return new HogQlFunctionResolver(snapshot).resolveQuery(query);
+        return new HogQlFunctionResolver(Optional.of(snapshot)).resolveQuery(query);
+    }
+
+    public static HogQlQuery resolve(HogQlQuery query)
+    {
+        requireNonNull(query, "query is null");
+        return new HogQlFunctionResolver(Optional.empty()).resolveQuery(query);
+    }
+
+    public static HogQlQuery resolveV0(HogQlQuery query)
+    {
+        requireNonNull(query, "query is null");
+        return new HogQlFunctionResolver(Optional.empty()).resolveQuery(query);
     }
 
     private HogQlQuery resolveQuery(HogQlQuery query)
@@ -276,7 +292,10 @@ final class HogQlFunctionResolver
     private Expression resolveFunction(FunctionCall function, boolean windowInvocation)
     {
         String name = function.name().value();
-        if (function.nameParts().size() == 1 && canonical(name).equals(MATCHES_ACTION)) {
+        if (function.nameParts().size() != 1) {
+            throw unsupportedError(function, "Qualified HogQL functions are not supported");
+        }
+        if (semanticCatalogAvailable && function.nameParts().size() == 1 && canonical(name).equals(MATCHES_ACTION)) {
             return new FunctionCall(
                     function.nameParts(),
                     function.arguments().stream().map(this::resolveExpression).toList(),

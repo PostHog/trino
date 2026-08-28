@@ -114,14 +114,32 @@ public final class HogQlCompiler
                 envelope.modifiers(),
                 catalogContext,
                 envelope.languageVersion(),
-                envelope.catalogGeneration());
+                envelope.catalogGeneration(),
+                false);
+    }
+
+    public HogQlCompilationResult compileV0(HogQlCompileEnvelope envelope, Optional<HogQlSemanticCatalogContext> catalogContext)
+    {
+        requireNonNull(envelope, "envelope is null");
+        requireNonNull(catalogContext, "catalogContext is null");
+        if (!envelope.modifiers().isEmpty()) {
+            throw unsupportedError(parse(envelope.query()).span(), "Modifiers are outside the HogQL v0 profile");
+        }
+        return compile(
+                parse(envelope.query()),
+                envelope.parameters(),
+                Map.of(),
+                catalogContext,
+                envelope.languageVersion(),
+                envelope.catalogGeneration(),
+                true);
     }
 
     public HogQlCompilationResult compile(String hogql, Map<String, HogQlTypedValue> parameters)
     {
         requireNonNull(hogql, "hogql is null");
         requireNonNull(parameters, "parameters is null");
-        return compile(parse(hogql), parameters, Map.of(), Optional.empty(), HogQlLanguageContract.current().languageVersion(), OptionalLong.empty());
+        return compile(parse(hogql), parameters, Map.of(), Optional.empty(), HogQlLanguageContract.current().languageVersion(), OptionalLong.empty(), false);
     }
 
     private HogQlQuery parse(String hogql)
@@ -145,7 +163,8 @@ public final class HogQlCompiler
             Map<String, HogQlTypedValue> modifiers,
             Optional<HogQlSemanticCatalogContext> catalogContext,
             HogQlLanguageVersion languageVersion,
-            OptionalLong expectedCatalogGeneration)
+            OptionalLong expectedCatalogGeneration,
+            boolean v0Profile)
     {
         validateParameters(query, parameters);
         validateQuery(query);
@@ -183,7 +202,10 @@ public final class HogQlCompiler
         for (int index = 0; index < placeholders.size(); index++) {
             parameterIds.put(placeholders.get(index).span(), index);
         }
-        ResolvedQuery resolved = resolveQuery(query, catalogContext, languageVersion, expectedCatalogGeneration, !modifiers.isEmpty());
+        if (v0Profile) {
+            HogQlV0ProfileValidator.validate(query, Optional.empty());
+        }
+        ResolvedQuery resolved = resolveQuery(query, catalogContext, languageVersion, expectedCatalogGeneration, !modifiers.isEmpty(), v0Profile);
         Statement statement = TrinoAstFactory.createStatement(resolved.query(), parameterIds);
         List<HogQlModifierBinding> modifierBindings = resolved.pinnedSnapshot()
                 .map(snapshot -> HogQlModifierResolver.resolve(snapshot, modifiers, query.span()))
@@ -231,7 +253,8 @@ public final class HogQlCompiler
             Optional<HogQlSemanticCatalogContext> catalogContext,
             HogQlLanguageVersion languageVersion,
             OptionalLong expectedCatalogGeneration,
-            boolean modifiersRequireSnapshot)
+            boolean modifiersRequireSnapshot,
+            boolean v0Profile)
     {
         boolean semanticCandidate = containsSemanticCandidate(query);
         if (!semanticCandidate && !modifiersRequireSnapshot) {
@@ -241,16 +264,19 @@ public final class HogQlCompiler
             if (modifiersRequireSnapshot) {
                 throw new HogQlSemanticCatalogException(Failure.UNAVAILABLE, "HogQL semantic catalog snapshot is required for modifiers");
             }
-            return new ResolvedQuery(query, Optional.empty());
+            return new ResolvedQuery(containsFunctionCall(query) ? HogQlFunctionResolver.resolve(query) : query, Optional.empty());
         }
         HogQlSemanticCatalogContext context = catalogContext.orElseThrow();
         PinnedSnapshot pinned = context.snapshotProvider().pin(new PinRequest(
                 context.catalog(),
                 requireNonNull(languageVersion, "languageVersion is null"),
                 expectedCatalogGeneration));
+        if (v0Profile) {
+            HogQlV0ProfileValidator.validate(query, Optional.of(pinned.snapshot()));
+        }
         HogQlQuery resolved = query;
         if (semanticCandidate) {
-            HogQlQuery functionsResolved = HogQlFunctionResolver.resolve(pinned, query);
+            HogQlQuery functionsResolved = v0Profile ? HogQlFunctionResolver.resolveV0(query) : HogQlFunctionResolver.resolve(pinned, query);
             resolved = HogQlSemanticResolver.resolve(pinned, functionsResolved)
                     .map(HogQlSemanticResolver.ResolvedQuery::query)
                     .orElse(functionsResolved);
@@ -540,6 +566,15 @@ public final class HogQlCompiler
     {
         return new TrinoException(
                 HOGQL_BINDING_ERROR,
+                Optional.of(new Location(span.startLine(), span.startColumn())),
+                message,
+                null);
+    }
+
+    private static TrinoException unsupportedError(SourceSpan span, String message)
+    {
+        return new TrinoException(
+                io.trino.hogql.compiler.HogQlErrorCode.HOGQL_UNSUPPORTED_FEATURE,
                 Optional.of(new Location(span.startLine(), span.startColumn())),
                 message,
                 null);
