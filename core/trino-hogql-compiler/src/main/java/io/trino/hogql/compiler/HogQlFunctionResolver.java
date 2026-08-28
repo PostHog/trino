@@ -385,6 +385,14 @@ final class HogQlFunctionResolver
             case UNIQ_IF -> aggregate("approx_distinct", List.of(arguments.getFirst()), false, arguments.get(1), span);
             case UNIQ_EXACT -> aggregate("count", List.of(arguments.getFirst()), true, null, span);
             case GROUP_UNIQ_ARRAY -> aggregate("array_agg", List.of(arguments.getFirst()), true, null, span);
+            case ARG_MAX_IF -> aggregate("max_by", List.of(arguments.getFirst(), arguments.get(1)), false, arguments.get(2), span);
+            case ANY_IF -> aggregate("arbitrary", List.of(arguments.getFirst()), false, arguments.get(1), span);
+            case MIN_IF -> aggregate("min", List.of(arguments.getFirst()), false, arguments.get(1), span);
+            case AVG_IF -> aggregate("avg", List.of(arguments.getFirst()), false, arguments.get(1), span);
+            case GROUP_ARRAY_IF -> aggregate("array_agg", List.of(arguments.getFirst()), false, arguments.get(1), span);
+            case UNIQ_EXACT_IF -> aggregate("count", List.of(arguments.getFirst()), true, arguments.get(1), span);
+            case GROUP_UNIQ_ARRAY_IF -> aggregate("array_agg", List.of(arguments.getFirst()), true, arguments.get(1), span);
+            case COUNT_DISTINCT -> aggregate("count", List.of(arguments.getFirst()), true, null, span);
             case MULTI_IF -> multiIf(function, arguments);
             case JSON_EXTRACT_STRING -> jsonExtractScalar(function, arguments, "varchar", new Literal(HogQlQuery.LiteralKind.STRING, "", span));
             case JSON_EXTRACT_INT -> jsonExtractScalar(function, arguments, "bigint", new Literal(HogQlQuery.LiteralKind.INTEGER, "0", span));

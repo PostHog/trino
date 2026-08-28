@@ -227,6 +227,21 @@ public class TestHogQlFunctionResolver
     }
 
     @Test
+    public void testCompilerLowersAggregateCombinators()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT argMaxIf(value, timestamp, active), anyIf(value, active), minIf(value, active), " +
+                        "avgIf(value, active), groupArrayIf(value, active), uniqExactIf(value, active), " +
+                        "groupUniqArrayIf(value, active), countDistinct(value) FROM records"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT max_by(value, timestamp) FILTER (WHERE active), arbitrary(value) FILTER (WHERE active), " +
+                        "min(value) FILTER (WHERE active), avg(value) FILTER (WHERE active), " +
+                        "array_agg(value) FILTER (WHERE active), count(DISTINCT value) FILTER (WHERE active), " +
+                        "array_agg(DISTINCT value) FILTER (WHERE active), count(DISTINCT value) FROM records"));
+    }
+
+    @Test
     public void testCompilerEnforcesV0FunctionArities()
     {
         assertThat(new HogQlCompiler().compile(envelope("SELECT coalesce('value')")).statement())

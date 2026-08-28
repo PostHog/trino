@@ -290,7 +290,9 @@ public record HogQlSemanticCatalogSnapshot(
     private static FunctionKind rewriteFunctionKind(FunctionRewrite rewrite)
     {
         return switch (rewrite) {
-            case COUNT_IF, GROUP_UNIQ_ARRAY, MAX_IF, SUM_IF, UNIQ_EXACT, UNIQ_IF -> FunctionKind.AGGREGATE;
+            case ANY_IF, ARG_MAX_IF, AVG_IF, COUNT_DISTINCT, COUNT_IF, GROUP_ARRAY_IF,
+                    GROUP_UNIQ_ARRAY, GROUP_UNIQ_ARRAY_IF, MAX_IF, MIN_IF, SUM_IF,
+                    UNIQ_EXACT, UNIQ_EXACT_IF, UNIQ_IF -> FunctionKind.AGGREGATE;
             default -> FunctionKind.SCALAR;
         };
     }
@@ -301,12 +303,14 @@ public record HogQlSemanticCatalogSnapshot(
             case CAST_BIGINT, CAST_DATE, CAST_DOUBLE, CAST_VARCHAR,
                     DATE_TRUNC_DAY, DATE_TRUNC_HOUR, DATE_TRUNC_MONTH, DATE_TRUNC_WEEK,
                     GROUP_UNIQ_ARRAY, INTERVAL_DAY, IS_NOT_NULL, IS_NULL, COUNT_IF,
-                    JSON_KEYS_AND_VALUES_RAW, NOT, PARSE_TIMESTAMP, TO_UNIX_TIMESTAMP, UNIQ_EXACT ->
+                    JSON_KEYS_AND_VALUES_RAW, NOT, PARSE_TIMESTAMP, TO_UNIX_TIMESTAMP,
+                    COUNT_DISTINCT, UNIQ_EXACT ->
                 !signature.variadic() && signature.argumentTypes().size() == 1;
-            case ADD_DAYS, ADD_MONTHS, AND, GREATER, JSON_EXTRACT_TYPED, JSON_KEYS_AND_VALUES,
-                    LIKE, MAX_IF, REGEX_EXTRACT, SUM_IF, UNIQ_IF ->
+            case ADD_DAYS, ADD_MONTHS, AND, ANY_IF, AVG_IF, GREATER, GROUP_ARRAY_IF,
+                    GROUP_UNIQ_ARRAY_IF, JSON_EXTRACT_TYPED, JSON_KEYS_AND_VALUES,
+                    LIKE, MAX_IF, MIN_IF, REGEX_EXTRACT, SUM_IF, UNIQ_EXACT_IF, UNIQ_IF ->
                 !signature.variadic() && signature.argumentTypes().size() == 2;
-            case REGEX_REPLACE_ALL -> !signature.variadic() && signature.argumentTypes().size() == 3;
+            case ARG_MAX_IF, REGEX_REPLACE_ALL -> !signature.variadic() && signature.argumentTypes().size() == 3;
             case CAST_TIMESTAMP -> !signature.variadic() &&
                     (signature.argumentTypes().size() == 1 || signature.argumentTypes().size() == 2);
             case DATE_ADD -> !signature.variadic() &&
@@ -1310,14 +1314,20 @@ public record HogQlSemanticCatalogSnapshot(
         ADD_DAYS,
         ADD_MONTHS,
         AND,
+        ANY_IF,
+        ARG_MAX_IF,
+        AVG_IF,
         DATE_ADD,
         DATE_TRUNC_DAY,
         DATE_TRUNC_HOUR,
         DATE_TRUNC_MONTH,
         DATE_TRUNC_WEEK,
         COUNT_IF,
+        COUNT_DISTINCT,
         GROUP_UNIQ_ARRAY,
         GREATER,
+        GROUP_ARRAY_IF,
+        GROUP_UNIQ_ARRAY_IF,
         INTERVAL_DAY,
         IS_NULL,
         IS_NOT_NULL,
@@ -1331,6 +1341,7 @@ public record HogQlSemanticCatalogSnapshot(
         JSON_LENGTH,
         LIKE,
         MAX_IF,
+        MIN_IF,
         MULTI_IF,
         NOT,
         PARSE_TIMESTAMP,
@@ -1340,6 +1351,7 @@ public record HogQlSemanticCatalogSnapshot(
         TODAY,
         TO_UNIX_TIMESTAMP,
         UNIQ_EXACT,
+        UNIQ_EXACT_IF,
         UNIQ_IF
     }
 
