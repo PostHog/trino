@@ -16,6 +16,7 @@ package io.trino.plugin.ducklake;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import io.trino.plugin.ducklake.function.CityHash64Function;
+import io.trino.plugin.ducklake.function.FormatReadableTimeDeltaFunction;
 import io.trino.spi.Plugin;
 import io.trino.spi.connector.ConnectorFactory;
 
@@ -33,6 +34,6 @@ public class DuckLakePlugin
     @Override
     public Set<Class<?>> getFunctions()
     {
-        return ImmutableSet.of(CityHash64Function.class);
+        return ImmutableSet.of(CityHash64Function.class, FormatReadableTimeDeltaFunction.class);
     }
 }
