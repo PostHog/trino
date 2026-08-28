@@ -302,7 +302,7 @@ public record HogQlSemanticCatalogSnapshot(
         return switch (rewrite) {
             case ARRAY_ENUMERATE, ARRAY_SUM, ASSUME_NOT_NULL, CAST_BIGINT, CAST_DATE, CAST_DOUBLE,
                     CAST_UUID, CAST_VARCHAR, EMPTY, FLOAT_OR_ZERO, INTERVAL_MONTH, INT_OR_ZERO,
-                    MD5, NOT_EMPTY, RANGE, START_WEEK, TO_JSON_STRING,
+                    MD5, NOT_EMPTY, START_WEEK, TO_JSON_STRING,
                     DATE_TRUNC_DAY, DATE_TRUNC_HOUR, DATE_TRUNC_MONTH, DATE_TRUNC_WEEK,
                     GROUP_UNIQ_ARRAY, INTERVAL_DAY, IS_NOT_NULL, IS_NULL, COUNT_IF,
                     NOT, PARSE_TIMESTAMP, TO_UNIX_TIMESTAMP,
@@ -312,7 +312,7 @@ public record HogQlSemanticCatalogSnapshot(
                     AVG_IF, DATE_PART, DECIMAL_CAST, DIVIDE_DECIMAL, EQUALS, FLOAT_OR_DEFAULT, GREATER, GROUP_ARRAY_IF, HAS,
                     GROUP_UNIQ_ARRAY_IF, JSON_EXTRACT_TYPED, JSON_HAS, JSON_KEYS_AND_VALUES, JSON_VALUE,
                     IN_ARRAY, INT_DIV, LIKE, MAX_IF, MIN_IF, MULTIPLY, MULTIPLY_DECIMAL,
-                    MEDIAN_IF, REGEX_EXTRACT, REGEX_EXTRACT_ALL, SPLIT_CHAR, SPLIT_STRING,
+                    MEDIAN_IF, MINUS, REGEX_EXTRACT, REGEX_EXTRACT_ALL, SPLIT_CHAR, SPLIT_STRING,
                     SUBTRACT_MONTHS, SUBTRACT_YEARS, SUM_IF,
                     TUPLE_ELEMENT, UNIQ_EXACT_IF, UNIQ_IF ->
                 !signature.variadic() && signature.argumentTypes().size() == 2;
@@ -324,11 +324,13 @@ public record HogQlSemanticCatalogSnapshot(
                     (signature.argumentTypes().size() == 2 || signature.argumentTypes().size() == 3);
             case JSON_EXTRACT_BOOL, JSON_EXTRACT_FLOAT, JSON_EXTRACT_INT, JSON_EXTRACT_RAW, JSON_EXTRACT_UINT ->
                 signature.variadic() && signature.argumentTypes().size() == 3;
-            case JSON_EXTRACT_ARRAY_RAW, JSON_EXTRACT_STRING, JSON_KEYS_AND_VALUES_RAW, JSON_LENGTH ->
+            case JSON_EXTRACT_ARRAY_RAW, JSON_EXTRACT_KEYS, JSON_EXTRACT_STRING, JSON_KEYS_AND_VALUES_RAW, JSON_LENGTH ->
                 (!signature.variadic() && signature.argumentTypes().size() == 1) ||
                     (signature.variadic() && signature.argumentTypes().size() == 3);
             case AND -> (!signature.variadic() && signature.argumentTypes().size() == 2) ||
                     (signature.variadic() && signature.argumentTypes().size() == 3);
+            case RANGE -> !signature.variadic() &&
+                    (signature.argumentTypes().size() == 1 || signature.argumentTypes().size() == 2);
             case MULTI_IF -> signature.variadic() && signature.argumentTypes().size() == 4;
             case TUPLE -> signature.variadic() && signature.argumentTypes().size() == 2;
             case TODAY -> !signature.variadic() && signature.argumentTypes().isEmpty();
@@ -1367,6 +1369,7 @@ public record HogQlSemanticCatalogSnapshot(
         JSON_EXTRACT_BOOL,
         JSON_EXTRACT_FLOAT,
         JSON_EXTRACT_INT,
+        JSON_EXTRACT_KEYS,
         JSON_EXTRACT_RAW,
         JSON_EXTRACT_STRING,
         JSON_EXTRACT_TYPED,
@@ -1381,6 +1384,7 @@ public record HogQlSemanticCatalogSnapshot(
         MD5,
         MEDIAN_IF,
         MIN_IF,
+        MINUS,
         MULTIPLY,
         MULTIPLY_DECIMAL,
         MULTI_IF,

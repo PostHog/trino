@@ -335,16 +335,31 @@ public class TestHogQlFunctionResolver
     {
         HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
                 "SELECT arrayElement(items, -1), arrayFilter(x -> x > 0, items), arrayFirst(x -> x > 0, items), " +
-                        "arrayMap(x -> x + 1, items), arraySum(items), range(3), range(0), tupleElement(item, 2), " +
+                        "arrayMap(x -> x + 1, items), arraySum(items), range(3), range(0), range(2, 5), tupleElement(item, 2), " +
                         "splitByChar(',', text), has(items, 3), has(items, NULL) FROM records"));
 
         assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
                 "SELECT element_at(items, -1), filter(items, x -> x > 0), element_at(filter(items, x -> x > 0), 1), " +
                         "transform(items, x -> x + 1), reduce(items, 0, (_hogql_sum, _hogql_item) -> _hogql_sum + _hogql_item, _hogql_sum -> _hogql_sum), " +
                         "if(3 <= 0, CAST(ARRAY[] AS array(bigint)), sequence(0, 3 - 1)), " +
-                        "if(0 <= 0, CAST(ARRAY[] AS array(bigint)), sequence(0, 0 - 1)), item[2], split(text, ','), " +
+                        "if(0 <= 0, CAST(ARRAY[] AS array(bigint)), sequence(0, 0 - 1)), " +
+                        "if(5 <= 2, CAST(ARRAY[] AS array(bigint)), sequence(2, 5 - 1)), item[2], split(text, ','), " +
                         "if(3 IS NULL, any_match(items, _hogql_item -> _hogql_item IS NULL), coalesce(contains(items, 3), false)), " +
                         "if(NULL IS NULL, any_match(items, _hogql_item -> _hogql_item IS NULL), coalesce(contains(items, NULL), false)) FROM records"));
+    }
+
+    @Test
+    public void testCompilerLowersFinalStockCompatibilityFunctions()
+    {
+        HogQlCompilationResult result = new HogQlCompiler().compile(envelope(
+                "SELECT minus(total, discount), toMonth(timestamp), ceil(score), " +
+                        "JSONExtractKeys(payload), JSONExtractKeys(payload, 'nested') FROM records"));
+
+        assertThat(result.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT total - discount, month(timestamp), ceiling(score), " +
+                        "map_keys(coalesce(TRY_CAST(json_parse(payload) AS map(varchar, json)), CAST(map(ARRAY[], ARRAY[]) AS map(varchar, json)))), " +
+                        "map_keys(coalesce(TRY_CAST(json_extract(payload, '$[\"nested\"]') AS map(varchar, json)), CAST(map(ARRAY[], ARRAY[]) AS map(varchar, json)))) " +
+                        "FROM records"));
     }
 
     @Test

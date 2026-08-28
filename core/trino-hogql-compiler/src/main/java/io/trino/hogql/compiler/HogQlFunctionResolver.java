@@ -433,7 +433,7 @@ final class HogQlFunctionResolver
                     span);
             case ARRAY_MAP -> call("transform", List.of(arguments.get(1), arguments.getFirst()), span);
             case ARRAY_SUM -> arraySum(arguments.getFirst(), span);
-            case RANGE -> range(arguments.getFirst(), span);
+            case RANGE -> range(arguments, span);
             case TUPLE_ELEMENT -> new SubscriptExpression(arguments.getFirst(), arguments.get(1), span);
             case SPLIT_CHAR -> call("split", List.of(arguments.get(1), arguments.getFirst()), span);
             case HAS -> has(arguments, span);
@@ -441,6 +441,7 @@ final class HogQlFunctionResolver
             case EMPTY -> empty(arguments.getFirst(), true, span);
             case NOT_EMPTY -> empty(arguments.getFirst(), false, span);
             case EQUALS -> new BinaryExpression(HogQlQuery.BinaryOperator.EQUAL, arguments.getFirst(), arguments.get(1), span);
+            case MINUS -> new BinaryExpression(HogQlQuery.BinaryOperator.SUBTRACT, arguments.getFirst(), arguments.get(1), span);
             case MULTIPLY, MULTIPLY_DECIMAL -> new BinaryExpression(HogQlQuery.BinaryOperator.MULTIPLY, arguments.getFirst(), arguments.get(1), span);
             case DIVIDE_DECIMAL -> new BinaryExpression(HogQlQuery.BinaryOperator.DIVIDE, arguments.getFirst(), arguments.get(1), span);
             case IN_ARRAY -> call("contains", List.of(arguments.get(1), arguments.getFirst()), span);
@@ -482,6 +483,10 @@ final class HogQlFunctionResolver
             case JSON_EXTRACT_BOOL -> jsonExtractScalar(function, arguments, "boolean", new Literal(HogQlQuery.LiteralKind.BOOLEAN, "false", span));
             case JSON_EXTRACT_UINT -> jsonExtractScalar(function, arguments, "bigint", integerLiteral("0", span));
             case JSON_EXTRACT_ARRAY_RAW -> jsonExtractArrayRaw(function, arguments);
+            case JSON_EXTRACT_KEYS -> call(
+                    "map_keys",
+                    List.of(typedJsonMapFromJson(jsonValue(function, arguments), "json", span)),
+                    span);
             case JSON_EXTRACT_RAW -> coalesce(
                     call("json_format", List.of(call("json_extract", List.of(arguments.getFirst(), jsonPath(function, arguments.subList(1, arguments.size()))), span)), span),
                     new Literal(HogQlQuery.LiteralKind.STRING, "", span),
@@ -918,14 +923,15 @@ final class HogQlFunctionResolver
         return new Literal(HogQlQuery.LiteralKind.INTEGER, value, span);
     }
 
-    private static Expression range(Expression end, HogQlQuery.SourceSpan span)
+    private static Expression range(List<Expression> arguments, HogQlQuery.SourceSpan span)
     {
-        Literal zero = integerLiteral("0", span);
-        Expression isEmpty = new BinaryExpression(HogQlQuery.BinaryOperator.LESS_THAN_OR_EQUAL, end, zero, span);
+        Expression start = arguments.size() == 1 ? integerLiteral("0", span) : arguments.getFirst();
+        Expression end = arguments.getLast();
+        Expression isEmpty = new BinaryExpression(HogQlQuery.BinaryOperator.LESS_THAN_OR_EQUAL, end, start, span);
         Expression empty = cast(new ArrayExpression(List.of(), span), "array(bigint)", span);
         Expression sequence = call(
                 "sequence",
-                List.of(zero, new BinaryExpression(HogQlQuery.BinaryOperator.SUBTRACT, end, integerLiteral("1", span), span)),
+                List.of(start, new BinaryExpression(HogQlQuery.BinaryOperator.SUBTRACT, end, integerLiteral("1", span), span)),
                 span);
         return call("if", List.of(isEmpty, empty, sequence), span);
     }
