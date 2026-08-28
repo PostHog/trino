@@ -862,12 +862,18 @@ final class HogQlFunctionResolver
         throw unsupportedError(function, "HogQL JSON extraction type must be a string literal");
     }
 
-    private static Literal jsonPath(FunctionCall function, List<Expression> segments)
+    private static Expression jsonPath(FunctionCall function, List<Expression> segments)
     {
         StringBuilder path = new StringBuilder("$");
+        List<Expression> pathParts = new ArrayList<>();
         for (Expression segment : segments) {
             if (!(segment instanceof Literal literal)) {
-                throw unsupportedError(function, "HogQL JSON path segments must be string or integer literals");
+                pathParts.add(stringLiteral(path.toString(), function.span()));
+                path.setLength(0);
+                pathParts.add(stringLiteral("[", function.span()));
+                pathParts.add(call("json_format", List.of(cast(segment, "json", function.span())), function.span()));
+                pathParts.add(stringLiteral("]", function.span()));
+                continue;
             }
             switch (literal.kind()) {
                 case STRING -> path.append("[\"")
@@ -877,7 +883,13 @@ final class HogQlFunctionResolver
                 default -> throw unsupportedError(function, "HogQL JSON path segments must be string or integer literals");
             }
         }
-        return new Literal(HogQlQuery.LiteralKind.STRING, path.toString(), function.span());
+        if (pathParts.isEmpty()) {
+            return stringLiteral(path.toString(), function.span());
+        }
+        if (!path.isEmpty()) {
+            pathParts.add(stringLiteral(path.toString(), function.span()));
+        }
+        return call("concat", pathParts, function.span());
     }
 
     private static FunctionCall coalesce(Expression value, Expression defaultValue, HogQlQuery.SourceSpan span)

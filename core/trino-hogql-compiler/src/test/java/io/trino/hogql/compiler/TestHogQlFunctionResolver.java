@@ -174,9 +174,16 @@ public class TestHogQlFunctionResolver
                         "map_entries(transform_values(coalesce(TRY_CAST(json_parse(payload_text) AS map(varchar, json)), " +
                         "CAST(map(ARRAY[], ARRAY[]) AS map(varchar, json))), (key, value) -> json_format(value))) FROM records"));
 
+        HogQlCompilationResult dynamicPathResult = new HogQlCompiler().compile(envelope(
+                "SELECT JSONExtractString(payload, dynamic_key), JSONExtractInt(payload, 'items', dynamic_index) FROM records"));
+
+        assertThat(dynamicPathResult.statement()).isEqualTo(sqlParser.createStatement(
+                "SELECT coalesce(json_extract_scalar(payload, concat('$', '[', json_format(CAST(dynamic_key AS json)), ']')), ''), " +
+                        "coalesce(TRY_CAST(json_extract_scalar(payload, concat('$[\"items\"]', '[', json_format(CAST(dynamic_index AS json)), ']')) AS bigint), 0) FROM records"));
+
         TrinoException exception = catchThrowableOfType(
                 TrinoException.class,
-                () -> new HogQlCompiler().compile(envelope("SELECT JSONExtractString(payload, dynamic_key)")));
+                () -> new HogQlCompiler().compile(envelope("SELECT JSONExtractString(payload, true)")));
 
         assertThat(exception.getErrorCode()).isEqualTo(HOGQL_UNSUPPORTED_FEATURE.toErrorCode());
         assertThat(exception).hasMessageContaining("JSON path segments must be string or integer literals");

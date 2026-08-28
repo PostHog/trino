@@ -67,9 +67,10 @@ stock Trino aggregate filters, DISTINCT aggregates, and searched CASE
 expressions.
 Aggregate rewrites preserve `OVER` specifications when the target Trino
 aggregate is used as a window function.
-Literal-path JSON extraction lowers to Trino JSON paths with HogQL-compatible
-defaults. The compatibility profile also supports the corpus's typed map and
-key/value extraction forms through checked JSON-to-map casts.
+JSON extraction lowers literal and runtime string/integer segments to Trino
+JSON paths with HogQL-compatible defaults. The compatibility profile also
+supports the corpus's typed map and key/value extraction forms through checked
+JSON-to-map casts.
 Date/time compatibility includes calendar arithmetic, interval-day values,
 epoch conversion, timezone attachment/conversion, formatting, and checked
 best-effort timestamp parsing.
