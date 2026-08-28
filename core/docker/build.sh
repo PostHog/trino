@@ -173,6 +173,28 @@ for arch in "${ARCHITECTURES[@]}"; do
         -t "${TAG}-$arch"
 done
 
+function require_image_label() {
+    local image="$1"
+    local name="$2"
+    local expected="$3"
+    local actual
+    actual="$(docker image inspect --format "{{index .Config.Labels \"${name}\"}}" "${image}")"
+    if [ "${actual}" != "${expected}" ]; then
+        echo >&2 "Image label ${name} is ${actual}, expected ${expected}"
+        exit 1
+    fi
+}
+
+for arch in "${ARCHITECTURES[@]}"; do
+    image="${TAG}-${arch}"
+    require_image_label "${image}" "org.opencontainers.image.revision" "${TRINO_SOURCE_REVISION}"
+    require_image_label "${image}" "io.posthog.trino.hogql.language-version" "${HOGQL_LANGUAGE_VERSION}"
+    require_image_label "${image}" "io.posthog.trino.hogql.catalog-protocol-version" "${HOGQL_CATALOG_PROTOCOL_VERSION}"
+    require_image_label "${image}" "io.posthog.trino.hogql.catalog-schema-version" "${HOGQL_CATALOG_SCHEMA_VERSION}"
+    require_image_label "${image}" "io.posthog.trino.server-sha256" "${TRINO_SERVER_SHA256}"
+    require_image_label "${image}" "io.posthog.trino.cli-sha256" "${TRINO_CLI_SHA256}"
+done
+
 echo "🧹 Cleaning up the build context directory"
 rm -r "${WORK_DIR}"
 
