@@ -1719,6 +1719,31 @@ public final class HogQlParser
                 }
                 return new TableReference(parts, sourceSpan(context));
             }
+            if (context instanceof HogQLParser.TableExprFunctionContext function) {
+                Identifier name = buildIdentifier(function.tableFunctionExpr().identifier());
+                if (!canonicalName(name).equals("numbers")) {
+                    throw unsupported(context, "table expression");
+                }
+                List<HogQLParser.ColumnExprContext> arguments = function.tableFunctionExpr().tableArgList() == null
+                        ? List.of()
+                        : function.tableFunctionExpr().tableArgList().columnExpr();
+                if (arguments.size() != 1) {
+                    throw unsupported(context, "numbers table function arity");
+                }
+                SourceSpan span = sourceSpan(context);
+                FunctionCall range = new FunctionCall(
+                        new Identifier("range", false, span),
+                        List.of(buildExpression(arguments.getFirst())),
+                        false,
+                        List.of(),
+                        Optional.empty(),
+                        span);
+                return new UnnestRelation(
+                        List.of(range),
+                        new Identifier("numbers", false, span),
+                        List.of(new Identifier("number", false, span)),
+                        span);
+            }
             if (context instanceof HogQLParser.TableExprPlaceholderContext placeholder) {
                 return new TablePlaceholder(buildPlaceholder(placeholder.placeholder()));
             }

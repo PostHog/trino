@@ -120,6 +120,15 @@ public class TestHogQlCompiler
                 "SELECT * FROM (SELECT 1 AS value UNION ALL SELECT 2 ORDER BY value) AS nested"));
     }
 
+    @Test
+    public void testLowersNumbersTableFunction()
+    {
+        Statement statement = compiler.compile("SELECT number FROM numbers(5)");
+
+        assertThat(statement).isEqualTo(sqlParser.createStatement(
+                "SELECT number FROM UNNEST(if(5 <= 0, CAST(ARRAY[] AS array(bigint)), sequence(0, 5 - 1))) AS numbers(number)"));
+    }
+
     @ParameterizedTest
     @CsvSource(delimiter = '|', textBlock = """
                                             SELECT [1, 2, 3]                 | SELECT ARRAY[1, 2, 3]
