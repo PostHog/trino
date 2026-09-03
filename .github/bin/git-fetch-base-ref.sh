@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-if [ -z "${GITHUB_BASE_REF:-}" ] || [ "$GITHUB_BASE_REF" == master ]; then
-    echo >&2 "GITHUB_BASE_REF is not set or is master, not fetching it"
+if [ -z "${GITHUB_BASE_REF:-}" ] || [ "$GITHUB_BASE_REF" = "master" ]; then
+    echo "GITHUB_BASE_REF is not set or is master, not fetching it" >&2
     exit 0
 fi
 
