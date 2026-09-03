@@ -188,6 +188,135 @@ final class TestDuckLakeWrites
     }
 
     @Test
+    void testReplaceTableDefinitionKeepsTheTableReadableThroughout()
+    {
+        String table = "replace_ddl_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + table + " AS SELECT id, 'old' AS tag FROM UNNEST(sequence(1, 3)) AS t(id)", 3);
+        try {
+            String replacedTableId = tableId(table);
+            assertUpdate("CREATE OR REPLACE TABLE " + table + " (n INTEGER COMMENT 'the only column') COMMENT 'replaced'");
+
+            assertThat(replacedTableAtSnapshot(table, replacedTableId))
+                    .isEqualTo("dropped_table:%s,created_table:\"main\".\"%s\"".formatted(replacedTableId, table));
+            assertQuery("SELECT count(*) FROM " + table, "VALUES 0");
+            assertQuery("SELECT column_name FROM information_schema.columns WHERE table_name = '" + table + "'", "VALUES 'n'");
+            assertThat((String) computeScalar("SHOW CREATE TABLE " + table)).contains("COMMENT 'replaced'", "COMMENT 'the only column'");
+            assertThat(duckDbRows("SELECT column_name FROM duckdb_columns() WHERE table_name = '" + table + "'")).isEqualTo(List.of("n"));
+
+            // the table that took the name is an ordinary table, which rows can be added to
+            assertUpdate("INSERT INTO " + table + " VALUES 7", 1);
+            assertQuery("SELECT n FROM " + table, "VALUES 7");
+            assertThat(duckDbScalar("SELECT n::VARCHAR FROM " + table)).isEqualTo("7");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testReplaceTableAsSelectSwapsTheRowsInOneSnapshot()
+    {
+        String table = "replace_ctas_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + table + " AS SELECT id FROM UNNEST(sequence(1, 3)) AS t(id)", 3);
+        try {
+            String replacedTableId = tableId(table);
+            String replacedFile = duckDbScalar("SELECT path FROM __ducklake_metadata_lake.ducklake_data_file WHERE table_id = " + replacedTableId);
+
+            assertUpdate("CREATE OR REPLACE TABLE " + table + " AS SELECT id, id * 10 AS scaled FROM UNNEST(sequence(1, 5)) AS t(id)", 5);
+
+            // the one snapshot ends the old table, creates the new one and fills it, in the order
+            // DuckDB records the same three changes in
+            assertThat(replacedTableAtSnapshot(table, replacedTableId))
+                    .isEqualTo("dropped_table:%s,created_table:\"main\".\"%s\",inserted_into_table:%s".formatted(replacedTableId, table, tableId(table)));
+            assertQuery("SELECT count(*), sum(scaled) FROM " + table, "VALUES (5, 150)");
+            assertThat(duckDbScalar("SELECT sum(scaled) FROM " + table)).isEqualTo("150");
+
+            // the files of the table that was replaced are ended rather than removed, so a reader
+            // of the snapshots they belonged to still finds them where they always were
+            assertThat(duckDbScalar(
+                    "SELECT count(*) FROM __ducklake_metadata_lake.ducklake_data_file WHERE table_id = %s AND end_snapshot IS NOT NULL".formatted(replacedTableId)))
+                    .isEqualTo("1");
+            assertThat(catalog.dataPath().resolve("main").resolve(table).resolve(replacedFile)).exists();
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testReplacingATableKeepsNothingOfTheOldDefinition()
+    {
+        String table = "replace_reset_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + table + " (id BIGINT, region VARCHAR) COMMENT 'first' WITH (partitioning = ARRAY['region'])");
+        try {
+            assertUpdate("INSERT INTO %s VALUES (1, 'us'), (2, 'eu')".formatted(table), 2);
+
+            // neither the comment nor the partitioning of the old table carries over
+            assertUpdate("CREATE OR REPLACE TABLE " + table + " AS SELECT 'x' AS region", 1);
+            assertThat((String) computeScalar("SHOW CREATE TABLE " + table)).doesNotContain("partitioning", "COMMENT 'first'");
+            assertQuery("SELECT region FROM " + table, "VALUES 'x'");
+
+            // a partitioning the new definition does state files the rows it writes
+            assertUpdate(
+                    "CREATE OR REPLACE TABLE %s WITH (partitioning = ARRAY['region']) AS SELECT * FROM (VALUES 'us', 'eu', 'us') AS t(region)".formatted(table),
+                    3);
+            assertThat((String) computeScalar("SHOW CREATE TABLE " + table)).contains("partitioning = ARRAY['region']");
+            assertQuery("SELECT count(*) FROM " + table + " WHERE region = 'us'", "VALUES 2");
+            assertThat(duckDbScalar(
+                    "SELECT count(DISTINCT data_file_id) FROM __ducklake_metadata_lake.ducklake_file_partition_value WHERE table_id = " + tableId(table)))
+                    .isEqualTo("2");
+            assertThat(duckDbScalar("SELECT count(*) FROM " + table)).isEqualTo("3");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testReplacingATableThatDoesNotExistCreatesIt()
+    {
+        String ddl = "replace_new_ddl_" + randomNameSuffix();
+        String ctas = "replace_new_ctas_" + randomNameSuffix();
+        String empty = "replace_new_empty_" + randomNameSuffix();
+        assertUpdate("CREATE OR REPLACE TABLE " + ddl + " (a INTEGER)");
+        assertUpdate("CREATE OR REPLACE TABLE " + ctas + " AS SELECT 1 AS a", 1);
+        // a query that selects nothing still leaves the table behind, with no rows in it
+        assertUpdate("CREATE OR REPLACE TABLE " + empty + " AS SELECT 1 AS a WHERE false", 0);
+        try {
+            assertQuery("SELECT count(*) FROM " + ddl, "VALUES 0");
+            assertQuery("SELECT a FROM " + ctas, "VALUES 1");
+            assertQuery("SELECT count(*) FROM " + empty, "VALUES 0");
+            assertThat(duckDbScalar("SELECT a::VARCHAR FROM " + ctas)).isEqualTo("1");
+            assertThat(duckDbScalar("SELECT count(*) FROM " + empty)).isEqualTo("0");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + ddl);
+            assertUpdate("DROP TABLE " + ctas);
+            assertUpdate("DROP TABLE " + empty);
+        }
+    }
+
+    @Test
+    void testAViewOverAReplacedTableReadsTheNewRows()
+    {
+        String table = "replaced_under_view_" + randomNameSuffix();
+        String view = "over_replaced_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + table + " AS SELECT id FROM UNNEST(sequence(1, 3)) AS t(id)", 3);
+        try {
+            assertUpdate("CREATE VIEW %s AS SELECT sum(id) AS total FROM %s".formatted(view, table));
+            assertQuery("SELECT total FROM " + view, "VALUES 6");
+
+            // the view names the table, not the identifier a replacement gives it
+            assertUpdate("CREATE OR REPLACE TABLE %s AS SELECT id FROM UNNEST(sequence(1, 10)) AS t(id)".formatted(table), 10);
+            assertQuery("SELECT total FROM " + view, "VALUES 55");
+        }
+        finally {
+            assertUpdate("DROP VIEW " + view);
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
     void testInsertIntoTableCreatedByDuckDb()
             throws SQLException
     {
@@ -735,6 +864,37 @@ final class TestDuckLakeWrites
         finally {
             assertUpdate("DROP TABLE " + table);
         }
+    }
+
+    /**
+     * The changes recorded for the snapshot that replaced the table, after checking that it was one
+     * snapshot: the row of the table that was there ends where the row of the table that took its
+     * name begins, and the two are different tables.
+     */
+    private String replacedTableAtSnapshot(String tableName, String replacedTableId)
+    {
+        List<String> rows = duckDbRows(
+                """
+                SELECT table_id::VARCHAR, begin_snapshot::VARCHAR, coalesce(end_snapshot::VARCHAR, 'open')
+                FROM __ducklake_metadata_lake.ducklake_table
+                WHERE table_name = '%s' ORDER BY begin_snapshot""".formatted(tableName));
+        assertThat(rows).hasSize(6);
+        assertThat(rows.getFirst()).isEqualTo(replacedTableId);
+        // the replacement is a table of its own, with an identifier of its own, as it is in DuckDB
+        assertThat(rows.get(3)).isNotEqualTo(replacedTableId);
+        String snapshot = rows.get(2);
+        assertThat(snapshot).isEqualTo(rows.get(4));
+        assertThat(rows.get(5)).isEqualTo("open");
+        return duckDbScalar("SELECT changes_made FROM __ducklake_metadata_lake.ducklake_snapshot_changes WHERE snapshot_id = " + snapshot);
+    }
+
+    /**
+     * The identifier of the table currently going by the given name.
+     */
+    private String tableId(String tableName)
+    {
+        return duckDbScalar("SELECT table_id::VARCHAR FROM __ducklake_metadata_lake.ducklake_table "
+                + "WHERE table_name = '" + tableName + "' AND end_snapshot IS NULL");
     }
 
     private String duckDbScalar(@Language("SQL") String sql)
