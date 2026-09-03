@@ -16,40 +16,48 @@ package io.trino.plugin.ducklake;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
-import io.trino.spi.connector.ConnectorInsertTableHandle;
+import com.google.common.collect.ImmutableMap;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.SchemaTableName;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
 /**
- * Everything the workers need to write into one table: where its files go, which columns they
- * hold, and how the rows are laid out across files.
+ * The table a {@code CREATE OR REPLACE TABLE ... AS SELECT} is about to define, which does not
+ * exist in the catalog yet.
  * <p>
- * The same description serves {@code INSERT} and {@code CREATE TABLE AS}. For the latter the table
- * already exists in the catalog by the time rows are written — the statement creates it in its own
- * snapshot first — so nothing distinguishes the two on the write side. The replacing form of
- * {@code CREATE TABLE AS} cannot create its table in advance, and uses {@link DuckLakeReplaceTarget}
- * instead.
+ * The name it takes still resolves to the table being replaced, holding the rows it has always
+ * held. Creating the new table in its own snapshot first, the way {@link DuckLakeWriteTarget} does,
+ * would leave the name resolving to an empty table until the rows landed. So the definition travels
+ * with the write instead, and the commit that registers the data files is the one that ends the old
+ * table and creates this one.
+ * <p>
+ * Nothing here identifies a catalog object: the table identifier and the identifier of its
+ * partitioning scheme are drawn by that commit. Only what the workers need to write the files is
+ * settled in advance, which is the column layout and the location the files go to.
  */
-public record DuckLakeWriteTarget(
+public record DuckLakeReplaceTarget(
         @JsonProperty SchemaTableName tableName,
-        @JsonProperty long tableId,
         @JsonProperty String tableLocation,
         @JsonProperty List<DuckLakeWriteColumn> columns,
-        @JsonProperty Optional<DuckLakePartitioning> partitioning)
-        implements ConnectorInsertTableHandle, ConnectorOutputTableHandle
+        @JsonProperty List<DuckLakePartitioning.Field> partitionFields,
+        @JsonProperty Map<Long, String> columnComments,
+        @JsonProperty Optional<String> comment)
+        implements ConnectorOutputTableHandle
 {
     @JsonCreator
-    public DuckLakeWriteTarget
+    public DuckLakeReplaceTarget
     {
         requireNonNull(tableName, "tableName is null");
         requireNonNull(tableLocation, "tableLocation is null");
         columns = ImmutableList.copyOf(columns);
-        requireNonNull(partitioning, "partitioning is null");
+        partitionFields = ImmutableList.copyOf(partitionFields);
+        columnComments = ImmutableMap.copyOf(columnComments);
+        requireNonNull(comment, "comment is null");
     }
 
     @Override
