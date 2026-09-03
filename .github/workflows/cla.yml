@@ -1,5 +1,11 @@
 name: CLA
 
+# Needs the base repository's token to post CLA status on pull requests from
+# forks, which is what pull_request_target exists for. It checks out
+# github.workflow_sha rather than the pull request head, so no attacker
+# controlled code runs, and persist-credentials is off. The job is also gated to
+# trinodb/trino, so it never runs in this fork at all.
+# nosemgrep: dotgithub-repo..semgrep.rules.github-actions-pull-request-target
 on:
   # Safe despite the read-write token: no code from the PR is checked out or executed.
   # The checkout below is pinned to github.workflow_sha, the commit this workflow file was
