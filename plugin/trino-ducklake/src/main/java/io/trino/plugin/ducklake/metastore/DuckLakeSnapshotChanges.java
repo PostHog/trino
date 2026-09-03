@@ -14,6 +14,7 @@
 package io.trino.plugin.ducklake.metastore;
 
 import com.google.common.collect.ImmutableSet;
+import io.trino.spi.TrinoException;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -21,6 +22,8 @@ import java.util.Optional;
 import java.util.Set;
 
 import static com.google.common.collect.Sets.intersection;
+import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
+import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_CHANGE_TYPE;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -45,9 +48,15 @@ public final class DuckLakeSnapshotChanges
     private final Set<Long> compactedTables;
 
     /**
-     * Reads the changes from the comma-separated form DuckLake stores them in. Entries whose type
-     * is not recognized are rejected rather than ignored: an unknown change was written by a newer
-     * DuckLake version, and treating it as harmless could drop the writer's work.
+     * Reads the changes from the comma-separated form DuckLake stores them in.
+     * <p>
+     * Two things can go wrong, and they mean different things to whoever reads the error. A change
+     * type this connector does not know is a catalog written by a newer DuckLake than this
+     * connector understands, and it fails with {@code DUCKLAKE_UNSUPPORTED_CHANGE_TYPE}: the
+     * connector cannot tell whether committing on top of it is safe, and ignoring it could drop the
+     * other writer's work. An entry that is not shaped like a change at all is a corrupt row, and
+     * fails as invalid metadata. Neither is retried, because attempting the commit again reads the
+     * same row and reaches the same conclusion.
      */
     public static DuckLakeSnapshotChanges parse(String changesMade)
     {
@@ -55,7 +64,7 @@ public final class DuckLakeSnapshotChanges
         for (String change : splitChanges(changesMade)) {
             int separator = change.indexOf(':');
             if (separator < 0) {
-                throw new IllegalArgumentException("Malformed DuckLake change entry: " + change);
+                throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Malformed DuckLake change entry: " + change);
             }
             builder.add(change.substring(0, separator), change.substring(separator + 1));
         }
@@ -168,7 +177,11 @@ public final class DuckLakeSnapshotChanges
                 case "created_schema", "created_table", "created_view", "created_scalar_macro", "created_table_macro",
                      "dropped_schema", "dropped_scalar_macro", "dropped_table_macro",
                      "flushed_inlined", "inline_flush" -> {}
-                default -> throw new IllegalArgumentException("Unknown DuckLake change type: " + type);
+                default -> throw new TrinoException(
+                        DUCKLAKE_UNSUPPORTED_CHANGE_TYPE,
+                        ("Another writer recorded the DuckLake change type '%s', which this connector does not understand, " +
+                                "so it cannot tell whether committing on top of that snapshot is safe. " +
+                                "Upgrade the DuckLake connector to a version that knows this change type.").formatted(type));
             }
         }
 
@@ -178,7 +191,7 @@ public final class DuckLakeSnapshotChanges
                 return Long.parseLong(value);
             }
             catch (NumberFormatException e) {
-                throw new IllegalArgumentException("Malformed DuckLake object identifier: " + value, e);
+                throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Malformed DuckLake object identifier: " + value, e);
             }
         }
 

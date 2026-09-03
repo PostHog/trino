@@ -38,6 +38,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.google.common.base.Verify.verify;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_COMMIT_CONFLICT;
+import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_CHANGE_TYPE;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -161,6 +162,42 @@ final class TestDuckLakeConcurrentCommits
     }
 
     /**
+     * A newer DuckLake records a change type this connector has never seen. It cannot tell whether
+     * its own commit may land on top of that snapshot, so it fails saying what it read and what to
+     * do about it, rather than committing and risking the other writer's work.
+     */
+    @Test
+    void testCommitFailsOnAChangeTypeTheConnectorDoesNotUnderstand()
+            throws Exception
+    {
+        String table = "unknown_" + randomNameSuffix();
+        String other = "elsewhere_" + randomNameSuffix();
+        createTable(table);
+        createTable(other);
+        DataFile dataFile = stageDataFile(table, 42);
+
+        long readSnapshotId = metastore.currentSnapshotId();
+        AtomicInteger attempts = new AtomicInteger();
+
+        assertThatThrownBy(() -> registerDataFile(readSnapshotId, table, dataFile, attempts, () -> {
+            // a real foreign snapshot, rewritten to record a change this connector cannot interpret
+            executeInDuckDb("INSERT INTO " + other + " VALUES (7)");
+            executeInCatalogDatabase(
+                    """
+                    UPDATE ducklake_snapshot_changes SET changes_made = 'teleported_table:99'
+                    WHERE snapshot_id = (SELECT max(snapshot_id) FROM ducklake_snapshot_changes)""");
+        }))
+                .isInstanceOf(TrinoException.class)
+                .matches(failure -> ((TrinoException) failure).getErrorCode().equals(DUCKLAKE_UNSUPPORTED_CHANGE_TYPE.toErrorCode()))
+                .hasMessageContaining("recorded the DuckLake change type 'teleported_table'")
+                .hasMessageContaining("Upgrade the DuckLake connector");
+
+        // reading the row again reaches the same conclusion, so the failure is not retried
+        assertThat(attempts).hasValue(2);
+        assertThat(dataFileCount(table)).isEqualTo(0);
+    }
+
+    /**
      * Registers an already written data file into a table the way {@code finishInsert} does, while
      * {@code foreignCommit} lands a snapshot from DuckDB during the first attempt. Returns the
      * snapshot the commit ended up on.
@@ -281,6 +318,17 @@ final class TestDuckLakeConcurrentCommits
                 Statement statement = connection.createStatement();
                 ResultSet resultSet = statement.executeQuery(sql)) {
             return mapper.map(resultSet);
+        }
+        catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private void executeInCatalogDatabase(@Language("SQL") String sql)
+    {
+        try (Connection connection = DriverManager.getConnection(catalog.jdbcUrl(), TestingDuckLakeCatalog.USER, TestingDuckLakeCatalog.PASSWORD);
+                Statement statement = connection.createStatement()) {
+            statement.executeUpdate(sql);
         }
         catch (SQLException e) {
             throw new RuntimeException(e);
