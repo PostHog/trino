@@ -160,6 +160,66 @@ final class TestDuckLakeWriteRoundTrips
         }
     }
 
+    /**
+     * The same daily shape as {@link #testDeletingWholeDaysOfATableDuckDbPartitionedByDateReadsEveryRow},
+     * with the day held as a {@code TIMESTAMPTZ} truncated to midnight rather than as a
+     * {@code DATE}. That is the column a pipeline materializing
+     * {@code DATE_TRUNC('day', ts)::TIMESTAMPTZ AS day} files its tables by.
+     * <p>
+     * It costs the same. {@code DuckLakeMetadata.isEnforceableType} admits only {@code TINYINT},
+     * {@code SMALLINT}, {@code INTEGER}, {@code BIGINT}, {@code BOOLEAN} and unbounded
+     * {@code VARCHAR}, so a predicate on a column of any timestamp type is never enforced and the
+     * delete cannot be decided from the partition values.
+     */
+    @Test
+    void testDeletingWholeDaysOfATableDuckDbPartitionedByTimestampWithTimeZoneReadsEveryRow()
+            throws SQLException
+    {
+        String table = "part_tstz_day_" + randomNameSuffix();
+        catalog.executeInDuckDb(
+                "CREATE TABLE %s (id INTEGER, day TIMESTAMPTZ, v VARCHAR)".formatted(table),
+                "ALTER TABLE %s SET PARTITIONED BY (day)".formatted(table));
+        try {
+            assertUpdate(
+                    """
+                    INSERT INTO %s VALUES
+                        (1, TIMESTAMP '2026-01-01 00:00:00 UTC', 'a'), (2, TIMESTAMP '2026-01-01 00:00:00 UTC', 'b'),
+                        (3, TIMESTAMP '2026-01-02 00:00:00 UTC', 'c'),
+                        (4, TIMESTAMP '2026-01-03 00:00:00 UTC', 'd'), (5, TIMESTAMP '2026-01-03 00:00:00 UTC', 'e')""".formatted(table),
+                    5);
+
+            // an identity partition key of this type is written, one file per day, and the value
+            // is recorded in UTC whatever zone the row carried
+            assertThat(activeDataFileCount(table)).isEqualTo(3);
+            assertThat(partitions(table)).isEqualTo(List.of(
+                    "2026-01-01 00:00:00+00",
+                    "2026-01-02 00:00:00+00",
+                    "2026-01-03 00:00:00+00"));
+
+            // Every row of the two days is read to decide a delete the partition values already
+            // answer. This is the assertion that flips to 0 once temporal partition predicates
+            // become enforceable (plan item 0.6b); until then it counts the rows of those days.
+            assertQueryStats(
+                    getSession(),
+                    "DELETE FROM %s WHERE day BETWEEN TIMESTAMP '2026-01-01 00:00:00 UTC' AND TIMESTAMP '2026-01-02 00:00:00 UTC'".formatted(table),
+                    stats -> assertThat(stats.getProcessedInputPositions()).isEqualTo(3),
+                    _ -> {});
+            assertThat(activeDataFileCount(table)).isEqualTo(1);
+            assertThat(activeDeleteFileCount(table)).isEqualTo(0);
+            assertQuery("SELECT id FROM " + table + " ORDER BY id", "VALUES 4, 5");
+            assertThat(catalog.rows("SELECT id::VARCHAR, day::VARCHAR FROM " + table + " ORDER BY id"))
+                    .isEqualTo(List.of("4", "2026-01-03 00:00:00+00", "5", "2026-01-03 00:00:00+00"));
+
+            // DuckDB files a row of its own under the value Trino recorded for that day
+            catalog.executeInDuckDb("INSERT INTO %s VALUES (6, TIMESTAMPTZ '2026-01-03 00:00:00+00', 'f')".formatted(table));
+            assertThat(partitions(table)).isEqualTo(List.of("2026-01-03 00:00:00+00", "2026-01-03 00:00:00+00"));
+            assertQuery("SELECT id FROM " + table + " ORDER BY id", "VALUES 4, 5, 6");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
     @Test
     void testInsertIntoTableDuckDbPartitionedByTemporalTransforms()
             throws SQLException
