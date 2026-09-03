@@ -184,20 +184,21 @@ public final class DuckLakeCommit
     public long insertSchema(String schemaName, String path)
     {
         long schemaId = allocateCatalogId();
-        insertSchemaRow(schemaId, schemaName, path);
+        insertSchemaRow(schemaId, schemaName, path, true);
         return schemaId;
     }
 
-    public void insertSchemaRow(long schemaId, String schemaName, String path)
+    public void insertSchemaRow(long schemaId, String schemaName, String path, boolean pathIsRelative)
     {
         handle.createUpdate(
                         """
                         INSERT INTO %s (schema_id, schema_uuid, begin_snapshot, end_snapshot, schema_name, path, path_is_relative)
-                        VALUES (:schemaId, %s, :snapshot, NULL, :schemaName, :path, true)""".formatted(table("ducklake_schema"), randomUuid()))
+                        VALUES (:schemaId, %s, :snapshot, NULL, :schemaName, :path, :pathIsRelative)""".formatted(table("ducklake_schema"), randomUuid()))
                 .bind("schemaId", schemaId)
                 .bind("snapshot", snapshotId)
                 .bind("schemaName", schemaName)
                 .bind("path", path)
+                .bind("pathIsRelative", pathIsRelative)
                 .execute();
     }
 
@@ -274,7 +275,7 @@ public final class DuckLakeCommit
     {
         return handle.createQuery(
                         """
-                        SELECT schema_id, schema_name, path
+                        SELECT schema_id, schema_name, path, path_is_relative
                         FROM %s
                         WHERE %s AND lower(schema_name) = :schemaName""".formatted(table("ducklake_schema"), visibleUnaliased()))
                 .bind("snapshot", baseSnapshotId)
@@ -282,7 +283,8 @@ public final class DuckLakeCommit
                 .map((rs, _) -> new SchemaIdentity(
                         rs.getLong("schema_id"),
                         rs.getString("schema_name"),
-                        Optional.ofNullable(rs.getString("path")).orElse("")))
+                        Optional.ofNullable(rs.getString("path")).orElse(""),
+                        rs.getBoolean("path_is_relative")))
                 .findFirst();
     }
 
@@ -884,7 +886,7 @@ public final class DuckLakeCommit
 
     public record TableIdentity(long tableId, long schemaId, String tableName, String path, Optional<String> tableUuid) {}
 
-    public record SchemaIdentity(long schemaId, String schemaName, String path) {}
+    public record SchemaIdentity(long schemaId, String schemaName, String path, boolean pathIsRelative) {}
 
     public record ViewIdentity(long viewId, String dialect) {}
 

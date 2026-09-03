@@ -11,9 +11,11 @@ reads the metadata directly from the catalog database (PostgreSQL) and scans
 the Parquet data files with Trino's native Parquet reader, so queries run
 distributed across the cluster without going through DuckDB.
 
-The connector is read-only. Tables are written by DuckDB (or other DuckLake
-writers) and queried from Trino. Rows removed with `DELETE` in DuckDB are
-recorded in positional delete files, which the connector applies when reading.
+The connector reads and writes the same catalog DuckDB does. A table written
+from Trino is a DuckLake table like any other, so DuckDB (or another DuckLake
+writer) reads it, and Trino reads what those engines write. Rows removed with
+`DELETE` are recorded in positional delete files, which every engine applies
+when reading.
 
 ## Requirements
 
@@ -197,12 +199,54 @@ The connector also derives table statistics (row count, null fractions, and
 value ranges) from the catalog for use by the [cost-based
 optimizer](/optimizer/cost-based-optimizations).
 
+## SQL support
+
+Beyond the {ref}`globally available <sql-globally-available>` and {ref}`read
+operation <sql-read-operations>` statements, the connector supports:
+
+- {doc}`/sql/insert`
+- {doc}`/sql/update`
+- {doc}`/sql/delete`
+- {doc}`/sql/merge`
+- {doc}`/sql/truncate`
+- {doc}`/sql/create-table`, including `CREATE OR REPLACE TABLE`
+- {doc}`/sql/create-table-as`, including `CREATE OR REPLACE TABLE ... AS`
+- {doc}`/sql/drop-table`
+- {doc}`/sql/alter-table`
+- {doc}`/sql/comment`
+- {doc}`/sql/create-schema`, {doc}`/sql/drop-schema`, and {doc}`/sql/alter-schema`
+- {ref}`sql-view-management`
+
+Every statement writes one DuckLake snapshot, whatever it changes. A
+`CREATE OR REPLACE TABLE` therefore ends the table that held the name and
+creates the one that takes it in a single snapshot: a reader sees the rows the
+table held before, or the rows it holds now, and never a table with no rows in
+it. As in DuckDB, the table that takes the name is a new table. Nothing of the
+old one carries over, so a comment or a `partitioning` property that the new
+definition does not state is gone.
+
 ## Limitations
 
-- The connector is read-only; `INSERT`, `UPDATE`, `DELETE`, `MERGE`, and DDL
-  statements are not supported.
 - Each query reads at the latest catalog snapshot committed when the query
-  starts; time travel with `FOR VERSION AS OF` is not yet supported.
+  starts; time travel with `FOR VERSION AS OF` is not supported.
+- `INSERT` writes every column of the table. A statement that names a subset of
+  the columns fails, because each data file holds all of them.
+- `ALTER TABLE ... ADD COLUMN` adds the column at the end of the table. A
+  position given with `FIRST` or `AFTER` fails, because the position of a
+  column is what identifies it in the data files already written.
+- `ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE` only widens a type, to one
+  that every value already written reads back as: `TINYINT` to `SMALLINT`,
+  `INTEGER` or `BIGINT`, `SMALLINT` to `INTEGER` or `BIGINT`, `INTEGER` to
+  `BIGINT`, and `REAL` to `DOUBLE`. DuckLake does not rewrite data files for a
+  type change.
+- `ALTER TABLE ... DROP COLUMN` cannot drop the only column of a table.
+- `DROP SCHEMA ... CASCADE` is not supported; drop the tables of the schema
+  first.
+- `partitioning` is the only supported table property, and views take no
+  properties.
+- A view written in another engine's dialect is listed but cannot be queried
+  from Trino, because its query text does not parse here.
+- A column with a non-`NULL` default value is not supported.
 - Queries on a column whose name mapping reads the values from a Hive partition
   in the file path (`ducklake_name_mapping.is_partition`), or maps the fields
   nested inside the column, fail. Other columns of such a table can be read.
