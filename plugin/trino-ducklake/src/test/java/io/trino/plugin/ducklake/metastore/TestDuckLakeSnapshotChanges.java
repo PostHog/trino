@@ -13,8 +13,11 @@
  */
 package io.trino.plugin.ducklake.metastore;
 
+import io.trino.spi.TrinoException;
 import org.junit.jupiter.api.Test;
 
+import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
+import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_CHANGE_TYPE;
 import static io.trino.plugin.ducklake.metastore.DuckLakeSnapshotChanges.parse;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -120,19 +123,33 @@ final class TestDuckLakeSnapshotChanges
 
     /**
      * A change type this connector does not know was written by a newer DuckLake version. Ignoring
-     * it could drop the work of the writer that made it, so it is rejected instead.
+     * it could drop the work of the writer that made it, so it is rejected instead, and named so
+     * that the remedy is obvious.
      */
     @Test
     void testUnknownChangeTypeIsRejected()
     {
         assertThatThrownBy(() -> parse("teleported_table:1"))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("Unknown DuckLake change type: teleported_table");
+                .isInstanceOf(TrinoException.class)
+                .matches(failure -> ((TrinoException) failure).getErrorCode().equals(DUCKLAKE_UNSUPPORTED_CHANGE_TYPE.toErrorCode()))
+                .hasMessageContaining("recorded the DuckLake change type 'teleported_table'")
+                .hasMessageContaining("Upgrade the DuckLake connector");
+    }
+
+    /**
+     * A row that is not shaped like a change at all is corruption rather than a newer writer, and
+     * says so with a different error code.
+     */
+    @Test
+    void testCorruptChangeEntryIsInvalidMetadata()
+    {
         assertThatThrownBy(() -> parse("dropped_table:not_a_number"))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("Malformed DuckLake object identifier: not_a_number");
+                .isInstanceOf(TrinoException.class)
+                .matches(failure -> ((TrinoException) failure).getErrorCode().equals(DUCKLAKE_INVALID_METADATA.toErrorCode()))
+                .hasMessageContaining("Malformed DuckLake object identifier: not_a_number");
         assertThatThrownBy(() -> parse("dropped_table"))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("Malformed DuckLake change entry: dropped_table");
+                .isInstanceOf(TrinoException.class)
+                .matches(failure -> ((TrinoException) failure).getErrorCode().equals(DUCKLAKE_INVALID_METADATA.toErrorCode()))
+                .hasMessageContaining("Malformed DuckLake change entry: dropped_table");
     }
 }
