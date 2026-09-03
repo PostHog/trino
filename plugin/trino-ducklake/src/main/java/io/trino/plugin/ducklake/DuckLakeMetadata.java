@@ -745,6 +745,13 @@ public class DuckLakeMetadata
             // statement finishes. Creating the new table now would make the name resolve to an
             // empty table in the meantime, so the whole statement is left to a single commit in
             // finishCreateTable.
+            //
+            // A name a view holds is one no table can take, and the commit will say so. It is
+            // worth saying here too, because everything the statement selects is written before
+            // that commit runs, and none of it could be used.
+            if (metastore.findView(snapshotId(), tableName.getSchemaName(), tableName.getTableName()).isPresent()) {
+                throw new TrinoException(ALREADY_EXISTS, "View already exists: " + tableName);
+            }
             List<DuckLakeWriteColumn> columns = DuckLakeColumns.assignColumnIds(tableMetadata.getColumns());
             return new DuckLakeReplaceTarget(
                     tableName,
