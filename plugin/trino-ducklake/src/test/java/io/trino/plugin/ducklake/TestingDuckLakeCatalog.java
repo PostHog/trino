@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.ducklake;
 
+import com.google.common.collect.ImmutableList;
 import org.intellij.lang.annotations.Language;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
@@ -24,8 +25,10 @@ import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.List;
 
 import static com.google.common.base.Verify.verify;
 import static io.trino.plugin.ducklake.metastore.DuckLakeMetastoreConnectionFactory.APPLICATION_NAME;
@@ -143,6 +146,41 @@ public final class TestingDuckLakeCatalog
         }
         catch (SQLException e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * The single value the query returns when DuckDB runs it.
+     */
+    public String scalar(@Language("SQL") String sql)
+    {
+        List<String> row = rows(sql);
+        verify(row.size() == 1, "expected one value from %s, got %s", sql, row);
+        return row.getFirst();
+    }
+
+    /**
+     * Everything the query returns when DuckDB runs it, as strings, one row after another.
+     * Reading every value as text keeps the assertions about what DuckDB sees independent of how
+     * JDBC maps each type. A null reads as {@code <null>}.
+     */
+    public List<String> rows(@Language("SQL") String sql)
+    {
+        try (Connection connection = openDuckDbConnection();
+                Statement statement = connection.createStatement();
+                ResultSet resultSet = statement.executeQuery(sql)) {
+            ResultSetMetaData metaData = resultSet.getMetaData();
+            ImmutableList.Builder<String> values = ImmutableList.builder();
+            while (resultSet.next()) {
+                for (int column = 1; column <= metaData.getColumnCount(); column++) {
+                    String value = resultSet.getString(column);
+                    values.add(value == null ? "<null>" : value);
+                }
+            }
+            return values.build();
+        }
+        catch (SQLException e) {
+            throw new RuntimeException("Failed to run in DuckDB: " + sql, e);
         }
     }
 
