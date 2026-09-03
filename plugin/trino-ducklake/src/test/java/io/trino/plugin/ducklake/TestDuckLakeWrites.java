@@ -13,18 +13,13 @@
  */
 package io.trino.plugin.ducklake;
 
-import com.google.common.collect.ImmutableList;
 import io.trino.Session;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
 import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.Test;
 
-import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.List;
 
 import static io.trino.testing.TestingNames.randomNameSuffix;
@@ -739,32 +734,11 @@ final class TestDuckLakeWrites
 
     private String duckDbScalar(@Language("SQL") String sql)
     {
-        List<String> row = duckDbRows(sql);
-        assertThat(row).hasSize(1);
-        return row.getFirst();
+        return catalog.scalar(sql);
     }
 
-    /**
-     * The single row the query returns, as strings. Reading everything as text keeps the
-     * assertions about what DuckDB sees independent of how JDBC maps each type.
-     */
     private List<String> duckDbRows(@Language("SQL") String sql)
     {
-        try (Connection connection = catalog.openDuckDbConnection();
-                Statement statement = connection.createStatement();
-                ResultSet resultSet = statement.executeQuery(sql)) {
-            ResultSetMetaData metaData = resultSet.getMetaData();
-            ImmutableList.Builder<String> values = ImmutableList.builder();
-            while (resultSet.next()) {
-                for (int column = 1; column <= metaData.getColumnCount(); column++) {
-                    String value = resultSet.getString(column);
-                    values.add(value == null ? "<null>" : value);
-                }
-            }
-            return values.build();
-        }
-        catch (SQLException e) {
-            throw new RuntimeException("Failed to run in DuckDB: " + sql, e);
-        }
+        return catalog.rows(sql);
     }
 }
