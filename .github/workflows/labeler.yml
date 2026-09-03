@@ -1,11 +1,11 @@
 name: "Pull Request Labeler"
 
+# Applies labels to pull requests from forks, which needs write access the
+# pull_request trigger does not give them. Nothing is checked out and no code
+# from the pull request is executed; permissions are contents read and pull
+# requests write.
+# nosemgrep: dotgithub-repo..semgrep.rules.github-actions-pull-request-target
 on:
-  # Applies labels to pull requests from forks, which needs write access the
-  # pull_request trigger does not give them. Nothing is checked out and no code
-  # from the pull request is executed; permissions are contents read and pull
-  # requests write.
-  # nosemgrep: dotgithub-repo..semgrep.rules.github-actions-pull-request-target
   pull_request_target:
 
 permissions:

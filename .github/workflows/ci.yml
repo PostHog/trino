@@ -33,7 +33,13 @@ env:
   TESTCONTAINERS_PULL_PAUSE_TIMEOUT: 600
   # used by actions/cache to retry the download after this time: https://github.com/actions/cache/blob/main/workarounds.md#cache-segment-restore-timeout
   SEGMENT_DOWNLOAD_TIMEOUT_MINS: 5
+  # Neither carries a credential. Both are presence flags, read only by testing
+  # them for emptiness, and eighteen job-level `if:` conditions below depend on
+  # them. A job-level condition cannot see a step-level env, so scoping these
+  # any more narrowly would silently disable the jobs that read them.
+  # nosemgrep: yaml.github-actions.security.gha-workflow-env-secret.gha-workflow-env-secret
   CI_SKIP_SECRETS_PRESENCE_CHECKS: ${{ secrets.CI_SKIP_SECRETS_PRESENCE_CHECKS }}
+  # nosemgrep: yaml.github-actions.security.gha-workflow-env-secret.gha-workflow-env-secret
   SECRETS_PRESENT: ${{ secrets.SECRETS_PRESENT }}
   PTL_TMP_DOWNLOAD_PATH: /tmp/pt_java_downloads
 
@@ -191,10 +197,13 @@ jobs:
       - name: Clean Maven Output
         run: $MAVEN clean -pl '!:trino-server,!:trino-cli'
       - name: Set up QEMU
+        # Registering QEMU emulators writes to the host's binfmt_misc, which is
+        # what --privileged is for below, and the only way to build the arm64
+        # image on an amd64 runner. The container runs one command and exits.
         run: |
           BINFMT_IMAGE=docker.io/tonistiigi/binfmt:latest
           .github/bin/retry docker pull "${BINFMT_IMAGE}"
-          docker run --rm --privileged "${BINFMT_IMAGE}" --install arm64
+          docker run --rm --privileged "${BINFMT_IMAGE}" --install arm64 # nosemgrep: trailofbits.generic.container-privileged.container-privileged
       - name: Build and Test Docker Image
         run: core/docker/build.sh
       - name: Cancel merge queue workflow
