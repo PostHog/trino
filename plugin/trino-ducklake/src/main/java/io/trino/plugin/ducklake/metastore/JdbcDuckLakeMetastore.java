@@ -64,6 +64,7 @@ public class JdbcDuckLakeMetastore
     private volatile Boolean dataFileHasPartialMax;
     private volatile Boolean inlinedDataTablesRegistryExists;
     private volatile Boolean nameMappingTableExists;
+    private volatile Boolean sortInfoTableExists;
     private volatile Boolean viewTableExists;
     private volatile Boolean nameMappingHasIsPartition;
 
@@ -100,11 +101,13 @@ public class JdbcDuckLakeMetastore
      */
     public <T> T commit(DuckLakeCommitAction<T> action)
     {
+        // read outside the transaction, so that the commit itself needs one connection only
+        boolean sortInfoSupported = sortInfoTableExists();
         RuntimeException conflict = null;
         for (int attempt = 0; attempt < MAX_COMMIT_ATTEMPTS; attempt++) {
             try {
                 return jdbi.inTransaction(TransactionIsolationLevel.SERIALIZABLE, handle -> {
-                    DuckLakeCommit commit = new DuckLakeCommit(handle, metadataSchema, snapshotState(handle));
+                    DuckLakeCommit commit = new DuckLakeCommit(handle, metadataSchema, snapshotState(handle), sortInfoSupported);
                     T result = action.run(commit);
                     commit.writeSnapshot();
                     return result;
@@ -876,6 +879,20 @@ public class JdbcDuckLakeMetastore
         if (tableExists == null) {
             tableExists = tableExists("ducklake_view");
             viewTableExists = tableExists;
+        }
+        return tableExists;
+    }
+
+    /**
+     * Whether the catalog records sort orders. {@code ducklake_sort_info} was added to the format
+     * in version 0.4, so a catalog written against an older one does not have the table at all.
+     */
+    private boolean sortInfoTableExists()
+    {
+        Boolean tableExists = sortInfoTableExists;
+        if (tableExists == null) {
+            tableExists = tableExists("ducklake_sort_info");
+            sortInfoTableExists = tableExists;
         }
         return tableExists;
     }
