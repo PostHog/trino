@@ -188,7 +188,7 @@ final class TestDuckLakeWrites
     }
 
     @Test
-    void testReplaceTableDefinitionKeepsTheTableReadableThroughout()
+    void testReplaceTableDefinitionInOneSnapshot()
     {
         String table = "replace_ddl_" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + table + " AS SELECT id, 'old' AS tag FROM UNNEST(sequence(1, 3)) AS t(id)", 3);
