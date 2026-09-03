@@ -156,6 +156,12 @@ change under it without failing the commit. The result is then computed from
 the snapshot the statement started at, which is what reading a snapshot means,
 rather than from the newest one.
 
+A query fails with `DUCKLAKE_UNSUPPORTED_CHANGE_TYPE` when another writer
+recorded a kind of change this connector does not know. The connector cannot
+decide whether committing on top of that snapshot is safe, so it refuses rather
+than risk dropping the other writer's work. Upgrade the connector to a version
+that understands the DuckLake version the other writer uses.
+
 ## Type mapping
 
 The connector maps DuckLake column types to Trino types as follows:
