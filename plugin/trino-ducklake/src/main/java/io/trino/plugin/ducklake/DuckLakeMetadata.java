@@ -195,8 +195,10 @@ public class DuckLakeMetadata
      */
     private <T> T commit(DuckLakeCommitAction<T> action)
     {
-        // pin the transaction to a snapshot first, which also verifies the catalog format version
-        snapshotId();
+        // pin the transaction to a snapshot first, which also verifies the catalog format version.
+        // Everything this statement read, it read there, so that is the snapshot the commit has to
+        // be checked for conflicts against.
+        long readSnapshotId = snapshotId();
 
         class Result
         {
@@ -204,7 +206,7 @@ public class DuckLakeMetadata
             long snapshot;
         }
 
-        Result result = metastore.commit(commit -> {
+        Result result = metastore.commit(readSnapshotId, commit -> {
             Result committed = new Result();
             committed.value = action.run(commit);
             committed.snapshot = commit.effectiveSnapshotId();

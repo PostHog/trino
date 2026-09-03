@@ -34,6 +34,7 @@ import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
 import static io.airlift.testing.ValidationAssertions.assertFailsValidation;
 import static io.airlift.testing.ValidationAssertions.assertValidates;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -59,7 +60,9 @@ final class TestDuckLakeConfig
                 .setFileStatisticsPruningEnabled(true)
                 .setMaxSplitSize(DataSize.of(64, MEGABYTE))
                 .setTargetMaxFileSize(DataSize.of(128, MEGABYTE))
-                .setMaxOpenPartitions(100));
+                .setMaxOpenPartitions(100)
+                .setCommitMaxRetries(10)
+                .setCommitRetryBackoff(new Duration(20, MILLISECONDS)));
     }
 
     /**
@@ -113,6 +116,8 @@ final class TestDuckLakeConfig
                 .put("ducklake.max-split-size", "32MB")
                 .put("ducklake.target-max-file-size", "48MB")
                 .put("ducklake.max-open-partitions", "7")
+                .put("ducklake.commit.max-retries", "4")
+                .put("ducklake.commit.retry-backoff", "250ms")
                 .buildOrThrow();
     }
 
@@ -129,6 +134,8 @@ final class TestDuckLakeConfig
         assertThat(config.getMaxSplitSize()).isEqualTo(DataSize.of(32, MEGABYTE));
         assertThat(config.getTargetMaxFileSize()).isEqualTo(DataSize.of(48, MEGABYTE));
         assertThat(config.getMaxOpenPartitions()).isEqualTo(7);
+        assertThat(config.getCommitMaxRetries()).isEqualTo(4);
+        assertThat(config.getCommitRetryBackoff()).isEqualTo(new Duration(250, MILLISECONDS));
     }
 
     @Test

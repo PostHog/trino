@@ -24,7 +24,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 
-import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
+import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_COMMIT_CONFLICT;
 import static java.lang.String.join;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
@@ -807,6 +807,40 @@ public final class DuckLakeCommit
         return snapshotId;
     }
 
+    /**
+     * Fails unless this commit may land on top of everything committed since {@code readSnapshotId},
+     * which is the snapshot the statement was planned and read against.
+     * <p>
+     * A statement reads a single snapshot, so what another writer did afterwards cannot change what
+     * it read. What it can change is whether the result may be written down: the DuckLake rules,
+     * applied here, say when it may not. When they allow it the commit lands on the newer snapshot
+     * unchanged, keeping the data files it already wrote.
+     */
+    void verifyNoConflictSince(long readSnapshotId)
+    {
+        if (changes.isEmpty() || baseSnapshotId <= readSnapshotId) {
+            // nothing to commit, or nothing was committed by anyone else in the meantime
+            return;
+        }
+        DuckLakeSnapshotChanges ourChanges = DuckLakeSnapshotChanges.parse(join(",", changes));
+        if (ourChanges.isEmpty()) {
+            // the statement created something by name, which the replay re-resolves by itself
+            return;
+        }
+        List<String> otherChangesMade = handle.createQuery(
+                        """
+                        SELECT changes_made FROM %s
+                        WHERE snapshot_id > :snapshot AND changes_made IS NOT NULL AND changes_made <> ''
+                        ORDER BY snapshot_id""".formatted(table("ducklake_snapshot_changes")))
+                .bind("snapshot", readSnapshotId)
+                .mapTo(String.class)
+                .list();
+        DuckLakeSnapshotChanges otherChanges = DuckLakeSnapshotChanges.parse(join(",", otherChangesMade));
+        ourChanges.conflictWith(otherChanges).ifPresent(conflict -> {
+            throw new ConcurrentModificationFailure("Conflicting concurrent commit to the DuckLake catalog: " + conflict);
+        });
+    }
+
     void writeSnapshot()
     {
         if (changes.isEmpty()) {
@@ -922,14 +956,16 @@ public final class DuckLakeCommit
 
     /**
      * Signals that the state a statement was planned against changed before it could commit.
-     * Retrying the commit cannot help, because the statement has to be replanned.
+     * Retrying the commit cannot help, because the statement has to be replanned. It carries its
+     * own error code so that a client driving the statement can tell this apart from a catalog
+     * that is broken, and decide for itself whether to run the statement again.
      */
     public static class ConcurrentModificationFailure
             extends TrinoException
     {
         public ConcurrentModificationFailure(String message)
         {
-            super(DUCKLAKE_INVALID_METADATA, message);
+            super(DUCKLAKE_COMMIT_CONFLICT, message);
         }
     }
 

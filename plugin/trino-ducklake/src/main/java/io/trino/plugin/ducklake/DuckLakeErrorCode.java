@@ -33,6 +33,7 @@ public enum DuckLakeErrorCode
     DUCKLAKE_COMMIT_FAILED(7, EXTERNAL),
     DUCKLAKE_WRITER_ERROR(8, EXTERNAL),
     DUCKLAKE_TOO_MANY_OPEN_PARTITIONS(9, USER_ERROR),
+    DUCKLAKE_COMMIT_CONFLICT(10, EXTERNAL),
     /**/;
 
     private final ErrorCode errorCode;
