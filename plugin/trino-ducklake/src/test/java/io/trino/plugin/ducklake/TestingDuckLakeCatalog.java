@@ -190,6 +190,22 @@ public final class TestingDuckLakeCatalog
         }
     }
 
+    /**
+     * Runs the statements against the catalog database itself, rather than through DuckDB. Used to
+     * put the catalog into a state no engine writes, such as the one an older DuckLake version
+     * would have left.
+     */
+    public void executeInMetastore(@Language("SQL") String... statements)
+            throws SQLException
+    {
+        try (Connection connection = DriverManager.getConnection(jdbcUrl(), USER, PASSWORD);
+                Statement statement = connection.createStatement()) {
+            for (String sql : statements) {
+                statement.execute(sql);
+            }
+        }
+    }
+
     private static void sleepBeforeRetry(int attempt)
     {
         try {

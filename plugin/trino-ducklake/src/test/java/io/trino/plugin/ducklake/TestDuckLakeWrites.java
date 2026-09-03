@@ -317,6 +317,49 @@ final class TestDuckLakeWrites
     }
 
     @Test
+    void testReplacingATableEndsTheSortOrderItHad()
+            throws SQLException
+    {
+        String table = "replace_sorted_" + randomNameSuffix();
+        catalog.executeInDuckDb(
+                "CREATE TABLE %s (id INTEGER, v VARCHAR)".formatted(table),
+                "ALTER TABLE %s SET SORTED BY (id ASC)".formatted(table),
+                "INSERT INTO %s VALUES (2, 'b'), (1, 'a')".formatted(table));
+        try {
+            String replacedTableId = tableId(table);
+            assertThat(sortOrderEndSnapshots(replacedTableId)).isEqualTo(List.of("open"));
+
+            assertUpdate("CREATE OR REPLACE TABLE %s AS SELECT 9 AS id".formatted(table), 1);
+
+            // the sort order ends with the table it described, in the same snapshot
+            assertThat(sortOrderEndSnapshots(replacedTableId)).isEqualTo(List.of(tableEndSnapshot(replacedTableId)));
+            // and the table that took the name has none, because its definition states none
+            assertThat(sortOrderEndSnapshots(tableId(table))).isEmpty();
+            assertQuery("SELECT id FROM " + table, "VALUES 9");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testDroppingATableEndsTheSortOrderItHad()
+            throws SQLException
+    {
+        String table = "drop_sorted_" + randomNameSuffix();
+        catalog.executeInDuckDb(
+                "CREATE TABLE %s (id INTEGER)".formatted(table),
+                "ALTER TABLE %s SET SORTED BY (id ASC)".formatted(table));
+        String droppedTableId = tableId(table);
+        assertThat(sortOrderEndSnapshots(droppedTableId)).isEqualTo(List.of("open"));
+
+        assertUpdate("DROP TABLE " + table);
+
+        assertThat(sortOrderEndSnapshots(droppedTableId)).isEqualTo(List.of(tableEndSnapshot(droppedTableId)));
+        assertThat(duckDbScalar("SELECT count(*) FROM duckdb_tables() WHERE table_name = '" + table + "'")).isEqualTo("0");
+    }
+
+    @Test
     void testInsertIntoTableCreatedByDuckDb()
             throws SQLException
     {
@@ -757,6 +800,12 @@ final class TestDuckLakeWrites
         try {
             assertThatThrownBy(() -> assertUpdate("CREATE TABLE %s (a INTEGER)".formatted(viewName)))
                     .hasMessageContaining("already exists");
+
+            // replacing is refused before the rows are selected, so nothing is written for a
+            // statement that cannot finish
+            assertThatThrownBy(() -> assertUpdate("CREATE OR REPLACE TABLE %s AS SELECT 1 AS a".formatted(viewName), 1))
+                    .hasMessageContaining("already exists");
+            assertThat(catalog.dataPath().resolve("main").resolve(viewName)).doesNotExist();
         }
         finally {
             assertUpdate("DROP VIEW " + viewName);
@@ -895,6 +944,24 @@ final class TestDuckLakeWrites
     {
         return duckDbScalar("SELECT table_id::VARCHAR FROM __ducklake_metadata_lake.ducklake_table "
                 + "WHERE table_name = '" + tableName + "' AND end_snapshot IS NULL");
+    }
+
+    /**
+     * The snapshot the row of the given table ended in, or {@code open} while it is still current.
+     */
+    private String tableEndSnapshot(String tableId)
+    {
+        return duckDbScalar("SELECT coalesce(end_snapshot::VARCHAR, 'open') FROM __ducklake_metadata_lake.ducklake_table "
+                + "WHERE table_id = " + tableId);
+    }
+
+    /**
+     * One entry per sort order the table has ever had, saying which snapshot ended it.
+     */
+    private List<String> sortOrderEndSnapshots(String tableId)
+    {
+        return duckDbRows("SELECT coalesce(end_snapshot::VARCHAR, 'open') FROM __ducklake_metadata_lake.ducklake_sort_info "
+                + "WHERE table_id = " + tableId + " ORDER BY sort_id");
     }
 
     private String duckDbScalar(@Language("SQL") String sql)
