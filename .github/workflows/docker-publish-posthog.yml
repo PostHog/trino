@@ -15,7 +15,7 @@ on:
   # two triggers.
   push:
     branches:
-      - ducklake-connector
+      - master
     tags:
       - "posthog-*"
   workflow_dispatch:
@@ -139,7 +139,7 @@ jobs:
     if: >-
       github.repository == 'PostHog/trino'
       && github.event_name == 'push'
-      && github.ref == 'refs/heads/ducklake-connector'
+      && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - name: Get deployer token
