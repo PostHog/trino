@@ -72,9 +72,18 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: airlift/github-actions/check-commit-messages@1652e24519f5c7cec59d841070bf9beffadabdf9
-        with:
-          base_ref: ${{ github.event.pull_request.base.ref }}
+      # Upstream's airlift/github-actions/check-commit-messages, vendored with
+      # one change: this fork allows Co-authored-by trailers that credit the AI
+      # tools that write some of its commits. See the script header.
+      - name: Check commit messages
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          if [[ ! "$BASE_REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Invalid pull request base ref: $BASE_REF" >&2
+            exit 1
+          fi
+          python3 .github/scripts/check-commit-messages.py --allow-ai-attribution "origin/${BASE_REF}..HEAD"
 
   zizmor:
     permissions:
