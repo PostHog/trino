@@ -54,12 +54,16 @@ public class JdbcDuckLakeMetastore
     private static final String SERIALIZATION_FAILURE_SQL_STATE = "40001";
     private static final String DEADLOCK_DETECTED_SQL_STATE = "40P01";
     private static final String UNIQUE_VIOLATION_SQL_STATE = "23505";
-    private static final int MAX_COMMIT_ATTEMPTS = 10;
-    private static final long COMMIT_RETRY_BASE_DELAY_MILLIS = 20;
-    private static final long MAX_COMMIT_RETRY_DELAY_MILLIS = 1000;
+    /**
+     * How often the wait between commit attempts is doubled. Waiting longer than this does not help
+     * a writer that keeps losing the race, and the bound holds whatever backoff is configured.
+     */
+    private static final int MAX_COMMIT_RETRY_DOUBLINGS = 5;
 
     private final Jdbi jdbi;
     private final String metadataSchema;
+    private final int maxCommitRetries;
+    private final long commitRetryBackoffMillis;
 
     private volatile Boolean dataFileHasPartialMax;
     private volatile Boolean inlinedDataTablesRegistryExists;
@@ -72,6 +76,8 @@ public class JdbcDuckLakeMetastore
     {
         this.jdbi = Jdbi.create(requireNonNull(connectionFactory, "connectionFactory is null"));
         this.metadataSchema = config.getMetadataSchema();
+        this.maxCommitRetries = config.getCommitMaxRetries();
+        this.commitRetryBackoffMillis = config.getCommitRetryBackoff().toMillis();
     }
 
     public long currentSnapshotId()
@@ -88,24 +94,32 @@ public class JdbcDuckLakeMetastore
     }
 
     /**
-     * Runs the action against a new snapshot and commits it atomically.
+     * Runs the action against a new snapshot and commits it atomically, re-basing it onto whatever
+     * another writer committed in the meantime.
      * <p>
-     * DuckLake orders all changes to a catalog on a single snapshot chain, so a commit conflicts
-     * with any other commit that started from the same snapshot. Conflicts are detected by the
-     * database rather than avoided by locking: the transaction runs at {@code SERIALIZABLE}, and
-     * the snapshot table's primary key rejects a second commit claiming the same snapshot
-     * identifier. Either way the action is discarded and replayed against the newer state, which
-     * is safe because it only reads catalog rows and writes them through this commit — the data
-     * files it registers were written before the commit began and are unaffected by a replay.
+     * DuckLake orders all changes to a catalog on a single snapshot chain, so every commit has to
+     * claim the snapshot following the newest one. Losing that race is ordinary rather than
+     * exceptional here, because a DuckDB writer commits to the same catalog: the database reports
+     * it — as a serialization failure, or as a unique violation on the snapshot table's primary
+     * key — and the action is discarded and replayed against the newer state. A replay is safe
+     * because the action only reads catalog rows and writes them through this commit; the data
+     * files it registers were written to object storage before the commit began, and the discarded
+     * attempt left no rows behind.
+     * <p>
+     * Re-basing is only allowed where DuckLake allows it. {@code readSnapshotId} is the snapshot the
+     * statement was planned and read against, and the commit refuses to land if anything committed
+     * after it changed an object the statement's own result depends on. The refusal carries
+     * {@code DUCKLAKE_COMMIT_CONFLICT} and is not retried: only replanning the statement can help.
      */
-    public <T> T commit(DuckLakeCommitAction<T> action)
+    public <T> T commit(long readSnapshotId, DuckLakeCommitAction<T> action)
     {
         RuntimeException conflict = null;
-        for (int attempt = 0; attempt < MAX_COMMIT_ATTEMPTS; attempt++) {
+        for (int attempt = 0; attempt <= maxCommitRetries; attempt++) {
             try {
                 return jdbi.inTransaction(TransactionIsolationLevel.SERIALIZABLE, handle -> {
                     DuckLakeCommit commit = new DuckLakeCommit(handle, metadataSchema, snapshotState(handle));
                     T result = action.run(commit);
+                    commit.verifyNoConflictSince(readSnapshotId);
                     commit.writeSnapshot();
                     return result;
                 });
@@ -119,9 +133,14 @@ public class JdbcDuckLakeMetastore
             catch (DuckLakeCommit.ConcurrentModificationFailure e) {
                 throw e;
             }
-            sleepBeforeRetry(attempt);
+            if (attempt < maxCommitRetries) {
+                sleepBeforeRetry(attempt);
+            }
         }
-        throw new TrinoException(DUCKLAKE_COMMIT_FAILED, "Failed to commit to the DuckLake catalog after %s attempts because of concurrent updates".formatted(MAX_COMMIT_ATTEMPTS), conflict);
+        throw new TrinoException(
+                DUCKLAKE_COMMIT_FAILED,
+                "Failed to commit to the DuckLake catalog after %s retries because of concurrent updates; raise ducklake.commit.max-retries if this is common".formatted(maxCommitRetries),
+                conflict);
     }
 
     private DuckLakeCommit.SnapshotState snapshotState(Handle handle)
@@ -156,10 +175,10 @@ public class JdbcDuckLakeMetastore
         return false;
     }
 
-    private static void sleepBeforeRetry(int attempt)
+    private void sleepBeforeRetry(int attempt)
     {
         try {
-            Thread.sleep(Math.min(COMMIT_RETRY_BASE_DELAY_MILLIS << attempt, MAX_COMMIT_RETRY_DELAY_MILLIS));
+            Thread.sleep(commitRetryBackoffMillis << Math.min(attempt, MAX_COMMIT_RETRY_DOUBLINGS));
         }
         catch (InterruptedException e) {
             Thread.currentThread().interrupt();

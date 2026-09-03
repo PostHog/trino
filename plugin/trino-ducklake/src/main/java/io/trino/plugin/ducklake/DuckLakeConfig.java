@@ -30,6 +30,7 @@ import java.io.File;
 import java.util.Optional;
 
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
@@ -48,6 +49,8 @@ public class DuckLakeConfig
     private DataSize maxSplitSize = DataSize.of(64, MEGABYTE);
     private DataSize targetMaxFileSize = DataSize.of(128, MEGABYTE);
     private int maxOpenPartitions = 100;
+    private int commitMaxRetries = 10;
+    private Duration commitRetryBackoff = new Duration(20, MILLISECONDS);
 
     @NotNull
     public String getConnectionUrl()
@@ -238,6 +241,35 @@ public class DuckLakeConfig
     public DuckLakeConfig setMaxOpenPartitions(int maxOpenPartitions)
     {
         this.maxOpenPartitions = maxOpenPartitions;
+        return this;
+    }
+
+    @Min(0)
+    public int getCommitMaxRetries()
+    {
+        return commitMaxRetries;
+    }
+
+    @Config("ducklake.commit.max-retries")
+    @ConfigDescription("Re-attempt a commit that lost the race for the next snapshot this many times before failing")
+    public DuckLakeConfig setCommitMaxRetries(int commitMaxRetries)
+    {
+        this.commitMaxRetries = commitMaxRetries;
+        return this;
+    }
+
+    @NotNull
+    @MinDuration("0ms")
+    public Duration getCommitRetryBackoff()
+    {
+        return commitRetryBackoff;
+    }
+
+    @Config("ducklake.commit.retry-backoff")
+    @ConfigDescription("Wait this long before re-attempting a commit, doubling after each attempt up to 32 times this value")
+    public DuckLakeConfig setCommitRetryBackoff(Duration commitRetryBackoff)
+    {
+        this.commitRetryBackoff = commitRetryBackoff;
         return this;
     }
 }

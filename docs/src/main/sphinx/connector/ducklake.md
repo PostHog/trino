@@ -98,12 +98,69 @@ The following configuration properties are available:
     byte ranges in parallel. Also configurable per query with the
     `max_split_size` [catalog session property](/sql/set-session).
   - `64MB`
+* - `ducklake.commit.max-retries`
+  - How often a commit that lost the race for the next snapshot is attempted again against the
+    newer state. Raise this on a catalog with many concurrent writers. See
+    [](ducklake-concurrent-writers).
+  - `10`
+* - `ducklake.commit.retry-backoff`
+  - How long to wait before attempting a commit again. The wait is doubled after each attempt,
+    up to 32 times this value.
+  - `20ms`
 :::
 
 The connector supports reading from S3, Azure Storage, Google Cloud Storage,
 and HDFS using the same [file system configuration](/object-storage) as other
 object storage connectors, such as `fs.native-s3.enabled=true` and the `s3.*`
 properties.
+
+(ducklake-concurrent-writers)=
+### Concurrent writers
+
+A DuckLake catalog orders every change on one chain of snapshots, so a commit
+has to claim the snapshot following the newest one. When another writer, such
+as DuckDB or a second Trino cluster, claims it first, the connector applies the
+DuckLake conflict rules and either lands the commit on the newer snapshot or
+fails the query. It never rewrites the data files it already wrote, and a
+failed attempt leaves nothing behind in the catalog.
+
+The commit lands on the newer snapshot when the other writer changed something
+this statement does not depend on. Two writers inserting into the same table is
+the common case and always succeeds, as does any pair of statements writing to
+different tables. The connector attempts the commit again up to
+`ducklake.commit.max-retries` times, waiting `ducklake.commit.retry-backoff`
+before the first attempt and doubling the wait after each one.
+
+The query fails with the `DUCKLAKE_COMMIT_CONFLICT` error code when the other
+writer changed the table this statement writes to, in a way that invalidates
+the result:
+
+* Inserting into a table another writer altered, dropped, or deleted from.
+* Deleting from a table another writer altered, dropped, inserted into, or
+  compacted.
+* Altering a table another writer altered or dropped.
+* Dropping a table another writer dropped.
+* Rewriting a data file or a delete file another writer replaced.
+
+Statements naming what they create, such as `CREATE TABLE` and `CREATE SCHEMA`,
+resolve the name against the newer catalog instead, and report the ordinary
+"already exists" or "not found" error if the other writer took it.
+
+These are the rules DuckDB applies to the same catalog, so a statement is
+accepted or rejected here exactly as it would be there. A client driving the
+statement can match `DUCKLAKE_COMMIT_CONFLICT` to tell a lost race apart from a
+broken catalog, and run the statement again once it has been replanned.
+
+A statement reads one snapshot throughout, so a table it only reads from can
+change under it without failing the commit. The result is then computed from
+the snapshot the statement started at, which is what reading a snapshot means,
+rather than from the newest one.
+
+A query fails with `DUCKLAKE_UNSUPPORTED_CHANGE_TYPE` when another writer
+recorded a kind of change this connector does not know. The connector cannot
+decide whether committing on top of that snapshot is safe, so it refuses rather
+than risk dropping the other writer's work. Upgrade the connector to a version
+that understands the DuckLake version the other writer uses.
 
 ## Type mapping
 
