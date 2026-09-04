@@ -14,6 +14,7 @@
 package io.trino.sql;
 
 import com.google.common.collect.HashBasedTable;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Table;
 import com.google.inject.Inject;
@@ -57,10 +58,16 @@ public class SessionPropertyResolver
 
     public SessionPropertiesApplier getSessionPropertiesApplier(PreparedQuery preparedQuery)
     {
-        if (!(preparedQuery.getStatement() instanceof Query queryStatement)) {
+        ImmutableList.Builder<SessionProperty> sessionProperties = ImmutableList.builder();
+        if (preparedQuery.getStatement() instanceof Query queryStatement) {
+            sessionProperties.addAll(queryStatement.getSessionProperties());
+        }
+        sessionProperties.addAll(preparedQuery.getSessionPropertyOverrides());
+        List<SessionProperty> properties = sessionProperties.build();
+        if (properties.isEmpty()) {
             return session -> session;
         }
-        return session -> prepareSession(session, queryStatement.getSessionProperties(), bindParameters(preparedQuery.getStatement(), preparedQuery.getParameters()));
+        return session -> prepareSession(session, properties, bindParameters(preparedQuery.getStatement(), preparedQuery.getParameters()));
     }
 
     private Session prepareSession(Session session, List<SessionProperty> sessionProperties, Map<NodeRef<Parameter>, Expression> parameters)

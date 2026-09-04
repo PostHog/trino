@@ -12,6 +12,7 @@ admin/tuning
 admin/jmx
 admin/opentelemetry
 admin/openmetrics
+admin/hogql
 admin/properties
 admin/spill
 admin/resource-groups
@@ -64,6 +65,7 @@ admin/properties
 ```
 
 * [Properties reference overview](admin/properties)
+* [](admin/hogql)
 * [](admin/properties-general)
 * [](admin/properties-client-protocol)
 * [](admin/properties-http-server)

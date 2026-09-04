@@ -1,0 +1,954 @@
+{
+    "corpusCases": [
+        {
+            "id": "expr.accept.arithmetic",
+            "status": "supported"
+        },
+        {
+            "id": "expr.accept.array",
+            "status": "supported"
+        },
+        {
+            "id": "expr.accept.between",
+            "status": "supported"
+        },
+        {
+            "id": "expr.accept.boolean",
+            "status": "supported"
+        },
+        {
+            "id": "expr.accept.case",
+            "status": "supported"
+        },
+        {
+            "id": "expr.accept.cast",
+            "status": "supported"
+        },
+        {
+            "id": "expr.accept.dotted-field",
+            "status": "supported"
+        },
+        {
+            "id": "expr.accept.function",
+            "status": "supported"
+        },
+        {
+            "id": "expr.accept.in-list",
+            "status": "supported"
+        },
+        {
+            "id": "expr.accept.literal-boolean",
+            "status": "supported"
+        },
+        {
+            "id": "expr.accept.literal-null",
+            "status": "supported"
+        },
+        {
+            "id": "expr.accept.literal-number",
+            "status": "supported"
+        },
+        {
+            "id": "expr.accept.literal-string",
+            "status": "supported"
+        },
+        {
+            "id": "expr.accept.null-predicate",
+            "status": "supported"
+        },
+        {
+            "id": "expr.accept.tuple",
+            "status": "supported"
+        },
+        {
+            "id": "expr.reject.incomplete-binary",
+            "status": "canonicalRejection"
+        },
+        {
+            "id": "expr.reject.unclosed-tuple",
+            "status": "canonicalRejection"
+        },
+        {
+            "id": "expr.reject.unexpected-character",
+            "status": "canonicalRejection"
+        },
+        {
+            "id": "query.accept.aggregate",
+            "status": "supported"
+        },
+        {
+            "id": "query.accept.constant",
+            "status": "supported"
+        },
+        {
+            "id": "query.accept.multiline",
+            "status": "supported"
+        },
+        {
+            "id": "query.accept.order-limit-offset",
+            "status": "supported"
+        },
+        {
+            "id": "query.accept.projection-from",
+            "status": "supported"
+        },
+        {
+            "id": "query.accept.where",
+            "status": "supported"
+        },
+        {
+            "id": "query.reject.missing-projection",
+            "status": "canonicalRejection"
+        },
+        {
+            "id": "query.reject.missing-source",
+            "status": "canonicalRejection"
+        },
+        {
+            "id": "query.reject.missing-where-expression",
+            "status": "canonicalRejection"
+        },
+        {
+            "id": "query.reject.trailing-comparison",
+            "status": "canonicalRejection"
+        }
+    ],
+    "features": [
+        {
+            "id": "alternative:alias:keyword",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+            ]
+        },
+        {
+            "id": "alternative:alias:quoted-identifier",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+            ]
+        },
+        {
+            "id": "alternative:alias:unquoted-identifier",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+            ]
+        },
+        {
+            "id": "alternative:columnAliases",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:columnExpr:ColumnExprAnd",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlParser#testUsesCanonicalGrammarForExpressionsAndWhereClause",
+                "TestHogQlCompiler#testLowersToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:columnExpr:ColumnExprOr",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.boolean"
+            ]
+        },
+        {
+            "id": "alternative:columnExpr:ColumnExprValuePassthrough",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:columnExprList",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpressions",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.array",
+                "TestHogQlCompatibilityCorpus#expr.accept.tuple"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprArray",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.array",
+                "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprArrayAccess",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlParser#testBuildsCollectionAccessWithSourceSpans",
+                "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprBetween",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.between",
+                "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprCase",
+            "loweringHandler": "TrinoAstFactory#createCaseExpression",
+            "parseHandler": "AstBuilder#buildCaseExpression",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.case",
+                "TestHogQlCompiler#testLowersCaseAndCastExpressions"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprCast",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.cast",
+                "TestHogQlCompiler#testLowersCaseAndCastExpressions"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprIsNull",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.null-predicate",
+                "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprNegate",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprNot",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlParser#testUsesCanonicalGrammarForExpressionsAndWhereClause",
+                "TestHogQlCompiler#testLowersToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprParens",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.boolean"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprPropertyAccess",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlParser#testBuildsCollectionAccessWithSourceSpans",
+                "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprPrecedence1",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlParser#testUsesCanonicalGrammarForExpressionsAndWhereClause",
+                "TestHogQlCompiler#testLowersToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTryCast",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCaseAndCastExpressions"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTuple",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.tuple",
+                "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTupleAccess",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlParser#testBuildsCollectionAccessWithSourceSpans",
+                "TestHogQlCompiler#testLowersCollectionAndPredicateExpressions"
+            ]
+        },
+        {
+            "id": "alternative:columnTypeExpr:ColumnTypeExprSimple",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildSimpleType",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.cast",
+                "TestHogQlCompiler#testLowersCaseAndCastExpressions"
+            ]
+        },
+        {
+            "id": "alternative:databaseIdentifier",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifiers",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "alternative:fromClause",
+            "loweringHandler": "TrinoAstFactory#createTable",
+            "parseHandler": "AstBuilder#buildTableReference",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:identifier:interval-keyword",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifier",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "alternative:identifier:keyword",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifier",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "alternative:identifier:quoted",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifier",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "alternative:identifier:unquoted",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifier",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "alternative:joinConstraintClause:on",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildJoinCriteria",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+            ]
+        },
+        {
+            "id": "alternative:joinConstraintClause:using",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildJoinCriteria",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersUnparenthesizedUsing"
+            ]
+        },
+        {
+            "id": "alternative:joinConstraintClause:using-parenthesized",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildJoinCriteria",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+            ]
+        },
+        {
+            "id": "alternative:joinExpr:JoinExprCrossOp",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildRelation",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+            ]
+        },
+        {
+            "id": "alternative:joinExpr:JoinExprOp",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildRelation",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+            ]
+        },
+        {
+            "id": "alternative:joinExpr:JoinExprParens",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildRelation",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+            ]
+        },
+        {
+            "id": "alternative:joinExpr:JoinExprTable",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildRelation",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+            ]
+        },
+        {
+            "id": "alternative:joinOp:JoinOpFull",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildJoinType",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+            ]
+        },
+        {
+            "id": "alternative:joinOp:JoinOpInner",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildJoinType",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+            ]
+        },
+        {
+            "id": "alternative:joinOp:JoinOpLeftRight",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildJoinType",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+            ]
+        },
+        {
+            "id": "alternative:joinOpCross:cross-join",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildRelation",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+            ]
+        },
+        {
+            "id": "alternative:keywordForAlias",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+            ]
+        },
+        {
+            "id": "alternative:nestedIdentifier",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifiers",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "alternative:selectColumnExpr:ColumnExprSelectValue",
+            "loweringHandler": "TrinoAstFactory#createSelectItem",
+            "parseHandler": "AstBuilder#buildProjection",
+            "testCaseIds": [
+                "TestHogQlCompiler#testReturnsOnlyStockTrinoTreeNodes"
+            ]
+        },
+        {
+            "id": "alternative:selectColumnExprList",
+            "loweringHandler": "TrinoAstFactory#createSelectItem",
+            "parseHandler": "AstBuilder#selectColumns",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:selectColumnExprListBeforeFrom:SelectColumnExprListBeforeFromPlain",
+            "loweringHandler": "TrinoAstFactory#createSelectItem",
+            "parseHandler": "AstBuilder#selectColumns",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:selectSetStmt",
+            "loweringHandler": "TrinoAstFactory#createQueryBody",
+            "parseHandler": "AstBuilder#buildSetQuery",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:selectStmtWithParens:direct",
+            "loweringHandler": "TrinoAstFactory#createQuery",
+            "parseHandler": "AstBuilder#extractPlainSelect",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
+            ]
+        },
+        {
+            "id": "alternative:selectStmtWithParens:parenthesized",
+            "loweringHandler": "TrinoAstFactory#createQuery",
+            "parseHandler": "AstBuilder#extractPlainSelect",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
+            ]
+        },
+        {
+            "id": "alternative:subsequentSelectSetClause",
+            "loweringHandler": "TrinoAstFactory#createQueryBody",
+            "parseHandler": "AstBuilder#buildSetQuery",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:tableExpr:TableExprAlias",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins",
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
+            ]
+        },
+        {
+            "id": "alternative:tableExpr:TableExprIdentifier",
+            "loweringHandler": "TrinoAstFactory#createTable",
+            "parseHandler": "AstBuilder#buildTableExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "alternative:tableExpr:TableExprSubquery",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
+            ]
+        },
+        {
+            "id": "alternative:tableExpr:TableExprValues",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:tableIdentifier",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifiers",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "alternative:valuesClause",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:valuesRow",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:whereClause",
+            "loweringHandler": "TrinoAstFactory#createStatement",
+            "parseHandler": "AstBuilder#build",
+            "testCaseIds": [
+                "TestHogQlParser#testUsesCanonicalGrammarForExpressionsAndWhereClause"
+            ]
+        },
+        {
+            "id": "alternative:withClause",
+            "loweringHandler": "TrinoAstFactory#createWith",
+            "parseHandler": "AstBuilder#buildCommonTables",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
+            ]
+        },
+        {
+            "id": "alternative:withExpr:WithExprSubquery",
+            "loweringHandler": "TrinoAstFactory#createWithQuery",
+            "parseHandler": "AstBuilder#buildCommonTables",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
+            ]
+        },
+        {
+            "id": "alternative:withExprColumnNameList",
+            "loweringHandler": "TrinoAstFactory#createWithQuery",
+            "parseHandler": "AstBuilder#buildCommonTables",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
+            ]
+        },
+        {
+            "id": "alternative:withExprList",
+            "loweringHandler": "TrinoAstFactory#createWith",
+            "parseHandler": "AstBuilder#buildCommonTables",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
+            ]
+        },
+        {
+            "id": "rule:alias",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+            ]
+        },
+        {
+            "id": "rule:columnAliases",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
+            ]
+        },
+        {
+            "id": "rule:columnExprList",
+            "loweringHandler": "TrinoAstFactory#createExpression",
+            "parseHandler": "AstBuilder#buildExpressions",
+            "testCaseIds": [
+                "TestHogQlCompatibilityCorpus#expr.accept.array",
+                "TestHogQlCompatibilityCorpus#expr.accept.tuple"
+            ]
+        },
+        {
+            "id": "rule:databaseIdentifier",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifiers",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "rule:fromClause",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildRelation",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "rule:identifier",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifier",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "rule:joinConstraintClause",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildJoinCriteria",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins",
+                "TestHogQlCompiler#testLowersUnparenthesizedUsing"
+            ]
+        },
+        {
+            "id": "rule:joinOp",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildJoinType",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+            ]
+        },
+        {
+            "id": "rule:keywordForAlias",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersAliasesAndStockJoins"
+            ]
+        },
+        {
+            "id": "rule:nestedIdentifier",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifiers",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "rule:selectColumnExprList",
+            "loweringHandler": "TrinoAstFactory#createSelectItem",
+            "parseHandler": "AstBuilder#selectColumns",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "rule:selectColumnExprListBeforeFrom",
+            "loweringHandler": "TrinoAstFactory#createSelectItem",
+            "parseHandler": "AstBuilder#selectColumns",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "rule:selectSetStmt",
+            "loweringHandler": "TrinoAstFactory#createQueryBody",
+            "parseHandler": "AstBuilder#buildSetQuery",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
+            ]
+        },
+        {
+            "id": "rule:subsequentSelectSetClause",
+            "loweringHandler": "TrinoAstFactory#createQueryBody",
+            "parseHandler": "AstBuilder#buildSetQuery",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
+            ]
+        },
+        {
+            "id": "rule:tableIdentifier",
+            "loweringHandler": "TrinoAstFactory#createIdentifier",
+            "parseHandler": "AstBuilder#buildIdentifiers",
+            "testCaseIds": [
+                "TestHogQlCompiler#testPreservesQuotedIdentifiersAndSourceLocations"
+            ]
+        },
+        {
+            "id": "rule:valuesClause",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
+            ]
+        },
+        {
+            "id": "rule:valuesRow",
+            "loweringHandler": "TrinoAstFactory#createRelation",
+            "parseHandler": "AstBuilder#buildTableExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersSetOperationsAndValuesToStockTrinoAst"
+            ]
+        },
+        {
+            "id": "rule:whereClause",
+            "loweringHandler": "TrinoAstFactory#createStatement",
+            "parseHandler": "AstBuilder#build",
+            "testCaseIds": [
+                "TestHogQlParser#testUsesCanonicalGrammarForExpressionsAndWhereClause"
+            ]
+        },
+        {
+            "id": "rule:withClause",
+            "loweringHandler": "TrinoAstFactory#createWith",
+            "parseHandler": "AstBuilder#buildCommonTables",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
+            ]
+        },
+        {
+            "id": "rule:withExprColumnNameList",
+            "loweringHandler": "TrinoAstFactory#createWithQuery",
+            "parseHandler": "AstBuilder#buildCommonTables",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
+            ]
+        },
+        {
+            "id": "rule:withExprList",
+            "loweringHandler": "TrinoAstFactory#createWith",
+            "parseHandler": "AstBuilder#buildCommonTables",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCtesAndDerivedTables"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprWinFunction",
+            "loweringHandler": "TrinoAstFactory#createFunctionCall",
+            "parseHandler": "AstBuilder#buildWindowFunction",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprWinFunctionTarget",
+            "loweringHandler": "TrinoAstFactory#createFunctionCall",
+            "parseHandler": "AstBuilder#buildWindowFunction",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:winFrameBound",
+            "loweringHandler": "TrinoAstFactory#createFrameBound",
+            "parseHandler": "AstBuilder#buildFrameBound",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
+            ]
+        },
+        {
+            "id": "alternative:winFrameClause",
+            "loweringHandler": "TrinoAstFactory#createWindowFrame",
+            "parseHandler": "AstBuilder#buildWindowFrame",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
+            ]
+        },
+        {
+            "id": "alternative:winFrameExtend:frameBetween",
+            "loweringHandler": "TrinoAstFactory#createWindowFrame",
+            "parseHandler": "AstBuilder#buildWindowFrame",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
+            ]
+        },
+        {
+            "id": "alternative:winFrameExtend:frameStart",
+            "loweringHandler": "TrinoAstFactory#createWindowFrame",
+            "parseHandler": "AstBuilder#buildWindowFrame",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
+            ]
+        },
+        {
+            "id": "alternative:winOrderByClause",
+            "loweringHandler": "TrinoAstFactory#createWindow",
+            "parseHandler": "AstBuilder#buildWindowSpecification",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:winPartitionByClause",
+            "loweringHandler": "TrinoAstFactory#createWindow",
+            "parseHandler": "AstBuilder#buildWindowSpecification",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:windowClause",
+            "loweringHandler": "TrinoAstFactory#createWindowDefinition",
+            "parseHandler": "AstBuilder#buildWindowDefinitions",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:windowExpr",
+            "loweringHandler": "TrinoAstFactory#createWindow",
+            "parseHandler": "AstBuilder#buildWindowSpecification",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "rule:winFrameBound",
+            "loweringHandler": "TrinoAstFactory#createFrameBound",
+            "parseHandler": "AstBuilder#buildFrameBound",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
+            ]
+        },
+        {
+            "id": "rule:winFrameClause",
+            "loweringHandler": "TrinoAstFactory#createWindowFrame",
+            "parseHandler": "AstBuilder#buildWindowFrame",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
+            ]
+        },
+        {
+            "id": "rule:winFrameExtend",
+            "loweringHandler": "TrinoAstFactory#createWindowFrame",
+            "parseHandler": "AstBuilder#buildWindowFrame",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersEveryCanonicalFrameBound"
+            ]
+        },
+        {
+            "id": "rule:winOrderByClause",
+            "loweringHandler": "TrinoAstFactory#createWindow",
+            "parseHandler": "AstBuilder#buildWindowSpecification",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "rule:winPartitionByClause",
+            "loweringHandler": "TrinoAstFactory#createWindow",
+            "parseHandler": "AstBuilder#buildWindowSpecification",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "rule:windowClause",
+            "loweringHandler": "TrinoAstFactory#createWindowDefinition",
+            "parseHandler": "AstBuilder#buildWindowDefinitions",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "rule:windowExpr",
+            "loweringHandler": "TrinoAstFactory#createWindow",
+            "parseHandler": "AstBuilder#buildWindowSpecification",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersWindowsToEquivalentStockTrinoAst"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprIgnoreNulls",
+            "loweringHandler": "TrinoAstFactory#createFunctionCall",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlWindowCompiler#testLowersCanonicalWindowNullTreatmentOrder"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprInterval",
+            "loweringHandler": "TrinoAstFactory#createIntervalExpression",
+            "parseHandler": "AstBuilder#buildExpression",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCanonicalIntervals",
+                "TestHogQlParser#testBuildsCanonicalIntervalExpressions"
+            ]
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprIntervalString",
+            "loweringHandler": "TrinoAstFactory#createIntervalExpression",
+            "parseHandler": "AstBuilder#buildStringInterval",
+            "testCaseIds": [
+                "TestHogQlCompiler#testLowersCanonicalIntervals",
+                "TestHogQlParser#testRejectsInvalidCombinedStringIntervals"
+            ]
+        }
+    ],
+    "schemaVersion": 1
+}

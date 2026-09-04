@@ -43,6 +43,7 @@ import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -74,6 +75,7 @@ public class CoordinatorDynamicCatalogManager
     private final CatalogStore catalogStore;
     private final CatalogFactory catalogFactory;
     private final CacheManagerRegistry cacheManagerRegistry;
+    private final CatalogLifecycleListeners catalogLifecycleListeners;
     private final Executor executor;
 
     private final Object catalogsUpdateLock = new Object();
@@ -92,12 +94,13 @@ public class CoordinatorDynamicCatalogManager
     private State state = State.CREATED;
 
     @Inject
-    public CoordinatorDynamicCatalogManager(CatalogStore catalogStore, CatalogFactory catalogFactory, CacheManagerRegistry cacheManagerRegistry, @ForStartup Executor executor)
+    public CoordinatorDynamicCatalogManager(CatalogStore catalogStore, CatalogFactory catalogFactory, CacheManagerRegistry cacheManagerRegistry, @ForStartup Executor executor, CatalogLifecycleListeners catalogLifecycleListeners)
     {
         this.catalogStore = requireNonNull(catalogStore, "catalogStore is null");
         this.catalogFactory = requireNonNull(catalogFactory, "catalogFactory is null");
         this.cacheManagerRegistry = requireNonNull(cacheManagerRegistry, "cacheManagerRegistry is null");
         this.executor = requireNonNull(executor, "executor is null");
+        this.catalogLifecycleListeners = requireNonNull(catalogLifecycleListeners, "catalogLifecycleListeners is null");
     }
 
     @PreDestroy
@@ -124,6 +127,7 @@ public class CoordinatorDynamicCatalogManager
     @Override
     public void loadInitialCatalogs()
     {
+        List<CatalogName> loadedCatalogs = new CopyOnWriteArrayList<>();
         synchronized (catalogsUpdateLock) {
             if (state == State.INITIALIZED) {
                 return;
@@ -142,6 +146,7 @@ public class CoordinatorDynamicCatalogManager
                                     CatalogConnector newCatalog = catalogFactory.createCatalog(catalog);
                                     activeCatalogs.put(storedCatalog.name(), newCatalog.getCatalog());
                                     allCatalogs.put(newCatalog.getCatalogHandle(), new RegisteredCatalog(new RegistrationToken(), newCatalog));
+                                    loadedCatalogs.add(storedCatalog.name());
                                     log.debug("-- Added catalog %s using connector %s --", storedCatalog.name(), catalog.connectorName());
                                 }
                                 catch (Throwable e) {
@@ -154,6 +159,7 @@ public class CoordinatorDynamicCatalogManager
                             })
                             .collect(toImmutableList()));
         }
+        loadedCatalogs.forEach(catalogLifecycleListeners::catalogLoaded);
     }
 
     @Override
@@ -285,6 +291,7 @@ public class CoordinatorDynamicCatalogManager
 
             log.debug("Added catalog: %s", catalog.getCatalogHandle());
         }
+        catalogLifecycleListeners.catalogLoaded(catalogName);
     }
 
     public void registerGlobalSystemConnector(GlobalSystemConnector connector)

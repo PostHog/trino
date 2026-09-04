@@ -36,6 +36,7 @@ import io.trino.cache.CacheManagerConfig;
 import io.trino.cache.CacheManagerRegistry;
 import io.trino.connector.CatalogFactory;
 import io.trino.connector.CatalogHandle;
+import io.trino.connector.CatalogLifecycleListeners;
 import io.trino.connector.CatalogServiceProviderModule;
 import io.trino.connector.ConnectorServicesProvider;
 import io.trino.connector.CoordinatorDynamicCatalogManager;
@@ -386,7 +387,12 @@ public class PlanTester
         this.catalogFactory = catalogFactory;
         SecretsResolver secretsResolver = new SecretsResolver(ImmutableMap.of());
         this.cacheManagerRegistry = new CacheManagerRegistry(noop(), noopTracer(), secretsResolver, new CacheManagerConfig());
-        this.catalogManager = new CoordinatorDynamicCatalogManager(new InMemoryCatalogStore(), catalogFactory, cacheManagerRegistry, directExecutor());
+        this.catalogManager = new CoordinatorDynamicCatalogManager(
+                new InMemoryCatalogStore(),
+                catalogFactory,
+                cacheManagerRegistry,
+                directExecutor(),
+                new CatalogLifecycleListeners(Set.of()));
         this.transactionManager = InMemoryTransactionManager.create(
                 new TransactionManagerConfig().setIdleTimeout(new Duration(1, TimeUnit.DAYS)),
                 yieldExecutor,

@@ -1,0 +1,456 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.trino.hogql.compiler;
+
+import io.trino.hogql.parser.tree.HogQlQuery;
+import io.trino.hogql.parser.tree.HogQlQuery.ArrayExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.BetweenExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.BinaryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.CaseExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.CastExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.ColumnReference;
+import io.trino.hogql.parser.tree.HogQlQuery.ColumnsList;
+import io.trino.hogql.parser.tree.HogQlQuery.ColumnsRegex;
+import io.trino.hogql.parser.tree.HogQlQuery.Expression;
+import io.trino.hogql.parser.tree.HogQlQuery.ExpressionProjection;
+import io.trino.hogql.parser.tree.HogQlQuery.FunctionCall;
+import io.trino.hogql.parser.tree.HogQlQuery.Identifier;
+import io.trino.hogql.parser.tree.HogQlQuery.InCohortExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.InExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.InSubqueryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.IntervalExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.IsNullExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinOn;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.JoinUsing;
+import io.trino.hogql.parser.tree.HogQlQuery.Literal;
+import io.trino.hogql.parser.tree.HogQlQuery.LambdaExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.MemberAccessExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.Placeholder;
+import io.trino.hogql.parser.tree.HogQlQuery.Projection;
+import io.trino.hogql.parser.tree.HogQlQuery.Relation;
+import io.trino.hogql.parser.tree.HogQlQuery.ScalarSubqueryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.SelectQueryBody;
+import io.trino.hogql.parser.tree.HogQlQuery.Star;
+import io.trino.hogql.parser.tree.HogQlQuery.SubscriptExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.TupleExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.UnaryExpression;
+import io.trino.hogql.parser.tree.HogQlQuery.UnnestRelation;
+import io.trino.hogql.parser.tree.HogQlQuery.Window;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowFrame;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowReference;
+import io.trino.hogql.parser.tree.HogQlQuery.WindowSpecification;
+
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+
+import static java.util.Objects.requireNonNull;
+
+final class HogQlProjectionDemand
+{
+    private final boolean all;
+    private final Set<String> unqualified;
+    private final Set<String> allQualifiers;
+    private final Map<String, Set<String>> qualified;
+
+    private HogQlProjectionDemand(boolean all, Set<String> unqualified, Set<String> allQualifiers, Map<String, Set<String>> qualified)
+    {
+        this.all = all;
+        this.unqualified = Set.copyOf(requireNonNull(unqualified, "unqualified is null"));
+        this.allQualifiers = Set.copyOf(requireNonNull(allQualifiers, "allQualifiers is null"));
+        requireNonNull(qualified, "qualified is null");
+        Map<String, Set<String>> copied = new HashMap<>();
+        qualified.forEach((key, value) -> copied.put(key, Set.copyOf(value)));
+        this.qualified = Map.copyOf(copied);
+    }
+
+    public static HogQlProjectionDemand collect(HogQlQuery query)
+    {
+        Builder builder = new Builder();
+        if (query.body() instanceof SelectQueryBody select) {
+            select.projections().forEach(projection -> collect(projection, builder));
+            select.where().ifPresent(expression -> collect(expression, builder));
+            select.groupBy().forEach(expression -> collect(expression, builder));
+            select.having().ifPresent(expression -> collect(expression, builder));
+            select.windows().forEach(window -> collect(window.specification(), builder));
+            select.limitBy().ifPresent(limitBy -> {
+                collect(limitBy.limit(), builder);
+                limitBy.offset().ifPresent(expression -> collect(expression, builder));
+                limitBy.partitionBy().forEach(expression -> collect(expression, builder));
+            });
+            select.from().ifPresent(relation -> collectJoinCriteria(relation, builder));
+        }
+        query.orderBy().forEach(sortItem -> collect(sortItem.expression(), builder));
+        query.limit().ifPresent(expression -> collect(expression, builder));
+        query.offset().ifPresent(expression -> collect(expression, builder));
+        return builder.build();
+    }
+
+    public static HogQlProjectionDemand collect(HogQlQuery query, RequiredOutputs requiredOutputs)
+    {
+        requireNonNull(requiredOutputs, "requiredOutputs is null");
+        if (requiredOutputs.all()) {
+            return collect(query);
+        }
+        Builder builder = collectNonProjection(query).toBuilder();
+        if (query.body() instanceof SelectQueryBody select) {
+            select.projections().forEach(projection -> collectRequiredProjection(projection, requiredOutputs, builder));
+        }
+        return builder.build();
+    }
+
+    private static void collectRequiredProjection(Projection projection, RequiredOutputs requiredOutputs, Builder builder)
+    {
+        switch (projection) {
+            case ExpressionProjection expression -> {
+                String name = expression.alias()
+                        .map(Identifier::value)
+                        .orElseGet(() -> expression.expression() instanceof ColumnReference reference ? reference.parts().getLast().value() : "");
+                if (requiredOutputs.includes(name)) {
+                    collect(expression.expression(), builder);
+                }
+            }
+            case ColumnsList columns -> columns.expressions().stream()
+                    .filter(ColumnReference.class::isInstance)
+                    .map(ColumnReference.class::cast)
+                    .filter(reference -> requiredOutputs.includes(reference.parts().getLast().value()))
+                    .forEach(builder::add);
+            case ColumnsRegex _ -> requiredOutputs.names().forEach(builder::addUnqualified);
+            case Star star -> requiredOutputs.names().forEach(name -> {
+                if (star.qualifier().isEmpty()) {
+                    builder.addUnqualified(name);
+                }
+                else {
+                    builder.addQualified(star.qualifier().getFirst().value(), name);
+                }
+            });
+        }
+    }
+
+    public static HogQlProjectionDemand collectNonProjection(HogQlQuery query)
+    {
+        Builder builder = new Builder();
+        if (query.body() instanceof SelectQueryBody select) {
+            select.where().ifPresent(expression -> collect(expression, builder));
+            select.groupBy().forEach(expression -> collect(expression, builder));
+            select.having().ifPresent(expression -> collect(expression, builder));
+            select.windows().forEach(window -> collect(window.specification(), builder));
+            select.limitBy().ifPresent(limitBy -> {
+                collect(limitBy.limit(), builder);
+                limitBy.offset().ifPresent(expression -> collect(expression, builder));
+                limitBy.partitionBy().forEach(expression -> collect(expression, builder));
+            });
+            select.from().ifPresent(relation -> collectJoinCriteria(relation, builder));
+        }
+        query.orderBy().forEach(sortItem -> collect(sortItem.expression(), builder));
+        query.limit().ifPresent(expression -> collect(expression, builder));
+        query.offset().ifPresent(expression -> collect(expression, builder));
+        return builder.build();
+    }
+
+    public static RequiredOutputs collectOrderingOutputs(HogQlQuery query)
+    {
+        Builder builder = new Builder();
+        if (query.body() instanceof SelectQueryBody select) {
+            select.limitBy().ifPresent(limitBy -> limitBy.partitionBy().forEach(expression -> collect(expression, builder)));
+        }
+        query.orderBy().forEach(sortItem -> collect(sortItem.expression(), builder));
+        return builder.build().asRequiredOutputs();
+    }
+
+    public static HogQlProjectionDemand collect(Expression expression)
+    {
+        Builder builder = new Builder();
+        collect(expression, builder);
+        return builder.build();
+    }
+
+    public static HogQlProjectionDemand column(String qualifier, String name)
+    {
+        Builder builder = new Builder();
+        builder.addQualified(qualifier, name);
+        return builder.build();
+    }
+
+    public static HogQlProjectionDemand preserveAll()
+    {
+        return new HogQlProjectionDemand(true, Set.of(), Set.of(), Map.of());
+    }
+
+    public static HogQlProjectionDemand preserveNone()
+    {
+        return new HogQlProjectionDemand(false, Set.of(), Set.of(), Map.of());
+    }
+
+    public RequiredOutputs forAlias(Identifier alias)
+    {
+        String qualifier = canonical(alias.value());
+        if (all || allQualifiers.contains(qualifier)) {
+            return RequiredOutputs.allOutputs();
+        }
+        Set<String> names = new HashSet<>(unqualified);
+        names.addAll(qualified.getOrDefault(qualifier, Set.of()));
+        return new RequiredOutputs(false, names);
+    }
+
+    public RequiredOutputs unqualified()
+    {
+        if (all) {
+            return RequiredOutputs.allOutputs();
+        }
+        return new RequiredOutputs(false, unqualified);
+    }
+
+    private RequiredOutputs asRequiredOutputs()
+    {
+        if (all || !allQualifiers.isEmpty()) {
+            return RequiredOutputs.allOutputs();
+        }
+        Set<String> names = new HashSet<>(unqualified);
+        qualified.values().forEach(names::addAll);
+        return new RequiredOutputs(false, names);
+    }
+
+    public HogQlProjectionDemand merge(HogQlProjectionDemand other)
+    {
+        requireNonNull(other, "other is null");
+        Map<String, Set<String>> mergedQualified = new HashMap<>();
+        qualified.forEach((key, value) -> mergedQualified.put(key, new HashSet<>(value)));
+        other.qualified.forEach((key, value) -> mergedQualified.computeIfAbsent(key, _ -> new HashSet<>()).addAll(value));
+        Set<String> mergedUnqualified = new HashSet<>(unqualified);
+        mergedUnqualified.addAll(other.unqualified);
+        Set<String> mergedAllQualifiers = new HashSet<>(allQualifiers);
+        mergedAllQualifiers.addAll(other.allQualifiers);
+        return new HogQlProjectionDemand(all || other.all, mergedUnqualified, mergedAllQualifiers, mergedQualified);
+    }
+
+    private Builder toBuilder()
+    {
+        Builder builder = new Builder();
+        builder.all = all;
+        builder.unqualified.addAll(unqualified);
+        builder.allQualifiers.addAll(allQualifiers);
+        qualified.forEach((key, value) -> builder.qualified.put(key, new HashSet<>(value)));
+        return builder;
+    }
+
+    private static void collect(Projection projection, Builder builder)
+    {
+        switch (projection) {
+            case ColumnsList columns -> columns.expressions().forEach(expression -> collect(expression, builder));
+            case ColumnsRegex _ -> builder.all = true;
+            case ExpressionProjection expression -> collect(expression.expression(), builder);
+            case Star star -> {
+                if (star.qualifier().isEmpty()) {
+                    builder.all = true;
+                }
+                else {
+                    builder.allQualifiers.add(canonical(star.qualifier().getFirst().value()));
+                }
+                star.replacements().forEach(replacement -> collect(replacement.expression(), builder));
+            }
+        }
+    }
+
+    private static void collectJoinCriteria(Relation relation, Builder builder)
+    {
+        switch (relation) {
+            case HogQlQuery.AliasedRelation alias -> collectJoinCriteria(alias.relation(), builder);
+            case HogQlQuery.CommonTableReference _, HogQlQuery.SubqueryRelation _, HogQlQuery.TablePlaceholder _, HogQlQuery.TableReference _, HogQlQuery.ValuesRelation _ -> {}
+            case JoinRelation join -> {
+                collectJoinCriteria(join.left(), builder);
+                collectJoinCriteria(join.right(), builder);
+                join.criteria().ifPresent(criteria -> {
+                    switch (criteria) {
+                        case JoinOn on -> collect(on.expression(), builder);
+                        case JoinUsing using -> using.columns().forEach(builder::addUnqualified);
+                    }
+                });
+            }
+            case HogQlQuery.PivotRelation pivot -> {
+                collectJoinCriteria(pivot.input(), builder);
+                pivot.aggregations().forEach(aggregation -> collect(aggregation.expression(), builder));
+                pivot.pivotColumns().forEach(column -> collect(column, builder));
+                pivot.valueGroups().forEach(group -> group.values().forEach(value -> collect(value, builder)));
+                pivot.groupBy().forEach(expression -> collect(expression, builder));
+            }
+            case UnnestRelation unnest -> unnest.expressions().forEach(expression -> collect(expression, builder));
+        }
+    }
+
+    private static void collect(Expression expression, Builder builder)
+    {
+        switch (expression) {
+            case ArrayExpression array -> array.values().forEach(value -> collect(value, builder));
+            case BetweenExpression between -> {
+                collect(between.value(), builder);
+                collect(between.min(), builder);
+                collect(between.max(), builder);
+            }
+            case BinaryExpression binary -> {
+                collect(binary.left(), builder);
+                collect(binary.right(), builder);
+            }
+            case CaseExpression caseExpression -> {
+                caseExpression.operand().ifPresent(value -> collect(value, builder));
+                caseExpression.whenClauses().forEach(when -> {
+                    collect(when.operand(), builder);
+                    collect(when.result(), builder);
+                });
+                caseExpression.defaultValue().ifPresent(value -> collect(value, builder));
+            }
+            case CastExpression cast -> collect(cast.value(), builder);
+            case ColumnReference reference -> builder.add(reference);
+            case FunctionCall function -> {
+                function.arguments().forEach(argument -> collect(argument, builder));
+                function.orderBy().forEach(sortItem -> collect(sortItem.expression(), builder));
+                function.filter().ifPresent(filter -> collect(filter, builder));
+                function.window().ifPresent(window -> collect(window, builder));
+            }
+            case InCohortExpression cohort -> collect(cohort.value(), builder);
+            case InExpression in -> {
+                collect(in.value(), builder);
+                in.values().forEach(value -> collect(value, builder));
+            }
+            case InSubqueryExpression in -> {
+                collect(in.value(), builder);
+                builder.all = true;
+            }
+            case IntervalExpression interval -> collect(interval.value(), builder);
+            case IsNullExpression isNull -> collect(isNull.value(), builder);
+            case LambdaExpression lambda -> builder.withSuppressed(
+                    lambda.arguments().stream().map(Identifier::value).map(HogQlProjectionDemand::canonical).collect(java.util.stream.Collectors.toSet()),
+                    () -> collect(lambda.body(), builder));
+            case Literal _, Placeholder _ -> {}
+            case MemberAccessExpression member -> collect(member.base(), builder);
+            case ScalarSubqueryExpression _ -> builder.all = true;
+            case SubscriptExpression subscript -> {
+                collect(subscript.base(), builder);
+                collect(subscript.index(), builder);
+            }
+            case TupleExpression tuple -> tuple.values().forEach(value -> collect(value, builder));
+            case UnaryExpression unary -> collect(unary.operand(), builder);
+        }
+    }
+
+    private static void collect(Window window, Builder builder)
+    {
+        switch (window) {
+            case WindowReference _ -> {}
+            case WindowSpecification specification -> {
+                specification.partitionBy().forEach(expression -> collect(expression, builder));
+                specification.orderBy().forEach(sortItem -> collect(sortItem.expression(), builder));
+                specification.frame().ifPresent(frame -> collect(frame, builder));
+            }
+        }
+    }
+
+    private static void collect(WindowFrame frame, Builder builder)
+    {
+        frame.start().value().ifPresent(value -> collect(value, builder));
+        frame.end().flatMap(HogQlQuery.FrameBound::value).ifPresent(value -> collect(value, builder));
+    }
+
+    private static String canonical(String value)
+    {
+        return value.toLowerCase(java.util.Locale.ENGLISH);
+    }
+
+    public record RequiredOutputs(boolean all, Set<String> names)
+    {
+        public RequiredOutputs
+        {
+            names = Set.copyOf(requireNonNull(names, "names is null"));
+        }
+
+        public static RequiredOutputs allOutputs()
+        {
+            return new RequiredOutputs(true, Set.of());
+        }
+
+        public boolean includes(String name)
+        {
+            return all || names.contains(canonical(name));
+        }
+
+        public RequiredOutputs merge(RequiredOutputs other)
+        {
+            requireNonNull(other, "other is null");
+            Set<String> merged = new HashSet<>(names);
+            merged.addAll(other.names);
+            return new RequiredOutputs(all || other.all, merged);
+        }
+    }
+
+    private static final class Builder
+    {
+        private boolean all;
+        private final Set<String> unqualified = new HashSet<>();
+        private final Set<String> allQualifiers = new HashSet<>();
+        private final Map<String, Set<String>> qualified = new HashMap<>();
+        private final Set<String> suppressed = new HashSet<>();
+
+        public void add(ColumnReference reference)
+        {
+            if (reference.parts().size() == 1) {
+                String name = canonical(reference.parts().getFirst().value());
+                if (!suppressed.contains(name)) {
+                    unqualified.add(name);
+                }
+                return;
+            }
+            String qualifier = canonical(reference.parts().getFirst().value());
+            if (suppressed.contains(qualifier)) {
+                return;
+            }
+            String field = canonical(reference.parts().get(1).value());
+            qualified.computeIfAbsent(qualifier, _ -> new HashSet<>()).add(field);
+        }
+
+        public void withSuppressed(Set<String> names, Runnable action)
+        {
+            Set<String> previous = Set.copyOf(suppressed);
+            suppressed.addAll(names);
+            try {
+                action.run();
+            }
+            finally {
+                suppressed.clear();
+                suppressed.addAll(previous);
+            }
+        }
+
+        public void addUnqualified(Identifier identifier)
+        {
+            unqualified.add(canonical(identifier.value()));
+        }
+
+        public void addUnqualified(String name)
+        {
+            unqualified.add(canonical(name));
+        }
+
+        public void addQualified(String qualifier, String name)
+        {
+            qualified.computeIfAbsent(canonical(qualifier), _ -> new HashSet<>()).add(canonical(name));
+        }
+
+        public HogQlProjectionDemand build()
+        {
+            return new HogQlProjectionDemand(all, unqualified, allQualifiers, qualified);
+        }
+    }
+}

@@ -50,6 +50,20 @@ RUN \
 FROM registry.access.redhat.com/hi/core-runtime:latest
 ARG JDK_VERSION
 ARG ARCH
+ARG TRINO_SOURCE_REVISION
+ARG HOGQL_LANGUAGE_VERSION
+ARG HOGQL_CATALOG_PROTOCOL_VERSION
+ARG HOGQL_CATALOG_SCHEMA_VERSION
+ARG TRINO_SERVER_SHA256
+ARG TRINO_CLI_SHA256
+LABEL org.opencontainers.image.revision="${TRINO_SOURCE_REVISION}" \
+      io.posthog.trino.ducklake.revision="${TRINO_SOURCE_REVISION}" \
+      io.posthog.trino.hogql.compiler-build="${TRINO_SOURCE_REVISION}" \
+      io.posthog.trino.hogql.language-version="${HOGQL_LANGUAGE_VERSION}" \
+      io.posthog.trino.hogql.catalog-protocol-version="${HOGQL_CATALOG_PROTOCOL_VERSION}" \
+      io.posthog.trino.hogql.catalog-schema-version="${HOGQL_CATALOG_SCHEMA_VERSION}" \
+      io.posthog.trino.server-sha256="${TRINO_SERVER_SHA256}" \
+      io.posthog.trino.cli-sha256="${TRINO_CLI_SHA256}"
 ENV JAVA_HOME="/usr/lib/jvm/${JDK_VERSION}"
 ENV PATH=$PATH:$JAVA_HOME/bin
 ENV LANG=C.UTF-8

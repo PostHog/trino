@@ -1,0 +1,2343 @@
+{
+    "schemaVersion": 1,
+    "languageVersion": "1.0.0",
+    "grammarSha256": "c255b1c828ea34b4eb5373dd1a153bbcf69f4f9eb58a900d353972ce07724242",
+    "grammarFeatureManifestSha256": "fbf7236643b43d929e9ef1c8fd01a04b746736dca2f965cc2e78ad62f1a98b10",
+    "grammarAlternativeIdentityManifestSha256": "55e33d04906b058bdbab00507b402766d386e4f771b60e4f5106fef63e18383d",
+    "syntaxTreeKind": "tree",
+    "sourceSpanGuarantee": "codePointOffsetsEndExclusiveOneBasedLineColumns",
+    "features": [
+        {
+            "id": "alternative:alias:keyword",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:alias:quoted-identifier",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:alias:unquoted-identifier",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:arrayJoinClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:block",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:catchBlock",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnAliases",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExpr:ColumnExprAlias",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExpr:ColumnExprAnd",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExpr:ColumnExprOr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExpr:ColumnExprTernaryOp",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExpr:ColumnExprValuePassthrough",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprTupleOrSingle:scalar",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprTupleOrSingle:tuple",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprArray",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprArrayAccess",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprArraySlice",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprAsterisk",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprBetween",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprCall",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprCallSelect",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprCase",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprCast",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColonLambda",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsAll",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsExclude",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsExcludeReplace",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsQualifiedAll",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsQualifiedExclude",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsQualifiedExcludeReplace",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsQualifiedReplace",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsRegex",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprColumnsReplace",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprDate",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprDict",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprFunction",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprFunctionWithinGroup",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprIdentifier",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprIgnoreNulls",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprInterval",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprIntervalString",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprIsDistinctFrom",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprIsNull",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprLambda",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprLiteral",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprNamedArg",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprNegate",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprNot",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprNullArrayAccess",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprNullPropertyAccess",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprNullSafeEq",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprNullTupleAccess",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprNullish",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprParens",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprPositional",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprPrecedence1",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprPrecedence2",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprPrecedence3",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprPropertyAccess",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprSpreadColumnsList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprSpreadColumnsRegex",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprSubquery",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprSubstring",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTagElement",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTemplateString",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTimestamp",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTrim",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTryCast",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTuple",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTupleAccess",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprTypeCast",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprWinFunction",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnExprValue:ColumnExprWinFunctionTarget",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnIdentifier:field-path",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnIdentifier:placeholder",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnLambdaExpr:ArrowLambda",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnLambdaExpr:ColonLambda",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnTypeCastExpr:ColumnTypeCastExprSimple",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnTypeCastExpr:ColumnTypeCastExprWithTimeZone",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnTypeCastIdentifier:interval-keyword",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnTypeCastIdentifier:quoted-identifier",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnTypeCastIdentifier:type-keyword",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnTypeCastIdentifier:unquoted-identifier",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnTypeExpr:ColumnTypeExprArray",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnTypeExpr:ColumnTypeExprComplex",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnTypeExpr:ColumnTypeExprCompound",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnTypeExpr:ColumnTypeExprEnum",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnTypeExpr:ColumnTypeExprNested",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnTypeExpr:ColumnTypeExprParam",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnTypeExpr:ColumnTypeExprSimple",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnsReplaceItem",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:columnsReplaceList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:databaseIdentifier",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:declaration:statement",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:declaration:variable",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:emptyStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:enumValue",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:expr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:exprStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:expression",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:floatingLiteral:floating-token",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:floatingLiteral:leading-decimal-point",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:floatingLiteral:trailing-decimal-point",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:forInStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:forStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:fromClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:fullTemplateString",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:funcStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:groupByClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:groupingSet",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:groupingSetList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:havingClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:hogqlxChildElement:expression",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:hogqlxChildElement:tag",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:hogqlxChildElement:text",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:hogqlxTagAttribute:boolean",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:hogqlxTagAttribute:expression",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:hogqlxTagAttribute:string",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:hogqlxTagElement:HogqlxTagElementClosed",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:hogqlxTagElement:HogqlxTagElementNested",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:hogqlxText",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:identifier:interval-keyword",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:identifier:keyword",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:identifier:quoted",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:identifier:unquoted",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:identifierList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:ifStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:implicitAlias:keyword",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:implicitAlias:quoted-identifier",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:implicitAlias:unquoted-identifier",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:interpolateClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:interpolateExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:interval",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:joinConstraintClause:on",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:joinConstraintClause:using",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:joinConstraintClause:using-parenthesized",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:joinExpr:JoinExprCrossOp",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:joinExpr:JoinExprOp",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:joinExpr:JoinExprParens",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:joinExpr:JoinExprPivot",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:joinExpr:JoinExprPositional",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:joinExpr:JoinExprTable",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:joinExpr:JoinExprUnpivot",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:joinOp:JoinOpFull",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:joinOp:JoinOpInner",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:joinOp:JoinOpLeftRight",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:joinOpCross:comma",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:joinOpCross:cross-join",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:keyword",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:keywordForAlias",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:keywordForImplicitAlias",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:keywordForTypeCast",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:kvPair",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:kvPairList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:limitAndOffsetClause:compact",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:limitAndOffsetClause:with-offset",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:limitAndOffsetClauseOptional:limit",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:limitAndOffsetClauseOptional:limit-with-offset",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:limitAndOffsetClauseOptional:offset-only",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:limitByClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:limitExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:literal:null",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:literal:number",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:literal:string",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:nestedIdentifier",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:numberLiteral",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:offsetOnlyClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:orderByClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:orderExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:orderExprList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:pivotColumn",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:pivotColumnList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:placeholder",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:prewhereClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:program",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:projectionOrderByClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:qualifyClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:ratioExpr:numeric",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:ratioExpr:placeholder",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:returnStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:sampleClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:select",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:selectColumnExpr:ColumnExprAliasBefore",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:selectColumnExpr:ColumnExprAliasImplicit",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:selectColumnExpr:ColumnExprInvalidFromImplicitAlias",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:selectColumnExpr:ColumnExprSelectValue",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:selectColumnExprList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:selectColumnExprListBeforeFrom:SelectColumnExprListBeforeFromPlain",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:selectColumnExprListBeforeFrom:SelectColumnExprListBeforeFromTrailingComma",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:selectSetStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:selectStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:selectStmtWithParens:direct",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:selectStmtWithParens:parenthesized",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:selectStmtWithParens:placeholder",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:selectStmtWithParens:with-parenthesized",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:settingExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:settingExprList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:settingsClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:statement:block",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:statement:empty",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:statement:expression",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:statement:for",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:statement:for-in",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:statement:function",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:statement:if",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:statement:return",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:statement:throw",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:statement:try-catch",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:statement:while",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:string:literal",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:string:template",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:stringContents:interpolation",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:stringContents:text",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:stringContentsFull:interpolation",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:stringContentsFull:text",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:subsequentSelectSetClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:tableArgList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:tableExpr:TableExprAlias",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:tableExpr:TableExprFunction",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:tableExpr:TableExprIdentifier",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:tableExpr:TableExprPivot",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:tableExpr:TableExprPlaceholder",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:tableExpr:TableExprSubquery",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:tableExpr:TableExprTag",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:tableExpr:TableExprUnpivot",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:tableExpr:TableExprValues",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:tableFunctionExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:tableIdentifier",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:templateString",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:throwStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:topClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:tryCatchStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:unpivotColumn",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:unpivotColumnList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:valuesClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:valuesRow",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:varAssignment",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:varDecl",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:whereClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:whileStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:winFrameBound",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:winFrameClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:winFrameExtend:frameBetween",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:winFrameExtend:frameStart",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:winOrderByClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:winPartitionByClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:windowClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:windowExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:withClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:withExpr:WithExprColumn",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:withExpr:WithExprSubquery",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:withExprColumnNameList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:withExprList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:withFillClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "alternative:withinGroupClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:alias",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:arrayJoinClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:block",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:catchBlock",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:columnAliases",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:columnExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:columnExprList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:columnExprTupleOrSingle",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:columnExprValue",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:columnIdentifier",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:columnLambdaExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:columnTypeCastExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:columnTypeCastIdentifier",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:columnTypeExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:columnsReplaceItem",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:columnsReplaceList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:databaseIdentifier",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:declaration",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:emptyStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:enumValue",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:expr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:exprStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:expression",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:floatingLiteral",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:forInStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:forStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:fromClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:fullTemplateString",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:funcStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:groupByClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:groupingSet",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:groupingSetList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:havingClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:hogqlxChildElement",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:hogqlxTagAttribute",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:hogqlxTagElement",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:hogqlxText",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:identifier",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:identifierList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:ifStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:implicitAlias",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:interpolateClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:interpolateExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:interval",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:joinConstraintClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:joinExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:joinOp",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:joinOpCross",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:keyword",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:keywordForAlias",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:keywordForImplicitAlias",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:keywordForTypeCast",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:kvPair",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:kvPairList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:limitAndOffsetClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:limitAndOffsetClauseOptional",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:limitByClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:limitExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:literal",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:nestedIdentifier",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:numberLiteral",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:offsetOnlyClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:orderByClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:orderExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:orderExprList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:pivotColumn",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:pivotColumnList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:placeholder",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:prewhereClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:program",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:projectionOrderByClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:qualifyClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:ratioExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:returnStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:sampleClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:select",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:selectColumnExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:selectColumnExprList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:selectColumnExprListBeforeFrom",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:selectSetStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:selectStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:selectStmtWithParens",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:settingExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:settingExprList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:settingsClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:statement",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:string",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:stringContents",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:stringContentsFull",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:subsequentSelectSetClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:tableArgList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:tableExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:tableFunctionExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:tableIdentifier",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:templateString",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:throwStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:topClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:tryCatchStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:unpivotColumn",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:unpivotColumnList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:valuesClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:valuesRow",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:varAssignment",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:varDecl",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:whereClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:whileStmt",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:winFrameBound",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:winFrameClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:winFrameExtend",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:winOrderByClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:winPartitionByClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:windowClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:windowExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:withClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:withExpr",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:withExprColumnNameList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:withExprList",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:withFillClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "rule:withinGroupClause",
+            "syntaxNodeKind": "rule"
+        },
+        {
+            "id": "token:ALL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:AND",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:ANTI",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:ANY",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:ARRAY",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:ARROW",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:AS",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:ASCENDING",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:ASOF",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:ASTERISK",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:BACKQUOTE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:BACKSLASH",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:BETWEEN",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:BINARY_LITERAL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:BOTH",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:BY",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:CASE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:CAST",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:CATCH",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:COHORT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:COLLATE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:COLON",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:COLONEQUALS",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:COLUMNS",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:COMMA",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:CONCAT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:CROSS",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:CUBE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:CURRENT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:DASH",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:DATE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:DAY",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:DECIMAL_LITERAL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:DESC",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:DESCENDING",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:DISTINCT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:DOLLAR",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:DOT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:DOUBLECOLON",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:ELSE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:END",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:EQ_DOUBLE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:EQ_SINGLE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:ESCAPE_CHAR_COMMON",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:EXCEPT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:EXCLUDE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:EXTRACT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:FILL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:FILTER",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:FINAL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:FINALLY",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:FIRST",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:FLOATING_LITERAL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:FN",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:FOLLOWING",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:FOR",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:FROM",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:FULL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:FULL_STRING_ESCAPE_TRIGGER",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:FULL_STRING_TEXT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:FUN",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:GROUP",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:GROUPING",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:GT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:GT_EQ",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:HASH",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:HASH_COMMENT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:HAVING",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:HEXADECIMAL_LITERAL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:HOGQLX_TEXT_TEXT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:HOGQLX_TEXT_WS",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:HOUR",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:ID",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:IDENTIFIER",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:IF",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:IGNORE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:ILIKE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:IN",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:INCLUDE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:INF",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:INNER",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:INTERPOLATE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:INTERSECT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:INTERVAL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:IREGEX_DOUBLE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:IREGEX_SINGLE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:IS",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:JOIN",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:KEY",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:LAMBDA",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:LAST",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:LBRACE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:LBRACKET",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:LEADING",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:LEFT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:LET",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:LIKE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:LIMIT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:LOCAL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:LPAREN",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:LT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:LT_EQ",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:LT_SLASH",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:MALFORMED_BINARY_LITERAL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:MATERIALIZED",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:MINUTE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:MONTH",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:MULTI_LINE_COMMENT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:NAME",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:NAN_SQL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:NATURAL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:NOT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:NOT_EQ",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:NOT_IREGEX",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:NOT_REGEX",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:NULLISH",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:NULLS",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:NULL_PROPERTY",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:NULL_SAFE_EQ",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:NULL_SQL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:OCTAL_LITERAL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:OCTAL_PREFIX_LITERAL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:OFFSET",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:ON",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:OR",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:ORDER",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:OUTER",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:OVER",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:PARTITION",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:PERCENT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:PIVOT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:PLUS",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:POSITIONAL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:PRECEDING",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:PREWHERE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:QUALIFY",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:QUARTER",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:QUERY",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:QUOTED_IDENTIFIER",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:QUOTE_DOUBLE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:QUOTE_SINGLE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:QUOTE_SINGLE_TEMPLATE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:QUOTE_SINGLE_TEMPLATE_FULL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:RANGE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:RBRACE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:RBRACKET",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:RECURSIVE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:REGEX_DOUBLE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:REGEX_SINGLE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:REPLACE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:RETURN",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:RIGHT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:ROLLUP",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:ROW",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:ROWS",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:RPAREN",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:SAMPLE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:SECOND",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:SELECT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:SEMI",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:SEMICOLON",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:SETS",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:SETTINGS",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:SINGLE_LINE_COMMENT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:SLASH",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:SLASH_GT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:STEP",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:STRING_ESCAPE_TRIGGER",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:STRING_LITERAL",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:STRING_TEXT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:SUBSTRING",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:TAGC_MULTI_LINE_COMMENT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:TAGC_SINGLE_LINE_COMMENT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:TAGC_WS",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:TAG_MULTI_LINE_COMMENT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:TAG_SINGLE_LINE_COMMENT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:TAG_WS",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:THEN",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:THROW",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:TIES",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:TIME",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:TIMESTAMP",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:TO",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:TOP",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:TOTALS",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:TRAILING",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:TRIM",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:TRUNCATE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:TRY",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:TRY_CAST",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:UNBOUNDED",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:UNDERSCORE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:UNEXPECTED_CHARACTER",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:UNION",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:UNPIVOT",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:USING",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:VALUES",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:WEEK",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:WHEN",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:WHERE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:WHILE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:WHITESPACE",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:WINDOW",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:WITH",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:WITHIN",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:YEAR",
+            "syntaxNodeKind": "token"
+        },
+        {
+            "id": "token:ZONE",
+            "syntaxNodeKind": "token"
+        }
+    ]
+}

@@ -1,0 +1,393 @@
+{
+    "grammarSha256": "c255b1c828ea34b4eb5373dd1a153bbcf69f4f9eb58a900d353972ce07724242",
+    "languageVersion": "1.0.0",
+    "rules": [
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:alias:keyword",
+                    "structuralFingerprint": "165f32605f10e147a97ee2d4f2f93bceeb5f6d6eb98f2ef8727355cb59c05bc3"
+                },
+                {
+                    "id": "alternative:alias:quoted-identifier",
+                    "structuralFingerprint": "0abeb8c8fdc827ac36ae2e683162ce80f95e5072fadbcfccd45390ecc8ad2f67"
+                },
+                {
+                    "id": "alternative:alias:unquoted-identifier",
+                    "structuralFingerprint": "73733fbd5549f93da457208e6512bd7d993c6bcaa6c383faac1b225b157ffce2"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "alias"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:columnExprTupleOrSingle:scalar",
+                    "structuralFingerprint": "802b98aaa0c9404525d83dacb80290db7fdff49d34dba43e0e8c6518536197e6"
+                },
+                {
+                    "id": "alternative:columnExprTupleOrSingle:tuple",
+                    "structuralFingerprint": "2b49f26a20cf05b31e6f7071f13a014eca01e5711bad4fcf3825b08d49e63464"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "columnExprTupleOrSingle"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:columnIdentifier:field-path",
+                    "structuralFingerprint": "a4d34630e93d0f240a41eb30229aec9c6363cb7de0b70ebd303df105b5c1a6e4"
+                },
+                {
+                    "id": "alternative:columnIdentifier:placeholder",
+                    "structuralFingerprint": "ac7187ca5c2d10611ac749649461be8e95b68c896f26c5e03b426f4d45a26531"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "columnIdentifier"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:columnTypeCastIdentifier:interval-keyword",
+                    "structuralFingerprint": "30dfdd38947f7e4f75b790b875db86a7f630c63352fbd145fe885fa1a4fe6a1c"
+                },
+                {
+                    "id": "alternative:columnTypeCastIdentifier:quoted-identifier",
+                    "structuralFingerprint": "0abeb8c8fdc827ac36ae2e683162ce80f95e5072fadbcfccd45390ecc8ad2f67"
+                },
+                {
+                    "id": "alternative:columnTypeCastIdentifier:type-keyword",
+                    "structuralFingerprint": "5d58081b9087f3da068f1ad6b457461b5d8deaae59f21cd53b85fcd1bd1f1331"
+                },
+                {
+                    "id": "alternative:columnTypeCastIdentifier:unquoted-identifier",
+                    "structuralFingerprint": "73733fbd5549f93da457208e6512bd7d993c6bcaa6c383faac1b225b157ffce2"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "columnTypeCastIdentifier"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:declaration:statement",
+                    "structuralFingerprint": "5f99fed7cff39aef459246e59fb6f13a5413ddeea7adad8864398797455986f9"
+                },
+                {
+                    "id": "alternative:declaration:variable",
+                    "structuralFingerprint": "4e7fc741b05bde1862641b814dccef54f6927a80c6d9e349ef7684664d44fd82"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "declaration"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:floatingLiteral:floating-token",
+                    "structuralFingerprint": "c88b9f8fead5722931e73444ea92d55372027c411f4f89618d6e0418310ab819"
+                },
+                {
+                    "id": "alternative:floatingLiteral:leading-decimal-point",
+                    "structuralFingerprint": "5b339918b24e7eb9571fa5c007b3b65a6f4c6d3b9c0562e21dcccdd3fd64cb84"
+                },
+                {
+                    "id": "alternative:floatingLiteral:trailing-decimal-point",
+                    "structuralFingerprint": "304631df88730bc6643859c047b4d5a3414e318bd46efc9830a3b292e1312786"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "floatingLiteral"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:hogqlxChildElement:expression",
+                    "structuralFingerprint": "92f247a454640b4807cf6c5f79cf4869c396255034642c950ed2ff7b256c4894"
+                },
+                {
+                    "id": "alternative:hogqlxChildElement:tag",
+                    "structuralFingerprint": "638198a63464a5654b4202c71ae03a9d8abb39b3f6727aeb46165c1635d4410b"
+                },
+                {
+                    "id": "alternative:hogqlxChildElement:text",
+                    "structuralFingerprint": "1acc0716f32f7f1346f847725d21990fd6861790bdbd91c30054c4a35c912d57"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "hogqlxChildElement"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:hogqlxTagAttribute:boolean",
+                    "structuralFingerprint": "f9ec2f5892a5ee11ecee8b7898937fc268f9b2b758ea9a2b4a295f95b0d8e18e"
+                },
+                {
+                    "id": "alternative:hogqlxTagAttribute:expression",
+                    "structuralFingerprint": "7c8aa67035024acc0a0829432ea042be18da3d8ee08fe8000fb60020e9aacbf1"
+                },
+                {
+                    "id": "alternative:hogqlxTagAttribute:string",
+                    "structuralFingerprint": "88dfc10a32800ba48ebe8400d56499520c4ad6601dcc8e7befad72eed782b50e"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "hogqlxTagAttribute"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:identifier:interval-keyword",
+                    "structuralFingerprint": "30dfdd38947f7e4f75b790b875db86a7f630c63352fbd145fe885fa1a4fe6a1c"
+                },
+                {
+                    "id": "alternative:identifier:keyword",
+                    "structuralFingerprint": "bdc4cccbde824cbcccd1a6102bd60f67ab401a5cc6058526f5ac571269ef6030"
+                },
+                {
+                    "id": "alternative:identifier:quoted",
+                    "structuralFingerprint": "0abeb8c8fdc827ac36ae2e683162ce80f95e5072fadbcfccd45390ecc8ad2f67"
+                },
+                {
+                    "id": "alternative:identifier:unquoted",
+                    "structuralFingerprint": "73733fbd5549f93da457208e6512bd7d993c6bcaa6c383faac1b225b157ffce2"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "identifier"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:implicitAlias:keyword",
+                    "structuralFingerprint": "c7b9f7299ab2aa1875c1ee89b24483887dec9de9834dd720cf174b9e104e9f25"
+                },
+                {
+                    "id": "alternative:implicitAlias:quoted-identifier",
+                    "structuralFingerprint": "0abeb8c8fdc827ac36ae2e683162ce80f95e5072fadbcfccd45390ecc8ad2f67"
+                },
+                {
+                    "id": "alternative:implicitAlias:unquoted-identifier",
+                    "structuralFingerprint": "73733fbd5549f93da457208e6512bd7d993c6bcaa6c383faac1b225b157ffce2"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "implicitAlias"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:joinConstraintClause:on",
+                    "structuralFingerprint": "07ff66fad5bfb8968fb35cc93e06ee8bd49028e1854a50b7a40ecaf87a8a97e4"
+                },
+                {
+                    "id": "alternative:joinConstraintClause:using",
+                    "structuralFingerprint": "2754567ba69ffb7298adf0d55cda11bd4b16ec0f9ed66692882b6f958e008327"
+                },
+                {
+                    "id": "alternative:joinConstraintClause:using-parenthesized",
+                    "structuralFingerprint": "c53b790c3e3f8f17d08669249304555a30541a4b37868d86043a794e5eff94e9"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "joinConstraintClause"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:joinOpCross:comma",
+                    "structuralFingerprint": "bcf9583b8a06a904da0c0ea03e289809ead51e2cda7d4084edc1ce18c4f2e025"
+                },
+                {
+                    "id": "alternative:joinOpCross:cross-join",
+                    "structuralFingerprint": "21eefbaad9b940960d7c860ca5bac0ab771e7f71f33b5dc9b9fb9250b4e7be95"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "joinOpCross"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:limitAndOffsetClause:compact",
+                    "structuralFingerprint": "8766cba8afea27bbf1418b00176a7981db472ab89a25675f1a415461a19d9fea"
+                },
+                {
+                    "id": "alternative:limitAndOffsetClause:with-offset",
+                    "structuralFingerprint": "b08e7c7ac1035886c8d50c94cac6b85ed8d5b8a169512b4d3601b87209495c49"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "limitAndOffsetClause"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:limitAndOffsetClauseOptional:limit",
+                    "structuralFingerprint": "8766cba8afea27bbf1418b00176a7981db472ab89a25675f1a415461a19d9fea"
+                },
+                {
+                    "id": "alternative:limitAndOffsetClauseOptional:limit-with-offset",
+                    "structuralFingerprint": "b08e7c7ac1035886c8d50c94cac6b85ed8d5b8a169512b4d3601b87209495c49"
+                },
+                {
+                    "id": "alternative:limitAndOffsetClauseOptional:offset-only",
+                    "structuralFingerprint": "3d9f0279272167d83cd5f876e7cf17e262cb676205fb7bd28f6e570596f0e383"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "limitAndOffsetClauseOptional"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:literal:null",
+                    "structuralFingerprint": "7da720bab69a8562e12edf2c66b42136fbcc198035a585ca5a893d200e5b677a"
+                },
+                {
+                    "id": "alternative:literal:number",
+                    "structuralFingerprint": "56c96aa898d8b78e683c7c140904730921bb5c67201b2be9dc07a804535aba3a"
+                },
+                {
+                    "id": "alternative:literal:string",
+                    "structuralFingerprint": "aab18d5f0771f8fd97a25ffd2112e667e894acf92a430b02dcd8be9522140e85"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "literal"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:ratioExpr:numeric",
+                    "structuralFingerprint": "77d0012bf666d0471f0c5fd47f2f749b3654961ab020288c8b5e524d218bc0a0"
+                },
+                {
+                    "id": "alternative:ratioExpr:placeholder",
+                    "structuralFingerprint": "ac7187ca5c2d10611ac749649461be8e95b68c896f26c5e03b426f4d45a26531"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "ratioExpr"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:selectStmtWithParens:direct",
+                    "structuralFingerprint": "d5e2b3fcc7a599513aa9c07f0a080bc96138881bda01b9885f451cdc4f47c9f1"
+                },
+                {
+                    "id": "alternative:selectStmtWithParens:parenthesized",
+                    "structuralFingerprint": "a70746a6394bdd78e9a2bf2f3b95085009b3c95808b9e2d491c1507129fa1766"
+                },
+                {
+                    "id": "alternative:selectStmtWithParens:placeholder",
+                    "structuralFingerprint": "ac7187ca5c2d10611ac749649461be8e95b68c896f26c5e03b426f4d45a26531"
+                },
+                {
+                    "id": "alternative:selectStmtWithParens:with-parenthesized",
+                    "structuralFingerprint": "e459d96cb925b44a2cc38e03a5dffa2719f59eada2bf788ed797a41540efbfc4"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "selectStmtWithParens"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:statement:block",
+                    "structuralFingerprint": "5acb58cd596f9ea97bc696bddd4f1a5113266af83e22c8f076e96eb5a25fd9bb"
+                },
+                {
+                    "id": "alternative:statement:empty",
+                    "structuralFingerprint": "1d7ce4f5e96efc68d3a3d0388001437e449425f07fbdb3a9bbf02289e6055489"
+                },
+                {
+                    "id": "alternative:statement:expression",
+                    "structuralFingerprint": "792d983175ddbb24989b35af49d0c512d46945699df2423920d79d6a84749f6f"
+                },
+                {
+                    "id": "alternative:statement:for",
+                    "structuralFingerprint": "e70251237e3fd8baf257e1e5e3d675d79bbbbb6ed301885637730065d8f15a58"
+                },
+                {
+                    "id": "alternative:statement:for-in",
+                    "structuralFingerprint": "8d49fe14f87bfe8baf981431e57d79f2c92516fdba0f2cdef472969ab5735d35"
+                },
+                {
+                    "id": "alternative:statement:function",
+                    "structuralFingerprint": "d319855a6ecd0c15fbef3322531043be6aec21545e25f2a4e32392a3e61f0453"
+                },
+                {
+                    "id": "alternative:statement:if",
+                    "structuralFingerprint": "912215ae9664d6d31e8d5102cabc877b5ebbfe6adac5e3261bff90f20475947c"
+                },
+                {
+                    "id": "alternative:statement:return",
+                    "structuralFingerprint": "24012c3b96984fd79cafc9d9a956d947e7ad6fdb21c1f3a2cbc968f80c141cfa"
+                },
+                {
+                    "id": "alternative:statement:throw",
+                    "structuralFingerprint": "85bf0d409a8909ef496fb3219b6d2e38ae9c3c6906953855c9326fcd00f1985a"
+                },
+                {
+                    "id": "alternative:statement:try-catch",
+                    "structuralFingerprint": "fa0c783e64388c6f9a5b32852170481d7b837dfea973e3e37cdc131b7f912f80"
+                },
+                {
+                    "id": "alternative:statement:while",
+                    "structuralFingerprint": "4ce361ee94a08639a64c93c45a3b6bdef28723e71ab7b4c5aaba60698b571477"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "statement"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:string:literal",
+                    "structuralFingerprint": "aab18d5f0771f8fd97a25ffd2112e667e894acf92a430b02dcd8be9522140e85"
+                },
+                {
+                    "id": "alternative:string:template",
+                    "structuralFingerprint": "a16ebcac7c3b3a8da8a3d035c74039354e90500773df3c4c2067bd96d5d43f9b"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "string"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:stringContents:interpolation",
+                    "structuralFingerprint": "c162361fa3590d43840dae422ae3f80c406018732b902d01b5188d263b9dea29"
+                },
+                {
+                    "id": "alternative:stringContents:text",
+                    "structuralFingerprint": "18cf885a4e28d578222b6878f728ac5f9065790527e565818e2a87a761b6bfdf"
+                }
+            ],
+            "queryReachable": true,
+            "rule": "stringContents"
+        },
+        {
+            "alternatives": [
+                {
+                    "id": "alternative:stringContentsFull:interpolation",
+                    "structuralFingerprint": "df68917607042cf2b91ee6c6f141fe1fcb4d578d2bb356001f5caec3c898bf2f"
+                },
+                {
+                    "id": "alternative:stringContentsFull:text",
+                    "structuralFingerprint": "1abe294c80a61ee18740150362bdafcbb0b7a344d69860589932df63cb1ccab8"
+                }
+            ],
+            "queryReachable": false,
+            "rule": "stringContentsFull"
+        }
+    ],
+    "schemaVersion": 1
+}

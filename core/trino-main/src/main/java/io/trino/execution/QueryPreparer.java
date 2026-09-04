@@ -16,20 +16,40 @@ package io.trino.execution;
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Inject;
 import io.trino.Session;
+import io.trino.hogql.HogQlCompilationEvent.Dimensions;
+import io.trino.hogql.HogQlCompilationObserver;
+import io.trino.hogql.HogQlCompilationTracker;
+import io.trino.hogql.compiler.HogQlCompilationResult;
+import io.trino.hogql.compiler.HogQlCompileEnvelope;
+import io.trino.hogql.compiler.HogQlCompiler;
+import io.trino.hogql.compiler.HogQlModifierBinding;
+import io.trino.hogql.compiler.HogQlSemanticCatalogContext;
+import io.trino.hogql.compiler.catalog.HogQlSemanticCatalogSnapshotProvider;
 import io.trino.spi.TrinoException;
 import io.trino.spi.resourcegroups.QueryType;
 import io.trino.sql.parser.ParsingException;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.Execute;
 import io.trino.sql.tree.ExecuteImmediate;
+import io.trino.sql.tree.Explain;
 import io.trino.sql.tree.ExplainAnalyze;
+import io.trino.sql.tree.ExplainFormat;
+import io.trino.sql.tree.ExplainType;
 import io.trino.sql.tree.Expression;
+import io.trino.sql.tree.Identifier;
+import io.trino.sql.tree.NodeLocation;
+import io.trino.sql.tree.QualifiedName;
+import io.trino.sql.tree.SessionProperty;
 import io.trino.sql.tree.Statement;
 
 import java.util.List;
 import java.util.Optional;
 
 import static io.trino.execution.ParameterExtractor.getParameterCount;
+import static io.trino.hogql.HogQlCatalogIdentifiers.physicalCatalog;
+import static io.trino.hogql.HogQlCompilationEvent.Phase.COMPILATION;
+import static io.trino.hogql.HogQlCompilationEvent.Phase.PARAMETER_BINDING;
+import static io.trino.hogql.HogQlCompilationObserver.NOOP;
 import static io.trino.spi.StandardErrorCode.INVALID_PARAMETER_USAGE;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.sql.analyzer.ConstantExpressionVerifier.verifyExpressionIsConstant;
@@ -41,21 +61,156 @@ import static java.util.Objects.requireNonNull;
 public class QueryPreparer
 {
     private final SqlParser sqlParser;
+    private final Optional<HogQlCompiler> hogQlCompiler;
+    private final HogQlParameterDecoder hogQlParameterDecoder;
+    private final HogQlCompilationObserver hogQlCompilationObserver;
+    private final Optional<HogQlSemanticCatalogSnapshotProvider> hogQlSemanticCatalogSnapshotProvider;
+    private final HogQlCompilationExecutor hogQlCompilationExecutor;
 
-    @Inject
     public QueryPreparer(SqlParser sqlParser)
     {
+        this(sqlParser, Optional.empty(), NOOP, Optional.empty(), HogQlCompilationExecutor.directExecutor());
+    }
+
+    public QueryPreparer(SqlParser sqlParser, HogQlCompiler hogQlCompiler)
+    {
+        this(sqlParser, Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")), NOOP, Optional.empty(), HogQlCompilationExecutor.directExecutor());
+    }
+
+    public QueryPreparer(SqlParser sqlParser, HogQlCompiler hogQlCompiler, HogQlCompilationObserver hogQlCompilationObserver)
+    {
+        this(sqlParser, Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")), hogQlCompilationObserver, Optional.empty(), HogQlCompilationExecutor.directExecutor());
+    }
+
+    public QueryPreparer(
+            SqlParser sqlParser,
+            HogQlCompiler hogQlCompiler,
+            HogQlCompilationObserver hogQlCompilationObserver,
+            Optional<HogQlSemanticCatalogSnapshotProvider> hogQlSemanticCatalogSnapshotProvider)
+    {
+        this(sqlParser,
+                Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")),
+                hogQlCompilationObserver,
+                hogQlSemanticCatalogSnapshotProvider,
+                HogQlCompilationExecutor.directExecutor());
+    }
+
+    @Inject
+    public QueryPreparer(
+            SqlParser sqlParser,
+            HogQlCompiler hogQlCompiler,
+            HogQlCompilationObserver hogQlCompilationObserver,
+            Optional<HogQlSemanticCatalogSnapshotProvider> hogQlSemanticCatalogSnapshotProvider,
+            HogQlCompilationExecutor hogQlCompilationExecutor)
+    {
+        this(sqlParser,
+                Optional.of(requireNonNull(hogQlCompiler, "hogQlCompiler is null")),
+                hogQlCompilationObserver,
+                hogQlSemanticCatalogSnapshotProvider,
+                hogQlCompilationExecutor);
+    }
+
+    private QueryPreparer(
+            SqlParser sqlParser,
+            Optional<HogQlCompiler> hogQlCompiler,
+            HogQlCompilationObserver hogQlCompilationObserver,
+            Optional<HogQlSemanticCatalogSnapshotProvider> hogQlSemanticCatalogSnapshotProvider,
+            HogQlCompilationExecutor hogQlCompilationExecutor)
+    {
         this.sqlParser = requireNonNull(sqlParser, "sqlParser is null");
+        this.hogQlCompiler = requireNonNull(hogQlCompiler, "hogQlCompiler is null");
+        this.hogQlParameterDecoder = new HogQlParameterDecoder(sqlParser);
+        this.hogQlCompilationObserver = requireNonNull(hogQlCompilationObserver, "hogQlCompilationObserver is null");
+        this.hogQlSemanticCatalogSnapshotProvider = requireNonNull(hogQlSemanticCatalogSnapshotProvider, "hogQlSemanticCatalogSnapshotProvider is null");
+        this.hogQlCompilationExecutor = requireNonNull(hogQlCompilationExecutor, "hogQlCompilationExecutor is null");
     }
 
     public PreparedQuery prepareQuery(Session session, String query)
             throws ParsingException, TrinoException
     {
-        Statement wrappedStatement = sqlParser.createStatement(query);
-        return prepareQuery(session, wrappedStatement);
+        return prepareQuery(session, QuerySubmission.trino(query));
+    }
+
+    public PreparedQuery prepareQuery(Session session, QuerySubmission submission)
+            throws ParsingException, TrinoException
+    {
+        requireNonNull(submission, "submission is null");
+        return switch (submission.language()) {
+            case TRINO -> prepareQuery(session, sqlParser.createStatement(submission.originalText()));
+            case HOGQL -> {
+                HogQlCompileEnvelope envelope = submission.hogQlEnvelope().orElseThrow();
+                HogQlCompilationTracker tracker = new HogQlCompilationTracker(hogQlCompilationObserver, Dimensions.fromEnvelope(envelope));
+                PreparedQuery preparedQuery;
+                try {
+                    HogQlCompilationResult result = tracker.observe(COMPILATION, () -> hogQlCompilationExecutor.execute(() -> hogQlCompiler
+                            .orElseThrow(() -> new TrinoException(NOT_SUPPORTED, "HogQL query submission is disabled"))
+                            .compileV0(envelope, semanticCatalogContext(session))));
+                    tracker.catalogGeneration(result.catalogGeneration());
+                    Statement statement = explain(result.statement(), submission.hogQlExplain());
+                    preparedQuery = tracker.observe(PARAMETER_BINDING, () -> prepareQuery(
+                            session,
+                            statement,
+                            Optional.of(hogQlParameterDecoder.decode(result, envelope)),
+                            sessionPropertyOverrides(result, statement)));
+                }
+                catch (RuntimeException | Error failure) {
+                    tracker.failed(failure);
+                    throw failure;
+                }
+                tracker.succeeded();
+                yield preparedQuery;
+            }
+        };
+    }
+
+    private static Statement explain(Statement statement, Optional<QuerySubmission.HogQlExplain> explain)
+    {
+        if (explain.isEmpty()) {
+            return statement;
+        }
+        NodeLocation location = statement.getLocation().orElseThrow();
+        QuerySubmission.HogQlExplain options = explain.orElseThrow();
+        return new Explain(
+                location,
+                statement,
+                List.of(
+                        new ExplainType(location, options.type()),
+                        new ExplainFormat(location, options.format())));
+    }
+
+    private Optional<HogQlSemanticCatalogContext> semanticCatalogContext(Session session)
+    {
+        if (hogQlSemanticCatalogSnapshotProvider.isEmpty() || session.getCatalog().isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(new HogQlSemanticCatalogContext(
+                physicalCatalog(session.getCatalog().orElseThrow()),
+                hogQlSemanticCatalogSnapshotProvider.orElseThrow()));
     }
 
     public PreparedQuery prepareQuery(Session session, Statement wrappedStatement)
+            throws ParsingException, TrinoException
+    {
+        return prepareQuery(session, wrappedStatement, Optional.empty());
+    }
+
+    public PreparedQuery prepareQuery(Session session, Statement wrappedStatement, List<Expression> suppliedParameters)
+            throws ParsingException, TrinoException
+    {
+        return prepareQuery(session, wrappedStatement, Optional.of(ImmutableList.copyOf(suppliedParameters)));
+    }
+
+    private PreparedQuery prepareQuery(Session session, Statement wrappedStatement, Optional<List<Expression>> suppliedParameters)
+            throws ParsingException, TrinoException
+    {
+        return prepareQuery(session, wrappedStatement, suppliedParameters, List.of());
+    }
+
+    private PreparedQuery prepareQuery(
+            Session session,
+            Statement wrappedStatement,
+            Optional<List<Expression>> suppliedParameters,
+            List<SessionProperty> sessionPropertyOverrides)
             throws ParsingException, TrinoException
     {
         Statement statement = wrappedStatement;
@@ -77,16 +232,42 @@ public class QueryPreparer
             }
         }
 
-        List<Expression> parameters = ImmutableList.of();
-        if (wrappedStatement instanceof Execute executeStatement) {
+        List<Expression> parameters;
+        if (suppliedParameters.isPresent()) {
+            parameters = suppliedParameters.orElseThrow();
+        }
+        else if (wrappedStatement instanceof Execute executeStatement) {
             parameters = executeStatement.getParameters();
         }
         else if (wrappedStatement instanceof ExecuteImmediate executeImmediateStatement) {
             parameters = executeImmediateStatement.getParameters();
         }
+        else {
+            parameters = ImmutableList.of();
+        }
         validateParameters(statement, parameters);
 
-        return new PreparedQuery(statement, parameters, prepareSql);
+        return new PreparedQuery(statement, parameters, prepareSql, sessionPropertyOverrides);
+    }
+
+    private List<SessionProperty> sessionPropertyOverrides(HogQlCompilationResult result, Statement statement)
+    {
+        NodeLocation location = statement.getLocation().orElseThrow();
+        return result.modifierBindings().stream()
+                .map(binding -> modifierBinding(binding, location))
+                .flatMap(Optional::stream)
+                .toList();
+    }
+
+    private Optional<SessionProperty> modifierBinding(HogQlModifierBinding binding, NodeLocation location)
+    {
+        Expression value = hogQlParameterDecoder.decode(binding, location);
+        return binding.sessionProperty().map(property -> {
+            QualifiedName name = QualifiedName.of(property.stream()
+                    .map(part -> new Identifier(location, part.value(), part.delimited()))
+                    .toList());
+            return new SessionProperty(location, name, value);
+        });
     }
 
     private static void validateParameters(Statement node, List<Expression> parameterValues)
@@ -105,12 +286,19 @@ public class QueryPreparer
         private final Statement statement;
         private final List<Expression> parameters;
         private final Optional<String> prepareSql;
+        private final List<SessionProperty> sessionPropertyOverrides;
 
         public PreparedQuery(Statement statement, List<Expression> parameters, Optional<String> prepareSql)
+        {
+            this(statement, parameters, prepareSql, List.of());
+        }
+
+        public PreparedQuery(Statement statement, List<Expression> parameters, Optional<String> prepareSql, List<SessionProperty> sessionPropertyOverrides)
         {
             this.statement = requireNonNull(statement, "statement is null");
             this.parameters = ImmutableList.copyOf(requireNonNull(parameters, "parameters is null"));
             this.prepareSql = requireNonNull(prepareSql, "prepareSql is null");
+            this.sessionPropertyOverrides = ImmutableList.copyOf(requireNonNull(sessionPropertyOverrides, "sessionPropertyOverrides is null"));
         }
 
         public Statement getStatement()
@@ -126,6 +314,11 @@ public class QueryPreparer
         public Optional<String> getPrepareSql()
         {
             return prepareSql;
+        }
+
+        public List<SessionProperty> getSessionPropertyOverrides()
+        {
+            return sessionPropertyOverrides;
         }
     }
 }
