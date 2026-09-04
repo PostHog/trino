@@ -90,6 +90,26 @@ final class TestStatsValueParser
     {
         assertThat(StatsValueParser.parse(DATE, "2024-05-01")).contains(19844L);
         assertThat(StatsValueParser.parse(DATE, "not a date")).isEmpty();
+        // a year past four digits is signed as this connector writes it, and bare as DuckDB does
+        assertThat(StatsValueParser.parse(DATE, "+10000-01-01")).contains(2932897L);
+        assertThat(StatsValueParser.parse(DATE, "10000-01-01")).isEmpty();
+    }
+
+    /**
+     * The forms DuckDB writes for a date or a timestamp that names no instant. Reading one back
+     * would be a guess, so it parses as unknown and leaves the file it partitions unprunable.
+     */
+    @Test
+    void testTemporalValuesDuckDbWritesThatNameNoInstant()
+    {
+        assertThat(StatsValueParser.parse(DATE, "infinity")).isEmpty();
+        assertThat(StatsValueParser.parse(DATE, "-infinity")).isEmpty();
+        assertThat(StatsValueParser.parse(DATE, "0001-01-01 (BC)")).isEmpty();
+        assertThat(StatsValueParser.parse(TIMESTAMP_MICROS, "infinity")).isEmpty();
+        assertThat(StatsValueParser.parse(TIMESTAMP_MICROS, "-infinity")).isEmpty();
+        assertThat(StatsValueParser.parse(TIMESTAMP_MICROS, "0001-01-01 00:00:00 (BC)")).isEmpty();
+        assertThat(StatsValueParser.parse(TIMESTAMP_TZ_MICROS, "infinity")).isEmpty();
+        assertThat(StatsValueParser.parse(TIMESTAMP_TZ_MICROS, "-infinity")).isEmpty();
     }
 
     @Test
@@ -108,6 +128,9 @@ final class TestStatsValueParser
         assertThat(StatsValueParser.parse(TIMESTAMP_TZ_MICROS, "2024-05-01 10:34:56.789012+00"))
                 .contains(LongTimestampWithTimeZone.fromEpochMillisAndFraction(1714559696789L, 12_000_000, UTC_KEY));
         assertThat(StatsValueParser.parse(TIMESTAMP_TZ_MICROS, "2024-05-01 12:34:56.789012+02"))
+                .contains(LongTimestampWithTimeZone.fromEpochMillisAndFraction(1714559696789L, 12_000_000, UTC_KEY));
+        // a writer in a zone offset by half an hour records the offset with its minutes
+        assertThat(StatsValueParser.parse(TIMESTAMP_TZ_MICROS, "2024-05-01 16:04:56.789012+05:30"))
                 .contains(LongTimestampWithTimeZone.fromEpochMillisAndFraction(1714559696789L, 12_000_000, UTC_KEY));
     }
 
