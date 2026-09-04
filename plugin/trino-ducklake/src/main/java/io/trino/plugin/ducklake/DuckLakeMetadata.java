@@ -13,7 +13,6 @@
  */
 package io.trino.plugin.ducklake;
 
-import com.google.common.base.Suppliers;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -103,7 +102,6 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -1534,16 +1532,13 @@ public class DuckLakeMetadata
         }
         else {
             Map<Long, DuckLakePartitionColumn> partitionColumns = enforceablePartitionColumns(handle);
-            // the files are only listed for a column whose values have to be checked one by one,
-            // and then only once however many such columns the predicate constrains
-            Supplier<List<DuckLakeDataFileEntry>> dataFiles = Suppliers.memoize(() -> metastore.dataFiles(handle.snapshotId(), handle.tableId()));
             ImmutableMap.Builder<DuckLakeColumnHandle, Domain> enforceableDomains = ImmutableMap.builder();
             ImmutableMap.Builder<DuckLakeColumnHandle, Domain> unenforceableDomains = ImmutableMap.builder();
             for (Map.Entry<DuckLakeColumnHandle, Domain> entry : predicate.getDomains().orElseThrow().entrySet()) {
                 DuckLakeColumnHandle column = entry.getKey();
                 DuckLakePartitionColumn partitionColumn = partitionColumns.get(column.columnId());
                 if (partitionColumn != null && isEnforceableType(column.type())
-                        && (!isTemporalType(column.type()) || everyPartitionValueDecidesTheColumn(column, partitionColumn, dataFiles.get()))) {
+                        && (!isTemporalType(column.type()) || everyPartitionValueDecidesTheColumn(handle, column, partitionColumn))) {
                     enforceableDomains.put(column, entry.getValue());
                 }
                 else {
@@ -1635,18 +1630,19 @@ public class DuckLakeMetadata
      * and a predicate the connector cannot apply to one file it is not allowed to prune is one it
      * cannot enforce for the table, so the engine keeps filtering the rows instead.
      * <p>
-     * The check runs over the same files and through the same code as
-     * {@link DuckLakeSplitManager#getSplits}, which reads the same snapshot, so a predicate
-     * enforced here is a predicate that splits can be pruned by there.
+     * The values are read through the same code as {@link DuckLakeSplitManager#getSplits}, at the
+     * same snapshot, so a predicate enforced here is a predicate splits can be pruned by there.
+     * The query behind it costs one row per distinct value of the key, not one per data file, so
+     * a table of many files filed by few days is answered by few rows.
      */
-    private static boolean everyPartitionValueDecidesTheColumn(
+    private boolean everyPartitionValueDecidesTheColumn(
+            DuckLakeTableHandle handle,
             DuckLakeColumnHandle column,
-            DuckLakePartitionColumn partitionColumn,
-            List<DuckLakeDataFileEntry> dataFiles)
+            DuckLakePartitionColumn partitionColumn)
     {
         List<DuckLakePartitionColumn> transforms = ImmutableList.of(partitionColumn);
-        return dataFiles.stream()
-                .allMatch(dataFile -> PartitionTransforms.partitionDomain(column, transforms, dataFile.partitionValues()).isPresent());
+        return metastore.distinctPartitionValues(handle.snapshotId(), handle.tableId(), partitionColumn.partitionKeyIndex()).stream()
+                .allMatch(partitionValues -> PartitionTransforms.partitionDomain(column, transforms, partitionValues).isPresent());
     }
 
     /**
