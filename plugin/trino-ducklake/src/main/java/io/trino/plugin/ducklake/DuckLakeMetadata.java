@@ -83,6 +83,8 @@ import io.trino.spi.statistics.ComputedStatistics;
 import io.trino.spi.statistics.DoubleRange;
 import io.trino.spi.statistics.Estimate;
 import io.trino.spi.statistics.TableStatistics;
+import io.trino.spi.type.TimestampType;
+import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
@@ -122,6 +124,7 @@ import static io.trino.spi.StandardErrorCode.TABLE_ALREADY_EXISTS;
 import static io.trino.spi.connector.RowChangeParadigm.DELETE_ROW_AND_INSERT_ROW;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
@@ -1528,12 +1531,14 @@ public class DuckLakeMetadata
             newUnenforcedConstraint = TupleDomain.all();
         }
         else {
-            Set<Long> enforceableColumnIds = enforceablePartitionColumnIds(handle);
+            Map<Long, DuckLakePartitionColumn> partitionColumns = enforceablePartitionColumns(handle);
             ImmutableMap.Builder<DuckLakeColumnHandle, Domain> enforceableDomains = ImmutableMap.builder();
             ImmutableMap.Builder<DuckLakeColumnHandle, Domain> unenforceableDomains = ImmutableMap.builder();
             for (Map.Entry<DuckLakeColumnHandle, Domain> entry : predicate.getDomains().orElseThrow().entrySet()) {
                 DuckLakeColumnHandle column = entry.getKey();
-                if (enforceableColumnIds.contains(column.columnId()) && isEnforceableType(column.type())) {
+                DuckLakePartitionColumn partitionColumn = partitionColumns.get(column.columnId());
+                if (partitionColumn != null && isEnforceableType(column.type())
+                        && (!isTemporalType(column.type()) || everyPartitionValueDecidesTheColumn(handle, column, partitionColumn))) {
                     enforceableDomains.put(column, entry.getValue());
                 }
                 else {
@@ -1568,32 +1573,34 @@ public class DuckLakeMetadata
     }
 
     /**
-     * Returns the ids of partition columns whose predicates the connector can fully enforce by
-     * pruning files: identity-transformed columns where every visible data file was written with
-     * the current partitioning scheme, so every row of a kept file carries the partition value.
+     * Returns the partition columns whose predicates the connector can fully enforce by pruning
+     * files, by column id: identity-transformed columns where every visible data file was written
+     * with the current partitioning scheme, so every row of a kept file carries the partition
+     * value.
      */
-    private Set<Long> enforceablePartitionColumnIds(DuckLakeTableHandle handle)
+    private Map<Long, DuckLakePartitionColumn> enforceablePartitionColumns(DuckLakeTableHandle handle)
     {
         Optional<DuckLakePartitionInfo> partitionInfo = metastore.partitionInfo(handle.snapshotId(), handle.tableId());
         if (partitionInfo.isEmpty()) {
-            return ImmutableSet.of();
+            return ImmutableMap.of();
         }
         if (!metastore.allDataFilesUsePartition(handle.snapshotId(), handle.tableId(), partitionInfo.get().partitionId())) {
-            return ImmutableSet.of();
+            return ImmutableMap.of();
         }
         return partitionInfo.get().columns().stream()
                 .filter(column -> column.transform().equalsIgnoreCase(IDENTITY_TRANSFORM))
-                .map(DuckLakePartitionColumn::columnId)
-                .collect(toImmutableSet());
+                // a column filed under two identity keys is read from the first of them, which is
+                // the one PartitionTransforms picks as well
+                .collect(toImmutableMap(DuckLakePartitionColumn::columnId, column -> column, (first, _) -> first));
     }
 
     /**
-     * Types whose identity partition values round-trip exactly through the string
-     * representation in {@code ducklake_file_partition_value}, so pruning on them can be
-     * used to enforce a predicate. {@code DATE} is excluded because DuckDB writes values
-     * such as {@code infinity}, {@code -infinity}, BC dates and years with five or more
-     * digits that cannot be parsed back reliably; predicates on it stay unenforced and
-     * pruning remains fail-open.
+     * Types whose identity partition values round-trip exactly through the string representation
+     * in {@code ducklake_file_partition_value}, so pruning on them can be used to enforce a
+     * predicate. A temporal type is admitted here only as a candidate: DuckDB writes values such
+     * as {@code infinity}, {@code -infinity}, BC dates and years with five or more digits, which
+     * do not parse back, so {@link #isTemporalType} sends its columns through
+     * {@link #everyPartitionValueDecidesTheColumn} first.
      */
     private static boolean isEnforceableType(Type type)
     {
@@ -1602,7 +1609,40 @@ public class DuckLakeMetadata
                 || type.equals(INTEGER)
                 || type.equals(BIGINT)
                 || type.equals(BOOLEAN)
-                || type instanceof VarcharType varcharType && varcharType.isUnbounded();
+                || type instanceof VarcharType varcharType && varcharType.isUnbounded()
+                || isTemporalType(type);
+    }
+
+    /**
+     * Types a partition value of which DuckDB may write in a form that does not parse back, so
+     * that the values of the table decide whether a predicate on the column can be enforced.
+     */
+    private static boolean isTemporalType(Type type)
+    {
+        return type.equals(DATE)
+                || type instanceof TimestampType
+                || type instanceof TimestampWithTimeZoneType;
+    }
+
+    /**
+     * Whether the partition value of every visible data file says which value of the column the
+     * rows of that file hold. A value the connector cannot read back leaves the file unprunable,
+     * and a predicate the connector cannot apply to one file it is not allowed to prune is one it
+     * cannot enforce for the table, so the engine keeps filtering the rows instead.
+     * <p>
+     * The values are read through the same code as {@link DuckLakeSplitManager#getSplits}, at the
+     * same snapshot, so a predicate enforced here is a predicate splits can be pruned by there.
+     * The query behind it costs one row per distinct value of the key, not one per data file, so
+     * a table of many files filed by few days is answered by few rows.
+     */
+    private boolean everyPartitionValueDecidesTheColumn(
+            DuckLakeTableHandle handle,
+            DuckLakeColumnHandle column,
+            DuckLakePartitionColumn partitionColumn)
+    {
+        List<DuckLakePartitionColumn> transforms = ImmutableList.of(partitionColumn);
+        return metastore.distinctPartitionValues(handle.snapshotId(), handle.tableId(), partitionColumn.partitionKeyIndex()).stream()
+                .allMatch(partitionValues -> PartitionTransforms.partitionDomain(column, transforms, partitionValues).isPresent());
     }
 
     /**

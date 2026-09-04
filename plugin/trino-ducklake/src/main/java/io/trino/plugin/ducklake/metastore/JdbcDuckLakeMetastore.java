@@ -624,6 +624,46 @@ public class JdbcDuckLakeMetastore
         }
     }
 
+    /**
+     * Returns the distinct partition values one key of the partitioning scheme takes across the
+     * data files of the table visible at the snapshot, each in the shape
+     * {@link DuckLakeDataFileEntry#partitionValues()} carries so that both are read the same way.
+     * A file that records no value under the key contributes the empty map.
+     * <p>
+     * The result holds one entry per distinct value rather than one per file, which is what makes
+     * it affordable to ask about a table of many files.
+     */
+    public List<Map<Integer, Optional<String>>> distinctPartitionValues(long snapshotId, long tableId, int partitionKeyIndex)
+    {
+        try (Handle handle = jdbi.open()) {
+            return handle.createQuery(
+                            """
+                            SELECT DISTINCT v.partition_key_index, v.partition_value
+                            FROM %s f
+                            LEFT JOIN %s v ON f.data_file_id = v.data_file_id AND f.table_id = v.table_id
+                                AND v.partition_key_index = :partitionKeyIndex
+                            WHERE f.table_id = :tableId AND %s""".formatted(
+                                    table("ducklake_data_file"),
+                                    table("ducklake_file_partition_value"),
+                                    visible("f")))
+                    .bind("snapshot", snapshotId)
+                    .bind("tableId", tableId)
+                    .bind("partitionKeyIndex", partitionKeyIndex)
+                    .map((rs, _) -> {
+                        int keyIndex = rs.getInt("partition_key_index");
+                        if (rs.wasNull()) {
+                            // a file that records nothing under the key says nothing about its rows
+                            return Map.<Integer, Optional<String>>of();
+                        }
+                        return Map.of(keyIndex, Optional.ofNullable(rs.getString("partition_value")));
+                    })
+                    .list();
+        }
+        catch (JdbiException e) {
+            throw metastoreError(e);
+        }
+    }
+
     public List<DuckLakeFileColumnStats> fileColumnStats(long tableId, Set<Long> columnIds)
     {
         if (columnIds.isEmpty()) {
