@@ -50,6 +50,7 @@ public final class DuckLakeCommit
     private final long baseSnapshotId;
     private final long snapshotId;
     private final long baseSchemaVersion;
+    private final boolean sortInfoSupported;
 
     private long nextCatalogId;
     private long nextFileId;
@@ -57,7 +58,7 @@ public final class DuckLakeCommit
     private final List<String> changes = new ArrayList<>();
     private final Set<Long> tablesWithSchemaChange = new LinkedHashSet<>();
 
-    DuckLakeCommit(Handle handle, String metadataSchema, SnapshotState state)
+    DuckLakeCommit(Handle handle, String metadataSchema, SnapshotState state, boolean sortInfoSupported)
     {
         this.handle = requireNonNull(handle, "handle is null");
         this.metadataSchema = requireNonNull(metadataSchema, "metadataSchema is null");
@@ -67,6 +68,7 @@ public final class DuckLakeCommit
         this.schemaVersion = state.schemaVersion();
         this.nextCatalogId = state.nextCatalogId();
         this.nextFileId = state.nextFileId();
+        this.sortInfoSupported = sortInfoSupported;
     }
 
     /**
@@ -184,20 +186,21 @@ public final class DuckLakeCommit
     public long insertSchema(String schemaName, String path)
     {
         long schemaId = allocateCatalogId();
-        insertSchemaRow(schemaId, schemaName, path);
+        insertSchemaRow(schemaId, schemaName, path, true);
         return schemaId;
     }
 
-    public void insertSchemaRow(long schemaId, String schemaName, String path)
+    public void insertSchemaRow(long schemaId, String schemaName, String path, boolean pathIsRelative)
     {
         handle.createUpdate(
                         """
                         INSERT INTO %s (schema_id, schema_uuid, begin_snapshot, end_snapshot, schema_name, path, path_is_relative)
-                        VALUES (:schemaId, %s, :snapshot, NULL, :schemaName, :path, true)""".formatted(table("ducklake_schema"), randomUuid()))
+                        VALUES (:schemaId, %s, :snapshot, NULL, :schemaName, :path, :pathIsRelative)""".formatted(table("ducklake_schema"), randomUuid()))
                 .bind("schemaId", schemaId)
                 .bind("snapshot", snapshotId)
                 .bind("schemaName", schemaName)
                 .bind("path", path)
+                .bind("pathIsRelative", pathIsRelative)
                 .execute();
     }
 
@@ -233,8 +236,12 @@ public final class DuckLakeCommit
 
     /**
      * Ends every row describing the table other than the table row itself: its columns, its
-     * partitioning scheme, its data and delete files and its comments. Used when the table is
-     * dropped, so that no part of it stays visible at later snapshots.
+     * partitioning scheme, its sort order, its data and delete files and its comments. Used when
+     * the table is dropped, so that no part of it stays visible at later snapshots.
+     * <p>
+     * This is the set DuckDB ends in {@code DuckLakeMetadataManager::DropTables}. The rows keyed by
+     * one of those, such as {@code ducklake_partition_column} and {@code ducklake_sort_expression},
+     * carry no snapshot range of their own and are left alone, as DuckDB leaves them.
      */
     public void endTableContents(long tableId)
     {
@@ -244,6 +251,9 @@ public final class DuckLakeCommit
         endRows("ducklake_delete_file", "table_id = :objectId", tableId);
         endRows("ducklake_column_tag", "table_id = :objectId", tableId);
         endRows("ducklake_tag", "object_id = :objectId", tableId);
+        if (sortInfoSupported) {
+            endRows("ducklake_sort_info", "table_id = :objectId", tableId);
+        }
     }
 
     public Optional<TableIdentity> findTable(String schemaName, String tableName)
@@ -274,7 +284,7 @@ public final class DuckLakeCommit
     {
         return handle.createQuery(
                         """
-                        SELECT schema_id, schema_name, path
+                        SELECT schema_id, schema_name, path, path_is_relative
                         FROM %s
                         WHERE %s AND lower(schema_name) = :schemaName""".formatted(table("ducklake_schema"), visibleUnaliased()))
                 .bind("snapshot", baseSnapshotId)
@@ -282,7 +292,8 @@ public final class DuckLakeCommit
                 .map((rs, _) -> new SchemaIdentity(
                         rs.getLong("schema_id"),
                         rs.getString("schema_name"),
-                        Optional.ofNullable(rs.getString("path")).orElse("")))
+                        Optional.ofNullable(rs.getString("path")).orElse(""),
+                        rs.getBoolean("path_is_relative")))
                 .findFirst();
     }
 
@@ -884,7 +895,7 @@ public final class DuckLakeCommit
 
     public record TableIdentity(long tableId, long schemaId, String tableName, String path, Optional<String> tableUuid) {}
 
-    public record SchemaIdentity(long schemaId, String schemaName, String path) {}
+    public record SchemaIdentity(long schemaId, String schemaName, String path, boolean pathIsRelative) {}
 
     public record ViewIdentity(long viewId, String dialect) {}
 

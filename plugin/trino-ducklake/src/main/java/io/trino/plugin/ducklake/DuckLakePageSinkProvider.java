@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.ducklake;
 
+import com.google.common.collect.ImmutableList;
 import com.google.inject.Inject;
 import io.airlift.json.JsonCodec;
 import io.trino.filesystem.TrinoFileSystemFactory;
@@ -30,6 +31,7 @@ import io.trino.spi.connector.ConnectorTableCredentials;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.MemoryContext;
 
+import java.util.List;
 import java.util.Optional;
 
 import static io.trino.plugin.ducklake.DuckLakeSessionProperties.getTargetMaxFileSize;
@@ -70,6 +72,9 @@ public class DuckLakePageSinkProvider
             Optional<ConnectorTableCredentials> tableCredentials,
             ConnectorPageSinkId pageSinkId)
     {
+        if (tableHandle instanceof DuckLakeReplaceTarget target) {
+            return createPageSink(session, target.tableLocation(), target.columns(), target.partitionFields());
+        }
         return createPageSink(session, (DuckLakeWriteTarget) tableHandle);
     }
 
@@ -103,14 +108,27 @@ public class DuckLakePageSinkProvider
 
     private ConnectorPageSink createPageSink(ConnectorSession session, DuckLakeWriteTarget target)
     {
+        return createPageSink(
+                session,
+                target.tableLocation(),
+                target.columns(),
+                target.partitioning().map(DuckLakePartitioning::fields).orElseGet(ImmutableList::of));
+    }
+
+    private ConnectorPageSink createPageSink(
+            ConnectorSession session,
+            String tableLocation,
+            List<DuckLakeWriteColumn> columns,
+            List<DuckLakePartitioning.Field> partitionFields)
+    {
         return new DuckLakePageSink(
                 session,
                 fileSystemFactory.create(session),
                 writerFactory,
                 pageIndexerFactory,
-                DuckLakeParquetSchema.create(target.columns()),
-                target.partitioning().map(partitioning -> new DuckLakeWritePartitioner(partitioning, target.columns())),
-                target.tableLocation(),
+                DuckLakeParquetSchema.create(columns),
+                partitionFields.isEmpty() ? Optional.empty() : Optional.of(new DuckLakeWritePartitioner(partitionFields, columns)),
+                tableLocation,
                 getTargetMaxFileSize(session).toBytes(),
                 maxOpenPartitions,
                 dataFileCodec);

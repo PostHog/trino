@@ -17,10 +17,7 @@ import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
 import org.junit.jupiter.api.Test;
 
-import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.SQLException;
-import java.sql.Statement;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.abort;
@@ -57,11 +54,9 @@ final class TestDuckLakeLegacyCatalog
     private static void makeCatalogLegacy(TestingDuckLakeCatalog catalog)
             throws SQLException
     {
-        try (Connection connection = DriverManager.getConnection(catalog.jdbcUrl(), TestingDuckLakeCatalog.USER, TestingDuckLakeCatalog.PASSWORD);
-                Statement statement = connection.createStatement()) {
-            statement.execute("DROP TABLE IF EXISTS public.ducklake_inlined_data_tables");
-            statement.execute("ALTER TABLE public.ducklake_name_mapping DROP COLUMN IF EXISTS is_partition");
-        }
+        catalog.executeInMetastore(
+                "DROP TABLE IF EXISTS public.ducklake_inlined_data_tables",
+                "ALTER TABLE public.ducklake_name_mapping DROP COLUMN IF EXISTS is_partition");
     }
 
     @Test

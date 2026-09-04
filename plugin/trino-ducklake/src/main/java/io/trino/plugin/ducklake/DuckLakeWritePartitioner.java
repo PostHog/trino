@@ -63,9 +63,9 @@ public final class DuckLakeWritePartitioner
     private final List<Type> sourceTypes;
     private final List<Type> partitionTypes;
 
-    public DuckLakeWritePartitioner(DuckLakePartitioning partitioning, List<DuckLakeWriteColumn> columns)
+    public DuckLakeWritePartitioner(List<DuckLakePartitioning.Field> fields, List<DuckLakeWriteColumn> columns)
     {
-        this.fields = ImmutableList.copyOf(requireNonNull(partitioning, "partitioning is null").fields());
+        this.fields = ImmutableList.copyOf(requireNonNull(fields, "fields is null"));
         this.sourceTypes = fields.stream()
                 .map(field -> columns.get(field.sourceChannel()).type())
                 .collect(toImmutableList());

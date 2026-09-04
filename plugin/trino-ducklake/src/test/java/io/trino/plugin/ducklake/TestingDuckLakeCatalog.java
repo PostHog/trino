@@ -26,7 +26,9 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 
+import static com.google.common.base.Strings.nullToEmpty;
 import static com.google.common.base.Verify.verify;
 import static io.trino.plugin.ducklake.metastore.DuckLakeMetastoreConnectionFactory.APPLICATION_NAME;
 import static java.lang.String.format;
@@ -42,6 +44,9 @@ public final class TestingDuckLakeCatalog
     public static final String USER = "test";
     public static final String PASSWORD = "test";
     private static final String DATABASE = "lakedb";
+    private static final String COMMIT_CONFLICT_MESSAGE = "Failed to commit DuckLake transaction";
+    private static final int COMMIT_ATTEMPTS = 5;
+    private static final Duration COMMIT_RETRY_DELAY = Duration.ofMillis(100);
 
     private final PostgreSQLContainer dockerContainer;
     private final Path dataPath;
@@ -146,14 +151,69 @@ public final class TestingDuckLakeCatalog
         }
     }
 
+    /**
+     * Runs the statements in DuckDB, in order, running one again when its DuckLake commit lost a
+     * race against another writer.
+     * <p>
+     * Every change to a DuckLake catalog claims the next snapshot, so a commit conflicts with any
+     * other commit that started from the same one. The connector retries such a commit; DuckDB
+     * reports it and leaves the connection it came from unusable. Tests write to one catalog from
+     * both engines at the same time, so a statement that loses the race runs again on a new
+     * connection, which is what a writer facing the conflict would do. Options an earlier
+     * statement set survive the new connection, because DuckLake keeps them in the catalog rather
+     * than on the connection.
+     */
     public void executeInDuckDb(@Language("SQL") String... statements)
             throws SQLException
     {
-        try (Connection connection = openDuckDbConnection();
+        Connection connection = openDuckDbConnection();
+        try {
+            for (String sql : statements) {
+                for (int attempt = 1; ; attempt++) {
+                    try (Statement statement = connection.createStatement()) {
+                        statement.execute(sql);
+                        break;
+                    }
+                    catch (SQLException e) {
+                        if (attempt == COMMIT_ATTEMPTS || !nullToEmpty(e.getMessage()).contains(COMMIT_CONFLICT_MESSAGE)) {
+                            throw e;
+                        }
+                    }
+                    connection.close();
+                    sleepBeforeRetry(attempt);
+                    connection = openDuckDbConnection();
+                }
+            }
+        }
+        finally {
+            connection.close();
+        }
+    }
+
+    /**
+     * Runs the statements against the catalog database itself, rather than through DuckDB. Used to
+     * put the catalog into a state no engine writes, such as the one an older DuckLake version
+     * would have left.
+     */
+    public void executeInMetastore(@Language("SQL") String... statements)
+            throws SQLException
+    {
+        try (Connection connection = DriverManager.getConnection(jdbcUrl(), USER, PASSWORD);
                 Statement statement = connection.createStatement()) {
             for (String sql : statements) {
                 statement.execute(sql);
             }
+        }
+    }
+
+    private static void sleepBeforeRetry(int attempt)
+    {
+        try {
+            Thread.sleep(COMMIT_RETRY_DELAY.toMillis() * attempt);
+        }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException(e);
         }
     }
 
