@@ -233,6 +233,15 @@ The connector skips data files that cannot match query predicates:
   `file_statistics_pruning_enabled` [catalog session
   property](/sql/set-session) disable this behavior.
 
+A predicate on an `identity` partition key is enforced by the connector, not
+only used to prune. A `DELETE` that covers whole partitions of such a key ends
+those data files in the catalog, without reading a row of them. Keys of type
+`DATE`, `TIMESTAMP`, and `TIMESTAMP WITH TIME ZONE` are enforced along with the
+integer, boolean and `VARCHAR` keys. DuckDB writes some temporal values in a
+form the connector cannot read back — `infinity`, `-infinity`, BC dates, and
+years of five or more digits — and a table that holds one leaves the predicate
+to the engine, so the file is read and filtered instead of pruned.
+
 Before scheduling a data file, the coordinator reads its Parquet footer once
 and groups adjacent row groups into splits. `ducklake.max-split-size` is a soft
 target for the sum of the row groups' compressed column sizes. A row group is
