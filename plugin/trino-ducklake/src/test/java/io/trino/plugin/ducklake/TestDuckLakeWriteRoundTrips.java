@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.ducklake;
 
+import io.trino.Session;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
 import org.intellij.lang.annotations.Language;
@@ -20,6 +21,7 @@ import org.junit.jupiter.api.Test;
 
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Set;
 
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -106,14 +108,12 @@ final class TestDuckLakeWriteRoundTrips
      * The shape a daily pipeline writes: DuckDB files the table by a {@code DATE} column and the
      * pipeline replaces whole days.
      * <p>
-     * The rows end up right, but the days are not dropped from the catalog the way an equivalent
-     * {@code VARCHAR} or {@code INTEGER} key is. {@code DuckLakeMetadata.isEnforceableType}
-     * excludes {@code DATE}, so the connector never enforces a predicate on such a column and the
-     * delete cannot be decided from the partition values. It falls back to reading every row of
-     * the matching days, and the files are dropped only because nothing is left in them.
+     * The days are dropped from the catalog the same way an equivalent {@code VARCHAR} or
+     * {@code INTEGER} key is: the partition value of each file decides the delete, so the files
+     * end without a row of them being read.
      */
     @Test
-    void testDeletingWholeDaysOfATableDuckDbPartitionedByDateReadsEveryRow()
+    void testDeletingWholeDaysOfATableDuckDbPartitionedByDateEndsTheFiles()
             throws SQLException
     {
         String table = "part_day_" + randomNameSuffix();
@@ -132,18 +132,19 @@ final class TestDuckLakeWriteRoundTrips
             assertThat(activeDataFileCount(table)).isEqualTo(3);
             assertThat(partitions(table)).isEqualTo(List.of("2026-01-01", "2026-01-02", "2026-01-03"));
 
-            // the two days are removed, but every row of them is read to find out that they are
+            // the two days are ended by the partition values alone, without reading a row
             assertQueryStats(
                     getSession(),
                     "DELETE FROM %s WHERE day BETWEEN DATE '2026-01-01' AND DATE '2026-01-02'".formatted(table),
-                    stats -> assertThat(stats.getProcessedInputPositions()).isEqualTo(3),
+                    stats -> assertThat(stats.getProcessedInputPositions()).isEqualTo(0),
                     _ -> {});
             assertThat(activeDataFileCount(table)).isEqualTo(1);
             assertThat(activeDeleteFileCount(table)).isEqualTo(0);
             assertQuery("SELECT id FROM " + table + " ORDER BY id", "VALUES 4, 5");
             assertThat(catalog.rows("SELECT id::VARCHAR FROM " + table + " ORDER BY id")).isEqualTo(List.of("4", "5"));
 
-            // part of a day is answered the same way, and leaves the file behind a delete file
+            // a predicate that reaches beyond the partitioning removes rows one by one, which
+            // leaves the file in place behind a delete file
             assertUpdate("DELETE FROM %s WHERE day = DATE '2026-01-03' AND id = 4".formatted(table), 1);
             assertThat(activeDataFileCount(table)).isEqualTo(1);
             assertThat(activeDeleteFileCount(table)).isEqualTo(1);
@@ -161,18 +162,16 @@ final class TestDuckLakeWriteRoundTrips
     }
 
     /**
-     * The same daily shape as {@link #testDeletingWholeDaysOfATableDuckDbPartitionedByDateReadsEveryRow},
+     * The same daily shape as {@link #testDeletingWholeDaysOfATableDuckDbPartitionedByDateEndsTheFiles},
      * with the day held as a {@code TIMESTAMPTZ} truncated to midnight rather than as a
      * {@code DATE}. That is the column a pipeline materializing
      * {@code DATE_TRUNC('day', ts)::TIMESTAMPTZ AS day} files its tables by.
      * <p>
-     * It costs the same. {@code DuckLakeMetadata.isEnforceableType} admits only {@code TINYINT},
-     * {@code SMALLINT}, {@code INTEGER}, {@code BIGINT}, {@code BOOLEAN} and unbounded
-     * {@code VARCHAR}, so a predicate on a column of any timestamp type is never enforced and the
-     * delete cannot be decided from the partition values.
+     * It costs the same: nothing. The value is recorded in UTC and read back as the instant it
+     * names, so the delete is decided from the catalog for this type too.
      */
     @Test
-    void testDeletingWholeDaysOfATableDuckDbPartitionedByTimestampWithTimeZoneReadsEveryRow()
+    void testDeletingWholeDaysOfATableDuckDbPartitionedByTimestampWithTimeZoneEndsTheFiles()
             throws SQLException
     {
         String table = "part_tstz_day_" + randomNameSuffix();
@@ -196,13 +195,11 @@ final class TestDuckLakeWriteRoundTrips
                     "2026-01-02 00:00:00+00",
                     "2026-01-03 00:00:00+00"));
 
-            // Every row of the two days is read to decide a delete the partition values already
-            // answer. This is the assertion that flips to 0 once temporal partition predicates
-            // become enforceable (plan item 0.6b); until then it counts the rows of those days.
+            // the partition values answer the delete, so the two days end without a row being read
             assertQueryStats(
                     getSession(),
                     "DELETE FROM %s WHERE day BETWEEN TIMESTAMP '2026-01-01 00:00:00 UTC' AND TIMESTAMP '2026-01-02 00:00:00 UTC'".formatted(table),
-                    stats -> assertThat(stats.getProcessedInputPositions()).isEqualTo(3),
+                    stats -> assertThat(stats.getProcessedInputPositions()).isEqualTo(0),
                     _ -> {});
             assertThat(activeDataFileCount(table)).isEqualTo(1);
             assertThat(activeDeleteFileCount(table)).isEqualTo(0);
@@ -214,6 +211,102 @@ final class TestDuckLakeWriteRoundTrips
             catalog.executeInDuckDb("INSERT INTO %s VALUES (6, TIMESTAMPTZ '2026-01-03 00:00:00+00', 'f')".formatted(table));
             assertThat(partitions(table)).isEqualTo(List.of("2026-01-03 00:00:00+00", "2026-01-03 00:00:00+00"));
             assertQuery("SELECT id FROM " + table + " ORDER BY id", "VALUES 4, 5, 6");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    /**
+     * A day partition holding {@code DATE 'infinity'}, which DuckDB records as the string
+     * {@code infinity} and no date parser reads back.
+     * <p>
+     * The value is not guessed at in either direction: the file is never pruned, and it is never
+     * counted as matching. A predicate the connector cannot decide for one file is one it cannot
+     * enforce for the table, so the delete is answered row by row and the engine keeps filtering.
+     * The days it covers still end, because nothing is left in them, and the infinite day is left
+     * where it is.
+     */
+    @Test
+    void testDeletingWholeDaysBesideAnInfiniteDateLeavesItAlone()
+            throws SQLException
+    {
+        String table = "part_inf_day_" + randomNameSuffix();
+        catalog.executeInDuckDb(
+                "CREATE TABLE %s (id INTEGER, day DATE, v VARCHAR)".formatted(table),
+                "ALTER TABLE %s SET PARTITIONED BY (day)".formatted(table));
+        try {
+            assertUpdate(
+                    """
+                    INSERT INTO %s VALUES
+                        (1, DATE '2026-01-01', 'a'), (2, DATE '2026-01-01', 'b'),
+                        (3, DATE '2026-01-02', 'c'),
+                        (4, DATE '2026-01-03', 'd'), (5, DATE '2026-01-03', 'e')""".formatted(table),
+                    5);
+            catalog.executeInDuckDb("INSERT INTO %s VALUES (9, DATE 'infinity', 'inf')".formatted(table));
+            assertThat(partitions(table)).isEqualTo(List.of("2026-01-01", "2026-01-02", "2026-01-03", "infinity"));
+
+            // the three rows of the two days are read to place the delete. The infinite day is
+            // read too, and its file gives up no row, because the predicate excludes the value
+            // its Parquet statistics report even though its partition value says nothing
+            assertQueryStats(
+                    getSession(),
+                    "DELETE FROM %s WHERE day BETWEEN DATE '2026-01-01' AND DATE '2026-01-02'".formatted(table),
+                    stats -> assertThat(stats.getProcessedInputPositions()).isEqualTo(3),
+                    _ -> {});
+
+            // exactly the two days are gone, and no delete file was written for either
+            assertThat(activeDataFileCount(table)).isEqualTo(2);
+            assertThat(activeDeleteFileCount(table)).isEqualTo(0);
+            assertThat(partitions(table)).isEqualTo(List.of("2026-01-03", "infinity"));
+
+            // and the infinite day still reads as the row DuckDB wrote, through both engines
+            assertQuery("SELECT id FROM " + table + " ORDER BY id", "VALUES 4, 5, 9");
+            assertThat(catalog.rows("SELECT day::VARCHAR FROM %s WHERE id = 9".formatted(table))).isEqualTo(List.of("infinity"));
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    /**
+     * A read of the same table: the days the connector can read back are pruned by their partition
+     * value, and the one it cannot is read and filtered rather than dropped.
+     */
+    @Test
+    void testReadingADayBesideAnInfiniteDatePrunesTheOtherDays()
+            throws SQLException
+    {
+        String table = "read_inf_day_" + randomNameSuffix();
+        catalog.executeInDuckDb(
+                "CREATE TABLE %s (id INTEGER, day DATE, v VARCHAR)".formatted(table),
+                "ALTER TABLE %s SET PARTITIONED BY (day)".formatted(table));
+        try {
+            assertUpdate(
+                    """
+                    INSERT INTO %s VALUES
+                        (1, DATE '2026-01-01', 'a'), (2, DATE '2026-01-01', 'b'),
+                        (3, DATE '2026-01-02', 'c'),
+                        (4, DATE '2026-01-03', 'd'), (5, DATE '2026-01-03', 'e')""".formatted(table),
+                    5);
+            catalog.executeInDuckDb("INSERT INTO %s VALUES (9, DATE 'infinity', 'inf')".formatted(table));
+
+            // With the file statistics of the catalog and of the reader both switched off, the
+            // partition values are the only thing left to prune by. The two days that cannot
+            // match are not opened; the day asked for and the day whose value does not parse are
+            // read, and the engine drops the row of the second.
+            Session partitionPruningOnly = Session.builder(getSession())
+                    .setCatalogSessionProperty("ducklake", "file_statistics_pruning_enabled", "false")
+                    .setCatalogSessionProperty("ducklake", "parquet_ignore_statistics", "true")
+                    .build();
+            assertQueryStats(
+                    partitionPruningOnly,
+                    "SELECT id FROM %s WHERE day = DATE '2026-01-02'".formatted(table),
+                    stats -> assertThat(stats.getProcessedInputPositions()).isEqualTo(2),
+                    result -> assertThat(result.getOnlyColumnAsSet()).isEqualTo(Set.of(3)));
+
+            // the row of the infinite day is not lost: a predicate that covers it returns it
+            assertQuery("SELECT id FROM %s WHERE day > DATE '2026-01-02' ORDER BY id".formatted(table), "VALUES 4, 5, 9");
         }
         finally {
             assertUpdate("DROP TABLE " + table);
