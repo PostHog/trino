@@ -132,6 +132,13 @@ final class TestStatsValueParser
         // a writer in a zone offset by half an hour records the offset with its minutes
         assertThat(StatsValueParser.parse(TIMESTAMP_TZ_MICROS, "2024-05-01 16:04:56.789012+05:30"))
                 .contains(LongTimestampWithTimeZone.fromEpochMillisAndFraction(1714559696789L, 12_000_000, UTC_KEY));
+        // A day key holds midnight, which is recorded without a fraction. It parses to the value
+        // TIMESTAMP '2026-01-01 00:00:00 UTC' carries at precision 6, so a predicate on the day
+        // matches the file filed under it, with or without the trailing zeros.
+        assertThat(StatsValueParser.parse(TIMESTAMP_TZ_MICROS, "2026-01-01 00:00:00+00"))
+                .contains(LongTimestampWithTimeZone.fromEpochMillisAndFraction(1767225600000L, 0, UTC_KEY));
+        assertThat(StatsValueParser.parse(TIMESTAMP_TZ_MICROS, "2026-01-01 00:00:00.000000+00"))
+                .isEqualTo(StatsValueParser.parse(TIMESTAMP_TZ_MICROS, "2026-01-01 00:00:00+00"));
     }
 
     @Test
