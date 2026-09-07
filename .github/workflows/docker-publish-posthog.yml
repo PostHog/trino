@@ -36,9 +36,6 @@ concurrency:
   group: trino-image-publisher-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'master' }}
   cancel-in-progress: false
 
-env:
-  IMAGE: 795637471508.dkr.ecr.us-east-1.amazonaws.com/posthog-trino
-
 jobs:
   test-release-contract:
     runs-on: ubuntu-latest
@@ -73,10 +70,12 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
         with:
-          role-to-assume: ${{ vars.AWS_ECR_PUBLISH_IAM_ROLE }}
+          role-to-assume: ${{ secrets.AWS_ECR_PUBLISH_IAM_ROLE }}
           aws-region: us-east-1
+          mask-aws-account-id: true
 
       - name: Log in to ECR
+        id: ecr
         uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2.0.1
 
       - name: Log in to GHCR
@@ -87,6 +86,8 @@ jobs:
 
       - name: Resolve source-ordered release
         id: metadata
+        env:
+          ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/posthog-trino
         run: bash .github/bin/trino-release.sh prepare
 
       - name: Set up OCI registry exporter
@@ -117,11 +118,12 @@ jobs:
         id: push
         if: steps.metadata.outputs.digest == '' && steps.metadata.outputs.build-digest == ''
         env:
+          ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/posthog-trino
           OCI_SOURCE: https://github.com/PostHog/trino
           OCI_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
-          staging_image="${IMAGE}:build-${GITHUB_SHA}"
+          staging_image="${ECR_REPOSITORY}:build-${GITHUB_SHA}"
           core/docker/build.sh -a arm64 -x -o "$staging_image"
           digest="$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "$staging_image" | jq -er 'select(test("^sha256:[0-9a-f]{64}$"))')"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
@@ -142,6 +144,7 @@ jobs:
       - name: Publish verified release aliases
         id: release
         env:
+          ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/posthog-trino
           BUILD_DIGEST: ${{ steps.push.outputs.digest || steps.metadata.outputs.build-digest }}
           READABLE_TAG: ${{ steps.tag.outputs.tag }}
         run: bash .github/bin/trino-release.sh publish

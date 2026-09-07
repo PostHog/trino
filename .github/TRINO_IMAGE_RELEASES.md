@@ -9,8 +9,8 @@ The ordered tag is `r<12-digit first-parent commit count>-<6-character revision>
 The checkout must contain complete history and match the workflow revision.
 This orders releases by source history, independently of build completion order.
 
-The canonical image repository is
-`795637471508.dkr.ecr.us-east-1.amazonaws.com/posthog-trino` in `us-east-1`.
+The canonical image repository is `posthog-trino` in `us-east-1`.
+The workflow derives its registry address from the authenticated ECR login.
 The publisher mirrors the same image to `ghcr.io/posthog/trino` for existing
 consumers. It builds once, then copies the image and its layers between
 registries without rebuilding.
@@ -43,9 +43,10 @@ an ordered tag to force a rebuild; publish a new source commit instead.
 
 Before merging, apply the separate infrastructure change that creates the
 fully immutable ECR repository and the master-only publisher role. Set the
-repository Actions variable `AWS_ECR_PUBLISH_IAM_ROLE` to
-`arn:aws:iam::795637471508:role/github-trino-publish-role`. This is an operator
-setup step, not a secret or a change performed by this workflow. OIDC trust must
+repository Actions secret `AWS_ECR_PUBLISH_IAM_ROLE` to
+`arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-trino-publish-role`. This is an operator
+setup step, not a change performed by this workflow. The workflow masks the AWS
+account ID in logs and does not store its registry address in source. OIDC trust must
 allow only `repo:PostHog/trino:ref:refs/heads/master`. The role must allow image
 push/read operations but no image deletion or repository-policy changes.
 
@@ -55,7 +56,7 @@ writers. Before enabling ECR release discovery, verify the applied repository
 immutability, protected source history, repository access, and effective writer
 permissions. GHCR remains a compatibility mirror and is not the new cells'
 trusted release source. This change does not modify repository rules, package
-access, Actions variables, or registry settings.
+access, Actions secrets, or registry settings.
 
 Run the local contract tests with `python3 .github/bin/test_trino_release.py`.
 These tests mock the registry commands; they do not publish images. After the

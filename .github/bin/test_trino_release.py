@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / ".github/bin/trino-release.sh"
-REPOSITORY = "795637471508.dkr.ecr.us-east-1.amazonaws.com/posthog-trino"
+REPOSITORY = "111122223333.dkr.ecr.us-east-1.amazonaws.com/posthog-trino"
 MIRROR = "ghcr.io/posthog/trino"
 RAW_DIGEST = "sha256:" + "1" * 64
 RELEASE_DIGEST = "sha256:" + "2" * 64
@@ -44,7 +44,7 @@ elif args[:3] == ["buildx", "imagetools", "create"]:
     if target in state.get("fail_targets", []):
         print("registry temporarily unavailable", file=sys.stderr)
         sys.exit(1)
-    if target.startswith("795637471508.") and target in state["tags"]:
+    if target.startswith("111122223333.") and target in state["tags"]:
         print("ImageTagAlreadyExistsException", file=sys.stderr)
         sys.exit(1)
     digest = args[-1].split("@", 1)[1]
@@ -84,6 +84,7 @@ class ReleaseContractTest(unittest.TestCase):
         count = int(subprocess.check_output(["git", "rev-list", "--first-parent", "--count", "HEAD"], cwd=ROOT, text=True))
         self.tag = f"r{count:012d}-{self.sha[:6]}"
         self.environment = dict(os.environ, PATH=f"{self.directory}:{os.environ['PATH']}",
+                                ECR_REPOSITORY=REPOSITORY,
                                 MOCK_REGISTRY=str(self.registry), GITHUB_OUTPUT=str(self.output),
                                 GITHUB_REPOSITORY="PostHog/trino", GITHUB_REF="refs/heads/master",
                                 GITHUB_EVENT_NAME="push", GITHUB_SHA=self.sha,
@@ -137,6 +138,16 @@ class ReleaseContractTest(unittest.TestCase):
                 self.environment[key] = value
                 self.run_phase("publish", success=False)
                 self.environment[key] = original
+        self.assertEqual(self.state()["writes"], [])
+
+    def test_canonical_ecr_repository_is_required(self):
+        for repository in ["", "ghcr.io/posthog/trino", REPOSITORY.replace("us-east-1", "eu-west-1"),
+                           REPOSITORY.replace("posthog-trino", "other"), "https://" + REPOSITORY]:
+            with self.subTest(repository=repository):
+                self.environment["ECR_REPOSITORY"] = repository
+                self.run_phase("prepare", success=False)
+                self.run_phase("publish", success=False)
+        self.assertEqual(self.output.read_text(), "")
         self.assertEqual(self.state()["writes"], [])
 
     def test_registry_error_is_not_treated_as_absence(self):
