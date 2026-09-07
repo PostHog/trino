@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / ".github/bin/trino-release.sh"
+REPOSITORY = "ghcr.io/posthog/trino"
+RAW_DIGEST = "sha256:" + "1" * 64
+RELEASE_DIGEST = "sha256:" + "2" * 64
+
+DOCKER = r'''#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+path = Path(os.environ["MOCK_REGISTRY"])
+state = json.loads(path.read_text())
+args = sys.argv[1:]
+if args[:3] == ["buildx", "imagetools", "inspect"]:
+    reference = args[-1]
+    if state.get("unavailable"):
+        print(state["unavailable"], file=sys.stderr)
+        sys.exit(1)
+    digest = reference.split("@", 1)[1] if "@" in reference else state["tags"].get(reference)
+    if not digest:
+        print("manifest unknown", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(state["manifests"][digest] if "--raw" in args else digest))
+elif args[:3] == ["buildx", "imagetools", "create"]:
+    target = args[args.index("--tag") + 1]
+    digest = args[-1].split("@", 1)[1]
+    if "--annotation" in args:
+        digest = "sha256:" + "2" * 64
+        annotations = dict(args[i + 1].removeprefix("index:").split("=", 1)
+                           for i, item in enumerate(args) if item == "--annotation")
+        state["manifests"][digest] = {"annotations": annotations}
+    state["tags"][target] = digest
+    state["writes"].append(target)
+    path.write_text(json.dumps(state))
+else:
+    raise RuntimeError(args)
+'''
+
+
+class ReleaseContractTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+        self.registry = self.directory / "registry.json"
+        self.registry.write_text(json.dumps({
+            "tags": {}, "manifests": {RAW_DIGEST: {}}, "writes": []}))
+        self.output = self.directory / "output"
+        self.output.touch()
+        for name, content in {
+            "docker": DOCKER,
+            "timeout": '#!/bin/sh\nshift\nshift\nexec "$@"\n',
+        }.items():
+            command = self.directory / name
+            command.write_text(content)
+            command.chmod(0o755)
+        self.sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        count = int(subprocess.check_output(["git", "rev-list", "--first-parent", "--count", "HEAD"], cwd=ROOT, text=True))
+        self.tag = f"r{count:012d}-{self.sha[:6]}"
+        self.environment = dict(os.environ, PATH=f"{self.directory}:{os.environ['PATH']}",
+                                MOCK_REGISTRY=str(self.registry), GITHUB_OUTPUT=str(self.output),
+                                GITHUB_REPOSITORY="PostHog/trino", GITHUB_REF="refs/heads/master",
+                                GITHUB_EVENT_NAME="push", GITHUB_SHA=self.sha,
+                                GITHUB_RUN_ID="12345", GITHUB_RUN_ATTEMPT="1", BUILD_DIGEST=RAW_DIGEST)
+
+    def run_phase(self, phase, success=True):
+        result = subprocess.run(["bash", str(SCRIPT), phase], cwd=ROOT,
+                                env=self.environment, capture_output=True, text=True)
+        self.assertEqual(result.returncode == 0, success, result.stderr)
+        return result
+
+    def state(self):
+        return json.loads(self.registry.read_text())
+
+    def test_new_release_and_rerun_preserve_digest_and_provenance(self):
+        self.run_phase("prepare")
+        self.assertIn(f"ordered-tag={self.tag}\ndigest=\n", self.output.read_text())
+        self.run_phase("publish")
+        state = self.state()
+        self.assertEqual(state["tags"][f"{REPOSITORY}:{self.tag}"], RELEASE_DIGEST)
+        self.assertEqual(state["tags"][f"{REPOSITORY}:{self.sha}"], RELEASE_DIGEST)
+        self.assertEqual(state["manifests"][RELEASE_DIGEST]["annotations"], {
+            "org.opencontainers.image.source": "https://github.com/PostHog/trino",
+            "org.opencontainers.image.revision": self.sha})
+        self.environment["BUILD_DIGEST"] = ""
+        self.environment["GITHUB_RUN_ATTEMPT"] = "2"
+        self.environment["READABLE_TAG"] = "test-release"
+        self.run_phase("prepare")
+        self.assertIn(f"digest={RELEASE_DIGEST}", self.output.read_text())
+        self.run_phase("publish")
+        state = self.state()
+        self.assertEqual(state["writes"].count(f"{REPOSITORY}:{self.tag}"), 1)
+        self.assertEqual(state["tags"][f"{REPOSITORY}:test-release"], RELEASE_DIGEST)
+
+    def test_rejects_untrusted_refs_events_and_source_mismatch(self):
+        for key, value in [("GITHUB_REF", "refs/heads/feature"),
+                           ("GITHUB_EVENT_NAME", "pull_request"),
+                           ("GITHUB_REPOSITORY", "someone/trino"),
+                           ("GITHUB_SHA", "a" * 40)]:
+            with self.subTest(key=key):
+                original = self.environment[key]
+                self.environment[key] = value
+                self.run_phase("publish", success=False)
+                self.environment[key] = original
+        self.assertEqual(self.state()["writes"], [])
+
+    def test_registry_error_is_not_treated_as_absence(self):
+        state = self.state()
+        state["unavailable"] = "unauthorized: access denied"
+        self.registry.write_text(json.dumps(state))
+        self.run_phase("prepare", success=False)
+        self.run_phase("publish", success=False)
+        self.assertEqual(self.state()["writes"], [])
+
+    def test_rejects_existing_release_with_wrong_provenance(self):
+        state = self.state()
+        state["tags"][f"{REPOSITORY}:{self.tag}"] = RAW_DIGEST
+        self.registry.write_text(json.dumps(state))
+        self.run_phase("prepare", success=False)
+        self.run_phase("publish", success=False)
+        self.assertEqual(self.state()["writes"], [])
+
+    def test_readable_alias_cannot_overwrite_an_ordered_release(self):
+        for tag in ["r000000000001-abcdef", "a" * 40, "--invalid"]:
+            with self.subTest(tag=tag):
+                self.environment["READABLE_TAG"] = tag
+                self.run_phase("publish", success=False)
+        self.assertEqual(self.state()["writes"], [])
+
+    def test_generic_not_found_is_not_release_absence(self):
+        state = self.state()
+        state["unavailable"] = "docker: command not found"
+        self.registry.write_text(json.dumps(state))
+        self.run_phase("prepare", success=False)
+        self.run_phase("publish", success=False)
+        self.assertEqual(self.state()["writes"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()
