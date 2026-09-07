@@ -14,6 +14,8 @@ Builds the Trino Docker image
 -r       Build the specified Trino release version, downloads all required artifacts
 -j       Build the Trino release with specified JDK distribution
 -x       Skip image tests
+-o       Publish a single-platform OCI image to this full image reference (requires -x)
+         Set OCI_SOURCE and OCI_REVISION to identify the source of the published image
 EOF
 }
 
@@ -27,13 +29,14 @@ ARCHITECTURES=(amd64 arm64)
 TRINO_VERSION=
 TAG_PREFIX=trino
 SERVER_ARTIFACT=trino-server
+OCI_IMAGE=
 
 TEMURIN_RELEASE=$("${SOURCE_DIR}/mvnw" -f "${SOURCE_DIR}/pom.xml" --quiet help:evaluate -Dexpression=temurin.release -DforceStdout --raw-streams)
 TEMURIN_DOWNLOAD_URL="https://api.adoptium.net/v3/binary/version/{release_name}/linux/{arch}/jdk/hotspot/normal/eclipse?project=jdk"
 
 SKIP_TESTS=false
 
-while getopts ":a:h:r:p:t:j:x" o; do
+while getopts ":a:h:r:p:t:j:xo:" o; do
     case "${o}" in
         a)
             IFS=, read -ra ARCH_ARG <<< "$OPTARG"
@@ -64,6 +67,9 @@ while getopts ":a:h:r:p:t:j:x" o; do
         x)
            SKIP_TESTS=true
            ;;
+        o)
+            OCI_IMAGE=${OPTARG}
+            ;;
         *)
             usage
             exit 1
@@ -71,6 +77,11 @@ while getopts ":a:h:r:p:t:j:x" o; do
     esac
 done
 shift $((OPTIND - 1))
+
+if [[ -n "$OCI_IMAGE" && ( "${#ARCHITECTURES[@]}" != 1 || "$SKIP_TESTS" != true ) ]]; then
+    echo >&2 "OCI publication requires one architecture and skipped local image tests"
+    exit 1
+fi
 
 function check_environment() {
     if ! command -v jq &> /dev/null; then
@@ -131,7 +142,15 @@ TAG="${TAG_PREFIX}:${TRINO_VERSION}"
 for arch in "${ARCHITECTURES[@]}"; do
     JDK_DOWNLOAD_LINK="$(temurin_download_uri "${TEMURIN_RELEASE}" "${arch}")"
     echo "🫙  Building the image for $arch with JDK ${JDK_DOWNLOAD_LINK}"
-    docker build \
+    build_command=(docker build)
+    output_arguments=(-t "${TAG}-$arch")
+    if [[ -n "$OCI_IMAGE" ]]; then
+        build_command=(docker buildx build)
+        output_arguments=(--output type=registry,oci-mediatypes=true --provenance=false --tag "$OCI_IMAGE"
+            --annotation "manifest:org.opencontainers.image.source=${OCI_SOURCE:?}"
+            --annotation "manifest:org.opencontainers.image.revision=${OCI_REVISION:?}")
+    fi
+    "${build_command[@]}" \
         "${WORK_DIR}" \
         --progress=plain \
         --pull \
@@ -140,7 +159,7 @@ for arch in "${ARCHITECTURES[@]}"; do
         --build-arg JDK_DOWNLOAD_LINK="${JDK_DOWNLOAD_LINK}" \
         --platform "linux/$arch" \
         -f Dockerfile \
-        -t "${TAG}-$arch"
+        "${output_arguments[@]}"
 done
 
 echo "🧹 Cleaning up the build context directory"
@@ -157,4 +176,3 @@ else
       docker image inspect -f '🚀 Built {{.RepoTags}} {{.Id}}' "${TAG}-$arch"
   done
 fi
-
