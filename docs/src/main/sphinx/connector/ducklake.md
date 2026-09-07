@@ -197,6 +197,11 @@ The connector also derives table statistics (row count, null fractions, and
 value ranges) from the catalog for use by the [cost-based
 optimizer](/optimizer/cost-based-optimizations).
 
+Scan statistics include bytes and read time from both data files and positional
+delete files. Each split accounts for its own reads, including repeated reads of
+the same delete file by different splits. These statistics do not include
+coordinator-side reads performed while committing changes.
+
 ## Limitations
 
 - The connector is read-only; `INSERT`, `UPDATE`, `DELETE`, `MERGE`, and DDL

@@ -210,16 +210,18 @@ public class DuckLakePageSourceProvider
             LocalMemoryContext dataFileMemoryContext = splitMemoryContext.newLocalMemoryContext(DuckLakePageSourceProvider.class.getSimpleName());
             ConnectorPageSource pageSource = createParquetPageSource(inputFile, duckLakeSplit, dataColumns, hiveColumns, parquetPredicate, options, dataFileMemoryContext::setBytes);
             LocalMemoryContext deletedPositionsMemoryContext = splitMemoryContext.newLocalMemoryContext("deletedPositions");
+            DeleteFileReadStatistics deleteFileReadStatistics = new DeleteFileReadStatistics();
             // Every split of the data file loads the whole delete file, so a file split into
             // several byte ranges re-reads its delete file once per split. The positions are
             // file-absolute, so each split simply ignores the ones outside the rows it reads.
-            Supplier<LongOpenHashSet> deletedPositions = Suppliers.memoize(() -> readDeletedPositions(fileSystem, deleteFile.get(), splitMemoryContext, deletedPositionsMemoryContext));
+            Supplier<LongOpenHashSet> deletedPositions = Suppliers.memoize(() -> readDeletedPositions(fileSystem, deleteFile.get(), splitMemoryContext, deletedPositionsMemoryContext, deleteFileReadStatistics));
             pageSource = TransformConnectorPageSource.create(
                     pageSource,
                     page -> filterDeletedRows(page, deletedPositions.get(), rowIndexChannel));
             return new MemoryContextClosingPageSource(
                     projectRequestedColumns(requestedColumns, rowIndexChannel, hasRowIndexChannel, duckLakeSplit.dataFileId(), pageSource),
-                    splitMemoryContext);
+                    splitMemoryContext,
+                    deleteFileReadStatistics);
         }
 
         ConnectorPageSource pageSource = createParquetPageSource(inputFile, duckLakeSplit, dataColumns, hiveColumns, parquetPredicate, options, memoryContext);
@@ -522,7 +524,8 @@ public class DuckLakePageSourceProvider
             TrinoFileSystem fileSystem,
             DuckLakeDeleteFileHandle deleteFile,
             AggregatedMemoryContext memoryContext,
-            LocalMemoryContext deletedPositionsMemoryContext)
+            LocalMemoryContext deletedPositionsMemoryContext,
+            DeleteFileReadStatistics readStatistics)
     {
         HiveColumnHandle positionColumn = new HiveColumnHandle(
                 "pos",
@@ -553,19 +556,25 @@ public class DuckLakePageSourceProvider
                 DOMAIN_COMPACTION_THRESHOLD,
                 OptionalLong.of(deleteFile.fileSizeBytes()),
                 readerMemoryContext::setBytes)) {
-            while (!pageSource.isFinished()) {
-                SourcePage page = pageSource.getNextSourcePage();
-                if (page == null) {
-                    continue;
-                }
-                Block block = page.getBlock(0);
-                for (int position = 0; position < block.getPositionCount(); position++) {
-                    if (block.isNull(position)) {
-                        throw new TrinoException(DUCKLAKE_BAD_DATA, "Delete file %s contains a null position".formatted(deleteFile.path()));
+            try {
+                while (!pageSource.isFinished()) {
+                    SourcePage page = pageSource.getNextSourcePage();
+                    if (page == null) {
+                        continue;
                     }
-                    deletedPositions.add(BIGINT.getLong(block, position));
+                    Block block = page.getBlock(0);
+                    for (int position = 0; position < block.getPositionCount(); position++) {
+                        if (block.isNull(position)) {
+                            throw new TrinoException(DUCKLAKE_BAD_DATA, "Delete file %s contains a null position".formatted(deleteFile.path()));
+                        }
+                        deletedPositions.add(BIGINT.getLong(block, position));
+                    }
+                    rowCount += page.getPositionCount();
                 }
-                rowCount += page.getPositionCount();
+            }
+            finally {
+                // Preserve observed reads even if decoding or validating the delete positions fails.
+                readStatistics.record(pageSource);
             }
         }
         catch (IOException | UncheckedIOException e) {
@@ -588,27 +597,41 @@ public class DuckLakePageSourceProvider
         return LONG_OPEN_HASH_SET_INSTANCE_SIZE + sizeOfLongArray(HashCommon.arraySize(size, Hash.DEFAULT_LOAD_FACTOR) + 1);
     }
 
+    private static final class DeleteFileReadStatistics
+    {
+        private long completedBytes;
+        private long readTimeNanos;
+
+        public void record(ConnectorPageSource pageSource)
+        {
+            completedBytes += pageSource.getCompletedBytes();
+            readTimeNanos += pageSource.getReadTimeNanos();
+        }
+    }
+
     /**
-     * Forwards to the wrapped page source and closes the given memory context when the page
-     * source is closed, freeing memory tracked for the lifetime of the page source (such as
-     * the loaded delete positions).
+     * Adds the lazily loaded delete file's reads to the data reader's statistics and closes the
+     * memory context holding both readers and the retained delete positions. Statistics remain
+     * available after the delete reader closes, without loading deletes just to inspect them.
      */
     private static final class MemoryContextClosingPageSource
             implements ConnectorPageSource
     {
         private final ConnectorPageSource delegate;
         private final AggregatedMemoryContext memoryContext;
+        private final DeleteFileReadStatistics deleteFileReadStatistics;
 
-        private MemoryContextClosingPageSource(ConnectorPageSource delegate, AggregatedMemoryContext memoryContext)
+        private MemoryContextClosingPageSource(ConnectorPageSource delegate, AggregatedMemoryContext memoryContext, DeleteFileReadStatistics deleteFileReadStatistics)
         {
             this.delegate = requireNonNull(delegate, "delegate is null");
             this.memoryContext = requireNonNull(memoryContext, "memoryContext is null");
+            this.deleteFileReadStatistics = requireNonNull(deleteFileReadStatistics, "deleteFileReadStatistics is null");
         }
 
         @Override
         public long getCompletedBytes()
         {
-            return delegate.getCompletedBytes();
+            return delegate.getCompletedBytes() + deleteFileReadStatistics.completedBytes;
         }
 
         @Override
@@ -620,7 +643,7 @@ public class DuckLakePageSourceProvider
         @Override
         public long getReadTimeNanos()
         {
-            return delegate.getReadTimeNanos();
+            return delegate.getReadTimeNanos() + deleteFileReadStatistics.readTimeNanos;
         }
 
         @Override
