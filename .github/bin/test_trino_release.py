@@ -26,6 +26,9 @@ state = json.loads(path.read_text())
 args = sys.argv[1:]
 if args[:3] == ["buildx", "imagetools", "inspect"]:
     reference = args[-1]
+    if reference in state.get("unavailable_references", {}):
+        print(state["unavailable_references"][reference], file=sys.stderr)
+        sys.exit(1)
     if state.get("unavailable"):
         print(state["unavailable"], file=sys.stderr)
         sys.exit(1)
@@ -192,6 +195,30 @@ class ReleaseContractTest(unittest.TestCase):
         self.assertEqual(state["tags"][f"{MIRROR}:{self.sha}"], RELEASE_DIGEST)
         self.assertEqual(state["writes"].count(f"{REPOSITORY}:{self.tag}"), 1)
         self.assertEqual(state["writes"].count(f"{REPOSITORY}:{self.sha}"), 1)
+
+    def test_ordered_lookup_error_cannot_fall_back_to_valid_staging(self):
+        state = self.state()
+        state["tags"][f"{REPOSITORY}:build-{self.sha}"] = RAW_DIGEST
+        state["unavailable_references"] = {f"{REPOSITORY}:{self.tag}": "unauthorized: access denied"}
+        self.registry.write_text(json.dumps(state))
+        self.run_phase("prepare", success=False)
+        self.run_phase("publish", success=False)
+        self.assertEqual(self.output.read_text(), "")
+        self.assertEqual(self.state()["writes"], [])
+
+    def test_invalid_ordered_provenance_cannot_fall_back_to_valid_staging(self):
+        state = self.state()
+        state["tags"][f"{REPOSITORY}:build-{self.sha}"] = RAW_DIGEST
+        state["tags"][f"{REPOSITORY}:{self.tag}"] = RELEASE_DIGEST
+        state["manifests"][RELEASE_DIGEST] = {
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "annotations": {"org.opencontainers.image.source": "https://github.com/someone/trino",
+                            "org.opencontainers.image.revision": self.sha}}
+        self.registry.write_text(json.dumps(state))
+        self.run_phase("prepare", success=False)
+        self.run_phase("publish", success=False)
+        self.assertEqual(self.output.read_text(), "")
+        self.assertEqual(self.state()["writes"], [])
 
     def test_partial_raw_build_recovers_before_ordered_release(self):
         state = self.state()

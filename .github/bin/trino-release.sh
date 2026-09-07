@@ -51,9 +51,9 @@ verify_manifest() {
 
 existing_release() {
     local digest
-    digest="$(existing_digest "$repository:$ordered_tag")"
+    digest="$(existing_digest "$repository:$ordered_tag")" || return 1
     if [[ -n "$digest" ]]; then
-        verify_manifest "$repository@$digest" application/vnd.oci.image.index.v1+json
+        verify_manifest "$repository@$digest" application/vnd.oci.image.index.v1+json || return 1
         printf '%s\n' "$digest"
     fi
 }
@@ -61,7 +61,7 @@ existing_release() {
 ensure_alias() {
     local target=$1 digest=$2 replace=${3:-false}
     local existing
-    existing="$(existing_digest "$target")"
+    existing="$(existing_digest "$target")" || return 1
     [[ "$existing" != "$digest" ]] || return 0
     [[ -z "$existing" || "$replace" == true ]] || fail "Immutable alias already contains a different image: $target"
     timeout --kill-after=10s 600s docker buildx imagetools create --prefer-index=false \
