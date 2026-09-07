@@ -19,6 +19,7 @@ on:
       - .github/workflows/docker-publish-posthog.yml
       - .github/bin/trino-release.sh
       - .github/bin/test_trino_release.py
+      - core/docker/build.sh
   workflow_dispatch:
     inputs:
       tag:
@@ -77,6 +78,12 @@ jobs:
         id: metadata
         run: bash .github/bin/trino-release.sh prepare
 
+      - name: Set up OCI registry exporter
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        if: steps.metadata.outputs.digest == ''
+        with:
+          driver: docker-container
+
       # No Maven cache here on purpose. This job publishes an image and any
       # branch build can write that cache, so reading it would let a branch
       # decide what goes into a published artifact.
@@ -95,9 +102,15 @@ jobs:
           ./mvnw clean install \
             -T 1C -DskipTests -Dmaven.javadoc.skip=true -Dair.check.skip-all=true
 
-      - name: Build arm64 image
+      - name: Build and push arm64 OCI image
+        id: push
         if: steps.metadata.outputs.digest == ''
-        run: core/docker/build.sh -a arm64 -x
+        run: |
+          set -euo pipefail
+          staging_image="${IMAGE}:build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          core/docker/build.sh -a arm64 -x -o "$staging_image"
+          digest="$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "$staging_image" | jq -er 'select(test("^sha256:[0-9a-f]{64}$"))')"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Resolve image tag
         id: tag
@@ -111,37 +124,6 @@ jobs:
             *) tag="${GITHUB_SHA}" ;;
           esac
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-
-      - name: Push image
-        id: push
-        if: steps.metadata.outputs.digest == ''
-        # Staging tags cannot match the ordered release selector.
-        # Publish eligible aliases only after adding manifest-level provenance.
-        run: |
-          set -euo pipefail
-          TRINO_VERSION="$(./mvnw --quiet help:evaluate -Dexpression=project.version -DforceStdout --raw-streams)"
-          staging_tag="build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          docker tag "trino:${TRINO_VERSION}-arm64" "${IMAGE}:${staging_tag}"
-          docker push "${IMAGE}:${staging_tag}"
-
-          # RepoDigests is populated by the push above. Read the entry for this
-          # repository, so a digest another tag left behind cannot be picked.
-          #
-          # No pipeline here. `grep | head` under `set -o pipefail` fails the
-          # step when head closes the pipe first, which is a real failure mode
-          # in this org (see the same warning in charts state-update.yml).
-          digests="$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${IMAGE}:${staging_tag}")"
-          digest=""
-          while IFS= read -r entry; do
-            case "${entry}" in
-              "${IMAGE}@"*) digest="${entry#*@}"; break ;;
-            esac
-          done <<< "${digests}"
-          if [ -z "${digest}" ]; then
-            echo "::error::could not read the build digest"
-            exit 1
-          fi
-          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Publish verified release aliases
         id: release

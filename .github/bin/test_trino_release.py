@@ -56,7 +56,8 @@ class ReleaseContractTest(unittest.TestCase):
         self.directory = Path(self.temporary.name)
         self.registry = self.directory / "registry.json"
         self.registry.write_text(json.dumps({
-            "tags": {}, "manifests": {RAW_DIGEST: {}}, "writes": []}))
+            "tags": {}, "manifests": {RAW_DIGEST: {
+                "mediaType": "application/vnd.oci.image.manifest.v1+json"}}, "writes": []}))
         self.output = self.directory / "output"
         self.output.touch()
         for name, content in {
@@ -146,6 +147,66 @@ class ReleaseContractTest(unittest.TestCase):
         self.run_phase("prepare", success=False)
         self.run_phase("publish", success=False)
         self.assertEqual(self.state()["writes"], [])
+
+    def test_docker_manifest_cannot_silently_drop_index_annotations(self):
+        state = self.state()
+        state["manifests"][RAW_DIGEST]["mediaType"] = "application/vnd.docker.distribution.manifest.v2+json"
+        self.registry.write_text(json.dumps(state))
+        self.run_phase("publish", success=False)
+        self.assertEqual(self.state()["writes"], [])
+
+
+class ImageBuildContractTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+        self.script = self.directory / "core/docker/build.sh"
+        self.script.parent.mkdir(parents=True)
+        self.script.write_text((ROOT / "core/docker/build.sh").read_text())
+        self.calls = self.directory / "docker-arguments.json"
+        self.bin = self.directory / "bin"
+        self.bin.mkdir()
+        commands = {
+            self.directory / "mvnw": '#!/bin/sh\nprintf "test-version\\n"\n',
+            self.bin / "docker": '#!/usr/bin/env python3\nimport json, os, sys\nfrom pathlib import Path\nPath(os.environ["BUILD_ARGUMENTS"]).write_text(json.dumps(sys.argv[1:]))\n',
+        }
+        for name in ["cp", "tar", "mv", "rm"]:
+            commands[self.bin / name] = '#!/bin/sh\nexit 0\n'
+        for command, content in commands.items():
+            command.write_text(content)
+            command.chmod(0o755)
+        self.environment = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}",
+                                TMPDIR=str(self.directory), BUILD_ARGUMENTS=str(self.calls))
+
+    def build(self, *arguments):
+        return subprocess.run(["bash", str(self.script), *arguments], env=self.environment,
+                              capture_output=True, text=True)
+
+    def test_oci_publication_uses_registry_exporter(self):
+        reference = f"{REPOSITORY}:build-12345-1"
+        result = self.build("-a", "arm64", "-x", "-o", reference)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = json.loads(self.calls.read_text())
+        self.assertEqual(arguments[:2], ["buildx", "build"])
+        self.assertEqual(arguments[arguments.index("--output") + 1], "type=registry,oci-mediatypes=true")
+        self.assertIn("--provenance=false", arguments)
+        self.assertEqual(arguments[arguments.index("--tag") + 1], reference)
+        self.assertEqual(arguments[arguments.index("--platform") + 1], "linux/arm64")
+
+    def test_default_local_build_stays_local(self):
+        result = self.build("-a", "arm64", "-x")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        arguments = json.loads(self.calls.read_text())
+        self.assertEqual(arguments[0], "build")
+        self.assertNotIn("--output", arguments)
+        self.assertEqual(arguments[arguments.index("-t") + 1], "trino:test-version-arm64")
+
+    def test_oci_publication_rejects_multiple_architectures_and_local_tests(self):
+        for arguments in [("-x", "-o", "test"), ("-a", "arm64", "-o", "test")]:
+            with self.subTest(arguments=arguments):
+                self.assertNotEqual(self.build(*arguments).returncode, 0)
+        self.assertFalse(self.calls.exists())
 
 
 if __name__ == "__main__":

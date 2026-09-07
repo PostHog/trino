@@ -56,6 +56,9 @@ case "${1:-}" in
         if [[ -z "$digest" ]]; then
             [[ "${BUILD_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'Build digest is required for a new release'
             [[ "${GITHUB_RUN_ID:-}" =~ ^[0-9]+$ && "${GITHUB_RUN_ATTEMPT:-}" =~ ^[0-9]+$ ]] || fail 'Run identity is required'
+            timeout --kill-after=10s 30s docker buildx imagetools inspect --raw "$repository@$BUILD_DIGEST" |
+                jq -e '.mediaType == "application/vnd.oci.image.manifest.v1+json"' >/dev/null ||
+                fail 'The build must publish an OCI image manifest before adding index annotations'
             annotated_tag="build-metadata-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
             timeout --kill-after=10s 60s docker buildx imagetools create \
                 --annotation "index:org.opencontainers.image.source=$source_url" \

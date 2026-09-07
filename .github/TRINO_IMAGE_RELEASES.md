@@ -15,6 +15,13 @@ annotations. The ordered tag, full revision alias, and optional readable alias
 resolve to this same index digest. The existing charts state dispatch receives
 that digest and continues to run only after a push to `master`.
 
+The publisher uses a Buildx `docker-container` builder and the registry exporter
+with `oci-mediatypes=true`. The default local `core/docker/build.sh` behavior
+stays unchanged. The publisher rejects non-OCI image manifests before it adds
+annotations: Buildx does not add index annotations to Docker manifest lists.
+See the [Buildx index creation implementation](https://github.com/docker/buildx/blob/master/util/imagetools/create.go)
+and [BuildKit OCI exporter option](https://github.com/moby/buildkit/blob/master/exporter/containerimage/exptypes/keys.go).
+
 Retries and manual runs for an already published source revision reuse its
 verified ordered release digest and skip the build. They never replace that
 ordered tag. Registry read failures or incorrect provenance stop publication.
