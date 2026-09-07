@@ -11,198 +11,126 @@ from pathlib import Path
 SUITE_DIR = Path("testing/trino-product-tests/src/test/java/io/trino/tests/product/suite")
 SUITE_HELPERS = {"SuiteRunner", "SuiteTag"}
 
-# Suites this fork does not run. SuiteHdfsImpersonation stands up seven Kerberos
-# and HDFS impersonation environments, each a multi-container Hadoop stack, and
-# times out waiting for one of them often enough to fail on its own. Nothing this
-# fork ships reaches that code. Suites named here are left out of the matrix
-# instead of being reported as unwired.
-EXCLUDED_SUITES = frozenset({"SuiteHdfsImpersonation"})
-
-SUITES = [
+# This fork runs DuckLake's integration tests in plugin/trino-ducklake.
+# Retain product coverage of shared SQL, clients, security, fault tolerance,
+# compatibility, and Parquet. The excluded suites exercise other connectors
+# or storage backends. Keep exclusions explicit so new suites require review.
+EXCLUDED_SUITES = frozenset({
+    "SuiteAllConnectorsSmoke",
+    "SuiteAzure",
+    "SuiteBlackHole",
+    "SuiteCassandra",
+    "SuiteClickhouse",
+    "SuiteDeltaLakeAlluxioCaching",
+    "SuiteDeltaLakeDatabricks133",
+    "SuiteDeltaLakeDatabricks143",
+    "SuiteDeltaLakeDatabricks154",
+    "SuiteDeltaLakeDatabricks164",
+    "SuiteDeltaLakeDatabricks173",
+    "SuiteDeltaLakeDatabricks18",
+    "SuiteDeltaLakeFloci",
+    "SuiteDeltaLakeHdfs",
+    "SuiteDeltaLakeOss",
+    "SuiteExasol",
+    "SuiteGcs",
+    "SuiteHdfsImpersonation",
+    "SuiteHive4",
+    "SuiteHiveAlluxioCaching",
+    "SuiteHiveBasic",
+    "SuiteHiveSpark",
+    "SuiteHiveStorageFormats",
+    "SuiteHiveTransactional",
+    "SuiteHmsOnly",
+    "SuiteHudi",
+    "SuiteIceberg",
+    "SuiteIcebergVariants",
+    "SuiteIgnite",
+    "SuiteKafka",
+    "SuiteLoki",
     "SuiteMysql",
     "SuitePostgresql",
+    "SuiteRanger",
+    "SuiteSnowflake",
     "SuiteSqlServer",
+    "SuiteStorageFormatsDetailed",
+    "SuiteTwoHives",
+})
+
+SUITES = [
     "SuiteFunctions",
     "SuiteTpch",
     "SuiteTpcds",
-    "SuiteExasol",
-    "SuiteSnowflake",
-    "SuiteCassandra",
-    "SuiteClickhouse",
-    "SuiteBlackHole",
-    "SuiteAllConnectorsSmoke",
-    "SuiteIgnite",
-    "SuiteKafka",
     "SuiteLdap",
     "SuiteOauth2",
     "SuiteClients",
     "SuiteJdbcKerberos",
-    "SuiteLoki",
-    "SuiteRanger",
     "SuiteTls",
-    "SuiteHiveBasic",
-    "SuiteHmsOnly",
-    "SuiteHiveStorageFormats",
     "SuiteSqlCancel",
-    "SuiteTwoHives",
-    "SuiteHive4",
-    "SuiteHudi",
-    "SuiteHiveTransactional",
     "SuiteAuthorization",
     "SuiteFaultTolerant",
-    "SuiteHiveSpark",
-    "SuiteHiveAlluxioCaching",
-    "SuiteStorageFormatsDetailed",
     "SuiteParquet",
-    "SuiteIceberg",
-    "SuiteIcebergVariants",
-    "SuiteDeltaLakeFloci",
-    "SuiteDeltaLakeHdfs",
-    "SuiteDeltaLakeOss",
-    "SuiteDeltaLakeAlluxioCaching",
     "SuiteCompatibility",
-    "SuiteGcs",
-    "SuiteAzure",
-    "SuiteDeltaLakeDatabricks133",
-    "SuiteDeltaLakeDatabricks143",
-    "SuiteDeltaLakeDatabricks154",
-    "SuiteDeltaLakeDatabricks164",
-    "SuiteDeltaLakeDatabricks173",
-    "SuiteDeltaLakeDatabricks18",
 ]
 
 ALL_SUITES = frozenset(SUITES)
-ALL_CONNECTORS_SMOKE = frozenset({"SuiteAllConnectorsSmoke"})
-DATABRICKS_SUITES = frozenset({
-    "SuiteDeltaLakeDatabricks133",
-    "SuiteDeltaLakeDatabricks143",
-    "SuiteDeltaLakeDatabricks154",
-    "SuiteDeltaLakeDatabricks164",
-    "SuiteDeltaLakeDatabricks173",
-    "SuiteDeltaLakeDatabricks18",
-})
-DELTA_LAKE_SUITES = DATABRICKS_SUITES | {
-    "SuiteAzure",
-    "SuiteDeltaLakeAlluxioCaching",
-    "SuiteDeltaLakeFloci",
-    "SuiteDeltaLakeHdfs",
-    "SuiteDeltaLakeOss",
-    "SuiteGcs",
-}
-HIVE_SUITES = DATABRICKS_SUITES | {
-    "SuiteAuthorization",
-    "SuiteAzure",
-    "SuiteClients",
-    "SuiteCompatibility",
-    "SuiteDeltaLakeFloci",
-    "SuiteDeltaLakeHdfs",
-    "SuiteDeltaLakeOss",
-    "SuiteGcs",
-    "SuiteHive4",
-    "SuiteHiveAlluxioCaching",
-    "SuiteHiveBasic",
-    "SuiteHiveSpark",
-    "SuiteHiveStorageFormats",
-    "SuiteHiveTransactional",
-    "SuiteHmsOnly",
-    "SuiteHudi",
-    "SuiteIceberg",
-    "SuiteIcebergVariants",
-    "SuiteParquet",
-    "SuiteSqlCancel",
-    "SuiteStorageFormatsDetailed",
-    "SuiteTpcds",
-    "SuiteTpch",
-    "SuiteTwoHives",
-}
-ICEBERG_SUITES = {
-    "SuiteAzure",
-    "SuiteCompatibility",
-    "SuiteDeltaLakeFloci",
-    "SuiteGcs",
-    "SuiteHiveStorageFormats",
-    "SuiteHmsOnly",
-    "SuiteIceberg",
-    "SuiteIcebergVariants",
-    "SuiteStorageFormatsDetailed",
-}
-JDBC_CONNECTOR_SUITES = ALL_CONNECTORS_SMOKE | {
-    "SuiteClickhouse",
-    "SuiteClients",
-    "SuiteExasol",
-    "SuiteIgnite",
-    "SuiteMysql",
-    "SuitePostgresql",
-    "SuiteRanger",
-    "SuiteSnowflake",
-    "SuiteSqlServer",
-}
 
-# Only modules in this map are eligible for matrix filtering. The suites include secondary
-# connectors and services used by each environment, not only the connector named by the suite.
-# Any impacted module absent from this map causes a full run.
+# Include secondary connectors used by retained server-test environments.
+# Empty mappings avoid scheduling suites for unrelated connector changes;
+# unknown modules (including shared engine/libraries) still run all retained suites.
 MODULE_TO_SUITES = {
-    # The old product-test impact analysis was connector-oriented. Keep this first pass at the
-    # same level: shared libraries, clients, core, and other infrastructure cause a full run.
-    "plugin/trino-base-jdbc": JDBC_CONNECTOR_SUITES,
-    "plugin/trino-blob-cache-alluxio": {
-        "SuiteDeltaLakeAlluxioCaching",
-        "SuiteHiveAlluxioCaching",
-        "SuiteIcebergVariants",
-    },
+    "plugin/trino-base-jdbc": {"SuiteClients"},
+    "plugin/trino-blob-cache-alluxio": set(),
     "plugin/trino-exchange-filesystem": {"SuiteFaultTolerant"},
     "plugin/trino-example-jdbc": set(),
-    # No product-test environment loads the DuckLake connector, so a change confined
-    # to it needs no product tests at all.
     "plugin/trino-ducklake": set(),
-    "plugin/trino-spooling-filesystem": {"SuitePostgresql"},
-
-    # Connectors loaded by the all-connectors smoke environment, plus their focused suites.
-    "plugin/trino-bigquery": ALL_CONNECTORS_SMOKE,
-    "plugin/trino-blackhole": ALL_CONNECTORS_SMOKE | {"SuiteBlackHole"},
-    "plugin/trino-cassandra": ALL_CONNECTORS_SMOKE | {"SuiteCassandra"},
-    "plugin/trino-clickhouse": ALL_CONNECTORS_SMOKE | {"SuiteClickhouse"},
-    "plugin/trino-delta-lake": ALL_CONNECTORS_SMOKE | DELTA_LAKE_SUITES,
-    "plugin/trino-druid": ALL_CONNECTORS_SMOKE,
-    "plugin/trino-duckdb": ALL_CONNECTORS_SMOKE,
-    "plugin/trino-elasticsearch": ALL_CONNECTORS_SMOKE,
-    "plugin/trino-exasol": {"SuiteExasol"},
-    "plugin/trino-faker": ALL_CONNECTORS_SMOKE,
-    "plugin/trino-google-sheets": ALL_CONNECTORS_SMOKE,
-    "plugin/trino-hive": ALL_CONNECTORS_SMOKE | HIVE_SUITES,
-    "plugin/trino-hudi": ALL_CONNECTORS_SMOKE | {"SuiteHudi"},
-    "plugin/trino-iceberg": ALL_CONNECTORS_SMOKE | ICEBERG_SUITES,
-    "plugin/trino-ignite": ALL_CONNECTORS_SMOKE | {"SuiteIgnite"},
-    "plugin/trino-jmx": ALL_CONNECTORS_SMOKE | {
-        "SuiteDeltaLakeAlluxioCaching",
-        "SuiteHiveAlluxioCaching",
-        "SuiteIcebergVariants",
+    "plugin/trino-spooling-filesystem": set(),
+    "plugin/trino-bigquery": set(),
+    "plugin/trino-blackhole": set(),
+    "plugin/trino-cassandra": set(),
+    "plugin/trino-clickhouse": set(),
+    "plugin/trino-delta-lake": set(),
+    "plugin/trino-druid": set(),
+    "plugin/trino-duckdb": set(),
+    "plugin/trino-elasticsearch": set(),
+    "plugin/trino-exasol": set(),
+    "plugin/trino-faker": set(),
+    "plugin/trino-google-sheets": set(),
+    "plugin/trino-hive": {
+        "SuiteAuthorization",
+        "SuiteClients",
+        "SuiteCompatibility",
+        "SuiteParquet",
+        "SuiteSqlCancel",
+        "SuiteTpcds",
+        "SuiteTpch",
     },
-    "plugin/trino-kafka": ALL_CONNECTORS_SMOKE | {"SuiteKafka"},
-    "plugin/trino-loki": ALL_CONNECTORS_SMOKE | {"SuiteLoki"},
-    "plugin/trino-mariadb": ALL_CONNECTORS_SMOKE | {"SuiteMysql", "SuiteRanger"},
-    "plugin/trino-memory": ALL_CONNECTORS_SMOKE | {"SuiteClients", "SuiteJdbcKerberos"},
-    "plugin/trino-mongodb": ALL_CONNECTORS_SMOKE,
-    "plugin/trino-mysql": ALL_CONNECTORS_SMOKE | {"SuiteMysql"},
-    "plugin/trino-opensearch": ALL_CONNECTORS_SMOKE,
-    "plugin/trino-oracle": ALL_CONNECTORS_SMOKE,
-    "plugin/trino-pinot": ALL_CONNECTORS_SMOKE,
-    "plugin/trino-postgresql": ALL_CONNECTORS_SMOKE | {"SuiteClients", "SuitePostgresql"},
-    "plugin/trino-prometheus": ALL_CONNECTORS_SMOKE,
-    "plugin/trino-redis": ALL_CONNECTORS_SMOKE,
-    "plugin/trino-redshift": ALL_CONNECTORS_SMOKE,
-    "plugin/trino-singlestore": ALL_CONNECTORS_SMOKE,
-    "plugin/trino-snowflake": ALL_CONNECTORS_SMOKE | {"SuiteSnowflake"},
-    "plugin/trino-sqlserver": ALL_CONNECTORS_SMOKE | {"SuiteSqlServer"},
-    "plugin/trino-tpcds": ALL_CONNECTORS_SMOKE | {"SuiteFunctions", "SuiteParquet", "SuiteTpcds"},
-    "plugin/trino-thrift": ALL_CONNECTORS_SMOKE,
-    "plugin/trino-thrift-api": ALL_CONNECTORS_SMOKE,
-    "plugin/trino-thrift-testing-server": ALL_CONNECTORS_SMOKE,
-
-    # Security and function plugins exercised outside connector-named suites.
+    "plugin/trino-hudi": set(),
+    "plugin/trino-iceberg": {"SuiteCompatibility"},
+    "plugin/trino-ignite": set(),
+    "plugin/trino-jmx": set(),
+    "plugin/trino-kafka": set(),
+    "plugin/trino-loki": set(),
+    "plugin/trino-mariadb": set(),
+    "plugin/trino-memory": {"SuiteClients", "SuiteJdbcKerberos"},
+    "plugin/trino-mongodb": set(),
+    "plugin/trino-mysql": set(),
+    "plugin/trino-opensearch": set(),
+    "plugin/trino-oracle": set(),
+    "plugin/trino-pinot": set(),
+    "plugin/trino-postgresql": {"SuiteClients"},
+    "plugin/trino-prometheus": set(),
+    "plugin/trino-redis": set(),
+    "plugin/trino-redshift": set(),
+    "plugin/trino-singlestore": set(),
+    "plugin/trino-snowflake": set(),
+    "plugin/trino-sqlserver": set(),
+    "plugin/trino-tpcds": {"SuiteFunctions", "SuiteParquet", "SuiteTpcds"},
+    "plugin/trino-thrift": set(),
+    "plugin/trino-thrift-api": set(),
+    "plugin/trino-thrift-testing-server": set(),
     "plugin/trino-ldap-group-provider": {"SuiteLdap"},
     "plugin/trino-password-authenticators": {"SuiteLdap"},
-    "plugin/trino-ranger": {"SuiteRanger"},
+    "plugin/trino-ranger": set(),
     "plugin/trino-teradata-functions": {"SuiteFunctions"},
 }
 
@@ -307,58 +235,33 @@ def validate_configuration(suite_dir=SUITE_DIR):
 
 
 class TestBuildMatrix(unittest.TestCase):
-    def test_connector_only_change(self):
+    def test_unrelated_connector_changes_produce_empty_matrix(self):
+        for module in ("plugin/trino-mysql", "plugin/trino-kafka", "plugin/trino-delta-lake"):
+            with self.subTest(module=module):
+                self.assertEqual(build_matrix({module}), {})
+
+    def test_ducklake_has_its_own_maven_tests(self):
+        self.assertEqual(build_matrix({"plugin/trino-ducklake"}), {})
+
+    def test_secondary_connector_keeps_client_coverage(self):
         self.assertEqual(
-            build_matrix({"plugin/trino-mysql"}),
+            suites_from_matrix(build_matrix({"plugin/trino-postgresql"})),
+            {"SuiteClients"},
+        )
+
+    def test_hive_keeps_shared_server_and_parquet_coverage(self):
+        self.assertEqual(
+            suites_from_matrix(build_matrix({"plugin/trino-hive"})),
             {
-                "include": [
-                    {"suite": "SuiteMysql"},
-                    {"suite": "SuiteAllConnectorsSmoke"},
-                ],
+                "SuiteAuthorization", "SuiteClients", "SuiteCompatibility", "SuiteParquet",
+                "SuiteSqlCancel", "SuiteTpcds", "SuiteTpch",
             },
         )
 
-    def test_secondary_connector(self):
-        self.assertEqual(
-            build_matrix({"plugin/trino-mariadb"}),
-            {
-                "include": [
-                    {"suite": "SuiteMysql"},
-                    {"suite": "SuiteAllConnectorsSmoke"},
-                    {"suite": "SuiteRanger"},
-                ],
-            },
-        )
-
-    def test_shared_connector_module(self):
-        # GIB includes all downstream modules. trino-example-jdbc is understood to have no product suite.
-        impacted_modules = {
-            "plugin/trino-base-jdbc",
-            "plugin/trino-clickhouse",
-            "plugin/trino-druid",
-            "plugin/trino-duckdb",
-            "plugin/trino-example-jdbc",
-            "plugin/trino-exasol",
-            "plugin/trino-ignite",
-            "plugin/trino-mariadb",
-            "plugin/trino-mysql",
-            "plugin/trino-oracle",
-            "plugin/trino-postgresql",
-            "plugin/trino-redshift",
-            "plugin/trino-singlestore",
-            "plugin/trino-snowflake",
-            "plugin/trino-sqlserver",
-        }
-        matrix = build_matrix(impacted_modules)
-        selected_suites = suites_from_matrix(matrix)
-        self.assertEqual(selected_suites, JDBC_CONNECTOR_SUITES)
-
-    def test_multiple_understood_modules(self):
-        matrix = build_matrix({"plugin/trino-kafka", "plugin/trino-loki"})
-        self.assertEqual(
-            suites_from_matrix(matrix),
-            {"SuiteAllConnectorsSmoke", "SuiteKafka", "SuiteLoki"},
-        )
+    def test_excluded_suites_never_run_even_for_core_changes(self):
+        for impacted in (None, set(), {"core/trino-main"}, {"plugin/trino-new-connector"}):
+            with self.subTest(impacted=impacted):
+                self.assertFalse(suites_from_matrix(build_matrix(impacted)) & EXCLUDED_SUITES)
 
     def test_core_change_runs_full_matrix(self):
         self.assertEqual(build_matrix({"core/trino-main"}), build_matrix(None))

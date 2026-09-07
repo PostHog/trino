@@ -34,9 +34,7 @@ env:
   # used by actions/cache to retry the download after this time: https://github.com/actions/cache/blob/main/workarounds.md#cache-segment-restore-timeout
   SEGMENT_DOWNLOAD_TIMEOUT_MINS: 5
   # Neither carries a credential. Both are presence flags, read only by testing
-  # them for emptiness, and eighteen job-level `if:` conditions below depend on
-  # them. A job-level condition cannot see a step-level env, so scoping these
-  # any more narrowly would silently disable the jobs that read them.
+  # them for emptiness. Shared storage tests and test-result uploads use them.
   # nosemgrep: yaml.github-actions.security.gha-workflow-env-secret.gha-workflow-env-secret
   CI_SKIP_SECRETS_PRESENCE_CHECKS: ${{ secrets.CI_SKIP_SECRETS_PRESENCE_CHECKS }}
   # nosemgrep: yaml.github-actions.security.gha-workflow-env-secret.gha-workflow-env-secret
@@ -397,64 +395,40 @@ jobs:
       - name: Maven Tests
         id: tests
         run: |
+          # Platform modules not covered by the matrix. Keep this list explicit so
+          # unrelated plugins do not get tested by the catch-all job.
           $MAVEN test ${MAVEN_TEST} -pl '
-            !:trino-base-jdbc,
-            !:trino-bigquery,
-            !:trino-cassandra,
-            !:trino-clickhouse,
-            !:trino-delta-lake,
-            !:trino-docs,
-            !:trino-druid,
-            !:trino-duckdb,
-            !:trino-ducklake,
-            !:trino-elasticsearch,
-            !:trino-exasol,
-            !:trino-faker,
-            !:trino-faulttolerant-tests,
-            !:trino-filesystem,
-            !:trino-blob-cache-alluxio,
-            !:trino-blob-cache-memory,
-            !:trino-filesystem-azure,
-            !:trino-filesystem-gcs,
-            !:trino-filesystem-manager,
-            !:trino-filesystem-s3,
-            !:trino-geospatial,
-            !:trino-google-sheets,
-            !:trino-hdfs,
-            !:trino-hive,
-            !:trino-hive-formats,
-            !:trino-hudi,
-            !:trino-iceberg,
-            !:trino-ignite,
-            !:trino-jdbc,
-            !:trino-kafka,
-            !:trino-lakehouse,
-            !:trino-main,
-            !:trino-mariadb,
-            !:trino-memory,
-            !:trino-mongodb,
-            !:trino-mysql,
-            !:trino-openlineage,
-            !:trino-opensearch,
-            !:trino-oracle,
-            !:trino-orc,
-            !:trino-parquet,
-            !:trino-pinot,
-            !:trino-postgresql,
-            !:trino-posthog-catalogstore,
-            !:trino-redis,
-            !:trino-redshift,
-            !:trino-resource-group-managers,
-            !:trino-server-core,
-            !:trino-server,
-            !:trino-singlestore,
-            !:trino-snowflake,
-            !:trino-spi,
-            !:trino-sqlserver,
-            !:trino-test-jdbc-compatibility-old-server,
-            !:trino-tests,
-            !:trino-thrift,
-            !:trino-web-ui'
+            :trino-cli,
+            :trino-client,
+            :trino-grammar,
+            :trino-parser,
+            :trino-server-main,
+            :trino-array,
+            :trino-cache,
+            :trino-geospatial-epsg,
+            :trino-geospatial-epsg-generator,
+            :trino-geospatial-toolkit,
+            :trino-matching,
+            :trino-memory-context,
+            :trino-metastore,
+            :trino-plugin-toolkit,
+            :trino-record-decoder,
+            :trino-exchange-filesystem,
+            :trino-http-event-listener,
+            :trino-http-server-event-listener,
+            :trino-ldap-group-provider,
+            :trino-opa,
+            :trino-password-authenticators,
+            :trino-ranger,
+            :trino-session-property-managers,
+            :trino-spooling-filesystem,
+            :trino-tpcds,
+            :trino-tpch,
+            :trino-product-tests,
+            :trino-testing,
+            :trino-testing-containers,
+            :trino-testing-resources,
+            :trino-testing-services'
       - name: Upload test results
         uses: ./.github/actions/process-test-results
         if: always()
@@ -562,7 +536,6 @@ jobs:
         timeout-minutes: 15
         with:
           cache: restore
-          cleanup-node: ${{ format('{0}', matrix.modules == 'plugin/trino-singlestore' || matrix.modules == 'plugin/trino-exasol' || matrix.modules == 'plugin/trino-oracle' || matrix.modules == 'plugin/trino-iceberg' || matrix.modules == 'plugin/trino-lakehouse') }}
       - name: Maven Install
         run: |
           export MAVEN_OPTS="${MAVEN_INSTALL_OPTS}"
@@ -570,17 +543,7 @@ jobs:
       - name: Maven Tests
         id: tests
         if: >-
-          ! (contains(matrix.modules, 'trino-bigquery') && contains(matrix.profile, 'cloud-tests-2'))
-          && ! (contains(matrix.modules, 'trino-delta-lake') && contains(matrix.profile, 'cloud-tests'))
-          && ! (contains(matrix.modules, 'trino-google-sheets') && contains(matrix.profile, 'cloud-tests'))
-          && ! (contains(matrix.modules, 'trino-hive') && contains(matrix.profile, 'cloud-tests'))
-          && ! (contains(matrix.modules, 'trino-iceberg') && contains(matrix.profile, 'cloud-tests'))
-          && ! (contains(matrix.modules, 'trino-redshift') && contains(matrix.profile, 'cloud-tests'))
-          && ! (contains(matrix.modules, 'trino-redshift') && contains(matrix.profile, 'fte-tests'))
-          && ! (contains(matrix.modules, 'trino-snowflake') && contains(matrix.profile, 'cloud-tests'))
-          && ! (contains(matrix.modules, 'trino-exchange-filesystem') && contains(matrix.profile, 'cloud-tests'))
-          && ! (contains(matrix.modules, 'trino-filesystem-azure') && contains(matrix.profile, 'cloud-tests'))
-          && ! (contains(matrix.modules, 'trino-filesystem-gcs') && contains(matrix.profile, 'cloud-tests'))
+          ! (contains(matrix.modules, 'trino-hive') && contains(matrix.profile, 'cloud-tests'))
           && ! (contains(matrix.modules, 'trino-filesystem-s3') && contains(matrix.profile, 'cloud-tests'))
         run: $MAVEN test ${MAVEN_TEST} -pl "${MATRIX_MODULES}" ${MATRIX_PROFILE:+-P "${MATRIX_PROFILE}"}
       # Additional tests for selected modules
@@ -589,18 +552,6 @@ jobs:
         if: contains(matrix.modules, 'trino-hdfs')
         run: |
           $MAVEN test ${MAVEN_TEST} -pl :trino-hdfs -P test-isolated-jvm-suites
-      - name: FileSystem Exchange Storage Cloud Tests
-        id: tests-filesystem-exchange
-        env:
-          ABFS_FLAT_ACCOUNT: ${{ vars.AZURE_ABFS_FLAT_ACCOUNT }}
-          ABFS_FLAT_ACCESS_KEY: ${{ secrets.AZURE_ABFS_FLAT_ACCESS_KEY }}
-          ABFS_HIERARCHICAL_ACCOUNT: ${{ vars.AZURE_ABFS_HIERARCHICAL_ACCOUNT }}
-          ABFS_HIERARCHICAL_ACCESS_KEY: ${{ secrets.AZURE_ABFS_HIERARCHICAL_ACCESS_KEY }}
-        if: >-
-          contains(matrix.modules, 'trino-exchange-filesystem') && contains(matrix.profile, 'cloud-tests') &&
-          (env.CI_SKIP_SECRETS_PRESENCE_CHECKS != '' || env.ABFS_FLAT_ACCESS_KEY != '' || env.ABFS_HIERARCHICAL_ACCESS_KEY != '')
-        run: |
-          $MAVEN test ${MAVEN_TEST} -pl "${MATRIX_MODULES}" -P "${MATRIX_PROFILE}"
       - name: S3 FileSystem Cloud Tests
         id: tests-s3
         env:
@@ -624,31 +575,6 @@ jobs:
         # Cancelled workflows may not have cleaned up the ephemeral bucket
         if: always()
         run: .github/bin/s3/delete-s3-bucket.sh || true
-      - name: Azure FileSystem Cloud Tests
-        id: tests-azure
-        env:
-          ABFS_FLAT_ACCOUNT: ${{ vars.AZURE_ABFS_FLAT_ACCOUNT }}
-          ABFS_FLAT_ACCESS_KEY: ${{ secrets.AZURE_ABFS_FLAT_ACCESS_KEY }}
-          ABFS_HIERARCHICAL_ACCOUNT: ${{ vars.AZURE_ABFS_HIERARCHICAL_ACCOUNT }}
-          ABFS_HIERARCHICAL_ACCESS_KEY: ${{ secrets.AZURE_ABFS_HIERARCHICAL_ACCESS_KEY }}
-          ABFS_OAUTH_TENANT_ID: ${{ vars.AZURE_ABFS_OAUTH_TENANT_ID }}
-          ABFS_OAUTH_CLIENT_ID: ${{ vars.AZURE_ABFS_OAUTH_CLIENT_ID }}
-          ABFS_OAUTH_CLIENT_SECRET: ${{ secrets.AZURE_ABFS_OAUTH_CLIENT_SECRET }}
-        # Run tests only if any of the secrets are present
-        if: >-
-          contains(matrix.modules, 'trino-filesystem-azure') && contains(matrix.profile, 'cloud-tests') &&
-          (env.CI_SKIP_SECRETS_PRESENCE_CHECKS != '' || env.ABFS_FLAT_ACCESS_KEY != '' || env.ABFS_HIERARCHICAL_ACCESS_KEY != '' || env.ABFS_OAUTH_CLIENT_SECRET != '')
-        run: |
-          $MAVEN test ${MAVEN_TEST} -pl "${MATRIX_MODULES}" -P "${MATRIX_PROFILE}"
-      - name: GCS FileSystem Cloud Tests
-        id: tests-gcs
-        env:
-          GCP_CREDENTIALS_KEY: ${{ secrets.GCP_CREDENTIALS_KEY }}
-        if: >-
-          contains(matrix.modules, 'trino-filesystem-gcs') && contains(matrix.profile, 'cloud-tests') &&
-          (env.CI_SKIP_SECRETS_PRESENCE_CHECKS != '' || env.GCP_CREDENTIALS_KEY != '')
-        run: |
-          $MAVEN test ${MAVEN_TEST} -pl "${MATRIX_MODULES}" -P "${MATRIX_PROFILE}"
       - name: Cloud Hive Tests
         id: tests-hive
         env:
@@ -662,166 +588,6 @@ jobs:
           (env.CI_SKIP_SECRETS_PRESENCE_CHECKS != '' || env.AWS_SECRET_ACCESS_KEY != '')
         run: |
           $MAVEN test ${MAVEN_TEST} -pl :trino-hive -Pcloud-tests
-      - name: Cloud Delta Lake Tests
-        id: tests-delta
-      # Cloud tests are separate because they are time intensive, requiring cross-cloud network communication
-        env:
-          ABFS_CONTAINER: ${{ vars.AZURE_ABFS_HIERARCHICAL_CONTAINER }}
-          ABFS_ACCOUNT: ${{ vars.AZURE_ABFS_HIERARCHICAL_ACCOUNT }}
-          ABFS_ACCESSKEY: ${{ secrets.AZURE_ABFS_HIERARCHICAL_ACCESS_KEY }}
-          AWS_ACCESS_KEY_ID: ${{ vars.TRINO_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.TRINO_AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: ${{ vars.TRINO_AWS_REGION }}
-          S3_BUCKET: ${{ vars.TRINO_S3_BUCKET }}
-          GCP_CREDENTIALS_KEY: ${{ secrets.GCP_CREDENTIALS_KEY }}
-          GCP_STORAGE_BUCKET: ${{ vars.GCP_STORAGE_BUCKET }}
-        # Run tests if any of the secrets is present. Do not skip tests when one secret renamed, or secret name has a typo.
-        if: >-
-          contains(matrix.modules, 'trino-delta-lake') && contains(matrix.profile, 'cloud-tests') &&
-          (env.CI_SKIP_SECRETS_PRESENCE_CHECKS != '' || env.ABFS_ACCESSKEY != '' || env.AWS_SECRET_ACCESS_KEY != '' || env.GCP_CREDENTIALS_KEY != '')
-        run: |
-          $MAVEN test ${MAVEN_TEST} -P "${MATRIX_PROFILE}" -pl :trino-delta-lake \
-            -Dtesting.azure-abfs-container="${ABFS_CONTAINER}" \
-            -Dtesting.azure-abfs-account="${ABFS_ACCOUNT}" \
-            -Dtesting.azure-abfs-access-key="${ABFS_ACCESSKEY}" \
-            -Dtesting.gcp-storage-bucket="${GCP_STORAGE_BUCKET}" \
-            -Dtesting.gcp-credentials-key="${GCP_CREDENTIALS_KEY}"
-      - name: Cloud BigQuery Tests
-        id: tests-bq
-        env:
-          BIGQUERY_CREDENTIALS_KEY: ${{ secrets.BIGQUERY_CREDENTIALS_KEY }}
-          BIGQUERY_CASE_INSENSITIVE_CREDENTIALS_KEY: ${{ secrets.BIGQUERY_CASE_INSENSITIVE_CREDENTIALS_KEY }}
-          GCP_STORAGE_BUCKET: ${{ vars.GCP_STORAGE_BUCKET }}
-          BIGQUERY_TESTING_BIGLAKE_CONNECTION_ID: ${{ vars.BIGQUERY_TESTING_BIGLAKE_CONNECTION_ID }}
-          BIGQUERY_TESTING_PROJECT_ID: ${{ vars.BIGQUERY_TESTING_PROJECT_ID }}
-          BIGQUERY_TESTING_PARENT_PROJECT_ID: ${{ vars.BIGQUERY_TESTING_PARENT_PROJECT_ID }}
-        if: matrix.modules == 'plugin/trino-bigquery' && !contains(matrix.profile, 'cloud-tests-2') && (env.CI_SKIP_SECRETS_PRESENCE_CHECKS != '' || env.BIGQUERY_CREDENTIALS_KEY != '')
-        run: |
-          $MAVEN test ${MAVEN_TEST} -pl :trino-bigquery -Pcloud-tests-1 \
-            -Dtesting.bigquery.credentials-key="${BIGQUERY_CREDENTIALS_KEY}" \
-            -Dtesting.bigquery-case-insensitive.credentials-key="${BIGQUERY_CASE_INSENSITIVE_CREDENTIALS_KEY}" \
-            -Dtesting.gcp-storage-bucket="${GCP_STORAGE_BUCKET}" \
-            -Dtesting.bigquery-connection-id="${BIGQUERY_TESTING_BIGLAKE_CONNECTION_ID}" \
-            -Dtesting.bigquery-project-id="${BIGQUERY_TESTING_PROJECT_ID}" \
-            -Dtesting.bigquery-parent-project-id="${BIGQUERY_TESTING_PARENT_PROJECT_ID}"
-      - name: Cloud BigQuery Smoke Tests
-        id: tests-bq-smoke
-        env:
-          BIGQUERY_CREDENTIALS_KEY: ${{ secrets.BIGQUERY_CREDENTIALS_KEY }}
-          GCP_STORAGE_BUCKET: ${{ vars.GCP_STORAGE_BUCKET }}
-        if: matrix.modules == 'plugin/trino-bigquery' && contains(matrix.profile, 'cloud-tests-2') && (env.CI_SKIP_SECRETS_PRESENCE_CHECKS != '' || env.BIGQUERY_CREDENTIALS_KEY != '')
-        run: |
-          $MAVEN test ${MAVEN_TEST} -pl :trino-bigquery -Pcloud-tests-2 \
-            -Dtesting.bigquery.credentials-key="${BIGQUERY_CREDENTIALS_KEY}" \
-            -Dtesting.gcp-storage-bucket="${GCP_STORAGE_BUCKET}" \
-            -Dtesting.alternate-bq-project-id=bigquery-cicd-alternate
-      - name: Cloud Snowflake Tests
-        id: tests-snowflake
-        env:
-          SNOWFLAKE_URL: ${{ vars.SNOWFLAKE_URL }}
-          SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER }}
-          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
-          SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DATABASE }}
-          SNOWFLAKE_ROLE: ${{ vars.SNOWFLAKE_ROLE }}
-          SNOWFLAKE_WAREHOUSE: ${{ vars.SNOWFLAKE_WAREHOUSE }}
-        if: matrix.modules == 'plugin/trino-snowflake' && contains(matrix.profile, 'cloud-tests') && (env.CI_SKIP_SECRETS_PRESENCE_CHECKS != '' || env.SNOWFLAKE_PASSWORD != '')
-        run: |
-          $MAVEN test ${MAVEN_TEST} -pl :trino-snowflake -Pcloud-tests \
-            -Dsnowflake.test.server.url="${SNOWFLAKE_URL}" \
-            -Dsnowflake.test.server.user="${SNOWFLAKE_USER}" \
-            -Dsnowflake.test.server.password="${SNOWFLAKE_PASSWORD}" \
-            -Dsnowflake.test.server.database="${SNOWFLAKE_DATABASE}" \
-            -Dsnowflake.test.server.role="${SNOWFLAKE_ROLE}" \
-            -Dsnowflake.test.server.warehouse="${SNOWFLAKE_WAREHOUSE}"
-      - name: Iceberg Cloud Tests
-        id: tests-iceberg
-        env:
-          AWS_ACCESS_KEY_ID: ${{ vars.TRINO_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.TRINO_AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: ${{ vars.TRINO_AWS_REGION }}
-          S3_BUCKET: ${{ vars.TRINO_S3_BUCKET }}
-          S3_TABLES_BUCKET: ${{ vars.TRINO_S3_TABLES_BUCKET }}
-          GCP_CREDENTIALS_KEY: ${{ secrets.GCP_CREDENTIALS_KEY }}
-          GCP_STORAGE_BUCKET: ${{ vars.GCP_STORAGE_BUCKET }}
-          ABFS_CONTAINER: ${{ vars.AZURE_ABFS_HIERARCHICAL_CONTAINER }}
-          ABFS_ACCOUNT: ${{ vars.AZURE_ABFS_HIERARCHICAL_ACCOUNT }}
-          ABFS_ACCESS_KEY: ${{ secrets.AZURE_ABFS_HIERARCHICAL_ACCESS_KEY }}
-          SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER }}
-          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
-          SNOWFLAKE_URL: ${{ vars.SNOWFLAKE_URL }}
-          SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DATABASE }}
-          SNOWFLAKE_CATALOG_SCHEMA: ${{ vars.SNOWFLAKE_CATALOG_SCHEMA }}
-          SNOWFLAKE_ROLE: ${{ vars.SNOWFLAKE_ROLE }}
-          SNOWFLAKE_WAREHOUSE: ${{ vars.SNOWFLAKE_WAREHOUSE }}
-          SNOWFLAKE_CATALOG_S3_ACCESS_KEY_ID: ${{ vars.SNOWFLAKE_CATALOG_S3_ACCESS_KEY_ID }}
-          SNOWFLAKE_CATALOG_S3_SECRET_ACCESS_KEY: ${{ secrets.SNOWFLAKE_CATALOG_S3_SECRET_ACCESS_KEY }}
-          SNOWFLAKE_EXTERNAL_VOLUME: ${{ vars.SNOWFLAKE_EXTERNAL_VOLUME }}
-          SNOWFLAKE_CATALOG_S3_REGION: ${{ vars.SNOWFLAKE_CATALOG_S3_REGION }}
-        if: >-
-          contains(matrix.modules, 'trino-iceberg') && contains(matrix.profile, 'cloud-tests') &&
-          (env.CI_SKIP_SECRETS_PRESENCE_CHECKS != '' || env.AWS_SECRET_ACCESS_KEY != '' || env.GCP_CREDENTIALS_KEY != '')
-        run: |
-          $MAVEN test ${MAVEN_TEST} -pl :trino-iceberg -P "${MATRIX_PROFILE}" \
-            -Dtesting.gcp-storage-bucket="${GCP_STORAGE_BUCKET}" \
-            -Dtesting.gcp-credentials-key="${GCP_CREDENTIALS_KEY}" \
-            -Dtesting.azure-abfs-container="${ABFS_CONTAINER}" \
-            -Dtesting.azure-abfs-account="${ABFS_ACCOUNT}" \
-            -Dtesting.azure-abfs-access-key="${ABFS_ACCESS_KEY}" \
-            -Dtesting.snowflake.catalog.user="${SNOWFLAKE_USER}" \
-            -Dtesting.snowflake.catalog.password="${SNOWFLAKE_PASSWORD}" \
-            -Dtesting.snowflake.catalog.account-url="${SNOWFLAKE_URL}" \
-            -Dtesting.snowflake.catalog.database="${SNOWFLAKE_DATABASE}" \
-            -Dtesting.snowflake.catalog.schema="${SNOWFLAKE_CATALOG_SCHEMA}" \
-            -Dtesting.snowflake.catalog.role="${SNOWFLAKE_ROLE}" \
-            -Dtesting.snowflake.catalog.warehouse="${SNOWFLAKE_WAREHOUSE}" \
-            -Dtesting.snowflake.catalog.s3.access-key="${SNOWFLAKE_CATALOG_S3_ACCESS_KEY_ID}" \
-            -Dtesting.snowflake.catalog.s3.secret-key="${SNOWFLAKE_CATALOG_S3_SECRET_ACCESS_KEY}" \
-            -Dtesting.snowflake.catalog.s3.external.volume="${SNOWFLAKE_EXTERNAL_VOLUME}" \
-            -Dtesting.snowflake.catalog.s3.region="${SNOWFLAKE_CATALOG_S3_REGION}"
-      - name: Cloud Google Sheets Tests
-        id: tests-google-sheets
-        env:
-          SHEETS_CREDENTIALS_KEY: ${{ secrets.SHEETS_CREDENTIALS_KEY }}
-        if: contains(matrix.modules, 'trino-google-sheets') && contains(matrix.profile, 'cloud-tests') && (env.CI_SKIP_SECRETS_PRESENCE_CHECKS != '' || env.SHEETS_CREDENTIALS_KEY != '')
-        run: |
-          $MAVEN test ${MAVEN_TEST} -pl :trino-google-sheets -Pcloud-tests \
-            -Dtesting.gsheets.credentials-key="${SHEETS_CREDENTIALS_KEY}"
-      - name: Cloud Redshift Tests ${{ matrix.profile }}
-        id: tests-redshift
-        env:
-          AWS_REGION: ${{ vars.REDSHIFT_AWS_REGION }}
-          AWS_ACCESS_KEY_ID: ${{ vars.REDSHIFT_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.REDSHIFT_AWS_SECRET_ACCESS_KEY }}
-          REDSHIFT_SUBNET_GROUP_NAME: ${{ vars.REDSHIFT_SUBNET_GROUP_NAME }}
-          REDSHIFT_IAM_ROLES: ${{ vars.REDSHIFT_IAM_ROLES }}
-          REDSHIFT_VPC_SECURITY_GROUP_IDS: ${{ vars.REDSHIFT_VPC_SECURITY_GROUP_IDS }}
-          REDSHIFT_S3_TPCH_TABLES_ROOT: ${{ vars.REDSHIFT_S3_TPCH_TABLES_ROOT }}
-          REDSHIFT_S3_UNLOAD_ROOT: ${{ vars.REDSHIFT_S3_UNLOAD_ROOT }}
-        if: >-
-          contains(matrix.modules, 'trino-redshift') &&
-          (contains(matrix.profile, 'cloud-tests') || contains(matrix.profile, 'fte-tests')) &&
-          (env.CI_SKIP_SECRETS_PRESENCE_CHECKS != '' || env.AWS_SECRET_ACCESS_KEY != '')
-        run: |
-          source .github/bin/redshift/setup-aws-redshift.sh
-
-          $MAVEN test ${MAVEN_TEST} -pl "${MATRIX_MODULES}" -P "${MATRIX_PROFILE}" \
-            -Dtest.redshift.jdbc.user="${REDSHIFT_USER}" \
-            -Dtest.redshift.jdbc.password="${REDSHIFT_PASSWORD}" \
-            -Dtest.redshift.jdbc.endpoint="${REDSHIFT_ENDPOINT}:${REDSHIFT_PORT}/" \
-            -Dtest.redshift.s3.tpch.tables.root="${REDSHIFT_S3_TPCH_TABLES_ROOT}" \
-            -Dtest.redshift.s3.unload.root="${REDSHIFT_S3_UNLOAD_ROOT}" \
-            -Dtest.redshift.iam.role="${REDSHIFT_IAM_ROLES}" \
-            -Dtest.redshift.aws.region="${AWS_REGION}" \
-            -Dtest.redshift.aws.access-key="${AWS_ACCESS_KEY_ID}" \
-            -Dtest.redshift.aws.secret-key="${AWS_SECRET_ACCESS_KEY}"
-      - name: Cleanup ephemeral Redshift Cluster
-        env:
-          AWS_REGION: ${{ vars.REDSHIFT_AWS_REGION }}
-          AWS_ACCESS_KEY_ID: ${{ vars.REDSHIFT_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.REDSHIFT_AWS_SECRET_ACCESS_KEY }}
-        # Cancelled workflows may have left the ephemeral cluster running
-        if: always()
-        run: .github/bin/redshift/delete-aws-redshift.sh
       - name: Sanitize artifact name
         if: always()
         run: |
@@ -840,17 +606,7 @@ jobs:
             ${{ steps.tests.outcome == 'failure'
               || steps.tests-hdfs-isolated.outcome == 'failure'
               || steps.tests-s3.outcome == 'failure'
-              || steps.tests-azure.outcome == 'failure'
-              || steps.tests-filesystem-exchange.outcome == 'failure'
-              || steps.tests-gcs.outcome == 'failure'
               || steps.tests-hive.outcome == 'failure'
-              || steps.tests-delta.outcome == 'failure'
-              || steps.tests-bq.outcome == 'failure'
-              || steps.tests-bq-smoke.outcome == 'failure'
-              || steps.tests-google-sheets.outcome == 'failure'
-              || steps.tests-iceberg.outcome == 'failure'
-              || steps.tests-redshift.outcome == 'failure'
-              || steps.tests-snowflake.outcome == 'failure'
             }}
           upload-heap-dump: ${{ env.SECRETS_PRESENT == '' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
       - name: Update PR check
@@ -1005,30 +761,6 @@ jobs:
         shell: bash
         env:
           TRINO_PRODUCT_TESTS_IMAGE: "trino:for-product-tests"
-          ABFS_CONTAINER: ${{ vars.AZURE_ABFS_HIERARCHICAL_CONTAINER }}
-          ABFS_ACCOUNT: ${{ vars.AZURE_ABFS_HIERARCHICAL_ACCOUNT }}
-          ABFS_ACCESS_KEY: ${{ secrets.AZURE_ABFS_HIERARCHICAL_ACCESS_KEY }}
-          S3_BUCKET: ${{ vars.TRINO_S3_BUCKET }}
-          AWS_REGION: ${{ vars.TRINO_AWS_REGION }}
-          TRINO_AWS_ACCESS_KEY_ID: ${{ vars.TRINO_AWS_ACCESS_KEY_ID }}
-          TRINO_AWS_SECRET_ACCESS_KEY: ${{ secrets.TRINO_AWS_SECRET_ACCESS_KEY }}
-          DATABRICKS_122_JDBC_URL: ${{ vars.DATABRICKS_122_JDBC_URL }}
-          DATABRICKS_133_JDBC_URL: ${{ vars.DATABRICKS_133_JDBC_URL }}
-          DATABRICKS_143_JDBC_URL: ${{ vars.DATABRICKS_143_JDBC_URL }}
-          DATABRICKS_154_JDBC_URL: ${{ vars.DATABRICKS_154_JDBC_URL }}
-          DATABRICKS_164_JDBC_URL: ${{ vars.DATABRICKS_164_JDBC_URL }}
-          DATABRICKS_173_JDBC_URL: ${{ vars.DATABRICKS_173_JDBC_URL }}
-          DATABRICKS_18_JDBC_URL: ${{ vars.DATABRICKS_18_JDBC_URL }}
-          DATABRICKS_LOGIN: token
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-          GCP_CREDENTIALS_KEY: ${{ secrets.GCP_CREDENTIALS_KEY }}
-          GCP_STORAGE_BUCKET: ${{ vars.GCP_STORAGE_BUCKET }}
-          SNOWFLAKE_URL: ${{ vars.SNOWFLAKE_URL }}
-          SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER }}
-          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
-          SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DATABASE }}
-          SNOWFLAKE_ROLE: ${{ vars.SNOWFLAKE_ROLE }}
-          SNOWFLAKE_WAREHOUSE: ${{ vars.SNOWFLAKE_WAREHOUSE }}
         run: |
           mkdir -p logs
 
@@ -1040,7 +772,6 @@ jobs:
 
           declare -a suite_results=()
           declare -a suite_totals=()
-          declare -a skipped_suites=()
           echo "## pt ${MATRIX_SUITE}" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
@@ -1052,74 +783,6 @@ jobs:
             echo "### ${suite}" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
 
-            availability_env=""
-            required_env=()
-            case "${suite}" in
-              SuiteGcs)
-                availability_env=GCP_CREDENTIALS_KEY
-                required_env+=(GCP_CREDENTIALS_KEY GCP_STORAGE_BUCKET)
-                ;;
-              SuiteAzure)
-                availability_env=ABFS_ACCESS_KEY
-                required_env+=(ABFS_CONTAINER ABFS_ACCOUNT ABFS_ACCESS_KEY)
-                ;;
-              SuiteSnowflake)
-                availability_env=SNOWFLAKE_PASSWORD
-                required_env+=(SNOWFLAKE_URL SNOWFLAKE_USER SNOWFLAKE_PASSWORD SNOWFLAKE_DATABASE SNOWFLAKE_ROLE SNOWFLAKE_WAREHOUSE)
-                ;;
-              SuiteDeltaLakeDatabricks133)
-                availability_env=DATABRICKS_TOKEN
-                required_env+=(S3_BUCKET AWS_REGION TRINO_AWS_ACCESS_KEY_ID TRINO_AWS_SECRET_ACCESS_KEY DATABRICKS_TOKEN DATABRICKS_133_JDBC_URL)
-                ;;
-              SuiteDeltaLakeDatabricks143)
-                availability_env=DATABRICKS_TOKEN
-                required_env+=(S3_BUCKET AWS_REGION TRINO_AWS_ACCESS_KEY_ID TRINO_AWS_SECRET_ACCESS_KEY DATABRICKS_TOKEN DATABRICKS_143_JDBC_URL)
-                ;;
-              SuiteDeltaLakeDatabricks154)
-                availability_env=DATABRICKS_TOKEN
-                required_env+=(S3_BUCKET AWS_REGION TRINO_AWS_ACCESS_KEY_ID TRINO_AWS_SECRET_ACCESS_KEY DATABRICKS_TOKEN DATABRICKS_154_JDBC_URL)
-                ;;
-              SuiteDeltaLakeDatabricks164)
-                availability_env=DATABRICKS_TOKEN
-                required_env+=(S3_BUCKET AWS_REGION TRINO_AWS_ACCESS_KEY_ID TRINO_AWS_SECRET_ACCESS_KEY DATABRICKS_TOKEN DATABRICKS_164_JDBC_URL)
-                ;;
-              SuiteDeltaLakeDatabricks173)
-                availability_env=DATABRICKS_TOKEN
-                required_env+=(S3_BUCKET AWS_REGION TRINO_AWS_ACCESS_KEY_ID TRINO_AWS_SECRET_ACCESS_KEY DATABRICKS_TOKEN DATABRICKS_173_JDBC_URL)
-                ;;
-              SuiteDeltaLakeDatabricks18)
-                availability_env=DATABRICKS_TOKEN
-                required_env+=(S3_BUCKET AWS_REGION TRINO_AWS_ACCESS_KEY_ID TRINO_AWS_SECRET_ACCESS_KEY DATABRICKS_TOKEN DATABRICKS_18_JDBC_URL)
-                ;;
-            esac
-
-            if [ -n "${availability_env}" ] && [ -z "${!availability_env:-}" ] && [ -z "${CI_SKIP_SECRETS_PRESENCE_CHECKS:-}" ]; then
-              suite_results+=("${suite}:SKIPPED")
-              suite_totals+=("${suite}:missing availability credential: ${availability_env}")
-              skipped_suites+=("${suite}")
-              echo "- Result: SKIPPED (missing availability credential: ${availability_env})" >> "$GITHUB_STEP_SUMMARY"
-              echo "" >> "$GITHUB_STEP_SUMMARY"
-              continue
-            fi
-
-            if [ "${#required_env[@]}" -gt 0 ]; then
-              missing_env=()
-              for env_name in "${required_env[@]}"; do
-                if [ -z "${!env_name:-}" ]; then
-                  missing_env+=("${env_name}")
-                fi
-              done
-              if [ "${#missing_env[@]}" -gt 0 ]; then
-                failed=1
-                failed_suites+=("${suite}")
-                suite_results+=("${suite}:FAILED")
-                suite_totals+=("${suite}:missing required env: ${missing_env[*]}")
-                echo "Missing required env: ${missing_env[*]}" > "${log_file}"
-                echo "- Result: FAILED (missing required env: ${missing_env[*]})" >> "$GITHUB_STEP_SUMMARY"
-                echo "" >> "$GITHUB_STEP_SUMMARY"
-                continue
-              fi
-            fi
             set +e
             java \
               -Xmx512M \
