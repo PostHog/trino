@@ -15,6 +15,7 @@ Builds the Trino Docker image
 -j       Build the Trino release with specified JDK distribution
 -x       Skip image tests
 -o       Publish a single-platform OCI image to this full image reference (requires -x)
+         Set OCI_SOURCE and OCI_REVISION to identify the source of the published image
 EOF
 }
 
@@ -145,7 +146,9 @@ for arch in "${ARCHITECTURES[@]}"; do
     output_arguments=(-t "${TAG}-$arch")
     if [[ -n "$OCI_IMAGE" ]]; then
         build_command=(docker buildx build)
-        output_arguments=(--output type=registry,oci-mediatypes=true --provenance=false --tag "$OCI_IMAGE")
+        output_arguments=(--output type=registry,oci-mediatypes=true --provenance=false --tag "$OCI_IMAGE"
+            --annotation "manifest:org.opencontainers.image.source=${OCI_SOURCE:?}"
+            --annotation "manifest:org.opencontainers.image.revision=${OCI_REVISION:?}")
     fi
     "${build_command[@]}" \
         "${WORK_DIR}" \

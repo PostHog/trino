@@ -10,7 +10,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / ".github/bin/trino-release.sh"
-REPOSITORY = "ghcr.io/posthog/trino"
+REPOSITORY = "795637471508.dkr.ecr.us-east-1.amazonaws.com/posthog-trino"
+MIRROR = "ghcr.io/posthog/trino"
 RAW_DIGEST = "sha256:" + "1" * 64
 RELEASE_DIGEST = "sha256:" + "2" * 64
 
@@ -32,15 +33,24 @@ if args[:3] == ["buildx", "imagetools", "inspect"]:
     if not digest:
         print("manifest unknown", file=sys.stderr)
         sys.exit(1)
+    if reference in state.get("readback_mismatch", []):
+        digest = "sha256:" + "3" * 64
     print(json.dumps(state["manifests"][digest] if "--raw" in args else digest))
 elif args[:3] == ["buildx", "imagetools", "create"]:
     target = args[args.index("--tag") + 1]
+    if target in state.get("fail_targets", []):
+        print("registry temporarily unavailable", file=sys.stderr)
+        sys.exit(1)
+    if target.startswith("795637471508.") and target in state["tags"]:
+        print("ImageTagAlreadyExistsException", file=sys.stderr)
+        sys.exit(1)
     digest = args[-1].split("@", 1)[1]
     if "--annotation" in args:
         digest = "sha256:" + "2" * 64
         annotations = dict(args[i + 1].removeprefix("index:").split("=", 1)
                            for i, item in enumerate(args) if item == "--annotation")
-        state["manifests"][digest] = {"annotations": annotations}
+        state["manifests"][digest] = {"annotations": annotations,
+            "mediaType": "application/vnd.oci.image.index.v1+json"}
     state["tags"][target] = digest
     state["writes"].append(target)
     path.write_text(json.dumps(state))
@@ -75,6 +85,11 @@ class ReleaseContractTest(unittest.TestCase):
                                 GITHUB_REPOSITORY="PostHog/trino", GITHUB_REF="refs/heads/master",
                                 GITHUB_EVENT_NAME="push", GITHUB_SHA=self.sha,
                                 GITHUB_RUN_ID="12345", GITHUB_RUN_ATTEMPT="1", BUILD_DIGEST=RAW_DIGEST)
+        state = self.state()
+        state["manifests"][RAW_DIGEST]["annotations"] = {
+            "org.opencontainers.image.source": "https://github.com/PostHog/trino",
+            "org.opencontainers.image.revision": self.sha}
+        self.registry.write_text(json.dumps(state))
 
     def run_phase(self, phase, success=True):
         result = subprocess.run(["bash", str(SCRIPT), phase], cwd=ROOT,
@@ -92,6 +107,8 @@ class ReleaseContractTest(unittest.TestCase):
         state = self.state()
         self.assertEqual(state["tags"][f"{REPOSITORY}:{self.tag}"], RELEASE_DIGEST)
         self.assertEqual(state["tags"][f"{REPOSITORY}:{self.sha}"], RELEASE_DIGEST)
+        self.assertEqual(state["tags"][f"{MIRROR}:{self.tag}"], RELEASE_DIGEST)
+        self.assertEqual(state["tags"][f"{MIRROR}:{self.sha}"], RELEASE_DIGEST)
         self.assertEqual(state["manifests"][RELEASE_DIGEST]["annotations"], {
             "org.opencontainers.image.source": "https://github.com/PostHog/trino",
             "org.opencontainers.image.revision": self.sha})
@@ -103,7 +120,9 @@ class ReleaseContractTest(unittest.TestCase):
         self.run_phase("publish")
         state = self.state()
         self.assertEqual(state["writes"].count(f"{REPOSITORY}:{self.tag}"), 1)
-        self.assertEqual(state["tags"][f"{REPOSITORY}:test-release"], RELEASE_DIGEST)
+        self.assertEqual(state["tags"][f"{MIRROR}:test-release"], RELEASE_DIGEST)
+        self.assertNotIn(f"{REPOSITORY}:test-release", state["tags"])
+        self.assertEqual(state["writes"].count(f"{REPOSITORY}:{self.sha}"), 1)
 
     def test_rejects_untrusted_refs_events_and_source_mismatch(self):
         for key, value in [("GITHUB_REF", "refs/heads/feature"),
@@ -155,6 +174,79 @@ class ReleaseContractTest(unittest.TestCase):
         self.run_phase("publish", success=False)
         self.assertEqual(self.state()["writes"], [])
 
+    def test_partial_ecr_publication_recovers_ghcr_without_building(self):
+        state = self.state()
+        state["fail_targets"] = [f"{MIRROR}:{self.tag}"]
+        self.registry.write_text(json.dumps(state))
+        self.run_phase("publish", success=False)
+        self.assertNotIn("digest=", self.output.read_text())
+        state = self.state()
+        self.assertEqual(state["tags"][f"{REPOSITORY}:{self.tag}"], RELEASE_DIGEST)
+        state["fail_targets"] = []
+        self.registry.write_text(json.dumps(state))
+        self.environment["BUILD_DIGEST"] = ""
+        self.run_phase("prepare")
+        self.assertIn(f"digest={RELEASE_DIGEST}\n", self.output.read_text())
+        self.run_phase("publish")
+        state = self.state()
+        self.assertEqual(state["tags"][f"{MIRROR}:{self.sha}"], RELEASE_DIGEST)
+        self.assertEqual(state["writes"].count(f"{REPOSITORY}:{self.tag}"), 1)
+        self.assertEqual(state["writes"].count(f"{REPOSITORY}:{self.sha}"), 1)
+
+    def test_partial_raw_build_recovers_before_ordered_release(self):
+        state = self.state()
+        state["tags"][f"{REPOSITORY}:build-{self.sha}"] = RAW_DIGEST
+        state["fail_targets"] = [f"{REPOSITORY}:{self.tag}"]
+        self.registry.write_text(json.dumps(state))
+        self.run_phase("publish", success=False)
+        self.run_phase("prepare")
+        self.assertIn(f"digest=\nbuild-digest={RAW_DIGEST}\n", self.output.read_text())
+        state = self.state()
+        state["fail_targets"] = []
+        self.registry.write_text(json.dumps(state))
+        self.run_phase("publish")
+        self.assertEqual(self.state()["tags"][f"{MIRROR}:{self.tag}"], RELEASE_DIGEST)
+
+    def test_staged_build_requires_matching_source_provenance(self):
+        state = self.state()
+        state["tags"][f"{REPOSITORY}:build-{self.sha}"] = RAW_DIGEST
+        state["manifests"][RAW_DIGEST]["annotations"]["org.opencontainers.image.revision"] = "a" * 40
+        self.registry.write_text(json.dumps(state))
+        self.run_phase("prepare", success=False)
+        self.run_phase("publish", success=False)
+        self.assertEqual(self.state()["writes"], [])
+
+    def test_immutable_alias_conflict_does_not_overwrite(self):
+        for repository in [REPOSITORY, MIRROR]:
+            with self.subTest(repository=repository):
+                state = self.state()
+                target = f"{repository}:{self.sha}"
+                state["tags"][target] = RAW_DIGEST
+                self.registry.write_text(json.dumps(state))
+                self.run_phase("publish", success=False)
+                state = self.state()
+                self.assertEqual(state["tags"][target], RAW_DIGEST)
+                self.assertNotIn(target, state["writes"])
+                del state["tags"][target]
+                self.registry.write_text(json.dumps(state))
+
+    def test_ghcr_readback_mismatch_prevents_state_output(self):
+        state = self.state()
+        state["readback_mismatch"] = [f"{MIRROR}:{self.tag}"]
+        self.registry.write_text(json.dumps(state))
+        self.run_phase("publish", success=False)
+        self.assertEqual(self.output.read_text(), "")
+
+    def test_readable_ghcr_alias_can_move_but_ecr_stays_immutable(self):
+        state = self.state()
+        state["tags"][f"{MIRROR}:latest"] = RAW_DIGEST
+        self.registry.write_text(json.dumps(state))
+        self.environment["READABLE_TAG"] = "latest"
+        self.run_phase("publish")
+        state = self.state()
+        self.assertEqual(state["tags"][f"{MIRROR}:latest"], RELEASE_DIGEST)
+        self.assertNotIn(f"{REPOSITORY}:latest", state["tags"])
+
 
 class ImageBuildContractTest(unittest.TestCase):
     def setUp(self):
@@ -177,7 +269,8 @@ class ImageBuildContractTest(unittest.TestCase):
             command.write_text(content)
             command.chmod(0o755)
         self.environment = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}",
-                                TMPDIR=str(self.directory), BUILD_ARGUMENTS=str(self.calls))
+                                TMPDIR=str(self.directory), BUILD_ARGUMENTS=str(self.calls),
+                                OCI_SOURCE="https://github.com/PostHog/trino", OCI_REVISION="a" * 40)
 
     def build(self, *arguments):
         return subprocess.run(["bash", str(self.script), *arguments], env=self.environment,
@@ -193,6 +286,8 @@ class ImageBuildContractTest(unittest.TestCase):
         self.assertIn("--provenance=false", arguments)
         self.assertEqual(arguments[arguments.index("--tag") + 1], reference)
         self.assertEqual(arguments[arguments.index("--platform") + 1], "linux/arm64")
+        self.assertIn("manifest:org.opencontainers.image.source=https://github.com/PostHog/trino", arguments)
+        self.assertIn("manifest:org.opencontainers.image.revision=" + "a" * 40, arguments)
 
     def test_default_local_build_stays_local(self):
         result = self.build("-a", "arm64", "-x")

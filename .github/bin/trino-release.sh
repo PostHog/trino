@@ -14,8 +14,10 @@ fail() { printf '%s\n' "$*" >&2; exit 1; }
 position="$(git rev-list --first-parent --count HEAD)"
 [[ "$position" =~ ^[1-9][0-9]{0,11}$ ]] || fail 'Source position is outside the release tag range'
 printf -v ordered_tag 'r%012d-%.6s' "$position" "$GITHUB_SHA"
-repository=ghcr.io/posthog/trino
+repository=795637471508.dkr.ecr.us-east-1.amazonaws.com/posthog-trino
+mirror=ghcr.io/posthog/trino
 source_url=https://github.com/PostHog/trino
+build_tag="build-$GITHUB_SHA"
 
 scratch="$(mktemp -d)"
 trap 'rm -r "$scratch"' EXIT
@@ -25,27 +27,59 @@ inspect_digest() {
         --format '{{json .Manifest.Digest}}' "$1" | jq -er 'select(test("^sha256:[0-9a-f]{64}$"))'
 }
 
-existing_release() {
+existing_digest() {
+    local reference=$1
     local digest
-    if digest="$(inspect_digest "$repository:$ordered_tag" 2> "$scratch/inspect-error")"; then
-        timeout --kill-after=10s 30s docker buildx imagetools inspect --raw "$repository@$digest" |
-            jq -e --arg revision "$GITHUB_SHA" --arg source "$source_url" '
-                .annotations["org.opencontainers.image.revision"] == $revision and
-                .annotations["org.opencontainers.image.source"] == $source
-            ' >/dev/null || fail 'Existing ordered release has invalid provenance'
+    if digest="$(inspect_digest "$reference" 2> "$scratch/inspect-error")"; then
         printf '%s\n' "$digest"
     elif grep -Eqi 'manifest unknown' "$scratch/inspect-error" ||
-        grep -Fqx "ERROR: $repository:$ordered_tag: not found" "$scratch/inspect-error"; then
+        grep -Fqx "ERROR: $reference: not found" "$scratch/inspect-error"; then
         return 0
     else
-        fail 'Cannot determine whether the ordered release exists'
+        fail "Cannot determine whether $reference exists"
     fi
+}
+
+verify_manifest() {
+    timeout --kill-after=10s 30s docker buildx imagetools inspect --raw "$1" |
+        jq -e --arg revision "$GITHUB_SHA" --arg source "$source_url" --arg media_type "$2" '
+            .mediaType == $media_type and
+            .annotations["org.opencontainers.image.revision"] == $revision and
+            .annotations["org.opencontainers.image.source"] == $source
+        ' >/dev/null || fail 'Image has invalid media type or source provenance'
+}
+
+existing_release() {
+    local digest
+    digest="$(existing_digest "$repository:$ordered_tag")"
+    if [[ -n "$digest" ]]; then
+        verify_manifest "$repository@$digest" application/vnd.oci.image.index.v1+json
+        printf '%s\n' "$digest"
+    fi
+}
+
+ensure_alias() {
+    local target=$1 digest=$2 replace=${3:-false}
+    local existing
+    existing="$(existing_digest "$target")"
+    [[ "$existing" != "$digest" ]] || return 0
+    [[ -z "$existing" || "$replace" == true ]] || fail "Immutable alias already contains a different image: $target"
+    timeout --kill-after=10s 600s docker buildx imagetools create --prefer-index=false \
+        --tag "$target" "$repository@$digest"
+    [[ "$(inspect_digest "$target")" == "$digest" ]] || fail 'Alias read-back does not match release'
 }
 
 case "${1:-}" in
     prepare)
         digest="$(existing_release)"
-        printf 'ordered-tag=%s\ndigest=%s\n' "$ordered_tag" "$digest" >> "${GITHUB_OUTPUT:?}"
+        build_digest=
+        if [[ -z "$digest" ]]; then
+            build_digest="$(existing_digest "$repository:$build_tag")"
+            if [[ -n "$build_digest" ]]; then
+                verify_manifest "$repository@$build_digest" application/vnd.oci.image.manifest.v1+json
+            fi
+        fi
+        printf 'ordered-tag=%s\ndigest=%s\nbuild-digest=%s\n' "$ordered_tag" "$digest" "$build_digest" >> "${GITHUB_OUTPUT:?}"
         ;;
     publish)
         readable_tag="${READABLE_TAG:-$GITHUB_SHA}"
@@ -55,27 +89,24 @@ case "${1:-}" in
         digest="$(existing_release)"
         if [[ -z "$digest" ]]; then
             [[ "${BUILD_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]] || fail 'Build digest is required for a new release'
-            [[ "${GITHUB_RUN_ID:-}" =~ ^[0-9]+$ && "${GITHUB_RUN_ATTEMPT:-}" =~ ^[0-9]+$ ]] || fail 'Run identity is required'
-            timeout --kill-after=10s 30s docker buildx imagetools inspect --raw "$repository@$BUILD_DIGEST" |
-                jq -e '.mediaType == "application/vnd.oci.image.manifest.v1+json"' >/dev/null ||
-                fail 'The build must publish an OCI image manifest before adding index annotations'
-            annotated_tag="build-metadata-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            verify_manifest "$repository@$BUILD_DIGEST" application/vnd.oci.image.manifest.v1+json
             timeout --kill-after=10s 60s docker buildx imagetools create \
                 --annotation "index:org.opencontainers.image.source=$source_url" \
                 --annotation "index:org.opencontainers.image.revision=$GITHUB_SHA" \
-                --tag "$repository:$annotated_tag" "$repository@$BUILD_DIGEST"
-            digest="$(inspect_digest "$repository:$annotated_tag")"
-            timeout --kill-after=10s 60s docker buildx imagetools create --prefer-index=false \
-                --tag "$repository:$ordered_tag" "$repository@$digest"
-            [[ "$(existing_release)" == "$digest" ]] || fail 'Ordered release read-back does not match the build'
+                --tag "$repository:$ordered_tag" "$repository@$BUILD_DIGEST"
+            digest="$(existing_release)"
+            [[ -n "$digest" ]] || fail 'Ordered release was not published'
         fi
 
-        # Keep legacy aliases on the same verified artifact as the ordered tag.
-        for tag in "$GITHUB_SHA" "$readable_tag"; do
-            timeout --kill-after=10s 60s docker buildx imagetools create --prefer-index=false \
-                --tag "$repository:$tag" "$repository@$digest"
-            [[ "$(inspect_digest "$repository:$tag")" == "$digest" ]] || fail 'Legacy alias read-back does not match release'
-        done
+        ensure_alias "$repository:$GITHUB_SHA" "$digest"
+        ensure_alias "$mirror:$ordered_tag" "$digest"
+        ensure_alias "$mirror:$GITHUB_SHA" "$digest"
+        if [[ "$readable_tag" != "$GITHUB_SHA" ]]; then
+            ensure_alias "$mirror:$readable_tag" "$digest" true
+        fi
+        verify_manifest "$mirror@$digest" application/vnd.oci.image.index.v1+json
+        [[ "$(inspect_digest "$repository:$ordered_tag")" == "$digest" ]] || fail 'ECR release changed during publication'
+        [[ "$(inspect_digest "$mirror:$ordered_tag")" == "$digest" ]] || fail 'GHCR release does not match ECR'
         printf 'digest=%s\n' "$digest" >> "${GITHUB_OUTPUT:?}"
         ;;
     *) fail 'Expected prepare or publish' ;;
