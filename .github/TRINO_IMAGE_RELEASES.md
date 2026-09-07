@@ -42,8 +42,9 @@ Registry read failures or incorrect provenance stop publication. Do not delete
 an ordered tag to force a rebuild; publish a new source commit instead.
 
 Before merging, apply the separate infrastructure change that creates the
-fully immutable ECR repository and the master-only publisher role. Set the
-repository Actions secret `AWS_ECR_PUBLISH_IAM_ROLE` to
+fully immutable ECR repository and the master-only publisher role. Configure the
+organization Actions secret `AWS_ECR_PUBLISH_IAM_ROLE` with the publisher role ARN
+and grant this repository access:
 `arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-trino-publish-role`. This is an operator
 setup step, not a change performed by this workflow. The workflow masks the AWS
 account ID in logs and does not store its registry address in source. OIDC trust must
