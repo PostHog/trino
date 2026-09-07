@@ -21,6 +21,7 @@ import io.trino.testing.QueryRunner;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -31,6 +32,8 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.google.common.collect.MoreCollectors.onlyElement;
+import static io.trino.plugin.ducklake.TestingDuckLakeCatalog.PASSWORD;
+import static io.trino.plugin.ducklake.TestingDuckLakeCatalog.USER;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.abort;
 
@@ -675,6 +678,38 @@ final class TestDuckLakeReads
         // other columns of the table are readable
         assertQuery("SELECT v FROM mapped_hive", "VALUES 'hello'");
         assertQuery("SELECT count(*) FROM mapped_hive", "VALUES 1");
+    }
+
+    @Test
+    void testPhysicalInputIncludesDeleteFiles()
+            throws SQLException
+    {
+        long expectedBytes;
+        try (Connection connection = DriverManager.getConnection(catalog.jdbcUrl(), USER, PASSWORD);
+                Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery(
+                        """
+                        SELECT sum(file_size_bytes)
+                        FROM (
+                            SELECT f.file_size_bytes
+                            FROM ducklake_data_file f JOIN ducklake_table t USING (table_id)
+                            WHERE t.table_name = 'deletes_table' AND f.end_snapshot IS NULL
+                            UNION ALL
+                            SELECT f.file_size_bytes
+                            FROM ducklake_delete_file f JOIN ducklake_table t USING (table_id)
+                            WHERE t.table_name = 'deletes_table' AND f.end_snapshot IS NULL
+                        ) files
+                        """)) {
+            assertThat(result.next()).isTrue();
+            expectedBytes = result.getLong(1);
+        }
+        // Each small data file is read whole, as is its current delete file. Assert the engine's
+        // query statistic, which is the value exported in query-completed events.
+        assertQueryStats(
+                withMaxSplitSize(WHOLE_FILE_SPLIT_SIZE),
+                "SELECT sum(id) FROM deletes_table",
+                stats -> assertThat(stats.getPhysicalInputDataSize().toBytes()).isEqualTo(expectedBytes),
+                result -> assertThat(result.getOnlyValue()).isEqualTo(126L));
     }
 
     @Test
