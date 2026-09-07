@@ -432,6 +432,29 @@ def run_tests(_, leftover_args: list[str]):
 class TestBuild(unittest.TestCase):
     maxDiff = None
 
+    def test_fork_ci_keeps_ducklake_and_shared_coverage(self):
+        with Path(".github/schedule-config.yml").open() as stream:
+            configs = load_schedule_configs(stream)
+        matrix = build_matrix_json(configs, set(), {"event_name": "merge_group"})
+        modules = {module for item in matrix["include"] for module in item["modules"].split(",")}
+        self.assertTrue({
+            "plugin/trino-ducklake", "plugin/trino-posthog-catalogstore",
+            "core/trino-main", "core/trino-spi", "testing/trino-tests",
+            "plugin/trino-hive", "lib/trino-parquet", "lib/trino-filesystem-s3",
+        } <= modules)
+        self.assertFalse({
+            "plugin/trino-iceberg", "plugin/trino-delta-lake", "plugin/trino-postgresql",
+            "plugin/trino-duckdb", "lib/trino-filesystem-azure", "lib/trino-filesystem-gcs",
+        } & modules)
+        for event_name in ("pull_request", "merge_group", "repository_dispatch"):
+            with self.subTest(event_name=event_name):
+                impacted = {"plugin/trino-ducklake"}
+                matrix = build_matrix_json(configs, impacted, {"event_name": event_name})
+                self.assertEqual(
+                    [item["modules"] for item in matrix["include"]],
+                    ["plugin/trino-ducklake"],
+                )
+
     def test_load_schedule_configs(self):
         configs = textwrap.dedent("""
                                  - { modules: [a], profile: b }
