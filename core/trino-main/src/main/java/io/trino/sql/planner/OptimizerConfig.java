@@ -84,6 +84,7 @@ public class OptimizerConfig
     private boolean predicatePushdownUseTableProperties = true;
     private boolean ignoreDownstreamPreferences;
     private boolean rewriteFilteringSemiJoinToInnerJoin = true;
+    private boolean fuseCountDistinct;
     private boolean optimizeDuplicateInsensitiveJoins = true;
     private boolean useLegacyWindowFilterPushdown;
     private boolean useTableScanNodePartitioning = true;
@@ -625,6 +626,19 @@ public class OptimizerConfig
     public OptimizerConfig setRewriteFilteringSemiJoinToInnerJoin(boolean rewriteFilteringSemiJoinToInnerJoin)
     {
         this.rewriteFilteringSemiJoinToInnerJoin = rewriteFilteringSemiJoinToInnerJoin;
+        return this;
+    }
+
+    public boolean isFuseCountDistinct()
+    {
+        return fuseCountDistinct;
+    }
+
+    @Config("optimizer.fuse-count-distinct")
+    @ConfigDescription("Fuse final single-key distinct aggregation with its count")
+    public OptimizerConfig setFuseCountDistinct(boolean fuseCountDistinct)
+    {
+        this.fuseCountDistinct = fuseCountDistinct;
         return this;
     }
 

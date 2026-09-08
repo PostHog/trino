@@ -116,6 +116,23 @@ The number of possible join orders scales factorially with the number of
 relations, so increasing this value can cause serious performance issues.
 :::
 
+## `optimizer.fuse-count-distinct`
+
+- **Type:** {ref}`prop-type-boolean`
+- **Default value:** `false`
+- **Session property:** `fuse_count_distinct`
+
+Enables an experimental execution path that counts the groups in a final
+single-key distinct hash aggregation without materializing the distinct keys
+into output pages. It supports a global `count(key)` or `count(*)` immediately
+above that aggregation and preserves exact equality and null semantics.
+
+Spill-enabled sessions, streaming or partial distinct aggregations, and unsupported
+aggregation shapes retain their existing execution paths. This optimization does
+not reduce input reads, exchange traffic, or the memory needed to retain distinct
+keys. Representative performance validation is required before enabling it by
+default.
+
 ## `optimizer.optimize-duplicate-insensitive-joins`
 
 - **Type:** {ref}`prop-type-boolean`

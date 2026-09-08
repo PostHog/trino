@@ -13,6 +13,7 @@
  */
 package io.trino.sql.planner;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Throwables;
 import com.google.common.base.VerifyException;
 import com.google.common.cache.CacheBuilder;
@@ -51,6 +52,7 @@ import io.trino.metadata.TableExecuteHandle;
 import io.trino.metadata.TableHandle;
 import io.trino.operator.AggregationOperator.AggregationOperatorFactory;
 import io.trino.operator.AssignUniqueIdOperator;
+import io.trino.operator.CountDistinctOperator.CountDistinctOperatorFactory;
 import io.trino.operator.DevNullOperator.DevNullOperatorFactory;
 import io.trino.operator.DirectExchangeClientSupplier;
 import io.trino.operator.DistinctLimitOperator.DistinctLimitOperatorFactory;
@@ -337,6 +339,7 @@ import static io.trino.SystemSessionProperties.isAdaptivePartialAggregationEnabl
 import static io.trino.SystemSessionProperties.isColumnarFilterEvaluationEnabled;
 import static io.trino.SystemSessionProperties.isEnableDynamicRowFiltering;
 import static io.trino.SystemSessionProperties.isForceSpillingOperator;
+import static io.trino.SystemSessionProperties.isFuseCountDistinct;
 import static io.trino.SystemSessionProperties.isSpillEnabled;
 import static io.trino.cache.CacheUtils.uncheckedCacheGet;
 import static io.trino.cache.SafeCaches.buildNonEvictableCache;
@@ -873,6 +876,35 @@ public class LocalExecutionPlanner
         {
             return partitionedSourceOrder;
         }
+    }
+
+    @VisibleForTesting
+    static boolean canFuseCountDistinct(Session session, AggregationNode node)
+    {
+        // Keep streaming and spillable aggregations on their existing paths. In particular,
+        // never count a partial distinct aggregation: the same key can recur after a flush.
+        if (!isFuseCountDistinct(session)
+                || isSpillEnabled(session)
+                || !node.hasSingleGlobalAggregation()
+                || !node.getStep().isInputRaw()
+                || node.getAggregations().size() != 1
+                || !(node.getSource() instanceof AggregationNode distinct)
+                || distinct.getStep().isOutputPartial()
+                || distinct.isStreamable()
+                || !distinct.getAggregations().isEmpty()
+                || distinct.getGroupingSetCount() != 1
+                || distinct.getGroupingKeys().size() != 1
+                || distinct.getGroupIdSymbol().isPresent()) {
+            return false;
+        }
+        Aggregation count = getOnlyElement(node.getAggregations().values());
+        return count.getResolvedFunction().signature().getName().equals(builtinFunctionName("count"))
+                && !count.isDistinct()
+                && count.getFilter().isEmpty()
+                && count.getMask().isEmpty()
+                && count.getOrderingScheme().isEmpty()
+                && (count.getArguments().isEmpty()
+                || count.getArguments().equals(ImmutableList.of(getOnlyElement(distinct.getGroupingKeys()).toSymbolReference())));
     }
 
     private class Visitor
@@ -1967,6 +1999,20 @@ public class LocalExecutionPlanner
         @Override
         public PhysicalOperation visitAggregation(AggregationNode node, LocalExecutionPlanContext context)
         {
+            if (canFuseCountDistinct(session, node)) {
+                AggregationNode distinct = (AggregationNode) node.getSource();
+                Symbol key = getOnlyElement(distinct.getGroupingKeys());
+                PhysicalOperation source = distinct.getSource().accept(this, context);
+                Aggregation count = getOnlyElement(node.getAggregations().values());
+                OperatorFactory operatorFactory = new CountDistinctOperatorFactory(
+                        context.getNextOperatorId(),
+                        node.getId(),
+                        key.type(),
+                        source.getLayout().get(key),
+                        count.getArguments().isEmpty(),
+                        hashStrategyCompiler);
+                return new PhysicalOperation(operatorFactory, makeLayout(node), source);
+            }
             PhysicalOperation source = node.getSource().accept(this, context);
 
             if (node.getGroupingKeys().isEmpty()) {
