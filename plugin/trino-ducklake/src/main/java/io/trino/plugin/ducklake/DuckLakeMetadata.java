@@ -922,7 +922,7 @@ public class DuckLakeMetadata
     }
 
     @Override
-    public void finishMerge(
+    public Optional<ConnectorOutputMetadata> finishMerge(
             ConnectorSession session,
             ConnectorMergeTableHandle mergeTableHandle,
             List<ConnectorTableHandle> sourceTableHandles,
@@ -946,7 +946,7 @@ public class DuckLakeMetadata
         }
         List<DuckLakeDataFile> dataFiles = insertedFiles.build();
         if (dataFiles.isEmpty() && removedPositionsByDataFile.isEmpty()) {
-            return;
+            return Optional.empty();
         }
 
         List<RewrittenDeletes> rewrittenDeletes = rewriteDeleteFiles(session, target, removedPositionsByDataFile);
@@ -969,6 +969,7 @@ public class DuckLakeMetadata
             }
             return null;
         });
+        return Optional.empty();
     }
 
     /**
