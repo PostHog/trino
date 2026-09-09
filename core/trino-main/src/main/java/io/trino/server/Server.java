@@ -32,7 +32,6 @@ import io.airlift.log.Logger;
 import io.airlift.log.TerminalColors;
 import io.airlift.node.NodeModule;
 import io.airlift.openmetrics.JmxOpenMetricsModule;
-import io.airlift.tracing.TracingModule;
 import io.airlift.units.Duration;
 import io.trino.cache.CacheManagerModule;
 import io.trino.cache.CacheManagerRegistry;
@@ -56,6 +55,7 @@ import io.trino.server.security.HeaderAuthenticatorManager;
 import io.trino.server.security.PasswordAuthenticatorManager;
 import io.trino.server.security.ServerSecurityModule;
 import io.trino.server.security.oauth2.OAuth2Client;
+import io.trino.tracing.TrinoTracingModule;
 import io.trino.transaction.TransactionManagerModule;
 import io.trino.util.EmbedVersion;
 import org.weakref.jmx.guice.MBeanModule;
@@ -113,7 +113,7 @@ public class Server
                 .add(new PrefixObjectNameGeneratorModule("io.trino"))
                 .add(new ServerMainModule(trinoVersion))
                 .add(new ServerSecurityModule())
-                .add(new TracingModule("trino", trinoVersion))
+                .add(new TrinoTracingModule("trino", trinoVersion))
                 .add(new TransactionManagerModule())
                 .add(new WarningCollectorModule())
                 .addAll(getAdditionalModules())
