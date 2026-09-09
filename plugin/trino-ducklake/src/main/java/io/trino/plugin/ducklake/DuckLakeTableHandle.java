@@ -14,11 +14,14 @@
 package io.trino.plugin.ducklake;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.google.common.collect.ImmutableSet;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.predicate.TupleDomain;
 
+import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 
 import static java.util.Objects.requireNonNull;
 
@@ -35,7 +38,8 @@ public record DuckLakeTableHandle(
         String tableLocation,
         TupleDomain<DuckLakeColumnHandle> enforcedConstraint,
         TupleDomain<DuckLakeColumnHandle> unenforcedConstraint,
-        OptionalLong rowCount)
+        OptionalLong rowCount,
+        Optional<Set<DuckLakeColumnHandle>> projectedColumns)
         implements ConnectorTableHandle
 {
     public DuckLakeTableHandle
@@ -46,6 +50,34 @@ public record DuckLakeTableHandle(
         requireNonNull(enforcedConstraint, "enforcedConstraint is null");
         requireNonNull(unenforcedConstraint, "unenforcedConstraint is null");
         requireNonNull(rowCount, "rowCount is null");
+        projectedColumns = requireNonNull(projectedColumns, "projectedColumns is null").map(ImmutableSet::copyOf);
+    }
+
+    public DuckLakeTableHandle(
+            String schemaName,
+            String tableName,
+            long tableId,
+            long snapshotId,
+            String tableLocation,
+            TupleDomain<DuckLakeColumnHandle> enforcedConstraint,
+            TupleDomain<DuckLakeColumnHandle> unenforcedConstraint,
+            OptionalLong rowCount)
+    {
+        this(schemaName, tableName, tableId, snapshotId, tableLocation, enforcedConstraint, unenforcedConstraint, rowCount, Optional.empty());
+    }
+
+    public DuckLakeTableHandle withProjectedColumns(Set<DuckLakeColumnHandle> columns)
+    {
+        return new DuckLakeTableHandle(
+                schemaName,
+                tableName,
+                tableId,
+                snapshotId,
+                tableLocation,
+                enforcedConstraint,
+                unenforcedConstraint,
+                rowCount,
+                Optional.of(columns));
     }
 
     public DuckLakeTableHandle withRowCount(long rowCount)
@@ -58,7 +90,8 @@ public record DuckLakeTableHandle(
                 tableLocation,
                 enforcedConstraint,
                 unenforcedConstraint,
-                OptionalLong.of(rowCount));
+                OptionalLong.of(rowCount),
+                projectedColumns);
     }
 
     @JsonIgnore

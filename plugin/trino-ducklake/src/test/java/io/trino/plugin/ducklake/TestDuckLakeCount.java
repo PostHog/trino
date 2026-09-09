@@ -37,13 +37,11 @@ final class TestDuckLakeCount
         extends AbstractTestQueryFramework
 {
     /**
-     * Larger than any fixture file, so every file is read by a single split whose record count is
-     * the exact number of rows of the file.
+     * Larger than the compressed row groups of any fixture file.
      */
     private static final String WHOLE_FILE_SPLIT_SIZE = "1GB";
     /**
-     * Small enough to split a fixture file into several byte ranges, none of which knows how many
-     * rows it holds.
+     * Small enough to assign every fixture row group to its own split.
      */
     private static final String TINY_SPLIT_SIZE = "1kB";
 
@@ -93,7 +91,7 @@ final class TestDuckLakeCount
                 "INSERT INTO counts_double_delete SELECT range, 'v' || range FROM range(0, 10)",
                 "DELETE FROM counts_double_delete WHERE id = 1",
 
-                // many rows in one file, so that a small split size cuts it into byte ranges
+                // many rows in one file, so that a small split size produces many row-group splits
                 "CALL lake.set_option('parquet_row_group_size', 2048)",
                 "CREATE TABLE counts_row_groups (id BIGINT, v VARCHAR)",
                 "INSERT INTO counts_row_groups SELECT range, 'v' || range FROM range(0, 20000)");
@@ -205,11 +203,10 @@ final class TestDuckLakeCount
     }
 
     /**
-     * A file cut into byte ranges only knows a share of its rows per range, so those splits read
-     * the file rather than counting from the catalog. The count still has to come out right.
+     * Metadata-only counts do not plan or read row groups, regardless of the split target.
      */
     @Test
-    void testCountOverSplitFiles()
+    void testCountOverRowGroupFilesReadsNoData()
     {
         Session session = Session.builder(getSession())
                 .setSystemProperty(ALLOW_PUSHDOWN_INTO_CONNECTORS, "false")
@@ -218,7 +215,7 @@ final class TestDuckLakeCount
         assertQueryStats(
                 session,
                 "SELECT count(*) FROM counts_row_groups",
-                queryStats -> assertThat(queryStats.getPhysicalInputDataSize().toBytes()).isPositive(),
+                queryStats -> assertThat(queryStats.getPhysicalInputDataSize().toBytes()).isEqualTo(0),
                 result -> assertThat(onlyValue(result)).isEqualTo(20000L));
     }
 

@@ -13,7 +13,12 @@
  */
 package io.trino.plugin.ducklake;
 
+import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
+import io.trino.filesystem.local.LocalFileSystem;
+import io.trino.parquet.ParquetReaderOptions;
+import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
+import io.trino.spi.SplitWeight;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
 import org.intellij.lang.annotations.Language;
@@ -33,6 +38,8 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.stream.Stream;
 
 import static com.google.common.collect.MoreCollectors.onlyElement;
@@ -42,8 +49,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.abort;
 
 /**
- * Covers the footer size the catalog records for a data file: what it counts, and the read the
- * connector saves by passing it to the Parquet reader.
+ * Covers the footer size the catalog records for a data file: what it counts, the coordinator
+ * planning read it controls, and the absence of repeated footer reads on workers.
  */
 final class TestDuckLakeFooterSize
         extends AbstractTestQueryFramework
@@ -155,11 +162,11 @@ final class TestDuckLakeFooterSize
     }
 
     /**
-     * A footer longer than the length the reader guesses is fetched once, at the size the catalog
-     * records, rather than fetched short and fetched again.
+     * A footer longer than the length the reader guesses is fetched once by split planning, at the
+     * size the catalog records. Workers receive the selected row-group metadata and read no footer.
      */
     @Test
-    void testLongFooterIsReadOnce()
+    void testLongFooterIsReadOnceDuringPlanning()
             throws Exception
     {
         DataFile dataFile = onlyDataFile("wide");
@@ -170,19 +177,19 @@ final class TestDuckLakeFooterSize
                 .describedAs("a file read whole into memory never reads its footer on its own")
                 .isGreaterThan(SMALL_FILE_THRESHOLD);
 
+        assertThat(planningReadBytes(dataFile)).isEqualTo(dataFile.footerSize() + POST_SCRIPT_SIZE);
         assertQueryStats(
                 onlyFooterRead(),
                 // no row group holds a negative id, so all of them are pruned by the statistics in
                 // the footer and the only bytes read are the footer itself
                 "SELECT max(id) FROM wide WHERE id < 0",
-                queryStats -> assertThat(queryStats.getPhysicalInputDataSize().toBytes())
-                        .isEqualTo(dataFile.footerSize() + POST_SCRIPT_SIZE),
+                queryStats -> assertThat(queryStats.getPhysicalInputDataSize().toBytes()).isEqualTo(0),
                 result -> assertThat(result.getOnlyValue()).isNull());
     }
 
     /**
-     * Without a footer size in the catalog the reader falls back to guessing, which costs it the
-     * discarded first read. Nothing else changes, which is what makes the size a hint.
+     * Without a footer size in the catalog planning falls back to guessing, which costs it the
+     * discarded first read. Workers still receive metadata and do not repeat either read.
      */
     @Test
     void testLongFooterWithoutCatalogSizeIsReadTwice()
@@ -192,11 +199,11 @@ final class TestDuckLakeFooterSize
         assertThat(dataFile.footerSize()).isEqualTo(0);
         long footerBytes = metadataLength(dataFile.path()) + POST_SCRIPT_SIZE;
 
+        assertThat(planningReadBytes(dataFile)).isEqualTo(DEFAULT_FOOTER_READ_SIZE + footerBytes);
         assertQueryStats(
                 onlyFooterRead(),
                 "SELECT max(id) FROM wide_without_footer_size WHERE id < 0",
-                queryStats -> assertThat(queryStats.getPhysicalInputDataSize().toBytes())
-                        .isEqualTo(DEFAULT_FOOTER_READ_SIZE + footerBytes),
+                queryStats -> assertThat(queryStats.getPhysicalInputDataSize().toBytes()).isEqualTo(0),
                 result -> assertThat(result.getOnlyValue()).isNull());
     }
 
@@ -252,6 +259,33 @@ final class TestDuckLakeFooterSize
         List<DataFile> dataFiles = dataFiles(tableName);
         assertThat(dataFiles).hasSize(1);
         return dataFiles.getFirst();
+    }
+
+    private long planningReadBytes(DataFile dataFile)
+            throws IOException
+    {
+        Path relativePath = catalog.dataPath().relativize(dataFile.path());
+        DuckLakeSplit file = new DuckLakeSplit(
+                1,
+                "local:///" + relativePath,
+                0,
+                dataFile.fileSizeBytes(),
+                dataFile.fileSizeBytes(),
+                dataFile.footerSize() == 0 ? OptionalLong.empty() : OptionalLong.of(dataFile.footerSize()),
+                1,
+                OptionalLong.empty(),
+                Optional.empty(),
+                ImmutableMap.of(),
+                Optional.empty(),
+                SplitWeight.standard());
+        FileFormatDataSourceStats stats = new FileFormatDataSourceStats();
+        DuckLakeSplitSource.planFile(
+                new LocalFileSystem(catalog.dataPath()),
+                ParquetReaderOptions.defaultOptions(),
+                stats,
+                Long.MAX_VALUE,
+                file);
+        return (long) stats.getReadBytes().getAllTime().getTotal();
     }
 
     private List<DataFile> dataFiles(String tableName)

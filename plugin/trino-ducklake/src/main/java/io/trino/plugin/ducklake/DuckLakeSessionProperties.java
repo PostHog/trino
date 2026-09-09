@@ -61,7 +61,7 @@ public class DuckLakeSessionProperties
                         false),
                 dataSizeProperty(
                         MAX_SPLIT_SIZE,
-                        "Target size of a split; larger data files are read as several byte ranges in parallel",
+                        "Target compressed size of the whole Parquet row groups assigned to a split",
                         duckLakeConfig.getMaxSplitSize(),
                         value -> validateMinDataSize(MAX_SPLIT_SIZE, value, MINIMUM_MAX_SPLIT_SIZE),
                         false),

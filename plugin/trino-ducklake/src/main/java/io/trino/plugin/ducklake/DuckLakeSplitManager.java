@@ -13,11 +13,14 @@
  */
 package io.trino.plugin.ducklake;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ListMultimap;
 import com.google.inject.Inject;
+import io.trino.filesystem.TrinoFileSystem;
+import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.parquet.ParquetReaderOptions;
+import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.ducklake.metastore.DuckLakeDataFileEntry;
 import io.trino.plugin.ducklake.metastore.DuckLakeDeleteFileEntry;
 import io.trino.plugin.ducklake.metastore.DuckLakeFileColumnStats;
@@ -28,6 +31,7 @@ import io.trino.plugin.ducklake.metastore.JdbcDuckLakeMetastore;
 import io.trino.plugin.ducklake.util.PartitionTransforms;
 import io.trino.plugin.ducklake.util.PathResolver;
 import io.trino.plugin.ducklake.util.StatsValueParser;
+import io.trino.plugin.hive.parquet.ParquetReaderConfig;
 import io.trino.spi.SplitWeight;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
@@ -51,9 +55,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_FEATURE;
@@ -62,9 +66,6 @@ import static io.trino.plugin.ducklake.DuckLakeSessionProperties.isFileStatistic
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.RealType.REAL;
 import static java.lang.Math.clamp;
-import static java.lang.Math.max;
-import static java.lang.Math.min;
-import static java.lang.Math.round;
 import static java.util.Objects.requireNonNull;
 
 public class DuckLakeSplitManager
@@ -77,11 +78,24 @@ public class DuckLakeSplitManager
     private static final double MINIMUM_ASSIGNED_SPLIT_WEIGHT = 0.05;
 
     private final JdbcDuckLakeMetastore metastore;
+    private final TrinoFileSystemFactory fileSystemFactory;
+    private final FileFormatDataSourceStats fileFormatDataSourceStats;
+    private final ParquetReaderOptions parquetReaderOptions;
+    private final ExecutorService executor;
 
     @Inject
-    public DuckLakeSplitManager(JdbcDuckLakeMetastore metastore)
+    public DuckLakeSplitManager(
+            JdbcDuckLakeMetastore metastore,
+            TrinoFileSystemFactory fileSystemFactory,
+            FileFormatDataSourceStats fileFormatDataSourceStats,
+            ParquetReaderConfig parquetReaderConfig,
+            @ForDuckLakeSplitManager ExecutorService executor)
     {
         this.metastore = requireNonNull(metastore, "metastore is null");
+        this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
+        this.fileFormatDataSourceStats = requireNonNull(fileFormatDataSourceStats, "fileFormatDataSourceStats is null");
+        this.parquetReaderOptions = parquetReaderConfig.toParquetReaderOptions();
+        this.executor = requireNonNull(executor, "executor is null");
     }
 
     @Override
@@ -134,8 +148,9 @@ public class DuckLakeSplitManager
         long maxSplitSize = getMaxSplitSize(session).toBytes();
         List<DuckLakeDataFileEntry> dataFiles = metastore.dataFiles(handle.snapshotId(), handle.tableId());
         Map<Long, DuckLakeNameMapping> nameMappings = nameMappings(dataFiles);
-        // a data file larger than the target split size contributes several splits
-        ImmutableList.Builder<DuckLakeSplit> splits = ImmutableList.builder();
+        boolean metadataOnly = handle.projectedColumns().map(Set::isEmpty).orElse(false)
+                && handle.unenforcedConstraint().isAll();
+        ImmutableList.Builder<DuckLakeSplit> files = ImmutableList.builder();
         for (DuckLakeDataFileEntry dataFile : dataFiles) {
             validateDataFile(handle, dataFile);
             if (prunedByPartitionValues(handle, dataFile, partitionInfo, transformsByColumnId, domains, enforcedColumns)) {
@@ -161,75 +176,47 @@ public class DuckLakeSplitManager
                 }
                 nameMapping = Optional.of(mapping);
             }
-            // Every split of a file loads that file's delete positions on its own, which re-reads
-            // the delete file once per split. That is correct because the Parquet row index is
-            // absolute within the file, independent of the byte range the split reads.
-            for (ByteRange range : byteRanges(dataFile.fileSizeBytes(), maxSplitSize)) {
-                splits.add(new DuckLakeSplit(
+            if (metadataOnly) {
+                // File pruning has enforced the remaining predicate. Keep exact catalog counts
+                // and avoid fetching any footer for a scan that needs no stored column.
+                files.add(new DuckLakeSplit(
                         dataFile.dataFileId(),
                         path,
-                        range.start(),
-                        range.length(),
+                        0,
+                        dataFile.fileSizeBytes(),
                         dataFile.fileSizeBytes(),
                         dataFile.footerSize(),
-                        apportionedRecordCount(recordCount, range.length(), dataFile.fileSizeBytes()),
+                        recordCount,
                         dataFile.rowIdStart(),
                         deleteFile,
                         dataFile.partitionValues(),
                         nameMapping,
-                        splitWeight(range.length(), maxSplitSize)));
+                        SplitWeight.standard()));
+                continue;
             }
+            files.add(new DuckLakeSplit(
+                    dataFile.dataFileId(),
+                    path,
+                    0,
+                    dataFile.fileSizeBytes(),
+                    dataFile.fileSizeBytes(),
+                    dataFile.footerSize(),
+                    recordCount,
+                    dataFile.rowIdStart(),
+                    deleteFile,
+                    dataFile.partitionValues(),
+                    nameMapping,
+                    SplitWeight.standard()));
         }
-        return new FixedSplitSource(splits.build());
+        List<DuckLakeSplit> retainedFiles = files.build();
+        if (metadataOnly || retainedFiles.isEmpty()) {
+            return new FixedSplitSource(retainedFiles);
+        }
+        TrinoFileSystem fileSystem = fileSystemFactory.create(session);
+        return new DuckLakeSplitSource(retainedFiles, fileSystem, parquetReaderOptions, fileFormatDataSourceStats, maxSplitSize, executor);
     }
 
-    /**
-     * Splits a data file of the given size into the byte ranges read by its splits. The ranges are
-     * contiguous, do not overlap, and cover the whole file, so every row group of the file is read
-     * by exactly one split; a file at or below the target size is read by a single split.
-     */
-    @VisibleForTesting
-    static List<ByteRange> byteRanges(long fileSizeBytes, long maxSplitSize)
-    {
-        checkArgument(fileSizeBytes >= 0, "fileSizeBytes is negative: %s", fileSizeBytes);
-        checkArgument(maxSplitSize > 0, "maxSplitSize is not positive: %s", maxSplitSize);
-        if (fileSizeBytes <= maxSplitSize) {
-            return ImmutableList.of(new ByteRange(0, fileSizeBytes));
-        }
-        ImmutableList.Builder<ByteRange> ranges = ImmutableList.builder();
-        for (long start = 0; start < fileSizeBytes; start += maxSplitSize) {
-            // the last range ends at the end of the file, so it may be shorter than the target size
-            ranges.add(new ByteRange(start, min(maxSplitSize, fileSizeBytes - start)));
-        }
-        return ranges.build();
-    }
-
-    /**
-     * A byte range {@code [start, start + length)} of a data file.
-     */
-    record ByteRange(long start, long length)
-    {
-        ByteRange
-        {
-            checkArgument(start >= 0, "start is negative: %s", start);
-            checkArgument(length >= 0, "length is negative: %s", length);
-        }
-    }
-
-    /**
-     * Returns the share of the record count of a file that falls on a byte range of it. The
-     * estimate is only used for scheduling, so a non-empty file never apportions zero rows to a
-     * split, which would make the split look free.
-     */
-    private static long apportionedRecordCount(long recordCount, long length, long fileSizeBytes)
-    {
-        if (recordCount == 0 || length == fileSizeBytes) {
-            return recordCount;
-        }
-        return max(1, round(recordCount * ((double) length / fileSizeBytes)));
-    }
-
-    private static SplitWeight splitWeight(long length, long maxSplitSize)
+    static SplitWeight splitWeight(long length, long maxSplitSize)
     {
         return SplitWeight.fromProportion(clamp((double) length / maxSplitSize, MINIMUM_ASSIGNED_SPLIT_WEIGHT, 1.0));
     }
