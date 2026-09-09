@@ -212,7 +212,7 @@ public class DuckLakePageSourceProvider
             LocalMemoryContext deletedPositionsMemoryContext = splitMemoryContext.newLocalMemoryContext("deletedPositions");
             DeleteFileReadStatistics deleteFileReadStatistics = new DeleteFileReadStatistics();
             // Every split of the data file loads the whole delete file, so a file split into
-            // several byte ranges re-reads its delete file once per split. The positions are
+            // several row-group sets re-reads its delete file once per split. The positions are
             // file-absolute, so each split simply ignores the ones outside the rows it reads.
             Supplier<LongOpenHashSet> deletedPositions = Suppliers.memoize(() -> readDeletedPositions(fileSystem, deleteFile.get(), splitMemoryContext, deletedPositionsMemoryContext, deleteFileReadStatistics));
             pageSource = TransformConnectorPageSource.create(
@@ -309,14 +309,15 @@ public class DuckLakePageSourceProvider
      * connector enforces are already applied by pruning files in the split manager, and a predicate
      * it does not enforce is applied by the engine, which would then have to project the column it
      * reads;
-     * <li>the split covers the whole data file, because only then is its record count the exact
-     * number of visible rows rather than a share of the file apportioned to a byte range.
+     * <li>the split is a metadata-only whole-file split, whose record count is the exact number of
+     * visible rows after deletes.
      * </ul>
      */
     private static boolean isRowCountOnly(List<DuckLakeColumnHandle> columns, TupleDomain<DuckLakeColumnHandle> effectivePredicate, DuckLakeSplit split)
     {
         return columns.isEmpty()
                 && effectivePredicate.isAll()
+                && split.rowGroupMetadata().isEmpty()
                 && split.start() == 0
                 && split.length() == split.fileSizeBytes();
     }
@@ -346,7 +347,7 @@ public class DuckLakePageSourceProvider
      * to save, because the reader reads the footer again whenever the bytes it holds do not cover
      * it, and it locates the footer from the file itself either way.
      */
-    private static ParquetReaderOptions withCatalogFooterSize(ParquetReaderOptions options, OptionalLong footerSize, long fileSizeBytes)
+    static ParquetReaderOptions withCatalogFooterSize(ParquetReaderOptions options, OptionalLong footerSize, long fileSizeBytes)
     {
         if (footerSize.isEmpty()) {
             return options;
@@ -372,14 +373,22 @@ public class DuckLakePageSourceProvider
             ParquetReaderOptions options,
             MemoryContext memoryContext)
     {
+        if (split.rowGroupMetadata().filter(metadata -> !metadata.allRowGroups()).isPresent()) {
+            // Buffering a small file is useful for its only split, but would read the complete file
+            // once for every partial row-group split.
+            options = ParquetReaderOptions.builder(options)
+                    .withSmallFileThreshold(DataSize.ofBytes(0))
+                    .build();
+        }
+
         // A file resolved through a name mapping carries no identifiers of its own, and one is
         // only reached here when the catalog has no mapping for it, so its identifiers are what
         // name its columns.
         ParquetPageSourceFactory.ColumnsForFile columnsForFile = split.nameMapping().isPresent()
                 ? (_, columns) -> columns
                 : (fileSchema, columns) -> columnsByFieldId(fileSchema, dataColumns, columns);
-        // the reader only returns the row groups starting inside the byte range of the split, so
-        // the splits of a file read every row group of it exactly once
+        // New splits supply only their assigned row groups. The byte range continues to select
+        // row groups for splits serialized by an older coordinator.
         return ParquetPageSourceFactory.createPageSource(
                 inputFile,
                 split.start(),
@@ -395,7 +404,15 @@ public class DuckLakePageSourceProvider
                 DOMAIN_COMPACTION_THRESHOLD,
                 OptionalLong.of(split.fileSizeBytes()),
                 memoryContext,
-                columnsForFile);
+                columnsForFile,
+                split.rowGroupMetadata().map(metadata -> {
+                    try {
+                        return metadata.read(split.path());
+                    }
+                    catch (IOException e) {
+                        throw new TrinoException(DUCKLAKE_BAD_DATA, "Invalid row-group metadata for " + split.path(), e);
+                    }
+                }));
     }
 
     /**

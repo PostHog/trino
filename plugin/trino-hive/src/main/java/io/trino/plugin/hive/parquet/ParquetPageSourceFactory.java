@@ -288,6 +288,43 @@ public class ParquetPageSourceFactory
             MemoryContext externalMemoryContext,
             ColumnsForFile columnsForFile)
     {
+        return createPageSource(
+                inputFile,
+                start,
+                length,
+                columns,
+                disjunctTupleDomains,
+                useColumnNames,
+                timeZone,
+                stats,
+                options,
+                parquetWriteValidation,
+                fileDecryptionProperties,
+                domainCompactionThreshold,
+                estimatedFileSize,
+                externalMemoryContext,
+                columnsForFile,
+                Optional.empty());
+    }
+
+    public static ConnectorPageSource createPageSource(
+            TrinoInputFile inputFile,
+            long start,
+            long length,
+            List<HiveColumnHandle> columns,
+            List<TupleDomain<HiveColumnHandle>> disjunctTupleDomains,
+            boolean useColumnNames,
+            DateTimeZone timeZone,
+            FileFormatDataSourceStats stats,
+            ParquetReaderOptions options,
+            Optional<ParquetWriteValidation> parquetWriteValidation,
+            Optional<FileDecryptionProperties> fileDecryptionProperties,
+            int domainCompactionThreshold,
+            OptionalLong estimatedFileSize,
+            MemoryContext externalMemoryContext,
+            ColumnsForFile columnsForFile,
+            Optional<ParquetMetadata> suppliedMetadata)
+    {
         MessageType fileSchema;
         MessageType requestedSchema;
         MessageColumnIO messageColumn;
@@ -296,7 +333,13 @@ public class ParquetPageSourceFactory
             AggregatedMemoryContext memoryContext = newAggregatedMemoryContext(externalMemoryContext);
             dataSource = createDataSource(inputFile, estimatedFileSize, options, memoryContext, stats);
 
-            ParquetMetadata parquetMetadata = MetadataReader.readFooter(dataSource, options, parquetWriteValidation, fileDecryptionProperties);
+            ParquetMetadata parquetMetadata;
+            if (suppliedMetadata.isPresent()) {
+                parquetMetadata = suppliedMetadata.orElseThrow();
+            }
+            else {
+                parquetMetadata = MetadataReader.readFooter(dataSource, options, parquetWriteValidation, fileDecryptionProperties);
+            }
             FileMetadata fileMetaData = parquetMetadata.getFileMetaData();
             fileSchema = fileMetaData.getSchema();
 

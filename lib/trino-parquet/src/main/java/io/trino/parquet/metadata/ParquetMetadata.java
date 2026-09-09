@@ -13,7 +13,6 @@
  */
 package io.trino.parquet.metadata;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.log.Logger;
@@ -70,6 +69,7 @@ public class ParquetMetadata
 {
     private static final Logger log = Logger.get(ParquetMetadata.class);
 
+    private final long firstRowIndex;
     private final FileMetaData parquetMetadata;
     private final ParquetDataSourceId dataSourceId;
     private final FileMetadata fileMetadata;
@@ -78,6 +78,16 @@ public class ParquetMetadata
     public ParquetMetadata(FileMetaData parquetMetadata, ParquetDataSourceId dataSourceId, Optional<FileDecryptionContext> decryptionContext)
             throws ParquetCorruptionException
     {
+        this(parquetMetadata, dataSourceId, decryptionContext, 0);
+    }
+
+    public ParquetMetadata(FileMetaData parquetMetadata, ParquetDataSourceId dataSourceId, Optional<FileDecryptionContext> decryptionContext, long firstRowIndex)
+            throws ParquetCorruptionException
+    {
+        if (firstRowIndex < 0) {
+            throw new IllegalArgumentException("firstRowIndex is negative: " + firstRowIndex);
+        }
+        this.firstRowIndex = firstRowIndex;
         this.fileMetadata = new FileMetadata(
                 readMessageType(parquetMetadata, dataSourceId),
                 keyValueMetaData(parquetMetadata),
@@ -121,7 +131,7 @@ public class ParquetMetadata
         List<BlockMetadata> blocks = new ArrayList<>();
         List<RowGroup> rowGroups = parquetMetadata.getRow_groups();
 
-        long fileRowCount = 0;
+        long fileRowCount = firstRowIndex;
 
         if (rowGroups != null) {
             for (RowGroup rowGroup : rowGroups) {
@@ -214,7 +224,6 @@ public class ParquetMetadata
         return blocks;
     }
 
-    @VisibleForTesting
     public FileMetaData getParquetMetadata()
     {
         return parquetMetadata;

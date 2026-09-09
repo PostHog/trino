@@ -41,7 +41,7 @@ final class TestDuckLakeReads
         extends AbstractTestQueryFramework
 {
     /**
-     * Small enough to split the multi-row-group fixture files into many byte ranges.
+     * Small enough to assign every fixture row group to its own split.
      */
     private static final String TINY_SPLIT_SIZE = "4kB";
     /**
@@ -182,7 +182,7 @@ final class TestDuckLakeReads
 
     /**
      * Creates tables whose data files hold many small row groups, so that a small
-     * {@code max_split_size} splits a file into byte ranges that each read a few of them. The
+     * {@code max_split_size} assigns only a few row groups to each split. The
      * row group size stays set for the rest of the session, so these fixtures are created last.
      */
     private static void createRowGroupFixtures(TestingDuckLakeCatalog catalog)
@@ -724,12 +724,11 @@ final class TestDuckLakeReads
     }
 
     @Test
-    void testByteRangeSplitsReadEveryRowExactlyOnce()
+    void testRowGroupSplitsReadEveryRowExactlyOnce()
             throws SQLException
     {
-        // reading a file as several byte ranges must neither drop rows (a gap between splits) nor
-        // duplicate them (an overlap): the count, the distinct count, the sum, and the extremes of
-        // the row ids pin that down, whatever byte ranges the splits cover
+        // reading a file as several row-group sets must neither drop nor duplicate rows: the count,
+        // the distinct count, the sum, and the extremes of the row ids pin that down
         String aggregates = "SELECT count(*), count(DISTINCT id), sum(id), min(id), max(id) FROM row_groups";
         MaterializedResult singleSplitResult = computeActual(withMaxSplitSize(WHOLE_FILE_SPLIT_SIZE), aggregates);
         for (String maxSplitSize : SPLIT_SIZES) {
@@ -747,7 +746,7 @@ final class TestDuckLakeReads
     }
 
     @Test
-    void testByteRangeSplitsProduceMoreSplits()
+    void testRowGroupSplitsProduceMoreSplits()
     {
         // the small target split size really does turn the single file into many splits. The probe
         // sums a column rather than counting rows, because a count is answered from the catalog
@@ -766,7 +765,7 @@ final class TestDuckLakeReads
     }
 
     @Test
-    void testByteRangeSplitsWithPositionalDeletes()
+    void testRowGroupSplitsWithPositionalDeletes()
             throws SQLException
     {
         Session manySplits = withMaxSplitSize(TINY_SPLIT_SIZE);
@@ -790,7 +789,7 @@ final class TestDuckLakeReads
     }
 
     @Test
-    void testByteRangeSplitsWithPredicate()
+    void testRowGroupSplitsWithPredicate()
             throws SQLException
     {
         Session manySplits = withMaxSplitSize(TINY_SPLIT_SIZE);

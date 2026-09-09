@@ -66,6 +66,7 @@ import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.ConnectorViewDefinition;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
+import io.trino.spi.connector.ProjectionApplicationResult;
 import io.trino.spi.connector.RelationColumnsMetadata;
 import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.RowChangeParadigm;
@@ -74,6 +75,7 @@ import io.trino.spi.connector.SchemaNotFoundException;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.connector.ViewNotFoundException;
+import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
@@ -1513,6 +1515,26 @@ public class DuckLakeMetadata
     }
 
     @Override
+    public Optional<ProjectionApplicationResult<ConnectorTableHandle>> applyProjection(
+            ConnectorSession session,
+            ConnectorTableHandle table,
+            List<ConnectorExpression> projections,
+            Map<String, ColumnHandle> assignments)
+    {
+        DuckLakeTableHandle handle = (DuckLakeTableHandle) table;
+        Set<DuckLakeColumnHandle> columns = assignments.values().stream()
+                .map(DuckLakeColumnHandle.class::cast)
+                .collect(toImmutableSet());
+        if (handle.projectedColumns().equals(Optional.of(columns))) {
+            return Optional.empty();
+        }
+        List<Assignment> newAssignments = assignments.entrySet().stream()
+                .map(entry -> new Assignment(entry.getKey(), entry.getValue(), ((DuckLakeColumnHandle) entry.getValue()).type()))
+                .collect(toImmutableList());
+        return Optional.of(new ProjectionApplicationResult<>(handle.withProjectedColumns(columns), projections, newAssignments, false));
+    }
+
+    @Override
     public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(ConnectorSession session, ConnectorTableHandle tableHandle, Constraint constraint)
     {
         DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
@@ -1555,7 +1577,8 @@ public class DuckLakeMetadata
                 // The unenforced constraint is still checked by the engine.
                 handle.enforcedConstraint().intersect(newEnforcedConstraint),
                 handle.unenforcedConstraint().intersect(newUnenforcedConstraint),
-                handle.rowCount());
+                handle.rowCount(),
+                handle.projectedColumns());
 
         if (handle.equals(newHandle)) {
             return Optional.empty();

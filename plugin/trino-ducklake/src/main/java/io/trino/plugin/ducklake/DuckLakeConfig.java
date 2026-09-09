@@ -205,7 +205,7 @@ public class DuckLakeConfig
     }
 
     @Config("ducklake.max-split-size")
-    @ConfigDescription("Target size of a split; larger data files are read as several byte ranges in parallel")
+    @ConfigDescription("Target compressed size of the whole Parquet row groups assigned to a split")
     public DuckLakeConfig setMaxSplitSize(DataSize maxSplitSize)
     {
         this.maxSplitSize = maxSplitSize;

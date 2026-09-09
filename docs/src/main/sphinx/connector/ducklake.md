@@ -94,8 +94,8 @@ The following configuration properties are available:
     catalog.
   - `true`
 * - `ducklake.max-split-size`
-  - Target size of a split. A data file larger than this is read as several
-    byte ranges in parallel. Also configurable per query with the
+  - Target compressed size of the whole Parquet row groups assigned to a
+    split. Also configurable per query with the
     `max_split_size` [catalog session property](/sql/set-session).
   - `64MB`
 :::
@@ -174,24 +174,30 @@ The connector skips data files that cannot match query predicates:
   `file_statistics_pruning_enabled` [catalog session
   property](/sql/set-session) disable this behavior.
 
-A data file larger than `ducklake.max-split-size` is divided into splits that
-each cover a byte range of the file, so the row groups of a single large file
-are read by many workers in parallel instead of by a single thread. Lower the
+Before scheduling a data file, the coordinator reads its Parquet footer once
+and groups adjacent row groups into splits. `ducklake.max-split-size` is a soft
+target for the sum of the row groups' compressed column sizes. A row group is
+never divided, so a single large row group can exceed the target. Lower the
 value with the `ducklake.max-split-size` catalog property or the
 `max_split_size` [catalog session property](/sql/set-session) to increase the
 parallelism of queries over few, large files.
+
+Each split carries metadata for only its assigned row groups. Workers therefore
+do not read the file footer again for every split. Footer reads performed by the
+coordinator during split planning are not included in worker physical input
+statistics.
 
 `SELECT count(*)` over a whole table is answered from the record counts in the
 catalog, without listing the data files of the table or reading any of them. A
 count that the catalog cannot answer on its own, such as one restricted by a
 predicate on a partition column, still lists the files but reads none of them,
 because a scan that reads no column is served from the record count of each
-file.
+file. This metadata-only path also skips Parquet footer planning.
 
-The connector reads the Parquet footer of a data file in a single request, using
-the footer size recorded in the catalog. Files written with many columns or many
-row groups have footers larger than the length a reader guesses at, and every
-split of such a file would otherwise pay for a second request.
+When planning a data file, the connector uses the footer size recorded in the
+catalog to read its Parquet footer in a single request. If the size is absent or
+stale, the reader locates the footer from the file and may require an additional
+request.
 
 The connector also derives table statistics (row count, null fractions, and
 value ranges) from the catalog for use by the [cost-based

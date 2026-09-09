@@ -32,13 +32,15 @@ import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
 /**
- * A byte range {@code [start, start + length)} of a data file. The Parquet reader restricts
- * itself to the row groups that begin inside the range, so the splits of a file must cover it
- * without gaps or overlaps for the file to be read exactly once.
+ * A set of whole, adjacent Parquet row groups from a data file. New splits carry the selected row
+ * group metadata, while {@code start} and {@code length} preserve compatibility with older splits
+ * that selected row groups by byte range.
  *
  * @param dataFileId identifier of the data file, used to address it when rows of it are deleted
- * @param fileSizeBytes size of the whole file, not of the byte range
- * @param recordCount number of visible rows of the byte range, apportioned by its share of the file
+ * @param fileSizeBytes size of the whole file
+ * @param recordCount number of stored rows in the selected row groups, or exact visible rows for a
+ *         metadata-only whole-file split
+ * @param rowGroupMetadata file schema and metadata for only the row groups assigned to this split
  */
 public record DuckLakeSplit(
         long dataFileId,
@@ -52,7 +54,8 @@ public record DuckLakeSplit(
         Optional<DuckLakeDeleteFileHandle> deleteFile,
         Map<Integer, Optional<String>> partitionValues,
         Optional<DuckLakeNameMapping> nameMapping,
-        SplitWeight splitWeight)
+        SplitWeight splitWeight,
+        Optional<DuckLakeRowGroupMetadata> rowGroupMetadata)
         implements ConnectorSplit
 {
     private static final int INSTANCE_SIZE = toIntExact(instanceSize(DuckLakeSplit.class));
@@ -60,15 +63,49 @@ public record DuckLakeSplit(
     public DuckLakeSplit
     {
         requireNonNull(path, "path is null");
+        checkArgument(fileSizeBytes >= 0, "fileSizeBytes is negative: %s", fileSizeBytes);
         checkArgument(start >= 0, "start is negative: %s", start);
         checkArgument(length >= 0, "length is negative: %s", length);
-        checkArgument(start + length <= fileSizeBytes, "byte range [%s, %s) exceeds the file size %s", start, start + length, fileSizeBytes);
+        checkArgument(start <= fileSizeBytes - length, "byte range [%s, %s) exceeds the file size %s", start, start + length, fileSizeBytes);
+        checkArgument(recordCount >= 0, "recordCount is negative: %s", recordCount);
         requireNonNull(footerSize, "footerSize is null");
         requireNonNull(rowIdStart, "rowIdStart is null");
         requireNonNull(deleteFile, "deleteFile is null");
         partitionValues = ImmutableMap.copyOf(partitionValues);
         requireNonNull(nameMapping, "nameMapping is null");
         requireNonNull(splitWeight, "splitWeight is null");
+        requireNonNull(rowGroupMetadata, "rowGroupMetadata is null");
+        checkArgument(rowGroupMetadata.isEmpty() || (start == 0 && length == fileSizeBytes),
+                "row-group metadata requires a whole-file byte range");
+    }
+
+    public DuckLakeSplit(
+            long dataFileId,
+            String path,
+            long start,
+            long length,
+            long fileSizeBytes,
+            OptionalLong footerSize,
+            long recordCount,
+            OptionalLong rowIdStart,
+            Optional<DuckLakeDeleteFileHandle> deleteFile,
+            Map<Integer, Optional<String>> partitionValues,
+            Optional<DuckLakeNameMapping> nameMapping,
+            SplitWeight splitWeight)
+    {
+        this(dataFileId,
+                path,
+                start,
+                length,
+                fileSizeBytes,
+                footerSize,
+                recordCount,
+                rowIdStart,
+                deleteFile,
+                partitionValues,
+                nameMapping,
+                splitWeight,
+                Optional.empty());
     }
 
     @Override
@@ -87,7 +124,8 @@ public record DuckLakeSplit(
                 + sizeOf(deleteFile, DuckLakeDeleteFileHandle::retainedSizeInBytes)
                 + estimatedSizeOf(partitionValues, SizeOf::sizeOf, value -> sizeOf(value, SizeOf::estimatedSizeOf))
                 + sizeOf(nameMapping, DuckLakeNameMapping::retainedSizeInBytes)
-                + splitWeight.getRetainedSizeInBytes();
+                + splitWeight.getRetainedSizeInBytes()
+                + sizeOf(rowGroupMetadata, DuckLakeRowGroupMetadata::retainedSizeInBytes);
     }
 
     @Override
