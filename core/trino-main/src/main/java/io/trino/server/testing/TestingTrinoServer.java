@@ -36,7 +36,6 @@ import io.airlift.log.Level;
 import io.airlift.log.Logging;
 import io.airlift.node.testing.TestingNodeModule;
 import io.airlift.openmetrics.JmxOpenMetricsModule;
-import io.airlift.tracing.TracingModule;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.sdk.trace.SpanProcessor;
 import io.trino.Session;
@@ -117,6 +116,7 @@ import io.trino.testing.TestingGroupProviderManager;
 import io.trino.testing.TestingWarningCollectorModule;
 import io.trino.tracing.ForTracing;
 import io.trino.tracing.TracingAccessControl;
+import io.trino.tracing.TrinoTracingModule;
 import io.trino.transaction.TransactionManager;
 import io.trino.transaction.TransactionManagerModule;
 import jakarta.servlet.Filter;
@@ -314,7 +314,7 @@ public class TestingTrinoServer
                 .add(new PrefixObjectNameGeneratorModule("io.trino"))
                 .add(new TestingJmxModule())
                 .add(new JmxOpenMetricsModule())
-                .add(new TracingModule("trino", VERSION))
+                .add(new TrinoTracingModule("trino", VERSION))
                 .add(new ServerSecurityModule())
                 .add(new CatalogManagerModule())
                 .add(new TransactionManagerModule())

@@ -47,6 +47,20 @@ Use the `otel.exporter.protocol` property to configure the protocol for exportin
 Defaults to the gRPC protocol with the `grpc` value. Set the value to `http/protobuf` for
 exporting traces using protocol buffers with HTTP transport.
 
+Enabling tracing exports only traces to `otel.exporter.endpoint`. It does not
+install OTLP metric or log exporters. Existing JMX and OpenMetrics metrics and
+application logging continue to work independently of tracing.
+
+For HTTP/protobuf, specify the complete trace ingestion URL, including the path.
+Trino uses the URL as configured and does not append `/v1/traces`. For example,
+to send traces to VictoriaTraces:
+
+```properties
+tracing.enabled=true
+otel.exporter.protocol=http/protobuf
+otel.exporter.endpoint=http://observe.example.com:10428/insert/opentelemetry/v1/traces
+```
+
 ### Sampling
 
 Use the `otel.tracing.sampling-ratio` property to control the ratio of traces
