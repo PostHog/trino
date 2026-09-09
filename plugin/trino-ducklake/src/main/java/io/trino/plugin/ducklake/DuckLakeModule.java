@@ -46,7 +46,7 @@ import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 import static io.airlift.json.JsonCodecBinder.jsonCodecBinder;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_METASTORE_ERROR;
-import static java.util.concurrent.Executors.newCachedThreadPool;
+import static java.util.concurrent.Executors.newFixedThreadPool;
 import static org.weakref.jmx.guice.ExportBinder.newExporter;
 
 public class DuckLakeModule
@@ -90,7 +90,7 @@ public class DuckLakeModule
     @ForDuckLakeSplitManager
     public static ExecutorService createSplitSourceExecutor(CatalogName catalogName)
     {
-        return newCachedThreadPool(daemonThreadsNamed("ducklake-split-source-" + catalogName + "-%s"));
+        return newFixedThreadPool(DuckLakeSplitSource.MAX_CONCURRENT_FILE_PLANS, daemonThreadsNamed("ducklake-split-source-" + catalogName + "-%s"));
     }
 
     @Provides

@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.json.JsonCodec;
 import io.trino.filesystem.Location;
+import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.local.LocalFileSystem;
 import io.trino.parquet.ParquetReaderOptions;
 import io.trino.parquet.metadata.ParquetMetadata;
@@ -38,6 +39,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.nio.ByteBuffer;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.file.Files;
@@ -50,11 +53,17 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.LongStream;
 
 import static io.trino.spi.connector.DynamicFilter.EMPTY;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static java.nio.file.StandardOpenOption.WRITE;
+import static java.util.concurrent.Executors.newCachedThreadPool;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -162,6 +171,54 @@ class TestDuckLakeRowGroupPlanner
     }
 
     @Test
+    void testSplitSourcePrefetchesFilesWithBoundedConcurrency()
+            throws Exception
+    {
+        int fileCount = 20;
+        List<DuckLakeSplit> files = new ArrayList<>();
+        for (int index = 0; index < fileCount; index++) {
+            String name = "data-%s.parquet".formatted(index);
+            Files.copy(directory.resolve("data.parquet"), directory.resolve(name));
+            files.add(fileSplit("local:///" + name));
+        }
+
+        CountDownLatch initialPlansStarted = new CountDownLatch(DuckLakeSplitSource.MAX_CONCURRENT_FILE_PLANS);
+        CountDownLatch releasePlans = new CountDownLatch(1);
+        AtomicInteger activePlans = new AtomicInteger();
+        AtomicInteger maximumConcurrency = new AtomicInteger();
+        AtomicInteger startedPlans = new AtomicInteger();
+        TrinoFileSystem fileSystem = delayedFileSystem(initialPlansStarted, releasePlans, activePlans, maximumConcurrency, startedPlans);
+
+        try (ExecutorService executor = newCachedThreadPool();
+                DuckLakeSplitSource source = new DuckLakeSplitSource(
+                        files,
+                        fileSystem,
+                        ParquetReaderOptions.defaultOptions(),
+                        new FileFormatDataSourceStats(),
+                        Long.MAX_VALUE,
+                        executor)) {
+            CompletableFuture<List<ConnectorSplit>> firstBatch = source.getNextBatch(fileCount, DynamicFilterSnapshot.EMPTY);
+            try {
+                assertThat(initialPlansStarted.await(10, SECONDS)).isTrue();
+                assertThat(activePlans).hasValue(DuckLakeSplitSource.MAX_CONCURRENT_FILE_PLANS);
+                assertThat(maximumConcurrency).hasValue(DuckLakeSplitSource.MAX_CONCURRENT_FILE_PLANS);
+                assertThat(startedPlans).hasValue(DuckLakeSplitSource.MAX_CONCURRENT_FILE_PLANS);
+            }
+            finally {
+                releasePlans.countDown();
+            }
+
+            List<ConnectorSplit> splits = new ArrayList<>(firstBatch.get());
+            while (!source.isFinished()) {
+                splits.addAll(source.getNextBatch(fileCount, DynamicFilterSnapshot.EMPTY).get());
+            }
+            assertThat(splits).hasSize(fileCount);
+            assertThat(startedPlans).hasValue(fileCount);
+            assertThat(maximumConcurrency).hasValueLessThanOrEqualTo(DuckLakeSplitSource.MAX_CONCURRENT_FILE_PLANS);
+        }
+    }
+
+    @Test
     void testWorkersReadEveryRowOnceWithoutReadingTheFooter()
             throws IOException
     {
@@ -240,9 +297,14 @@ class TestDuckLakeRowGroupPlanner
 
     private DuckLakeSplit fileSplit()
     {
+        return fileSplit("local:///data.parquet");
+    }
+
+    private DuckLakeSplit fileSplit(String path)
+    {
         return new DuckLakeSplit(
                 1,
-                "local:///data.parquet",
+                path,
                 0,
                 fileSize,
                 fileSize,
@@ -253,6 +315,39 @@ class TestDuckLakeRowGroupPlanner
                 ImmutableMap.of(),
                 Optional.empty(),
                 SplitWeight.standard());
+    }
+
+    private TrinoFileSystem delayedFileSystem(
+            CountDownLatch initialPlansStarted,
+            CountDownLatch releasePlans,
+            AtomicInteger activePlans,
+            AtomicInteger maximumConcurrency,
+            AtomicInteger startedPlans)
+    {
+        TrinoFileSystem delegate = new LocalFileSystem(directory);
+        return (TrinoFileSystem) Proxy.newProxyInstance(
+                TrinoFileSystem.class.getClassLoader(),
+                new Class<?>[] {TrinoFileSystem.class},
+                (_, method, arguments) -> {
+                    if (method.getName().equals("newInputFile") && method.getParameterCount() == 2) {
+                        startedPlans.incrementAndGet();
+                        int active = activePlans.incrementAndGet();
+                        maximumConcurrency.accumulateAndGet(active, Math::max);
+                        initialPlansStarted.countDown();
+                        try {
+                            releasePlans.await();
+                        }
+                        finally {
+                            activePlans.decrementAndGet();
+                        }
+                    }
+                    try {
+                        return method.invoke(delegate, arguments);
+                    }
+                    catch (InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
     }
 
     private static void readValues(ConnectorPageSource source, List<Long> values)

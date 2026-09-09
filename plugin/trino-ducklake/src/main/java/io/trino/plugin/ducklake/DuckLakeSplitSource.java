@@ -49,6 +49,8 @@ import static java.util.concurrent.CompletableFuture.supplyAsync;
 final class DuckLakeSplitSource
         implements ConnectorSplitSource
 {
+    static final int MAX_CONCURRENT_FILE_PLANS = 8;
+
     private final Iterator<DuckLakeSplit> files;
     private final TrinoFileSystem fileSystem;
     private final ParquetReaderOptions parquetReaderOptions;
@@ -56,7 +58,9 @@ final class DuckLakeSplitSource
     private final long targetSplitBytes;
     private final Executor executor;
     private final Deque<DuckLakeSplit> pendingSplits = new ArrayDeque<>();
+    private final Deque<CompletableFuture<List<DuckLakeSplit>>> prefetchedFiles = new ArrayDeque<>();
 
+    private CompletableFuture<List<DuckLakeSplit>> currentFilePlan;
     private CompletableFuture<List<ConnectorSplit>> currentBatch;
     private boolean closed;
 
@@ -85,24 +89,55 @@ final class DuckLakeSplitSource
         checkArgument(maxSize > 0, "maxSize must be positive: %s", maxSize);
 
         if (!pendingSplits.isEmpty()) {
-            return completedFuture(removeBatch(maxSize));
+            List<ConnectorSplit> batch = removeBatch(maxSize);
+            prefetchFiles();
+            return completedFuture(batch);
         }
-        if (!files.hasNext()) {
+
+        prefetchFiles();
+        if (prefetchedFiles.isEmpty()) {
             return completedFuture(ImmutableList.of());
         }
 
-        DuckLakeSplit file = files.next();
-        currentBatch = supplyAsync(() -> planFile(file), executor)
+        CompletableFuture<List<DuckLakeSplit>> filePlan = prefetchedFiles.removeFirst();
+        currentFilePlan = filePlan;
+        currentBatch = filePlan
                 .thenApply(splits -> {
                     synchronized (this) {
+                        currentFilePlan = null;
                         if (closed) {
-                            return ImmutableList.of();
+                            return ImmutableList.<ConnectorSplit>of();
                         }
                         pendingSplits.addAll(splits);
-                        return removeBatch(maxSize);
+                        List<ConnectorSplit> batch = removeBatch(maxSize);
+                        prefetchFiles();
+                        return batch;
+                    }
+                })
+                .whenComplete((_, _) -> {
+                    synchronized (this) {
+                        if (currentFilePlan == filePlan) {
+                            currentFilePlan = null;
+                        }
                     }
                 });
         return currentBatch;
+    }
+
+    private void prefetchFiles()
+    {
+        int bufferedFiles = prefetchedFiles.size();
+        if (currentFilePlan != null) {
+            bufferedFiles++;
+        }
+        if (!pendingSplits.isEmpty()) {
+            bufferedFiles++;
+        }
+        while (bufferedFiles < MAX_CONCURRENT_FILE_PLANS && files.hasNext()) {
+            DuckLakeSplit file = files.next();
+            prefetchedFiles.addLast(supplyAsync(() -> planFile(file), executor));
+            bufferedFiles++;
+        }
     }
 
     private List<ConnectorSplit> removeBatch(int maxSize)
@@ -175,7 +210,7 @@ final class DuckLakeSplitSource
     @Override
     public synchronized boolean isFinished()
     {
-        return closed || (!files.hasNext() && pendingSplits.isEmpty() && (currentBatch == null || currentBatch.isDone()));
+        return closed || (!files.hasNext() && pendingSplits.isEmpty() && prefetchedFiles.isEmpty() && currentFilePlan == null && (currentBatch == null || currentBatch.isDone()));
     }
 
     @Override
@@ -183,6 +218,11 @@ final class DuckLakeSplitSource
     {
         closed = true;
         pendingSplits.clear();
+        prefetchedFiles.forEach(future -> future.cancel(true));
+        prefetchedFiles.clear();
+        if (currentFilePlan != null) {
+            currentFilePlan.cancel(true);
+        }
         if (currentBatch != null) {
             currentBatch.cancel(true);
         }
