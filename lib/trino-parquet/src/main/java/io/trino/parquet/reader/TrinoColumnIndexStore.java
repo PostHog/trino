@@ -25,8 +25,6 @@ import io.trino.parquet.crypto.ModuleType;
 import io.trino.parquet.metadata.BlockMetadata;
 import io.trino.parquet.metadata.ColumnChunkMetadata;
 import io.trino.parquet.metadata.IndexReference;
-import io.trino.spi.predicate.Domain;
-import io.trino.spi.predicate.TupleDomain;
 import jakarta.annotation.Nullable;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.format.BlockCipher;
@@ -168,11 +166,11 @@ public class TrinoColumnIndexStore
             ParquetDataSource dataSource,
             BlockMetadata blockMetadata,
             Map<List<String>, ColumnDescriptor> descriptorsByPath,
-            TupleDomain<ColumnDescriptor> parquetTupleDomain,
+            List<ColumnDescriptor> candidateColumns,
             ParquetReaderOptions options,
             Optional<FileDecryptionContext> decryptionContext)
     {
-        if (!options.isUseColumnIndex() || parquetTupleDomain.isAll() || parquetTupleDomain.isNone()) {
+        if (!options.isUseColumnIndex() || candidateColumns.isEmpty()) {
             return Optional.empty();
         }
 
@@ -193,9 +191,7 @@ public class TrinoColumnIndexStore
             columnsReadPaths.add(ColumnPath.get(path.toArray(new String[0])));
         }
 
-        Map<ColumnDescriptor, Domain> parquetDomains = parquetTupleDomain.getDomains()
-                .orElseThrow(() -> new IllegalStateException("Predicate other than none should have domains"));
-        Set<ColumnPath> columnsFilteredPaths = parquetDomains.keySet().stream()
+        Set<ColumnPath> columnsFilteredPaths = candidateColumns.stream()
                 .map(column -> ColumnPath.get(column.getPath()))
                 .collect(toImmutableSet());
 
