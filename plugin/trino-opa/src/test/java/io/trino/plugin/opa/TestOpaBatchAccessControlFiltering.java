@@ -29,11 +29,16 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static com.google.common.util.concurrent.Uninterruptibles.awaitUninterruptibly;
 import static io.trino.plugin.opa.RequestTestUtilities.assertStringRequestsEqual;
 import static io.trino.plugin.opa.RequestTestUtilities.buildValidatingRequestHandler;
 import static io.trino.plugin.opa.TestConstants.OK_RESPONSE;
@@ -45,6 +50,10 @@ import static io.trino.plugin.opa.TestHelpers.assertAccessControlMethodThrowsFor
 import static io.trino.plugin.opa.TestHelpers.assertAccessControlMethodThrowsForResponse;
 import static io.trino.plugin.opa.TestHelpers.createMockHttpClient;
 import static io.trino.plugin.opa.TestHelpers.createOpaAuthorizer;
+import static java.util.concurrent.Executors.newFixedThreadPool;
+import static java.util.concurrent.Executors.newSingleThreadExecutor;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 final class TestOpaBatchAccessControlFiltering
@@ -253,6 +262,63 @@ final class TestOpaBatchAccessControlFiltering
                         .put(tableOne, ImmutableSet.of("table_one_column_one", "table_one_column_two"))
                         .put(tableTwo, ImmutableSet.of("table_two_column_two"))
                         .buildOrThrow());
+    }
+
+    @Test
+    void testFilterColumnsLimitsOutstandingRequests()
+            throws Exception
+    {
+        SchemaTableName tableOne = SchemaTableName.schemaTableName("my_schema", "table_one");
+        SchemaTableName tableTwo = SchemaTableName.schemaTableName("my_schema", "table_two");
+        SchemaTableName tableThree = SchemaTableName.schemaTableName("my_schema", "table_three");
+        Map<SchemaTableName, Set<String>> requestedColumns = ImmutableMap.of(
+                tableOne, ImmutableSet.of("column"),
+                tableTwo, ImmutableSet.of("column"),
+                tableThree, ImmutableSet.of("column"));
+        CountDownLatch twoRequestsStarted = new CountDownLatch(2);
+        CountDownLatch threeRequestsStarted = new CountDownLatch(3);
+        CountDownLatch releaseResponses = new CountDownLatch(1);
+        AtomicInteger activeRequests = new AtomicInteger();
+        AtomicInteger maximumActiveRequests = new AtomicInteger();
+        ExecutorService httpExecutor = newFixedThreadPool(3);
+        InstrumentedHttpClient mockClient = createMockHttpClient(
+                OPA_SERVER_BATCH_URI,
+                _ -> {
+                    int currentActiveRequests = activeRequests.incrementAndGet();
+                    maximumActiveRequests.accumulateAndGet(currentActiveRequests, Math::max);
+                    twoRequestsStarted.countDown();
+                    threeRequestsStarted.countDown();
+                    try {
+                        assertThat(awaitUninterruptibly(releaseResponses, 10, SECONDS)).isTrue();
+                        return new MockResponse("{\"result\": [0]}", 200);
+                    }
+                    finally {
+                        activeRequests.decrementAndGet();
+                    }
+                },
+                httpExecutor);
+        OpaAccessControl authorizer = createOpaAuthorizer(
+                batchFilteringOpaConfig().setMaxOutstandingRequests(2),
+                mockClient);
+        ExecutorService executor = newSingleThreadExecutor();
+        try {
+            Future<Map<SchemaTableName, Set<String>>> result = executor.submit(() -> authorizer.filterColumns(
+                    TEST_SECURITY_CONTEXT,
+                    "my_catalog",
+                    requestedColumns));
+
+            assertThat(twoRequestsStarted.await(10, SECONDS)).isTrue();
+            assertThat(threeRequestsStarted.await(200, MILLISECONDS)).isFalse();
+            releaseResponses.countDown();
+
+            assertThat(result.get(10, SECONDS)).containsExactlyInAnyOrderEntriesOf(requestedColumns);
+            assertThat(maximumActiveRequests).hasValue(2);
+        }
+        finally {
+            releaseResponses.countDown();
+            executor.shutdownNow();
+            httpExecutor.shutdownNow();
+        }
     }
 
     @Test

@@ -30,6 +30,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
 import java.util.function.Function;
 
 import static com.google.common.net.MediaType.JSON_UTF_8;
@@ -103,9 +104,20 @@ public final class HttpClientUtils
             this(new RecordingHttpProcessor(expectedURI, expectedMethod, expectedContentType, handler));
         }
 
+        public InstrumentedHttpClient(URI expectedURI, String expectedMethod, String expectedContentType, Function<JsonNode, MockResponse> handler, ExecutorService executor)
+        {
+            this(new RecordingHttpProcessor(expectedURI, expectedMethod, expectedContentType, handler), executor);
+        }
+
         public InstrumentedHttpClient(RecordingHttpProcessor processor)
         {
             super(processor);
+            this.httpProcessor = processor;
+        }
+
+        public InstrumentedHttpClient(RecordingHttpProcessor processor, ExecutorService executor)
+        {
+            super(processor, executor);
             this.httpProcessor = processor;
         }
 

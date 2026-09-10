@@ -61,6 +61,9 @@ The following table lists the configuration properties for the OPA access contro
 * - `opa.allow-permission-management-operations`
   - Configure if permission management operations are allowed. Find more details in
     [](opa-permission-management). Defaults to `false`.
+* - `opa.max-outstanding-requests`
+  - Maximum number of requests awaiting responses from OPA across all queries.
+    Defaults to `512`.
 * - `opa.http-client.*`
   - Optional HTTP client configurations for the connection from Trino to OPA,
     for example `opa.http-client.http-proxy` for configuring the HTTP proxy.
