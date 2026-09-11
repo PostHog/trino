@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableMap;
 import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
 import io.trino.parquet.DiskRange;
+import io.trino.parquet.ParquetCorruptionException;
 import io.trino.parquet.ParquetReaderOptions;
 import io.trino.parquet.metadata.IndexReference;
 import io.trino.parquet.metadata.ParquetMetadata;
@@ -33,13 +34,18 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.parquet.example.data.Group;
 import org.apache.parquet.example.data.simple.SimpleGroupFactory;
 import org.apache.parquet.format.FileMetaData;
+import org.apache.parquet.format.Statistics;
 import org.apache.parquet.hadoop.ParquetWriter;
 import org.apache.parquet.hadoop.example.ExampleParquetWriter;
+import org.apache.parquet.internal.filter2.columnindex.ColumnIndexFilter;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.MessageTypeParser;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.ArrayList;
@@ -47,6 +53,10 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Consumer;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import java.util.logging.SimpleFormatter;
+import java.util.logging.StreamHandler;
 import java.util.stream.IntStream;
 
 import static io.airlift.slice.Slices.utf8Slice;
@@ -55,8 +65,10 @@ import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregate
 import static io.trino.parquet.ParquetTestUtils.createParquetReader;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.apache.parquet.hadoop.ParquetFileWriter.Mode.OVERWRITE;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
 // ExampleParquetWriter is not thread-safe
@@ -126,19 +138,29 @@ class TestRedundantColumnIndexes
         assertIndexReads(1024, Domain.notNull(VARCHAR), Domain.all(BIGINT), removeNullCounts, ImmutableList.of("value"), true);
     }
 
-    @Test
-    void testUntrustedBounds()
+    @ParameterizedTest
+    @ValueSource(strings = {"1.7.0", "1.8.0"})
+    void testUntrustedBounds(String writerVersion)
             throws IOException
     {
         assertIndexReads(0, range("1024", "2047"), Domain.all(BIGINT), metadata -> {
-            metadata.setCreated_by("parquet-mr version 1.8.0");
+            metadata.setCreated_by("parquet-mr version " + writerVersion);
             metadata.getRow_groups().forEach(rowGroup -> {
-                var statistics = rowGroup.getColumns().getFirst().getMeta_data().getStatistics();
-                // Old binary bounds from this writer are ignored. Even misleading bounds must not disable pruning.
+                Statistics statistics = rowGroup.getColumns().getFirst().getMeta_data().getStatistics();
+                // Buggy-writer bounds are ignored; later legacy UTF8 bounds are widened.
+                // Neither case should disable useful page pruning based on these misleading bounds.
                 statistics.setMin(utf8Slice("1024").getBytes());
                 statistics.setMax(utf8Slice("2047").getBytes());
                 statistics.unsetMin_value();
                 statistics.unsetMax_value();
+                org.apache.parquet.column.statistics.Statistics<?> parsedStatistics = MetadataReader.readStats(
+                        Optional.of(metadata.getCreated_by()), Optional.of(statistics), SCHEMA.getType("value").asPrimitiveType());
+                if (writerVersion.equals("1.7.0")) {
+                    assertThat(parsedStatistics.hasNonNullValue()).isFalse();
+                }
+                else {
+                    assertThat(parsedStatistics.genericGetMax()).isEqualTo(org.apache.parquet.io.api.Binary.fromString("3"));
+                }
             });
         }, ImmutableList.of("value"), true);
     }
@@ -169,6 +191,40 @@ class TestRedundantColumnIndexes
                 2048,
                 ImmutableList.of(ImmutableList.of("value"), ImmutableList.of()),
                 true);
+        // Both groups filter on position, but only the first still needs the value predicate.
+        assertIndexReads(
+                1024,
+                Domain.notNull(VARCHAR),
+                Domain.create(ValueSet.ofRanges(Range.range(BIGINT, 512L, true, 3583L, true)), false),
+                KEEP_STATISTICS,
+                2048,
+                ImmutableList.of(ImmutableList.of("value", "position"), ImmutableList.of("position")),
+                true);
+    }
+
+    @Test
+    void testEmptyRowGroupMetadataValidation()
+            throws IOException
+    {
+        ParquetReaderOptions options = ParquetReaderOptions.builder().build();
+        var dataSource = new RecordingDataSource(writeFile(0, ROW_COUNT), options);
+        FileMetaData thriftMetadata = MetadataReader.readFooter(dataSource, Optional.empty()).getParquetMetadata().deepCopy();
+        thriftMetadata.getRow_groups().getFirst().setNum_rows(0);
+        ParquetMetadata validEmptyMetadata = new ParquetMetadata(thriftMetadata.deepCopy(), dataSource.getId(), Optional.empty());
+        try (ParquetReader reader = createParquetReader(dataSource, validEmptyMetadata, options, newSimpleAggregatedMemoryContext(), TYPES, COLUMN_NAMES, TupleDomain.all())) {
+            assertThat(reader.nextPage()).isNull();
+        }
+
+        thriftMetadata.getRow_groups().getFirst().getColumns().remove(1);
+        ParquetMetadata invalidEmptyMetadata = new ParquetMetadata(thriftMetadata, dataSource.getId(), Optional.empty());
+        assertThatThrownBy(() -> {
+            try (ParquetReader reader = createParquetReader(dataSource, invalidEmptyMetadata, options, newSimpleAggregatedMemoryContext(), TYPES, COLUMN_NAMES, TupleDomain.all())) {
+                reader.nextPage();
+            }
+        })
+                .isInstanceOf(ParquetCorruptionException.class)
+                .hasMessageContaining("Metadata is missing for column")
+                .hasMessageContaining("position");
     }
 
     private static Domain range(String low, String high)
@@ -212,6 +268,15 @@ class TestRedundantColumnIndexes
 
         List<Long> matchingPositions = new ArrayList<>();
         int rowsRead = 0;
+        ByteArrayOutputStream indexLogs = new ByteArrayOutputStream();
+        StreamHandler logHandler = new StreamHandler(indexLogs, new SimpleFormatter());
+        logHandler.setEncoding(UTF_8.name());
+        long testThreadId = Thread.currentThread().threadId();
+        logHandler.setFilter(record -> record.getLongThreadID() == testThreadId);
+        Logger indexLogger = Logger.getLogger(ColumnIndexFilter.class.getName());
+        Level previousLevel = indexLogger.getLevel();
+        indexLogger.setLevel(Level.INFO);
+        indexLogger.addHandler(logHandler);
         try (ParquetReader reader = createParquetReader(
                 dataSource,
                 metadata,
@@ -236,6 +301,12 @@ class TestRedundantColumnIndexes
                 }
             }
         }
+        finally {
+            indexLogger.removeHandler(logHandler);
+            indexLogger.setLevel(previousLevel);
+            logHandler.close();
+        }
+        assertThat(indexLogs.toString(UTF_8)).doesNotContain("No column index for column");
         assertThat(matchingPositions).containsExactlyElementsOf(IntStream.range(0, ROW_COUNT)
                 .filter(row -> valueDomain.includesNullableValue(row < nullCount ? null : value(row)) && positionDomain.includesNullableValue((long) row))
                 .mapToObj(row -> (long) row)
