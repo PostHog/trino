@@ -126,6 +126,12 @@ jobs:
           - { java-version: 25.0.4, cache: 'true', cleanup-node: true }
           - { java-version: 26, cache: 'restore', cleanup-node: true }
           - { java-version: 27-ea, cache: 'restore', cleanup-node: true }
+    # An early-access JDK is republished under one version, so a build whose
+    # checksum no longer matches what actions/setup-java records fails every
+    # pull request at once, on a leg that tells us about a JDK rather than
+    # about the change. The leg still runs and is still read; it no longer
+    # decides whether a pull request is green.
+    continue-on-error: ${{ endsWith(matrix.java-version, '-ea') }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
