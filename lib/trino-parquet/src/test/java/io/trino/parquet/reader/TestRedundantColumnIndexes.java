@@ -139,6 +139,23 @@ class TestRedundantColumnIndexes
         assertIndexReads(1024, Domain.notNull(VARCHAR), Domain.all(BIGINT), removeNullCounts, ImmutableList.of("value"), true);
     }
 
+    @Test
+    void testRequiredColumnWithoutNullCount()
+            throws IOException
+    {
+        Consumer<FileMetaData> removeNullCounts = metadata -> metadata.getRow_groups().forEach(rowGroup -> rowGroup.getColumns().forEach(column -> column.getMeta_data().getStatistics().unsetNull_count()));
+        assertIndexReads(0, Domain.all(VARCHAR), Domain.notNull(BIGINT), removeNullCounts, ImmutableList.of(), false);
+        assertIndexReads(0, range("1024", "2047"), Domain.notNull(BIGINT), removeNullCounts, ImmutableList.of("value"), true);
+        assertIndexReads(0, Domain.all(VARCHAR), Domain.singleValue(BIGINT, 1024L), removeNullCounts, ImmutableList.of("position"), true);
+    }
+
+    @Test
+    void testRequiredColumnWithoutStatistics()
+            throws IOException
+    {
+        assertIndexReads(0, Domain.all(VARCHAR), Domain.notNull(BIGINT), metadata -> metadata.getRow_groups().forEach(rowGroup -> rowGroup.getColumns().forEach(column -> column.getMeta_data().unsetStatistics())), ImmutableList.of(), false);
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"1.7.0", "1.8.0"})
     void testUntrustedBounds(String writerVersion)
