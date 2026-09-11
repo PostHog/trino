@@ -84,6 +84,7 @@
         <module>plugin/trino-google-sheets</module>
         <module>plugin/trino-hive</module>
         <module>plugin/trino-hoglake</module>
+        <module>plugin/trino-hogql-functions</module>
         <module>plugin/trino-http-event-listener</module>
         <module>plugin/trino-http-server-event-listener</module>
         <module>plugin/trino-hudi</module>
