@@ -19,11 +19,14 @@ import io.trino.plugin.hoglake.testing.ConnectorTestFixtures.FileColumn;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.DynamicFilter;
+import io.trino.spi.connector.MemoryContext;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
 import org.apache.parquet.schema.Types;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -285,8 +288,8 @@ class TestHoglakeParquetBinding
         try {
             pageSource.close();
         }
-        catch (java.io.IOException e) {
-            throw new java.io.UncheckedIOException(e);
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
     }
 
@@ -303,6 +306,6 @@ class TestHoglakeParquetBinding
                 Optional.empty(),
                 columns.stream().map(ColumnHandle.class::cast).toList(),
                 DynamicFilter.EMPTY,
-                io.trino.spi.connector.MemoryContext.NO_LIMIT);
+                MemoryContext.NO_LIMIT);
     }
 }

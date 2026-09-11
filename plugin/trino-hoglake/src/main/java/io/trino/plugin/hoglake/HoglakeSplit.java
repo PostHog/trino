@@ -15,6 +15,7 @@ package io.trino.plugin.hoglake;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.airlift.slice.SizeOf;
 import io.trino.spi.HostAddress;
 import io.trino.spi.connector.ConnectorSplit;
 
@@ -67,6 +68,6 @@ public record HoglakeSplit(
     @Override
     public long getRetainedSizeInBytes()
     {
-        return INSTANCE_SIZE + estimatedSizeOf(path) + sizeOf(deleteFilePath, io.airlift.slice.SizeOf::estimatedSizeOf);
+        return INSTANCE_SIZE + estimatedSizeOf(path) + sizeOf(deleteFilePath, SizeOf::estimatedSizeOf);
     }
 }

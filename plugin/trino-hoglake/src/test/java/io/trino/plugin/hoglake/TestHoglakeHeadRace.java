@@ -27,6 +27,8 @@ import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
+import io.trino.spi.connector.DynamicFilterSnapshot;
+import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.TableNotFoundException;
 import org.junit.jupiter.api.AfterAll;
@@ -42,6 +44,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
@@ -188,7 +191,7 @@ class TestHoglakeHeadRace
         // Execution: getSplits scans at the PINNED snapshot, so it plans
         // the old incarnation's files, not the new one's.
         ConnectorSplitSource splitSource = splitManager.getSplits(
-                HoglakeTransactionHandle.INSTANCE, session, handle, java.util.Set.of(), Constraint.alwaysTrue());
+                HoglakeTransactionHandle.INSTANCE, session, handle, Set.of(), Constraint.alwaysTrue());
         List<HoglakeSplit> splits = getAllSplits(splitSource);
         assertThat(splits).hasSize(1);
         assertThat(splits.get(0).path()).isEqualTo(V1_FILE);
@@ -206,7 +209,7 @@ class TestHoglakeHeadRace
                 Optional.empty(),
                 List.of(total),
                 DynamicFilter.EMPTY,
-                io.trino.spi.connector.MemoryContext.NO_LIMIT);
+                MemoryContext.NO_LIMIT);
         List<List<Object>> rows = ConnectorTestFixtures.readAll(pageSource, List.of(BIGINT));
         pageSource.close();
 
@@ -246,7 +249,7 @@ class TestHoglakeHeadRace
         // bug — the SPI's typed TableNotFoundException (NOT_FOUND,
         // USER_ERROR), not an internal error.
         assertThatThrownBy(() -> splitManager.getSplits(
-                HoglakeTransactionHandle.INSTANCE, session, handle, java.util.Set.of(), Constraint.alwaysTrue()))
+                HoglakeTransactionHandle.INSTANCE, session, handle, Set.of(), Constraint.alwaysTrue()))
                 .isInstanceOf(TableNotFoundException.class)
                 .isInstanceOfSatisfying(TrinoException.class, e -> {
                     assertThat(e.getErrorCode()).isEqualTo(NOT_FOUND.toErrorCode());
@@ -270,7 +273,7 @@ class TestHoglakeHeadRace
         // failure — never silently-wrong rows, never a generic internal
         // error.
         assertThatThrownBy(() -> splitManager.getSplits(
-                HoglakeTransactionHandle.INSTANCE, session, handle, java.util.Set.of(), Constraint.alwaysTrue()))
+                HoglakeTransactionHandle.INSTANCE, session, handle, Set.of(), Constraint.alwaysTrue()))
                 .isInstanceOfSatisfying(TrinoException.class, e ->
                         assertThat(e.getErrorCode()).isEqualTo(HOGLAKE_SNAPSHOT_EXPIRED.toErrorCode()))
                 .hasMessageContaining("snapshot expired");
@@ -302,7 +305,7 @@ class TestHoglakeHeadRace
                 session, new SchemaTableName("analytics", "metrics"), Optional.empty(), Optional.empty());
 
         assertThatThrownBy(() -> splitManager.getSplits(
-                HoglakeTransactionHandle.INSTANCE, session, handle, java.util.Set.of(), Constraint.alwaysTrue()))
+                HoglakeTransactionHandle.INSTANCE, session, handle, Set.of(), Constraint.alwaysTrue()))
                 .isInstanceOfSatisfying(TrinoException.class, e ->
                         assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
                 .hasMessageContaining("table has row-level deletes")
@@ -339,7 +342,7 @@ class TestHoglakeHeadRace
 
         // The in-flight query still reads exactly what it analyzed.
         ConnectorSplitSource pinnedSource = splitManager.getSplits(
-                HoglakeTransactionHandle.INSTANCE, session, handle, java.util.Set.of(), Constraint.alwaysTrue());
+                HoglakeTransactionHandle.INSTANCE, session, handle, Set.of(), Constraint.alwaysTrue());
         assertThat(getAllSplits(pinnedSource)).hasSize(1);
 
         // A NEW query pins the new head and sees the appended file.
@@ -347,7 +350,7 @@ class TestHoglakeHeadRace
                 session, new SchemaTableName("analytics", "metrics"), Optional.empty(), Optional.empty());
         assertThat(((HoglakeTableHandle) fresh).snapshotId()).isEqualTo(5);
         ConnectorSplitSource freshSource = splitManager.getSplits(
-                HoglakeTransactionHandle.INSTANCE, session, fresh, java.util.Set.of(), Constraint.alwaysTrue());
+                HoglakeTransactionHandle.INSTANCE, session, fresh, Set.of(), Constraint.alwaysTrue());
         assertThat(getAllSplits(freshSource)).hasSize(2);
     }
 
@@ -361,7 +364,7 @@ class TestHoglakeHeadRace
     private static List<HoglakeSplit> getAllSplits(ConnectorSplitSource splitSource)
             throws InterruptedException, ExecutionException
     {
-        return splitSource.getNextBatch(100, io.trino.spi.connector.DynamicFilterSnapshot.EMPTY).get().stream()
+        return splitSource.getNextBatch(100, DynamicFilterSnapshot.EMPTY).get().stream()
                 .map(HoglakeSplit.class::cast)
                 .toList();
     }

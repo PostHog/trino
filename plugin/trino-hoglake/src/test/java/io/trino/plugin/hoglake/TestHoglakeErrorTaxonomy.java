@@ -27,7 +27,9 @@ import org.junit.jupiter.api.parallel.Execution;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -182,7 +184,7 @@ class TestHoglakeErrorTaxonomy
     {
         // Bind-then-close to get a port that refuses connections.
         int port;
-        try (java.net.ServerSocket socket = new java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) {
+        try (ServerSocket socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
             port = socket.getLocalPort();
         }
         HoglakeClient unreachable = new HoglakeClient("http://127.0.0.1:" + port, "lake");

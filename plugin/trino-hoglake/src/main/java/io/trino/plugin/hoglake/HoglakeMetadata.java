@@ -29,6 +29,7 @@ import io.trino.spi.connector.SchemaTablePrefix;
 import io.trino.spi.connector.TableColumnsMetadata;
 
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -147,7 +148,7 @@ public class HoglakeMetadata
     }
 
     @Override
-    public java.util.Iterator<TableColumnsMetadata> streamTableColumns(
+    public Iterator<TableColumnsMetadata> streamTableColumns(
             ConnectorSession session,
             SchemaTablePrefix prefix)
     {

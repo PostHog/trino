@@ -25,6 +25,7 @@ import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.security.ConnectorIdentity;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.Type;
@@ -204,7 +205,7 @@ public final class ConnectorTestFixtures
     {
         List<List<Object>> rows = new ArrayList<>();
         while (!pageSource.isFinished()) {
-            io.trino.spi.connector.SourcePage page = pageSource.getNextSourcePage();
+            SourcePage page = pageSource.getNextSourcePage();
             if (page == null) {
                 break;
             }

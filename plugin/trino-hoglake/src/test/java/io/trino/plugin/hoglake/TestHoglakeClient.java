@@ -17,6 +17,8 @@ import com.sun.net.httpserver.HttpServer;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.TrinoException;
+import io.trino.spi.connector.SchemaNotFoundException;
+import io.trino.spi.connector.TableNotFoundException;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -155,7 +157,7 @@ class TestHoglakeClient
     void unknownNamespaceIsSchemaNotFound()
     {
         assertThatThrownBy(() -> client.listTables("nope"))
-                .isInstanceOf(io.trino.spi.connector.SchemaNotFoundException.class)
+                .isInstanceOf(SchemaNotFoundException.class)
                 .hasMessageContaining("nope");
     }
 
@@ -220,7 +222,7 @@ class TestHoglakeClient
     void scanOfMissingTableFailsLoudly()
     {
         assertThatThrownBy(() -> client.scan("analytics", "nope", 6))
-                .isInstanceOf(io.trino.spi.connector.TableNotFoundException.class)
+                .isInstanceOf(TableNotFoundException.class)
                 .hasMessageContaining("analytics.nope");
     }
 }

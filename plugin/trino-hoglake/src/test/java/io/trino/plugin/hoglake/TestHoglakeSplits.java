@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.hoglake;
 
+import io.airlift.json.JsonCodec;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.TrinoException;
 import org.apache.parquet.schema.MessageType;
@@ -118,7 +119,7 @@ class TestHoglakeSplits
     void splitSurvivesJsonRoundTripForWorkerDispatch()
             throws Exception
     {
-        io.airlift.json.JsonCodec<HoglakeSplit> codec = io.airlift.json.JsonCodec.jsonCodec(HoglakeSplit.class);
+        JsonCodec<HoglakeSplit> codec = JsonCodec.jsonCodec(HoglakeSplit.class);
 
         for (HoglakeSplit split : HoglakeSplitManager.toSplits(List.of(
                 new HoglakeDtos.ScanFile(DATA_FILE, null),
