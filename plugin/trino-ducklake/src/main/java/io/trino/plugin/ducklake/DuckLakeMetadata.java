@@ -115,6 +115,7 @@ import static io.trino.plugin.ducklake.DuckLakeColumnHandle.ROW_COUNT_COLUMN;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_FEATURE;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_FORMAT_VERSION;
+import static io.trino.plugin.ducklake.util.DuckLakeViewSql.withCatalogPlaceholder;
 import static io.trino.plugin.ducklake.util.PartitionTransforms.IDENTITY_TRANSFORM;
 import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.COLUMN_ALREADY_EXISTS;
@@ -1447,7 +1448,7 @@ public class DuckLakeMetadata
                     schema.schemaId(),
                     viewName.getTableName(),
                     TRINO_VIEW_DIALECT,
-                    definition.getOriginalSql(),
+                    storedViewSql(definition),
                     formatColumnAliases(definition));
             commit.setTableTag(viewId, VIEW_DEFINITION_TAG_KEY, Optional.of(viewDefinitionCodec.toJson(definition)));
             commit.recordCreatedView(viewName.getSchemaName(), viewName.getTableName());
@@ -1557,6 +1558,20 @@ public class DuckLakeMetadata
         if (!metastore.viewsSupported()) {
             throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "This DuckLake catalog was created before views were added to the format");
         }
+    }
+
+    /**
+     * The view's query in the form DuckLake stores it, naming the catalog it reads by the
+     * placeholder the format defines rather than by the name this catalog is mounted under here.
+     * Trino keeps reading the query from the tag beside the view, so the placeholder is written
+     * for the engines that read the column instead — DuckDB attaches the catalog under a name of
+     * its own, and a literal one would leave the view unbindable there.
+     */
+    private static String storedViewSql(ConnectorViewDefinition definition)
+    {
+        return definition.getCatalog()
+                .map(catalog -> withCatalogPlaceholder(definition.getOriginalSql(), catalog))
+                .orElseGet(definition::getOriginalSql);
     }
 
     /**

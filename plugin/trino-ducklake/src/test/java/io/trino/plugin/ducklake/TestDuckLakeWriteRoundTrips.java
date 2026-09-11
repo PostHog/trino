@@ -16,7 +16,6 @@ package io.trino.plugin.ducklake;
 import io.trino.Session;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
-import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.Test;
 
 import java.sql.SQLException;
@@ -540,12 +539,13 @@ final class TestDuckLakeWriteRoundTrips
      * A view whose query names its tables through the Trino catalog, as a tool that generates SQL
      * against a specific catalog writes them.
      * <p>
-     * The connector stores the query text as it was written, so the catalog name goes into the
-     * DuckLake view along with it. Trino resolves that name and reads the view; DuckDB has no
-     * database of that name and fails to bind it, while the rest of the catalog keeps working.
+     * The name of the catalog is stored as the placeholder DuckLake defines for it rather than
+     * literally, so the view binds in either engine: each resolves the placeholder to the name it
+     * knows the catalog by, and the two names differ. Trino mounts this catalog as
+     * {@code ducklake} and DuckDB attaches it as {@code lake}.
      */
     @Test
-    void testAViewQualifiedByTheTrinoCatalogNameDoesNotBindInDuckDb()
+    void testAViewQualifiedByTheTrinoCatalogNameBindsInDuckDb()
             throws SQLException
     {
         String table = "qualified_source_" + randomNameSuffix();
@@ -556,14 +556,21 @@ final class TestDuckLakeWriteRoundTrips
         try {
             assertUpdate("CREATE VIEW %s AS SELECT id FROM ducklake.main.%s WHERE id = 2".formatted(view, table));
 
-            assertThat(liveViewRow(view, "sql")).isEqualTo(List.of(formattedViewQuery("ducklake.main." + table)));
+            assertThat(liveViewRow(view, "sql")).isEqualTo(List.of(formattedViewQuery("{DUCKLAKE_CATALOG}.main." + table)));
             assertQuery("SELECT id FROM " + view, "VALUES 2");
 
             // DuckDB lists the view and keeps reading the tables beside it
             assertThat(catalog.rows("SELECT view_name FROM duckdb_views() WHERE view_name = '%s'".formatted(view))).isEqualTo(List.of(view));
             assertThat(catalog.scalar("SELECT count(*) FROM " + table)).isEqualTo("2");
 
-            assertThat(duckDbFailure("SELECT * FROM " + view)).contains("Binder Error: Catalog \"ducklake\" does not exist!");
+            // and reads the view itself, which a literal catalog name would leave it unable to bind
+            assertThat(catalog.rows("SELECT id::VARCHAR FROM " + view)).isEqualTo(List.of("2"));
+
+            // replacing the view writes the placeholder again rather than the name it was given
+            assertUpdate("CREATE OR REPLACE VIEW %s AS SELECT id FROM ducklake.main.%s WHERE id = 1".formatted(view, table));
+            assertThat(liveViewRow(view, "sql")).isEqualTo(List.of(formattedViewQuery("{DUCKLAKE_CATALOG}.main." + table, 1)));
+            assertQuery("SELECT id FROM " + view, "VALUES 1");
+            assertThat(catalog.rows("SELECT id::VARCHAR FROM " + view)).isEqualTo(List.of("1"));
         }
         finally {
             assertUpdate("DROP VIEW " + view);
@@ -599,21 +606,12 @@ final class TestDuckLakeWriteRoundTrips
      */
     private static String formattedViewQuery(String source)
     {
-        return "SELECT id\nFROM\n  %s\nWHERE (id = 2)\n".formatted(source);
+        return formattedViewQuery(source, 2);
     }
 
-    /**
-     * The message DuckDB fails the query with. Fails the test if the query succeeds.
-     */
-    private String duckDbFailure(@Language("SQL") String sql)
+    private static String formattedViewQuery(String source, int id)
     {
-        try {
-            catalog.rows(sql);
-        }
-        catch (RuntimeException e) {
-            return e.getCause() == null ? e.getMessage() : e.getCause().getMessage();
-        }
-        throw new AssertionError("Expected DuckDB to fail: " + sql);
+        return "SELECT id\nFROM\n  %s\nWHERE (id = %s)\n".formatted(source, id);
     }
 
     private long activeDataFileCount(String table)
