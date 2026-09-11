@@ -139,36 +139,19 @@ public final class PredicateUtils
         return new TupleDomainParquetPredicate(parquetTupleDomain, columnReferences.build(), timeZone);
     }
 
-    public static boolean predicateMatches(
-            TupleDomainParquetPredicate parquetPredicate,
+    private static boolean predicateMatches(
+            TupleDomainParquetPredicate indexPredicate,
+            List<ColumnDescriptor> candidateColumns,
+            Map<ColumnDescriptor, Long> columnValueCounts,
             PrunedBlockMetadata columnsMetadata,
             ParquetDataSource dataSource,
             Map<List<String>, ColumnDescriptor> descriptorsByPath,
-            TupleDomain<ColumnDescriptor> parquetTupleDomain,
             Optional<ColumnIndexStore> columnIndexStore,
             Optional<BloomFilterStore> bloomFilterStore,
-            DateTimeZone timeZone,
             int domainCompactionThreshold,
             Optional<FileDecryptionContext> decryptionContext)
             throws IOException
     {
-        if (columnsMetadata.getRowCount() == 0) {
-            return false;
-        }
-        Map<ColumnDescriptor, Statistics<?>> columnStatistics = getStatistics(columnsMetadata, descriptorsByPath);
-        Map<ColumnDescriptor, Long> columnValueCounts = getColumnValueCounts(columnsMetadata, descriptorsByPath);
-        Optional<List<ColumnDescriptor>> candidateColumns = parquetPredicate.getIndexLookupCandidates(columnValueCounts, columnStatistics, dataSource.getId());
-        if (candidateColumns.isEmpty()) {
-            return false;
-        }
-        if (candidateColumns.get().isEmpty()) {
-            return true;
-        }
-        // Perform column index, bloom filter checks and dictionary lookups only for the subset of columns where it can be useful.
-        // This prevents unnecessary filesystem reads and decoding work when the predicate on a column comes from
-        // file-level min/max stats or more generally when the predicate selects a range equal to or wider than row-group min/max.
-        TupleDomainParquetPredicate indexPredicate = new TupleDomainParquetPredicate(parquetTupleDomain, candidateColumns.get(), timeZone);
-
         // Page stats is finer grained but relatively more expensive, so we do the filtering after above block filtering.
         if (columnIndexStore.isPresent() && !indexPredicate.matches(columnValueCounts, columnIndexStore.get(), dataSource.getId())) {
             return false;
@@ -183,7 +166,7 @@ public final class PredicateUtils
                 columnsMetadata,
                 dataSource,
                 descriptorsByPath,
-                ImmutableSet.copyOf(candidateColumns.get()),
+                ImmutableSet.copyOf(candidateColumns),
                 columnIndexStore,
                 decryptionContext);
     }
@@ -203,24 +186,40 @@ public final class PredicateUtils
     {
         ImmutableList.Builder<RowGroupInfo> rowGroupInfoBuilder = ImmutableList.builder();
         for (BlockMetadata block : parquetMetadata.getBlocks(splitStart, splitLength)) {
+            PrunedBlockMetadata columnsMetadata = createPrunedColumnsMetadata(block, dataSource.getId(), descriptorsByPath);
+            if (block.rowCount() == 0) {
+                continue;
+            }
+            Map<ColumnDescriptor, Statistics<?>> columnStatistics = getStatistics(columnsMetadata, descriptorsByPath);
+            Map<ColumnDescriptor, Long> columnValueCounts = getColumnValueCounts(columnsMetadata, descriptorsByPath);
             for (int i = 0; i < parquetTupleDomains.size(); i++) {
                 TupleDomain<ColumnDescriptor> parquetTupleDomain = parquetTupleDomains.get(i);
                 TupleDomainParquetPredicate parquetPredicate = parquetPredicates.get(i);
-                Optional<ColumnIndexStore> columnIndex = getColumnIndexStore(dataSource, block, descriptorsByPath, parquetTupleDomain, options, parquetMetadata.getDecryptionContext());
+                Optional<List<ColumnDescriptor>> candidateColumns = parquetPredicate.getIndexLookupCandidates(columnValueCounts, columnStatistics, dataSource.getId());
+                if (candidateColumns.isEmpty()) {
+                    continue;
+                }
+                if (candidateColumns.get().isEmpty()) {
+                    rowGroupInfoBuilder.add(new RowGroupInfo(columnsMetadata, block.fileRowCountOffset(), Optional.empty()));
+                    break;
+                }
+                // Retain the row-group statistics decision for page filtering too. Indexes cannot prune pages
+                // for a column whose entire row-group domain is contained in the predicate.
+                Optional<ColumnIndexStore> columnIndex = getColumnIndexStore(dataSource, block, descriptorsByPath, candidateColumns.get(), options, parquetMetadata.getDecryptionContext());
                 Optional<BloomFilterStore> bloomFilterStore = getBloomFilterStore(dataSource, block, parquetTupleDomain, options, parquetMetadata.getDecryptionContext());
-                PrunedBlockMetadata columnsMetadata = createPrunedColumnsMetadata(block, dataSource.getId(), descriptorsByPath);
+                TupleDomainParquetPredicate indexPredicate = new TupleDomainParquetPredicate(parquetTupleDomain, candidateColumns.get(), timeZone);
                 if (predicateMatches(
-                        parquetPredicate,
+                        indexPredicate,
+                        candidateColumns.get(),
+                        columnValueCounts,
                         columnsMetadata,
                         dataSource,
                         descriptorsByPath,
-                        parquetTupleDomain,
                         columnIndex,
                         bloomFilterStore,
-                        timeZone,
                         domainCompactionThreshold,
                         parquetMetadata.getDecryptionContext())) {
-                    rowGroupInfoBuilder.add(new RowGroupInfo(columnsMetadata, block.fileRowCountOffset(), columnIndex));
+                    rowGroupInfoBuilder.add(new RowGroupInfo(columnsMetadata, block.fileRowCountOffset(), columnIndex, columnIndex.map(_ -> indexPredicate)));
                     break;
                 }
             }

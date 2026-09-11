@@ -263,7 +263,7 @@ public class ParquetReader
         if (parquetPredicate.isPresent() && options.isUseColumnIndex()) {
             filter = parquetPredicate.get().toParquetFilter(timeZone);
         }
-        this.blockRowRanges = calculateFilteredRowRanges(rowGroups, filter, primitiveFields);
+        this.blockRowRanges = calculateFilteredRowRanges(rowGroups, filter, primitiveFields, timeZone);
 
         this.exceptionTransform = exceptionTransform;
         ListMultimap<ChunkKey, DiskRange> ranges = ArrayListMultimap.create();
@@ -1439,7 +1439,8 @@ public class ParquetReader
     private static FilteredRowRanges[] calculateFilteredRowRanges(
             List<RowGroupInfo> rowGroups,
             Optional<FilterPredicate> filter,
-            List<PrimitiveField> primitiveFields)
+            List<PrimitiveField> primitiveFields,
+            DateTimeZone timeZone)
     {
         FilteredRowRanges[] blockRowRanges = new FilteredRowRanges[rowGroups.size()];
         if (filter.isEmpty()) {
@@ -1454,9 +1455,15 @@ public class ParquetReader
             if (rowGroupColumnIndexStore.isEmpty()) {
                 continue;
             }
+            Optional<FilterPredicate> rowGroupFilter = rowGroupInfo.columnIndexPredicate()
+                    .map(predicate -> predicate.toParquetFilter(timeZone))
+                    .orElse(filter);
+            if (rowGroupFilter.isEmpty()) {
+                continue;
+            }
             long rowGroupRowCount = rowGroupInfo.prunedBlockMetadata().getRowCount();
             FilteredRowRanges rowRanges = new FilteredRowRanges(ColumnIndexFilter.calculateRowRanges(
-                    FilterCompat.get(filter.get()),
+                    FilterCompat.get(rowGroupFilter.get()),
                     rowGroupColumnIndexStore.get(),
                     paths,
                     rowGroupRowCount));
