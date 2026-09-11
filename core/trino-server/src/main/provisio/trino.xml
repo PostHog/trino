@@ -118,6 +118,12 @@
         </artifact>
     </artifactSet>
 
+    <artifactSet to="plugin/hoglake">
+        <artifact id="${project.groupId}:trino-hoglake:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
     <artifactSet to="plugin/hudi">
         <artifact id="${project.groupId}:trino-hudi:zip:${project.version}">
             <unpack />

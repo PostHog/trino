@@ -21,6 +21,7 @@ Exasol          <connector/exasol>
 Faker           <connector/faker>
 Google Sheets   <connector/googlesheets>
 Hive            <connector/hive>
+Hoglake         <connector/hoglake>
 Hudi            <connector/hudi>
 Iceberg         <connector/iceberg>
 Ignite          <connector/ignite>
