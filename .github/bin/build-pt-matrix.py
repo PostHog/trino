@@ -104,6 +104,7 @@ MODULE_TO_SUITES = {
         "SuiteTpcds",
         "SuiteTpch",
     },
+    "plugin/trino-hoglake": set(),
     "plugin/trino-hudi": set(),
     "plugin/trino-iceberg": {"SuiteCompatibility"},
     "plugin/trino-ignite": set(),

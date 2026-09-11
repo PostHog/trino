@@ -438,7 +438,7 @@ class TestBuild(unittest.TestCase):
         matrix = build_matrix_json(configs, set(), {"event_name": "merge_group"})
         modules = {module for item in matrix["include"] for module in item["modules"].split(",")}
         self.assertTrue({
-            "plugin/trino-ducklake", "plugin/trino-posthog-catalogstore",
+            "plugin/trino-ducklake", "plugin/trino-hoglake", "plugin/trino-posthog-catalogstore",
             "core/trino-main", "core/trino-spi", "testing/trino-tests",
             "plugin/trino-hive", "lib/trino-parquet", "lib/trino-filesystem-s3",
         } <= modules)

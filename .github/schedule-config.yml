@@ -25,6 +25,7 @@
 - { modules: core/trino-main }
 - { modules: lib/trino-filesystem-s3, profile: cloud-tests }
 - { modules: plugin/trino-ducklake }
+- { modules: plugin/trino-hoglake }
 - { modules: plugin/trino-hive }
 - { modules: plugin/trino-hive, profile: cloud-tests }
 - { modules: plugin/trino-hive, profile: test-parquet }
