@@ -38,6 +38,7 @@ import org.apache.parquet.format.Statistics;
 import org.apache.parquet.hadoop.ParquetWriter;
 import org.apache.parquet.hadoop.example.ExampleParquetWriter;
 import org.apache.parquet.internal.filter2.columnindex.ColumnIndexFilter;
+import org.apache.parquet.io.api.Binary;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.MessageTypeParser;
 import org.junit.jupiter.api.Test;
@@ -159,7 +160,7 @@ class TestRedundantColumnIndexes
                     assertThat(parsedStatistics.hasNonNullValue()).isFalse();
                 }
                 else {
-                    assertThat(parsedStatistics.genericGetMax()).isEqualTo(org.apache.parquet.io.api.Binary.fromString("3"));
+                    assertThat(parsedStatistics.genericGetMax()).isEqualTo(Binary.fromString("3"));
                 }
             });
         }, ImmutableList.of("value"), true);
