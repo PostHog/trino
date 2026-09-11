@@ -45,6 +45,8 @@ import org.apache.parquet.internal.column.columnindex.ColumnIndex;
 import org.apache.parquet.internal.column.columnindex.ColumnIndexBuilder;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit;
+import org.apache.parquet.schema.MessageType;
+import org.apache.parquet.schema.MessageTypeParser;
 import org.apache.parquet.schema.PrimitiveType;
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
 import org.apache.parquet.schema.Types;
@@ -629,6 +631,42 @@ public class TestTupleDomainParquetPredicate
     private static int millisToJulianDay(long timestamp)
     {
         return toIntExact(MILLISECONDS.toDays(timestamp) + JULIAN_EPOCH_OFFSET_DAYS);
+    }
+
+    @Test
+    public void testIndexCandidatesWithoutNullCounts()
+            throws ParquetCorruptionException
+    {
+        MessageType schema = MessageTypeParser.parseMessageType(
+                """
+                message test {
+                    required int64 required_value;
+                    optional int64 optional_value;
+                    required group required_parent { required int64 value; }
+                    optional group optional_parent { required int64 value; }
+                    repeated group repeated_parent { required int64 value; }
+                }
+                """);
+        for (ColumnDescriptor column : schema.getColumns()) {
+            TupleDomainParquetPredicate predicate = new TupleDomainParquetPredicate(
+                    TupleDomain.withColumnDomains(ImmutableMap.of(column, notNull(BIGINT))),
+                    ImmutableList.of(column),
+                    UTC);
+            List<ColumnDescriptor> expected = column.getMaxDefinitionLevel() == 0 ? ImmutableList.of() : ImmutableList.of(column);
+            // Cover absent statistics, empty statistics, and bounds without a null count.
+            assertThat(predicate.getIndexLookupCandidates(ImmutableMap.of(column, 2L), ImmutableMap.of(), ID))
+                    .isEqualTo(Optional.of(expected));
+            for (Statistics<?> stats : ImmutableList.of(
+                    Statistics.getBuilderForReading(column.getPrimitiveType()).build(),
+                    Statistics.getBuilderForReading(column.getPrimitiveType())
+                            .withMin(BytesUtils.longToBytes(10))
+                            .withMax(BytesUtils.longToBytes(20))
+                            .build())) {
+                assertThat(stats.isNumNullsSet()).isFalse();
+                assertThat(predicate.getIndexLookupCandidates(ImmutableMap.of(column, 2L), ImmutableMap.of(column, stats), ID))
+                        .isEqualTo(Optional.of(expected));
+            }
+        }
     }
 
     @Test

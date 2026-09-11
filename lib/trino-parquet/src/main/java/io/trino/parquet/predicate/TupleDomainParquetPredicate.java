@@ -138,6 +138,12 @@ public class TupleDomainParquetPredicate
             }
 
             Statistics<?> columnStatistics = statistics.get(column);
+            // A column with no definition levels cannot contain nulls, even when null-count statistics are absent.
+            // If all non-null values match, page indexes and dictionaries cannot eliminate any rows.
+            if (column.getMaxDefinitionLevel() == 0 && effectivePredicateDomain.getValues().isAll() &&
+                    (columnStatistics == null || !columnStatistics.isNumNullsSet())) {
+                continue;
+            }
             if (columnStatistics == null || columnStatistics.isEmpty()) {
                 // no stats for column
                 candidateColumns.add(column);
