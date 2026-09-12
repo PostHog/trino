@@ -27,7 +27,7 @@ public class KeyManagementServer
 {
     public static final int KES_PORT = 7373;
     private static final Logger log = Logger.get(KeyManagementServer.class);
-    private static final String DEFAULT_IMAGE = "minio/kes:2024-06-17T15-47-05Z";
+    private static final String DEFAULT_IMAGE = "quay.io/minio/kes:2024-06-17T15-47-05Z";
     private static final String DEFAULT_HOST_NAME = "kes";
 
     public static KeyManagementServer.Builder builder()
