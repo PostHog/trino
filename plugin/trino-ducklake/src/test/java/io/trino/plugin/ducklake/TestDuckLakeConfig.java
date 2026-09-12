@@ -15,7 +15,6 @@ package io.trino.plugin.ducklake;
 
 import com.google.common.collect.ImmutableMap;
 import io.airlift.configuration.ConfigurationFactory;
-import io.airlift.configuration.validation.FileExists;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import jakarta.validation.constraints.AssertTrue;
@@ -161,15 +160,11 @@ final class TestDuckLakeConfig
     }
 
     @Test
-    void testPasswordFileMustExist()
+    void testPasswordFileExistenceIsValidatedWhenCreatingConnector()
     {
         File missing = temporaryDirectory.resolve("does-not-exist").toFile();
 
-        assertFailsValidation(
-                validConfig().setConnectionPasswordFile(missing),
-                "connectionPasswordFile",
-                "file does not exist: " + missing.getPath(),
-                FileExists.class);
+        assertValidates(validConfig().setConnectionPasswordFile(missing));
     }
 
     private DuckLakeConfig validConfig()

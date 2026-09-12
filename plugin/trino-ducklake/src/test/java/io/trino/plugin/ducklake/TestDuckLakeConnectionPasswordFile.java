@@ -67,6 +67,9 @@ final class TestDuckLakeConnectionPasswordFile
         assertQuery("SELECT name FROM region WHERE regionkey = 1", "VALUES 'AMERICA'");
 
         // rotating the credential takes effect without restarting Trino or recreating the catalog
+        Files.delete(passwordFile);
+        assertQueryFails("SELECT name FROM region WHERE regionkey = 1", ".*Failed to read DuckLake metadata connection password file:.*");
+
         writePassword("rotated-to-a-wrong-password");
         assertQueryFails("SELECT name FROM region WHERE regionkey = 1", ".*password authentication failed.*");
 

@@ -28,6 +28,7 @@ import io.trino.plugin.ducklake.metastore.PooledDuckLakeConnectionFactory;
 import io.trino.plugin.hive.HiveNodePartitioningProvider;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
 import io.trino.plugin.hive.parquet.ParquetWriterConfig;
+import io.trino.spi.Node;
 import io.trino.spi.TrinoException;
 import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.connector.ConnectorNodePartitioningProvider;
@@ -40,6 +41,7 @@ import org.jdbi.v3.core.ConnectionFactory;
 import java.sql.Driver;
 import java.util.concurrent.ExecutorService;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static io.airlift.bootstrap.ClosingBinder.closingBinder;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
@@ -96,8 +98,17 @@ public class DuckLakeModule
     @Provides
     @Singleton
     @ForDuckLakeMetastoreDriver
-    public static ConnectionFactory createConnectionFactory(DuckLakeConfig config)
+    public static ConnectionFactory createConnectionFactory(DuckLakeConfig config, Node currentNode)
     {
+        // Only coordinators access the metadata database. Workers load catalogs lazily and
+        // must not wait for an unused password file to reach their independent Secret mounts.
+        if (currentNode.isCoordinator()) {
+            config.getConnectionPasswordFile().ifPresent(file -> checkArgument(
+                    file.exists(),
+                    "Invalid configuration property ducklake.metadata.connection-password-file: file does not exist: %s",
+                    file));
+        }
+
         Driver driver;
         try {
             driver = (Driver) Class.forName("org.postgresql.Driver").getConstructor().newInstance();

@@ -68,7 +68,9 @@ The following configuration properties are available:
     every connection, so a rotated password takes effect without restarting Trino. Cannot be
     combined with `ducklake.metadata.connection-password`. Prefer this property for a catalog
     created with [](/sql/create-catalog), because the password then does not appear in the
-    statement that Trino records in the query log and shows in the Web UI.
+    statement that Trino records in the query log and shows in the Web UI. The file must exist
+    on the coordinator when creating the catalog. Workers do not access the metadata database
+    and do not require this file to load the catalog or execute reads and writes.
   -
 * - `ducklake.metadata.connection-pool.max-size`
   - Maximum number of connections the catalog keeps open to the catalog database. Keep this
@@ -115,6 +117,20 @@ The connector supports reading from S3, Azure Storage, Google Cloud Storage,
 and HDFS using the same [file system configuration](/object-storage) as other
 object storage connectors, such as `fs.native-s3.enabled=true` and the `s3.*`
 properties.
+
+### Metadata password files
+
+For local development, create the password file on the coordinator and point
+`ducklake.metadata.connection-password-file` at it before creating the catalog.
+For Kubernetes deployments, mount the Secret on the coordinator and allow its
+volume projection to complete. A successful Secret API update alone does not
+mean the file is visible inside the container.
+
+If catalog creation reports that the password file does not exist, check the
+configured path and the coordinator's volume mount. Restore the file before
+creating the catalog again. If the file disappears after creation, new metadata
+connections fail until it is restored; no catalog recreation is required.
+Workers can load catalogs and execute tasks without this metadata credential.
 
 (ducklake-concurrent-writers)=
 ### Concurrent writers

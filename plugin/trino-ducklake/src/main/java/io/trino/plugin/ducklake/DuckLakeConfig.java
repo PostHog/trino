@@ -16,7 +16,6 @@ package io.trino.plugin.ducklake;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.ConfigSecuritySensitive;
-import io.airlift.configuration.validation.FileExists;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.airlift.units.MinDataSize;
@@ -96,7 +95,7 @@ public class DuckLakeConfig
         return this;
     }
 
-    public Optional<@FileExists File> getConnectionPasswordFile()
+    public Optional<File> getConnectionPasswordFile()
     {
         return Optional.ofNullable(connectionPasswordFile);
     }
