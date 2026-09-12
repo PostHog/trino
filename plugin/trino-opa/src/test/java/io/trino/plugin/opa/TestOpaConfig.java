@@ -38,7 +38,8 @@ final class TestOpaConfig
                 .setLogRequests(false)
                 .setLogResponses(false)
                 .setAllowPermissionManagementOperations(false)
-                .setAdditionalContextFile(null));
+                .setAdditionalContextFile(null)
+                .setMaxOutstandingRequests(512));
     }
 
     @Test
@@ -54,6 +55,7 @@ final class TestOpaConfig
                 .put("opa.log-responses", "true")
                 .put("opa.allow-permission-management-operations", "true")
                 .put("opa.context-file", "src/test/resources/additional-context.properties")
+                .put("opa.max-outstanding-requests", "37")
                 .buildOrThrow();
 
         OpaConfig expected = new OpaConfig()
@@ -65,7 +67,8 @@ final class TestOpaConfig
                 .setLogRequests(true)
                 .setLogResponses(true)
                 .setAllowPermissionManagementOperations(true)
-                .setAdditionalContextFile(Path.of("src/test/resources/additional-context.properties"));
+                .setAdditionalContextFile(Path.of("src/test/resources/additional-context.properties"))
+                .setMaxOutstandingRequests(37);
 
         assertFullMapping(properties, expected);
     }
