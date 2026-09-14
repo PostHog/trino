@@ -19,6 +19,7 @@ import io.trino.filesystem.TrinoInputFile;
 import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.parquet.Column;
 import io.trino.parquet.Field;
+import io.trino.parquet.ParquetCorruptionException;
 import io.trino.parquet.ParquetDataSource;
 import io.trino.parquet.ParquetReaderOptions;
 import io.trino.parquet.metadata.FileMetadata;
@@ -37,8 +38,10 @@ import io.trino.spi.connector.ConnectorTableCredentials;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.DynamicFilter;
+import io.trino.spi.connector.EmptyPageSource;
 import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.connector.MemoryUsageReportingPageSource;
+import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.io.MessageColumnIO;
@@ -47,9 +50,11 @@ import org.joda.time.DateTimeZone;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.parquet.ParquetTypeUtils.constructField;
@@ -60,6 +65,7 @@ import static io.trino.parquet.predicate.PredicateUtils.buildPredicate;
 import static io.trino.parquet.predicate.PredicateUtils.getFilteredRowGroups;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.type.UuidType.UUID;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -98,11 +104,14 @@ public class HoglakePageSourceProvider
         HoglakeSplit hoglakeSplit = (HoglakeSplit) split;
         ensureNoRowLevelDeletes(hoglakeSplit);
 
-        // Splits cover whole files at the query's pinned snapshot. Hoglake does not push down
-        // predicates, so Trino projects any columns needed for filtering or aggregation.
-        // With no columns, only row cardinality is needed (for example, COUNT(*)).
-        // If reader-side predicates are added, this shortcut must also require an unrestricted predicate.
-        if (columns.isEmpty() && hoglakeSplit.recordCount() >= 0) {
+        TupleDomain<HoglakeColumnHandle> predicate = ((HoglakeTableHandle) table).constraint();
+        if (predicate.isNone()) {
+            return new EmptyPageSource();
+        }
+
+        // Splits cover whole files at the query's pinned snapshot. With no columns or
+        // reader-side predicate, only row cardinality is needed (for example, COUNT(*)).
+        if (columns.isEmpty() && predicate.isAll() && hoglakeSplit.recordCount() >= 0) {
             return new HoglakeCountPageSource(hoglakeSplit.recordCount());
         }
 
@@ -117,7 +126,7 @@ public class HoglakePageSourceProvider
         ParquetDataSource dataSource = null;
         try {
             dataSource = new HoglakeParquetDataSource(inputFile, hoglakeSplit.fileSizeBytes(), options);
-            return new MemoryUsageReportingPageSource(createParquetPageSource(dataSource, hoglakeColumns, options), memoryContext);
+            return new MemoryUsageReportingPageSource(createParquetPageSource(dataSource, hoglakeColumns, predicate.simplify(DOMAIN_COMPACTION_THRESHOLD), options), memoryContext);
         }
         catch (Exception e) {
             if (dataSource != null) {
@@ -160,6 +169,7 @@ public class HoglakePageSourceProvider
     private static ConnectorPageSource createParquetPageSource(
             ParquetDataSource dataSource,
             List<HoglakeColumnHandle> columns,
+            TupleDomain<HoglakeColumnHandle> predicate,
             ParquetReaderOptions options)
             throws IOException
     {
@@ -195,20 +205,25 @@ public class HoglakePageSourceProvider
             }
         }
 
-        Map<List<String>, ColumnDescriptor> descriptorsByPath = getDescriptors(fileSchema, requestedSchema);
-        TupleDomainParquetPredicate parquetPredicate =
-                buildPredicate(requestedSchema, TupleDomain.all(), descriptorsByPath, DateTimeZone.UTC);
-        List<RowGroupInfo> rowGroups = getFilteredRowGroups(
-                0,
-                dataSource.getEstimatedSize(),
-                dataSource,
-                parquetMetadata,
-                List.of(TupleDomain.all()),
-                List.of(parquetPredicate),
-                descriptorsByPath,
-                DateTimeZone.UTC,
-                DOMAIN_COMPACTION_THRESHOLD,
-                options);
+        // Predicate columns need footer metadata even when they are not projected. Use the
+        // same field-id/name binding as the reader, including renamed and missing columns.
+        MessageType predicateSchema = new MessageType(fileSchema.getName(), Stream.concat(
+                        boundFields.stream(),
+                        predicate.getDomains().orElseThrow().keySet().stream()
+                                .flatMap(column -> bindColumn(fileSchema, column).stream()))
+                .distinct()
+                .toList());
+        Map<List<String>, ColumnDescriptor> descriptorsByPath = getDescriptors(fileSchema, predicateSchema);
+        TupleDomain<ColumnDescriptor> parquetDomain = parquetPredicate(fileSchema, descriptorsByPath, predicate);
+        List<RowGroupInfo> rowGroups;
+        try {
+            rowGroups = filterRowGroups(dataSource, parquetMetadata, parquetDomain, descriptorsByPath, options);
+        }
+        catch (ParquetCorruptionException e) {
+            // Unusable statistics must not exclude data. Retry without pruning; structural
+            // corruption will still fail when constructing metadata or reading the data.
+            rowGroups = filterRowGroups(dataSource, parquetMetadata, TupleDomain.all(), descriptorsByPath, options);
+        }
 
         AggregatedMemoryContext memoryContext = newSimpleAggregatedMemoryContext();
         ParquetReader parquetReader = new ParquetReader(
@@ -225,6 +240,61 @@ public class HoglakePageSourceProvider
                 Optional.empty(),
                 Optional.empty());
         return new HoglakePageSource(parquetReader, adaptations);
+    }
+
+    private static List<RowGroupInfo> filterRowGroups(
+            ParquetDataSource dataSource,
+            ParquetMetadata parquetMetadata,
+            TupleDomain<ColumnDescriptor> parquetDomain,
+            Map<List<String>, ColumnDescriptor> descriptorsByPath,
+            ParquetReaderOptions options)
+            throws IOException
+    {
+        TupleDomainParquetPredicate parquetPredicate =
+                buildPredicate(parquetMetadata.getFileMetaData().getSchema(), parquetDomain, descriptorsByPath, DateTimeZone.UTC);
+        return getFilteredRowGroups(
+                0,
+                dataSource.getEstimatedSize(),
+                dataSource,
+                parquetMetadata,
+                List.of(parquetDomain),
+                List.of(parquetPredicate),
+                descriptorsByPath,
+                DateTimeZone.UTC,
+                DOMAIN_COMPACTION_THRESHOLD,
+                options);
+    }
+
+    static TupleDomain<ColumnDescriptor> parquetPredicate(
+            MessageType fileSchema,
+            Map<List<String>, ColumnDescriptor> descriptorsByPath,
+            TupleDomain<HoglakeColumnHandle> predicate)
+    {
+        if (predicate.isNone()) {
+            return TupleDomain.none();
+        }
+        Map<ColumnDescriptor, Domain> domains = new HashMap<>();
+        for (Map.Entry<HoglakeColumnHandle, Domain> entry : predicate.getDomains().orElseThrow().entrySet()) {
+            HoglakeColumnHandle column = entry.getKey();
+            Domain domain = entry.getValue();
+            Optional<org.apache.parquet.schema.Type> binding = bindColumn(fileSchema, column);
+            if (binding.isEmpty()) {
+                if (!domain.isNullAllowed()) {
+                    return TupleDomain.none();
+                }
+                continue;
+            }
+            // UUID ordering differs from Parquet's binary ordering. Nested fields have no
+            // statistics for the whole value. Unsupported statistics types remain residuals.
+            if (!binding.get().isPrimitive() || column.type().equals(UUID)) {
+                continue;
+            }
+            ColumnDescriptor descriptor = descriptorsByPath.get(List.of(binding.get().getName()));
+            if (descriptor != null) {
+                domains.merge(descriptor, domain, Domain::intersect);
+            }
+        }
+        return TupleDomain.withColumnDomains(domains);
     }
 
     /**

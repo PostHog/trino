@@ -23,10 +23,13 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTableVersion;
+import io.trino.spi.connector.Constraint;
+import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.SchemaNotFoundException;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
 import io.trino.spi.connector.TableColumnsMetadata;
+import io.trino.spi.predicate.TupleDomain;
 
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -162,6 +165,20 @@ public class HoglakeMetadata
                             TableColumnsMetadata.forTable(name, columnMetadata(table))));
         }
         return result.iterator();
+    }
+
+    @Override
+    public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(ConnectorSession session, ConnectorTableHandle table, Constraint constraint)
+    {
+        HoglakeTableHandle handle = (HoglakeTableHandle) table;
+        TupleDomain<HoglakeColumnHandle> predicate = handle.constraint()
+                .intersect(constraint.getSummary().transformKeys(HoglakeColumnHandle.class::cast));
+        if (predicate.equals(handle.constraint())) {
+            return Optional.empty();
+        }
+        // Statistics only exclude row groups; the engine must still evaluate every filter.
+        return Optional.of(new ConstraintApplicationResult<>(
+                handle.withConstraint(predicate), constraint.getSummary(), constraint.getExpression(), false));
     }
 
     // ---- helpers -----------------------------------------------------------

@@ -19,10 +19,13 @@ import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.connector.SourcePage;
+import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.TupleDomain;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -84,13 +87,38 @@ final class TestHoglakeCountPageSource
                 .hasMessage("Object storage accessed");
     }
 
+    @Test
+    void testPredicateWithNoProjectedColumnsRequiresStorage()
+    {
+        HoglakeColumnHandle column = new HoglakeColumnHandle("value", 1, BIGINT, true);
+        TupleDomain<HoglakeColumnHandle> predicate = TupleDomain.withColumnDomains(Map.of(column, Domain.singleValue(BIGINT, 1L)));
+        assertThatThrownBy(() -> createPageSource(17, Optional.empty(), List.of(), predicate))
+                .isInstanceOf(AssertionError.class)
+                .hasMessage("Object storage accessed");
+    }
+
+    @Test
+    void testNonePredicateProducesNoRowsWithoutStorage()
+            throws IOException
+    {
+        try (ConnectorPageSource source = createPageSource(17, Optional.empty(), List.of(), TupleDomain.none())) {
+            assertThat(source.isFinished()).isTrue();
+            assertThat(source.getCompletedBytes()).isZero();
+        }
+    }
+
     private ConnectorPageSource createPageSource(long count, Optional<String> deletePath, List<ColumnHandle> columns)
+    {
+        return createPageSource(count, deletePath, columns, TupleDomain.all());
+    }
+
+    private ConnectorPageSource createPageSource(long count, Optional<String> deletePath, List<ColumnHandle> columns, TupleDomain<HoglakeColumnHandle> predicate)
     {
         return provider.createPageSource(
                 HoglakeTransactionHandle.INSTANCE,
                 ConnectorTestFixtures.session(),
                 new HoglakeSplit("s3://test-bucket/counts.parquet", 100, count, deletePath, 0),
-                new HoglakeTableHandle("test", "counts", 7, "synthetic-table", List.of()),
+                new HoglakeTableHandle("test", "counts", 7, "synthetic-table", List.of(), predicate),
                 Optional.empty(),
                 columns,
                 DynamicFilter.EMPTY,
