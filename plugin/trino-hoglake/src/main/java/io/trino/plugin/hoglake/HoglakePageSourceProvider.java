@@ -109,6 +109,12 @@ public class HoglakePageSourceProvider
             return new EmptyPageSource();
         }
 
+        // Splits cover whole files at the query's pinned snapshot. With no columns or
+        // reader-side predicate, only row cardinality is needed (for example, COUNT(*)).
+        if (columns.isEmpty() && predicate.isAll() && hoglakeSplit.recordCount() >= 0) {
+            return new HoglakeCountPageSource(hoglakeSplit.recordCount());
+        }
+
         List<HoglakeColumnHandle> hoglakeColumns = columns.stream()
                 .map(HoglakeColumnHandle.class::cast)
                 .toList();

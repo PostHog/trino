@@ -1,0 +1,215 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.trino.plugin.hoglake;
+
+import com.sun.net.httpserver.HttpServer;
+import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.plugin.hoglake.rest.HoglakeClient;
+import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
+import io.trino.plugin.hoglake.testing.ConnectorTestFixtures.FileColumn;
+import io.trino.spi.Plugin;
+import io.trino.spi.connector.Connector;
+import io.trino.spi.connector.ConnectorContext;
+import io.trino.spi.connector.ConnectorFactory;
+import io.trino.spi.connector.ConnectorMetadata;
+import io.trino.spi.connector.ConnectorPageSourceProvider;
+import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorSplitManager;
+import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.transaction.IsolationLevel;
+import io.trino.testing.StandaloneQueryRunner;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.testing.TestingSession.testSessionBuilder;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
+import static org.apache.parquet.schema.Types.optional;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
+
+@TestInstance(PER_CLASS)
+@Execution(SAME_THREAD)
+final class TestHoglakeCount
+{
+    private static final String FIRST_FILE_PATH = "memory:///counts-first.parquet";
+    private static final String SECOND_FILE_PATH = "memory:///counts-second.parquet";
+
+    private final AtomicBoolean storageAllowed = new AtomicBoolean();
+    private HttpServer server;
+    private HoglakeClient client;
+    private StandaloneQueryRunner queryRunner;
+
+    @BeforeAll
+    void setUp()
+            throws IOException
+    {
+        byte[] parquet = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(
+                optional(INT64).id(1).named("value"), BIGINT, Arrays.asList(1L, 1L, 2L, null))));
+        TrinoFileSystemFactory storage = ConnectorTestFixtures.memoryFileSystem(Map.of(FIRST_FILE_PATH, parquet, SECOND_FILE_PATH, parquet));
+        HoglakePageSourceProvider pageSources = new HoglakePageSourceProvider(identity -> {
+            if (!storageAllowed.get()) {
+                throw new AssertionError("Object storage must not be accessed for catalog counts");
+            }
+            return storage.create(identity);
+        });
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            String path = exchange.getRequestURI().getPath();
+            String body;
+            if (path.equals("/v1/catalogs/lake")) {
+                body =
+                        """
+                        {"name":"lake", "head_snapshot_id":7, "schema_version":1}
+                        """;
+            }
+            else if (!"snapshot=7".equals(exchange.getRequestURI().getQuery())) {
+                exchange.sendResponseHeaders(400, -1);
+                exchange.close();
+                return;
+            }
+            else if (path.endsWith("/scan")) {
+                if (path.contains("/empty/")) {
+                    body = "[]";
+                }
+                else {
+                    // Two catalog files, each containing four rows, including a null.
+                    String file =
+                            """
+                            {"data_file":{"data_file_id":%d, "path":"%s", "record_count":4, "file_size_bytes":%d,
+                             "file_format":"parquet", "begin_snapshot":1}}
+                            """;
+                    body = "[" + file.formatted(1, FIRST_FILE_PATH, parquet.length) + "," + file.formatted(2, SECOND_FILE_PATH, parquet.length) + "]";
+                }
+            }
+            else {
+                body =
+                        """
+                        {"name":"counts", "namespace":"test", "table_uuid":"synthetic-table",
+                         "columns":[{"field_id":1, "ordinal":0, "name":"value", "type":"long", "nullable":true}],
+                         "record_count":0, "file_count":0, "file_size_bytes":0}
+                        """;
+            }
+            byte[] bytes = body.getBytes(UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, bytes.length);
+            try (var output = exchange.getResponseBody()) {
+                output.write(bytes);
+            }
+        });
+        server.start();
+        client = new HoglakeClient("http://127.0.0.1:" + server.getAddress().getPort(), "lake");
+        queryRunner = new StandaloneQueryRunner(testSessionBuilder().setCatalog("hoglake").setSchema("test").build());
+        queryRunner.installPlugin(new Plugin()
+        {
+            @Override
+            public Iterable<ConnectorFactory> getConnectorFactories()
+            {
+                return List.of(new ConnectorFactory()
+                {
+                    @Override
+                    public String getName()
+                    {
+                        return "hoglake_count_test";
+                    }
+
+                    @Override
+                    public Connector create(String catalogName, Map<String, String> config, ConnectorContext context)
+                    {
+                        return new Connector()
+                        {
+                            @Override
+                            public void shutdown() {}
+
+                            @Override
+                            public ConnectorTransactionHandle beginTransaction(IsolationLevel isolationLevel, boolean readOnly, boolean autoCommit)
+                            {
+                                return HoglakeTransactionHandle.INSTANCE;
+                            }
+
+                            @Override
+                            public ConnectorMetadata getMetadata(ConnectorSession session, ConnectorTransactionHandle transaction)
+                            {
+                                return new HoglakeMetadata(client);
+                            }
+
+                            @Override
+                            public ConnectorSplitManager getSplitManager()
+                            {
+                                return new HoglakeSplitManager(client);
+                            }
+
+                            @Override
+                            public ConnectorPageSourceProvider getPageSourceProvider()
+                            {
+                                return pageSources;
+                            }
+                        };
+                    }
+                });
+            }
+        });
+        queryRunner.createCatalog("hoglake", "hoglake_count_test", Map.of());
+    }
+
+    @AfterAll
+    void tearDown()
+    {
+        if (queryRunner != null) {
+            queryRunner.close();
+        }
+        if (client != null) {
+            client.close();
+        }
+        if (server != null) {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void testCountsWithoutObjectStorage()
+    {
+        assertThat(queryRunner.execute("SELECT count(*) FROM counts").getOnlyValue()).isEqualTo(8L);
+        assertThat(queryRunner.execute("SELECT count(*) FROM empty").getOnlyValue()).isEqualTo(0L);
+    }
+
+    @Test
+    void testColumnDependentCounts()
+    {
+        storageAllowed.set(true);
+        try {
+            assertThat(queryRunner.execute("SELECT count(*) FROM counts WHERE value = 1").getOnlyValue()).isEqualTo(4L);
+            assertThat(queryRunner.execute("SELECT count(*) FROM counts WHERE value > 10").getOnlyValue()).isEqualTo(0L);
+            assertThat(queryRunner.execute("SELECT count(value) FROM counts").getOnlyValue()).isEqualTo(6L);
+            assertThat(queryRunner.execute("SELECT count(DISTINCT value) FROM counts").getOnlyValue()).isEqualTo(2L);
+            assertThat(queryRunner.execute("SELECT value, count(*) FROM counts GROUP BY value ORDER BY value NULLS LAST").getMaterializedRows())
+                    .isEqualTo(queryRunner.execute("VALUES (BIGINT '1', BIGINT '4'), (BIGINT '2', BIGINT '2'), (CAST(NULL AS BIGINT), BIGINT '2')").getMaterializedRows());
+        }
+        finally {
+            storageAllowed.set(false);
+        }
+    }
+}
