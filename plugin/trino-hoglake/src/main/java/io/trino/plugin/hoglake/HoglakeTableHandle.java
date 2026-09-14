@@ -17,6 +17,7 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.predicate.TupleDomain;
 
 import java.util.List;
 
@@ -33,13 +34,16 @@ import static java.util.Objects.requireNonNull;
  * DROP + CREATE, which changes {@code tableUuid}) cannot rebind the
  * query to a different table state between analysis and execution. One
  * query, one consistent snapshot.
+ *
+ * <p>The constraint is used only for scan pruning; the engine retains residual filters.
  */
 public record HoglakeTableHandle(
         @JsonProperty("schemaName") String schemaName,
         @JsonProperty("tableName") String tableName,
         @JsonProperty("snapshotId") long snapshotId,
         @JsonProperty("tableUuid") String tableUuid,
-        @JsonProperty("columns") List<HoglakeColumnHandle> columns)
+        @JsonProperty("columns") List<HoglakeColumnHandle> columns,
+        @JsonProperty("constraint") TupleDomain<HoglakeColumnHandle> constraint)
         implements ConnectorTableHandle
 {
     @JsonCreator
@@ -48,7 +52,18 @@ public record HoglakeTableHandle(
         requireNonNull(schemaName, "schemaName is null");
         requireNonNull(tableName, "tableName is null");
         requireNonNull(tableUuid, "tableUuid is null");
+        requireNonNull(constraint, "constraint is null");
         columns = List.copyOf(requireNonNull(columns, "columns is null"));
+    }
+
+    public HoglakeTableHandle(String schemaName, String tableName, long snapshotId, String tableUuid, List<HoglakeColumnHandle> columns)
+    {
+        this(schemaName, tableName, snapshotId, tableUuid, columns, TupleDomain.all());
+    }
+
+    public HoglakeTableHandle withConstraint(TupleDomain<HoglakeColumnHandle> constraint)
+    {
+        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint);
     }
 
     public SchemaTableName schemaTableName()
