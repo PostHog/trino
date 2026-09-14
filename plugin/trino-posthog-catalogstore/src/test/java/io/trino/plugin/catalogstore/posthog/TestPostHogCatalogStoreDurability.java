@@ -36,6 +36,7 @@ import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
@@ -294,7 +295,7 @@ final class TestPostHogCatalogStoreDurability
             assertThat(result.next()).isTrue();
             return result.getLong(1);
         }
-        catch (java.sql.SQLException exception) {
+        catch (SQLException exception) {
             throw new RuntimeException("Failed to inspect isolated catalog mutation", exception);
         }
     }
