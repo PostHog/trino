@@ -119,6 +119,11 @@ public final class ConnectorTestFixtures
      */
     public static byte[] writeParquet(List<FileColumn> columns)
     {
+        return writeParquet(columns, ParquetWriterOptions.builder().build());
+    }
+
+    public static byte[] writeParquet(List<FileColumn> columns, ParquetWriterOptions options)
+    {
         MessageType schema = new MessageType(
                 "hoglake_test",
                 columns.stream().map(FileColumn::field).toList());
@@ -136,7 +141,7 @@ public final class ConnectorTestFixtures
                 out,
                 schema,
                 primitiveTypes,
-                ParquetWriterOptions.builder().build(),
+                options,
                 CompressionCodec.UNCOMPRESSED,
                 "hoglake-test",
                 Optional.empty(),

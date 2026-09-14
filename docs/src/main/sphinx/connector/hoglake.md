@@ -56,9 +56,15 @@ with `HOGLAKE_SNAPSHOT_EXPIRED`; retry the query to plan against a retained snap
 Parquet columns bind by field ID. Fields without IDs fall back to column names.
 Columns absent from older files produce nulls.
 
-The connector does not support writes, DDL, time-travel SQL, nested types, or
-predicate pushdown. It creates one split per file. Queries encountering deletion
-vectors fail during split planning because applying row-level deletes is not yet
+Query predicates are used to prune Parquet row groups using compatible statistics.
+Trino retains the residual filters to evaluate matching rows. Missing or unusable
+statistics do not exclude data. UUID bounds are not used because their ordering
+differs from Parquet's binary ordering.
+
+The connector creates one split per file. Catalog file pruning is not available:
+the Hoglake scan API exposes statistics state but no per-file column bounds.
+The connector does not support writes, DDL, time-travel SQL, or nested types.
+Queries encountering deletion vectors fail during split planning because applying row-level deletes is not yet
 supported.
 
 ## Development

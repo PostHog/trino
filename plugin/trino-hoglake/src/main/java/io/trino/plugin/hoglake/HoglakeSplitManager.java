@@ -63,6 +63,9 @@ public class HoglakeSplitManager
             Constraint constraint)
     {
         HoglakeTableHandle handle = (HoglakeTableHandle) table;
+        if (handle.constraint().isNone() || constraint.getSummary().isNone()) {
+            return new FixedSplitSource(List.of());
+        }
         List<HoglakeDtos.ScanFile> scan =
                 client.scan(handle.schemaName(), handle.tableName(), handle.snapshotId());
         ensureNoRowLevelDeletes(scan);
