@@ -96,13 +96,17 @@ final class TestHoglakeCount
                     body = "[]";
                 }
                 else {
-                    // Two catalog files, each containing four rows, including a null.
+                    long recordCount = 4;
+                    if (path.contains("/counts_multiple_pages/")) {
+                        recordCount = 1_048_583;
+                    }
+                    // The larger count is synthetic: metadata-only scans must never read these files.
                     String file =
                             """
-                            {"data_file":{"data_file_id":%d, "path":"%s", "record_count":4, "file_size_bytes":%d,
+                            {"data_file":{"data_file_id":%d, "path":"%s", "record_count":%d, "file_size_bytes":%d,
                              "file_format":"parquet", "begin_snapshot":1}}
                             """;
-                    body = "[" + file.formatted(1, FIRST_FILE_PATH, parquet.length) + "," + file.formatted(2, SECOND_FILE_PATH, parquet.length) + "]";
+                    body = "[" + file.formatted(1, FIRST_FILE_PATH, recordCount, parquet.length) + "," + file.formatted(2, SECOND_FILE_PATH, recordCount, parquet.length) + "]";
                 }
             }
             else {
@@ -194,6 +198,12 @@ final class TestHoglakeCount
     {
         assertThat(queryRunner.execute("SELECT count(*) FROM counts").getOnlyValue()).isEqualTo(8L);
         assertThat(queryRunner.execute("SELECT count(*) FROM empty").getOnlyValue()).isEqualTo(0L);
+    }
+
+    @Test
+    void testCountAcrossMultipleMetadataPages()
+    {
+        assertThat(queryRunner.execute("SELECT count(*) FROM counts_multiple_pages").getOnlyValue()).isEqualTo(2_097_166L);
     }
 
     @Test
