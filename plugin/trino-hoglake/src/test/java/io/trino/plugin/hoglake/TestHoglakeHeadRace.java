@@ -354,6 +354,32 @@ class TestHoglakeHeadRace
         assertThat(getAllSplits(freshSource)).hasSize(2);
     }
 
+    @Test
+    void countUsesPinnedSnapshotWithoutObjectStorage()
+            throws Exception
+    {
+        ConnectorTableHandle handle = metadata.getTableHandle(
+                session, new SchemaTableName("analytics", "metrics"), Optional.empty(), Optional.empty());
+        switchToIncarnation2();
+
+        HoglakePageSourceProvider counts = new HoglakePageSourceProvider(_ -> {
+            throw new AssertionError("Object storage accessed for catalog count");
+        });
+        long rows = 0;
+        try (ConnectorSplitSource splits = splitManager.getSplits(
+                HoglakeTransactionHandle.INSTANCE, session, handle, Set.of(), Constraint.alwaysTrue())) {
+            for (HoglakeSplit split : getAllSplits(splits)) {
+                try (ConnectorPageSource source = counts.createPageSource(
+                        HoglakeTransactionHandle.INSTANCE, session, split, handle, Optional.empty(), List.of(), DynamicFilter.EMPTY, MemoryContext.NO_LIMIT)) {
+                    while (!source.isFinished()) {
+                        rows += source.getNextSourcePage().getPositionCount();
+                    }
+                }
+            }
+        }
+        assertThat(rows).isEqualTo(2);
+    }
+
     // ---- plumbing ----------------------------------------------------------
 
     private static CannedResponse ok(String body)

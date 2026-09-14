@@ -98,6 +98,14 @@ public class HoglakePageSourceProvider
         HoglakeSplit hoglakeSplit = (HoglakeSplit) split;
         ensureNoRowLevelDeletes(hoglakeSplit);
 
+        // Splits cover whole files at the query's pinned snapshot. Hoglake does not push down
+        // predicates, so Trino projects any columns needed for filtering or aggregation.
+        // With no columns, only row cardinality is needed (for example, COUNT(*)).
+        // If reader-side predicates are added, this shortcut must also require an unrestricted predicate.
+        if (columns.isEmpty() && hoglakeSplit.recordCount() >= 0) {
+            return new HoglakeCountPageSource(hoglakeSplit.recordCount());
+        }
+
         List<HoglakeColumnHandle> hoglakeColumns = columns.stream()
                 .map(HoglakeColumnHandle.class::cast)
                 .toList();
