@@ -16,14 +16,19 @@ package io.trino.plugin.catalogstore.posthog;
 import com.google.common.collect.ImmutableMap;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
+import java.net.URI;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Map;
+import java.util.Set;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static io.trino.testing.TestingNames.randomNameSuffix;
 
 /**
- * A PostgreSQL testcontainer standing in for the database a cell shares between its coordinators.
+ * An isolated PostgreSQL fixture for the database a cell shares between its coordinators.
  */
 public final class TestingCatalogStoreDatabase
         implements AutoCloseable
@@ -33,14 +38,48 @@ public final class TestingCatalogStoreDatabase
     private static final String PASSWORD = "test";
 
     private final PostgreSQLContainer container;
+    private final String connectionUrl;
+    private final String user;
+    private final String password;
+    private final String schema;
 
     public TestingCatalogStoreDatabase()
     {
+        String externalUrl = System.getProperty("catalogstore.test.jdbc-url");
+        if (externalUrl != null) {
+            validateExternalUrl(externalUrl);
+            container = null;
+            user = System.getProperty("catalogstore.test.jdbc-user", USER);
+            password = System.getProperty("catalogstore.test.jdbc-password", PASSWORD);
+            schema = "catalogstore_test_" + randomNameSuffix();
+            connectionUrl = externalUrl + "?currentSchema=" + schema;
+            execute("CREATE SCHEMA " + schema);
+            return;
+        }
         container = new PostgreSQLContainer("postgres:16")
                 .withDatabaseName(DATABASE)
                 .withUsername(USER)
                 .withPassword(PASSWORD);
         container.start();
+        connectionUrl = container.getJdbcUrl();
+        user = USER;
+        password = PASSWORD;
+        schema = null;
+    }
+
+    static void validateExternalUrl(String externalUrl)
+    {
+        checkArgument(externalUrl.startsWith("jdbc:postgresql://"), "Test database requires a local PostgreSQL JDBC URL");
+        URI address;
+        try {
+            address = URI.create(externalUrl.substring("jdbc:".length()));
+        }
+        catch (IllegalArgumentException _) {
+            throw new IllegalArgumentException("Invalid local test database URL");
+        }
+        checkArgument(address.getHost() != null && Set.of("localhost", "127.0.0.1", "[::1]").contains(address.getHost()), "Test database must use a loopback host");
+        checkArgument(address.getUserInfo() == null && address.getRawQuery() == null && address.getRawFragment() == null, "Test database URL must not contain credentials or options");
+        checkArgument(address.getPath() != null && address.getPath().matches("/[A-Za-z_][A-Za-z0-9_]*"), "Test database URL requires one database name");
     }
 
     /**
@@ -50,9 +89,9 @@ public final class TestingCatalogStoreDatabase
     {
         return ImmutableMap.<String, String>builder()
                 .put("catalog-store.cell-id", cellId)
-                .put("catalog-store.connection-url", container.getJdbcUrl())
-                .put("catalog-store.connection-user", USER)
-                .put("catalog-store.connection-password", PASSWORD)
+                .put("catalog-store.connection-url", connectionUrl)
+                .put("catalog-store.connection-user", user)
+                .put("catalog-store.connection-password", password)
                 .buildOrThrow();
     }
 
@@ -62,18 +101,23 @@ public final class TestingCatalogStoreDatabase
      */
     public void execute(String sql)
     {
-        try (Connection connection = DriverManager.getConnection(container.getJdbcUrl(), USER, PASSWORD);
+        try (Connection connection = DriverManager.getConnection(connectionUrl, user, password);
                 Statement statement = connection.createStatement()) {
             statement.execute(sql);
         }
         catch (SQLException e) {
-            throw new RuntimeException("Failed to execute: " + sql, e);
+            throw new RuntimeException("Failed to execute catalog store fixture statement", e);
         }
     }
 
     @Override
     public void close()
     {
-        container.stop();
+        if (container != null) {
+            container.stop();
+        }
+        else {
+            execute("DROP SCHEMA " + schema + " CASCADE");
+        }
     }
 }
