@@ -5,6 +5,14 @@ It covers startup reuse, absent live synchronization, stale drops, conflicting
 properties, and failed catalogs that remain visible by name. These characterize
 the store's boundaries; they do not make concurrent catalog writers safe.
 
+The cancellation tests hold an isolated PostgreSQL table lock while a real
+coordinator executes `CREATE CATALOG` or `DROP CATALOG`. They verify that the
+client can receive `FAILED` with `USER_CANCELED` before the blocked write completes.
+Releasing the lock then changes the persisted catalog. A failed or cancelled DDL
+response is therefore not proof that all catalog writes have stopped. An external
+rollout controller must retain an ambiguous mutation until recovery establishes
+that no delayed writer can remain.
+
 The default database fixture uses Testcontainers. Without Docker, an explicitly
 configured disposable local PostgreSQL server can be used:
 

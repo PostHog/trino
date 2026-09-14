@@ -20,6 +20,7 @@ import com.google.inject.Provides;
 import com.google.inject.Singleton;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
 import io.trino.connector.CatalogStoreManager;
+import io.trino.execution.QueryManager;
 import io.trino.metadata.CatalogManager;
 import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.server.ServerConfig;
@@ -33,13 +34,22 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static io.trino.execution.QueryState.FAILED;
+import static io.trino.spi.StandardErrorCode.USER_CANCELED;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.testing.TestingSession.testSessionBuilder;
+import static io.trino.testing.assertions.Assert.assertEventually;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.Executors.newSingleThreadExecutor;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
@@ -209,6 +219,83 @@ final class TestPostHogCatalogStoreDurability
             assertThatThrownBy(() -> restarted.execute("CREATE CATALOG IF NOT EXISTS broken_catalog USING tpch"))
                     .hasMessageContaining("Catalog 'broken_catalog' failed to initialize and is disabled");
             assertThat(restarted.execute("SELECT state FROM system.metadata.catalogs WHERE catalog_name = 'broken_catalog'").getOnlyValue()).isEqualTo("FAILING");
+        }
+    }
+
+    @Test
+    void testCanceledCreationCanPersistAfterFailedResponse()
+            throws Exception
+    {
+        assertCanceledMutationCanPersist(false);
+    }
+
+    @Test
+    void testCanceledDropCanPersistAfterFailedResponse()
+            throws Exception
+    {
+        assertCanceledMutationCanPersist(true);
+    }
+
+    private static void assertCanceledMutationCanPersist(boolean drop)
+            throws Exception
+    {
+        try (TestingCatalogStoreDatabase isolatedDatabase = new TestingCatalogStoreDatabase();
+                DistributedQueryRunner runner = createQueryRunner(isolatedDatabase.storeProperties("cell" + randomNameSuffix()));
+                Connection blocker = isolatedDatabase.openConnection()) {
+            String query = "CREATE CATALOG canceled_catalog USING tpch";
+            int initialCount = 0;
+            if (drop) {
+                runner.execute(query);
+                query = "DROP CATALOG canceled_catalog";
+                initialCount = 1;
+            }
+            blocker.setAutoCommit(false);
+            try (Statement statement = blocker.createStatement()) {
+                statement.setQueryTimeout(10);
+                statement.execute("LOCK TABLE trino_catalogs IN ACCESS EXCLUSIVE MODE");
+                try (var executor = newSingleThreadExecutor()) {
+                    String mutation = query;
+                    var response = executor.submit(() -> runner.execute(mutation));
+                    try {
+                        assertEventually(() -> assertThat(scalar(
+                                statement,
+                                "SELECT count(*) FROM pg_locks WHERE relation = 'trino_catalogs'::regclass AND NOT granted")).isPositive());
+                        QueryManager manager = runner.getCoordinator().getQueryManager();
+                        var queryId = getOnlyElement(manager.getQueries().stream()
+                                .filter(info -> info.getQuery().equals(mutation) && !info.getState().isDone())
+                                .toList()).getQueryId();
+                        manager.cancelQuery(queryId);
+                        assertThat(manager.getQueryState(queryId)).isEqualTo(FAILED);
+                        assertThat(manager.getFullQueryInfo(queryId).getErrorCode()).isEqualTo(USER_CANCELED.toErrorCode());
+                        assertThatThrownBy(() -> response.get(10, SECONDS))
+                                .isInstanceOf(ExecutionException.class)
+                                .hasMessageContaining("Query was canceled");
+                        assertThat(scalar(statement, "SELECT count(*) FROM trino_catalogs WHERE catalog_name = 'canceled_catalog'"))
+                                .isEqualTo(initialCount);
+                    }
+                    finally {
+                        blocker.rollback();
+                    }
+                    int finalCount = 1 - initialCount;
+                    assertEventually(() -> assertThat(scalar(
+                            statement,
+                            "SELECT count(*) FROM trino_catalogs WHERE catalog_name = 'canceled_catalog'")).isEqualTo(finalCount));
+                }
+            }
+            finally {
+                blocker.rollback();
+            }
+        }
+    }
+
+    private static long scalar(Statement statement, String sql)
+    {
+        try (ResultSet result = statement.executeQuery(sql)) {
+            assertThat(result.next()).isTrue();
+            return result.getLong(1);
+        }
+        catch (java.sql.SQLException exception) {
+            throw new RuntimeException("Failed to inspect isolated catalog mutation", exception);
         }
     }
 

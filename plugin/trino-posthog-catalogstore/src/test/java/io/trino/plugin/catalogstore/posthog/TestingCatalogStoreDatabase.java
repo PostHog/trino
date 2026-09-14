@@ -110,6 +110,12 @@ public final class TestingCatalogStoreDatabase
         }
     }
 
+    public Connection openConnection()
+            throws SQLException
+    {
+        return DriverManager.getConnection(connectionUrl, user, password);
+    }
+
     @Override
     public void close()
     {
