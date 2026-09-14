@@ -12,7 +12,7 @@ Create `etc/catalog/hoglake.properties`:
 connector.name=hoglake
 hoglake.uri=http://localhost:8080
 hoglake.catalog=lake
-hoglake.s3.region=us-east-1
+s3.region=us-east-1
 ```
 
 `hoglake.uri` is the REST base URI, without a `/v1` suffix. The endpoint must be
@@ -24,15 +24,59 @@ the catalog's files.
 | `hoglake.uri` | Hoglake REST base URI; required. | None |
 | `hoglake.catalog` | Hoglake catalog to expose. | `hoglake` |
 | `hoglake.client.request-timeout` | Positive request timeout, with `ms`, `s`, `m`, `h`, or `d` suffix. | `2m` |
-| `hoglake.s3.endpoint` | Optional S3-compatible endpoint. | AWS endpoint resolution |
-| `hoglake.s3.region` | S3 region. | `us-east-1` |
-| `hoglake.s3.access-key` | Optional S3 access key. | AWS default credential provider chain |
-| `hoglake.s3.secret-key` | Optional S3 secret key. | AWS default credential provider chain |
-| `hoglake.s3.path-style` | Enable S3 path-style access. | `false` |
+| `fs.s3.enabled` | Enable the native S3 filesystem. | `true` |
+| `s3.endpoint` | Optional S3-compatible endpoint. | AWS endpoint resolution |
+| `s3.region` | S3 region. | `us-east-1` |
+| `s3.aws-access-key` | Optional S3 access key. | AWS default credential provider chain |
+| `s3.aws-secret-key` | Optional S3 secret key. | AWS default credential provider chain |
+| `s3.path-style-access` | Enable S3 path-style access. | `false` |
+| `fs.cache.enabled` | Enable filesystem data caching. | `false` |
 
+The connector uses Trino's shared [S3 filesystem configuration](/object-storage/file-system-s3).
 Use Trino's [secrets support](/security/secrets) for explicit credentials. Workers use the
 configured credentials or the AWS default credential provider chain; the connector
 does not obtain temporary credentials from Hoglake.
+
+Existing catalogs can continue using these aliases:
+
+| Existing property | Standard property |
+| --- | --- |
+| `hoglake.s3.endpoint` | `s3.endpoint` |
+| `hoglake.s3.region` | `s3.region` |
+| `hoglake.s3.access-key` | `s3.aws-access-key` |
+| `hoglake.s3.secret-key` | `s3.aws-secret-key` |
+| `hoglake.s3.path-style` | `s3.path-style-access` |
+
+Equivalent settings under both names are accepted; conflicting settings fail catalog
+initialization. Blank legacy endpoint and credential values retain their default
+behavior. Unrecognized properties and invalid configuration now fail catalog
+initialization, including properties that older versions silently ignored.
+
+## Filesystem caching
+
+Set `fs.cache.enabled=true` in the catalog to cache Parquet reads through Trino's
+shared [filesystem cache](/object-storage/file-system-cache). Omitted or `false`
+leaves data caching disabled.
+
+Every node, including the coordinator, must load a cache manager capable of caching
+table data. Configure the `alluxio` manager through `cache-manager.config-files`
+in each node's `etc/config.properties`, following the filesystem cache documentation.
+Cache directories must exist and be writable on every node, with capacity limits
+configured. Directory, capacity, page-size, and TTL properties belong in the cache
+manager properties file, not the Hoglake catalog. The default `memory` manager alone
+is insufficient; enabling data caching without a suitable manager fails catalog
+initialization.
+
+The engine manages cache resources and scopes entries by Trino catalog and cache
+usage. Hoglake uses the default file keys: location, last-modified time, and length.
+Warm reads can still issue S3 HEAD requests to determine file identity. These keys
+are not Hoglake snapshot identifiers or per-user cache partitions. Published data
+files should remain immutable; changing content while retaining the same location,
+modification time, and length cannot be detected by this key scheme.
+
+This caches filesystem data only, not Hoglake REST metadata. Split scheduling is
+unchanged: there is no preference for workers already holding a file in cache.
+Per-catalog cache metrics and tracing are provided by the shared cache infrastructure.
 
 ## Types
 

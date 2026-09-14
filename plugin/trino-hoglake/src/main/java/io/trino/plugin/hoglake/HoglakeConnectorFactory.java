@@ -13,13 +13,21 @@
  */
 package io.trino.plugin.hoglake;
 
-import io.trino.filesystem.s3.S3FileSystemConfig;
-import io.trino.filesystem.s3.S3FileSystemFactory;
-import io.trino.filesystem.s3.S3FileSystemStats;
-import io.trino.plugin.hoglake.rest.HoglakeClient;
+import com.google.inject.Injector;
+import io.airlift.bootstrap.Bootstrap;
+import io.airlift.bootstrap.LifeCycleManager;
+import io.trino.filesystem.manager.FileSystemModule;
+import io.trino.plugin.base.ConnectorContextModule;
+import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorPageSourceProvider;
+import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorSplitManager;
+import io.trino.plugin.base.jmx.MBeanServerModule;
+import io.trino.spi.classloader.ThreadContextClassLoader;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorContext;
 import io.trino.spi.connector.ConnectorFactory;
+import io.trino.spi.connector.ConnectorPageSourceProvider;
+import io.trino.spi.connector.ConnectorSplitManager;
+import org.weakref.jmx.guice.MBeanModule;
 
 import java.util.Map;
 
@@ -38,25 +46,26 @@ public class HoglakeConnectorFactory
     public Connector create(String catalogName, Map<String, String> config, ConnectorContext context)
     {
         checkStrictSpiVersionMatch(context, this);
-        HoglakeConfig hoglakeConfig = HoglakeConfig.fromMap(config);
+        ClassLoader classLoader = getClass().getClassLoader();
+        try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            Injector injector = new Bootstrap(
+                    "io.trino.bootstrap.catalog." + catalogName,
+                    new MBeanModule(),
+                    new MBeanServerModule(),
+                    new HoglakeModule(),
+                    new FileSystemModule(catalogName, context, false),
+                    new ConnectorContextModule(catalogName, context))
+                    .doNotInitializeLogging()
+                    .disableSystemProperties()
+                    .setOptionalConfigurationProperties(HoglakeFileSystemConfig.defaults(config))
+                    .setRequiredConfigurationProperties(HoglakeFileSystemConfig.normalize(config))
+                    .initialize();
 
-        HoglakeClient client = new HoglakeClient(
-                hoglakeConfig.uri(), hoglakeConfig.catalog(), hoglakeConfig.requestTimeout());
-
-        S3FileSystemConfig s3Config = new S3FileSystemConfig()
-                .setRegion(hoglakeConfig.s3Region())
-                .setEndpoint(hoglakeConfig.s3Endpoint())
-                .setAwsAccessKey(hoglakeConfig.s3AccessKey())
-                .setAwsSecretKey(hoglakeConfig.s3SecretKey())
-                .setPathStyleAccess(hoglakeConfig.s3PathStyle());
-        S3FileSystemFactory fileSystemFactory =
-                new S3FileSystemFactory(context.getOpenTelemetry(), s3Config, new S3FileSystemStats());
-
-        return new HoglakeConnector(
-                new HoglakeMetadata(client),
-                new HoglakeSplitManager(client),
-                new HoglakePageSourceProvider(fileSystemFactory),
-                fileSystemFactory,
-                client);
+            return new HoglakeConnector(
+                    injector.getInstance(HoglakeMetadata.class),
+                    new ClassLoaderSafeConnectorSplitManager(injector.getInstance(ConnectorSplitManager.class), classLoader),
+                    new ClassLoaderSafeConnectorPageSourceProvider(injector.getInstance(ConnectorPageSourceProvider.class), classLoader),
+                    injector.getInstance(LifeCycleManager.class));
+        }
     }
 }

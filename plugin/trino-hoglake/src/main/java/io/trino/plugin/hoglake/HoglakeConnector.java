@@ -13,8 +13,7 @@
  */
 package io.trino.plugin.hoglake;
 
-import io.trino.filesystem.s3.S3FileSystemFactory;
-import io.trino.plugin.hoglake.rest.HoglakeClient;
+import io.airlift.bootstrap.LifeCycleManager;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
@@ -32,23 +31,20 @@ public class HoglakeConnector
         implements Connector
 {
     private final HoglakeMetadata metadata;
-    private final HoglakeSplitManager splitManager;
-    private final HoglakePageSourceProvider pageSourceProvider;
-    private final S3FileSystemFactory fileSystemFactory;
-    private final HoglakeClient client;
+    private final ConnectorSplitManager splitManager;
+    private final ConnectorPageSourceProvider pageSourceProvider;
+    private final LifeCycleManager lifeCycleManager;
 
     public HoglakeConnector(
             HoglakeMetadata metadata,
-            HoglakeSplitManager splitManager,
-            HoglakePageSourceProvider pageSourceProvider,
-            S3FileSystemFactory fileSystemFactory,
-            HoglakeClient client)
+            ConnectorSplitManager splitManager,
+            ConnectorPageSourceProvider pageSourceProvider,
+            LifeCycleManager lifeCycleManager)
     {
         this.metadata = requireNonNull(metadata, "metadata is null");
         this.splitManager = requireNonNull(splitManager, "splitManager is null");
         this.pageSourceProvider = requireNonNull(pageSourceProvider, "pageSourceProvider is null");
-        this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
-        this.client = requireNonNull(client, "client is null");
+        this.lifeCycleManager = requireNonNull(lifeCycleManager, "lifeCycleManager is null");
     }
 
     @Override
@@ -81,9 +77,6 @@ public class HoglakeConnector
     @Override
     public void shutdown()
     {
-        // Both hold threads: the S3 factory its transfer machinery, the
-        // REST client the JDK HttpClient's selector thread + executor.
-        client.close();
-        fileSystemFactory.destroy();
+        lifeCycleManager.stop();
     }
 }
