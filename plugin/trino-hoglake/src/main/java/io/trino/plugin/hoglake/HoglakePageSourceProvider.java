@@ -14,6 +14,7 @@
 package io.trino.plugin.hoglake;
 
 import io.trino.filesystem.Location;
+import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.filesystem.TrinoInputFile;
 import io.trino.memory.context.AggregatedMemoryContext;
@@ -22,6 +23,7 @@ import io.trino.parquet.Field;
 import io.trino.parquet.ParquetCorruptionException;
 import io.trino.parquet.ParquetDataSource;
 import io.trino.parquet.ParquetReaderOptions;
+import io.trino.parquet.metadata.BlockMetadata;
 import io.trino.parquet.metadata.FileMetadata;
 import io.trino.parquet.metadata.ParquetMetadata;
 import io.trino.parquet.predicate.TupleDomainParquetPredicate;
@@ -40,7 +42,6 @@ import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.EmptyPageSource;
 import io.trino.spi.connector.MemoryContext;
-import io.trino.spi.connector.MemoryUsageReportingPageSource;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import org.apache.parquet.column.ColumnDescriptor;
@@ -64,7 +65,6 @@ import static io.trino.parquet.ParquetTypeUtils.lookupColumnByName;
 import static io.trino.parquet.predicate.PredicateUtils.buildPredicate;
 import static io.trino.parquet.predicate.PredicateUtils.getFilteredRowGroups;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
-import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.UuidType.UUID;
 import static java.util.Objects.requireNonNull;
 
@@ -77,6 +77,11 @@ import static java.util.Objects.requireNonNull;
  * PARQUET:field_id when the file carries ids; files written without ids
  * bind by name (exact, then case-insensitive). Catalog columns absent
  * from the file (added after the file was written) read as nulls.
+ *
+ * <p>When the split carries a deletion vector, the file's rows are read
+ * with their original file row positions and the rows the vector marks
+ * deleted are dropped, so the vector stays tied to the snapshot the scan
+ * pinned.
  */
 public class HoglakePageSourceProvider
         implements ConnectorPageSourceProvider
@@ -102,7 +107,6 @@ public class HoglakePageSourceProvider
             MemoryContext memoryContext)
     {
         HoglakeSplit hoglakeSplit = (HoglakeSplit) split;
-        ensureNoRowLevelDeletes(hoglakeSplit);
 
         TupleDomain<HoglakeColumnHandle> predicate = ((HoglakeTableHandle) table).constraint();
         if (predicate.isNone()) {
@@ -112,21 +116,27 @@ public class HoglakePageSourceProvider
         // Splits cover whole files at the query's pinned snapshot. With no columns or
         // reader-side predicate, only row cardinality is needed (for example, COUNT(*)).
         if (columns.isEmpty() && predicate.isAll() && hoglakeSplit.recordCount() >= 0) {
-            return new HoglakeCountPageSource(hoglakeSplit.recordCount());
+            return createCountPageSource(session, hoglakeSplit);
         }
 
         List<HoglakeColumnHandle> hoglakeColumns = columns.stream()
                 .map(HoglakeColumnHandle.class::cast)
                 .toList();
 
-        TrinoInputFile inputFile = fileSystemFactory.create(session)
-                .newInputFile(Location.of(hoglakeSplit.path()), hoglakeSplit.fileSizeBytes());
+        TrinoFileSystem fileSystem = fileSystemFactory.create(session);
+        TrinoInputFile inputFile = fileSystem.newInputFile(Location.of(hoglakeSplit.path()), hoglakeSplit.fileSizeBytes());
 
         ParquetReaderOptions options = ParquetReaderOptions.defaultOptions();
         ParquetDataSource dataSource = null;
         try {
             dataSource = new HoglakeParquetDataSource(inputFile, hoglakeSplit.fileSizeBytes(), options);
-            return new MemoryUsageReportingPageSource(createParquetPageSource(dataSource, hoglakeColumns, predicate.simplify(DOMAIN_COMPACTION_THRESHOLD), options), memoryContext);
+            HoglakeDeletionVector deletionVector = loadDeletionVector(fileSystem, dataSource, hoglakeSplit);
+            return createParquetPageSource(
+                    dataSource,
+                    hoglakeColumns,
+                    predicate.simplify(DOMAIN_COMPACTION_THRESHOLD),
+                    deletionVector,
+                    options);
         }
         catch (Exception e) {
             if (dataSource != null) {
@@ -150,26 +160,53 @@ public class HoglakePageSourceProvider
     }
 
     /**
-     * Defense-in-depth: the authoritative DV refusal fires at split
-     * generation ({@link HoglakeSplitManager#ensureNoRowLevelDeletes}),
-     * before any split reaches the engine. This worker-side guard backs
-     * it up in case a DV-carrying split ever arrives anyway — silently
-     * returning deleted rows is not an option.
+     * The catalog metadata path: a file's visible row count is its physical
+     * record count minus the rows its deletion vector removes. The vector is
+     * still read and validated first, so a vector that is missing, corrupt,
+     * or disagrees with the catalog's {@code delete_count} fails the count
+     * instead of being mistaken for no deletes at all.
      */
-    static void ensureNoRowLevelDeletes(HoglakeSplit split)
+    private ConnectorPageSource createCountPageSource(ConnectorSession session, HoglakeSplit split)
     {
+        long visibleRows = split.recordCount();
         if (split.deleteFilePath().isPresent()) {
-            throw new TrinoException(NOT_SUPPORTED,
-                    "table has row-level deletes; DV application not yet implemented in the hoglake connector"
-                            + " (data file " + split.path() + " has deletion vector "
-                            + split.deleteFilePath().get() + " covering " + split.deleteCount() + " rows)");
+            HoglakeDeletionVector deletionVector = HoglakeDeletionVectorLoader.load(
+                    fileSystemFactory.create(session), split, split.recordCount());
+            visibleRows -= deletionVector.cardinality();
         }
+        return new HoglakeCountPageSource(visibleRows);
+    }
+
+    /**
+     * Reads a split's deletion vector through the connector's filesystem, so
+     * object-storage configuration, authentication, and filesystem caching
+     * apply to deletion vectors exactly as they do to Parquet data.
+     */
+    private static HoglakeDeletionVector loadDeletionVector(
+            TrinoFileSystem fileSystem,
+            ParquetDataSource dataSource,
+            HoglakeSplit split)
+            throws IOException
+    {
+        if (split.deleteFilePath().isEmpty()) {
+            return null;
+        }
+        // Deleted positions are file row ordinals, so bound them with the
+        // file's real row count from its own footer rather than the
+        // catalog's record_count, which a wrong vector would be measured
+        // against.
+        long fileRows = 0;
+        for (BlockMetadata block : MetadataReader.readFooter(dataSource, Optional.empty()).getBlocks()) {
+            fileRows = Math.addExact(fileRows, block.rowCount());
+        }
+        return HoglakeDeletionVectorLoader.load(fileSystem, split, fileRows);
     }
 
     private static ConnectorPageSource createParquetPageSource(
             ParquetDataSource dataSource,
             List<HoglakeColumnHandle> columns,
             TupleDomain<HoglakeColumnHandle> predicate,
+            HoglakeDeletionVector deletionVector,
             ParquetReaderOptions options)
             throws IOException
     {
@@ -226,10 +263,15 @@ public class HoglakePageSourceProvider
         }
 
         AggregatedMemoryContext memoryContext = newSimpleAggregatedMemoryContext();
+        // The reader appends the file row position of every row as an extra
+        // channel when a deletion vector must be applied. That position is
+        // the row's original, file-relative ordinal — row-group offsets
+        // included — which is exactly the numbering a deletion vector uses,
+        // so pruned row groups and multi-page reads cannot shift it.
         ParquetReader parquetReader = new ParquetReader(
                 Optional.ofNullable(fileMetadata.getCreatedBy()),
                 parquetColumns,
-                false,
+                deletionVector != null,
                 rowGroups,
                 dataSource,
                 DateTimeZone.UTC,
@@ -239,7 +281,7 @@ public class HoglakePageSourceProvider
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty());
-        return new HoglakePageSource(parquetReader, adaptations);
+        return new HoglakePageSource(parquetReader, adaptations, deletionVector);
     }
 
     private static List<RowGroupInfo> filterRowGroups(
