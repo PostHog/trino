@@ -1,6 +1,6 @@
 # Hoglake connector
 
-The Hoglake connector provides read-only access to a Hoglake catalog. It obtains
+The Hoglake connector provides read and append access to a Hoglake catalog. It obtains
 metadata and file lists from the Hoglake REST API and reads Parquet files directly
 from S3-compatible object storage. Hoglake namespaces appear as Trino schemas.
 
@@ -107,9 +107,63 @@ differs from Parquet's binary ordering.
 
 The connector creates one split per file. Catalog file pruning is not available:
 the Hoglake scan API exposes statistics state but no per-file column bounds.
-The connector does not support writes, DDL, time-travel SQL, or nested types.
+The connector does not support time-travel SQL or nested types.
 Queries encountering deletion vectors fail during split planning because applying row-level deletes is not yet
 supported.
+
+## Writing tables
+
+The connector supports `CREATE TABLE`, `INSERT INTO`, and `CREATE TABLE AS SELECT`
+(CTAS) in an existing Hoglake namespace:
+
+```sql
+CREATE TABLE hoglake.analytics.measurements (id bigint, value double, label varchar);
+INSERT INTO hoglake.analytics.measurements VALUES (1, 12.5, 'sample');
+CREATE TABLE hoglake.analytics.measurement_copy AS
+SELECT * FROM hoglake.analytics.measurements;
+```
+
+Writes use the catalog's `data_path` and the connector's filesystem credentials.
+Bucket roots such as `s3://example-bucket` and paths with or without a trailing
+slash are supported.
+These credentials need permission to create objects and remove aborted uploads.
+No separate write configuration is required. Files use Snappy-compressed Parquet
+with catalog field IDs, a target size of 128 MiB, and deferred catalog statistics.
+The Hoglake hydrator can populate these statistics later; rows are readable immediately.
+
+The scalar types listed above are writable. Bounded `VARCHAR` becomes unbounded
+`VARCHAR`, and temporal precisions below six become precision six. Higher temporal
+precisions, `CHAR`, `SMALLINT`, `TINYINT`, and nested types are rejected on creation.
+Omitted nullable columns receive nulls. `NOT NULL` constraints are enforced.
+
+An insert registers all its files in one catalog commit. Its table UUID and read
+snapshot guard against concurrent table replacement or schema changes. Concurrent
+appends are allowed. Empty inserts do not create files or commits.
+
+CREATE and CTAS require a server advertising `atomic-table-creation-v1`.
+The connector prepares an unpublished operation, writes its files, then publishes
+the table and all initial files in one atomic catalog transaction. The target must
+still be absent at publication. No temporary table or rename is used.
+
+Preparation returns stable field IDs and an operation-specific write path. A lost
+publication response is resolved through the durable operation receipt, with one
+identical retry if the operation is still prepared. If recovery remains unavailable,
+the error includes the operation ID for inspection. Rollback aborts the operation;
+it never drops a table. A committed operation remains committed even after later
+renames or drops. The server retains terminal receipts and expires unpublished
+operations after 24 hours, so longer-running creations must be retried as new queries.
+There is no fallback to the old staging-table protocol on older servers.
+
+Writes are limited to single-statement transactions and unpartitioned tables.
+Query/task retries, table replacement, comments, custom table properties, `UPDATE`,
+`DELETE`, and `MERGE` are not supported. Sort specifications on existing tables are
+advisory and are not applied by this writer.
+
+INSERT requests are not retried automatically because the append API has no
+write idempotency key. A timeout or lost response can leave the outcome unknown: check
+the catalog before repeating an insert. Files handed to the coordinator are not
+deleted on an ambiguous commit failure, to avoid removing committed data. Failed
+writes can therefore leave unregistered objects for operator cleanup.
 
 ## Development
 
@@ -125,5 +179,14 @@ Build from the repository root:
 
 The plugin ZIP is produced under `plugin/trino-hoglake/target/` and is included in
 the server distribution as `plugin/hoglake`. Standalone connector regression tests
-live in this module. Tests that start the Hoglake server belong with that server
-and should consume the matching Trino distribution.
+live in this module. `TestHoglakeLiveWrites` is an opt-in integration test against
+an isolated Hoglake server and S3-compatible bucket. Enable it with
+`-Dhoglake.test.uri=<local-server-uri>` and
+`-Dhoglake.test.s3-endpoint=<local-object-store-uri>`. It uses synthetic test
+credentials and creates a unique test catalog. The default bucket is
+`trino-write-test`; override its URI with `hoglake.test.data-path`. Set
+`hoglake.test.root-path` to a separate empty bucket URI without a trailing slash
+to also run the bucket-root regression. `TestHoglakeLiveWriteFailures` uses the
+same server settings to verify ambiguous responses and concurrent DDL against
+the real catalog through a fault-injecting local proxy.
+The normal test run uses synthetic HTTP fixtures and does not require Docker.

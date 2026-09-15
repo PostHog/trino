@@ -16,6 +16,7 @@ package io.trino.plugin.hoglake.rest;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.trino.spi.StandardErrorCode;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.SchemaNotFoundException;
 import io.trino.spi.connector.SchemaTableName;
@@ -31,6 +32,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_NOT_FOUND;
@@ -157,6 +159,126 @@ public class HoglakeClient
         return get(tablePath(namespace, table, "/scan?snapshot=" + snapshot),
                 new TypeReference<List<HoglakeDtos.ScanFile>>() {})
                 .orElseThrow(() -> new TableNotFoundException(new SchemaTableName(namespace, table)));
+    }
+
+    public HoglakeDtos.Table createTable(String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns)
+    {
+        return post(namespacePath(namespace, "/tables"),
+                new HoglakeDtos.CreateTable(table, columns),
+                new TypeReference<HoglakeDtos.Table>() {});
+    }
+
+    public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns)
+    {
+        return write(
+                "PUT",
+                catalogPath("/table-creations/" + encode(operationId)),
+                Map.of("namespace", namespace, "name", table, "columns", columns),
+                new TypeReference<HoglakeDtos.TableCreation>() {});
+    }
+
+    public HoglakeDtos.TableCreation publishTableCreation(String operationId, List<HoglakeDtos.FileRegistration> files)
+    {
+        return validateCreationReceipt(operationId, post(catalogPath("/table-creations/" + encode(operationId) + "/commit"), Map.of("files", files), new TypeReference<HoglakeDtos.TableCreation>() {}));
+    }
+
+    public HoglakeDtos.TableCreation getTableCreation(String operationId)
+    {
+        return validateCreationReceipt(operationId, get(catalogPath("/table-creations/" + encode(operationId)), new TypeReference<HoglakeDtos.TableCreation>() {})
+                .orElseThrow(() -> new TrinoException(HOGLAKE_CATALOG_NOT_FOUND, "Hoglake creation operation not found: " + operationId)));
+    }
+
+    private static HoglakeDtos.TableCreation validateCreationReceipt(String operationId, HoglakeDtos.TableCreation receipt)
+    {
+        if (!operationId.equals(receipt.operationId()) || receipt.tableUuid() == null ||
+                (receipt.state() == null || !List.of("prepared", "committed", "rejected", "aborted").contains(receipt.state())) ||
+                ("committed".equals(receipt.state()) && (receipt.snapshotId() == null || receipt.snapshotId() <= 0))) {
+            throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake creation receipt; inspect operation " + operationId);
+        }
+        return receipt;
+    }
+
+    public void abortTableCreation(String operationId)
+    {
+        post(catalogPath("/table-creations/" + encode(operationId) + "/abort"), Map.of(), new TypeReference<HoglakeDtos.TableCreation>() {});
+    }
+
+    public void renameTable(String namespace, String table, String newName)
+    {
+        post(tablePath(namespace, table, "/alter"), Map.of("ops", List.of(Map.of("op", "rename_table", "new_name", newName))), new TypeReference<HoglakeDtos.Table>() {});
+    }
+
+    public void dropStagingTable(String namespace, String table)
+    {
+        write("DELETE", tablePath(namespace, table, ""), Map.of(), new TypeReference<Object>() {});
+    }
+
+    public void commit(HoglakeDtos.Commit request)
+    {
+        HoglakeDtos.CommitResult result = post(catalogPath("/commit"), request, new TypeReference<HoglakeDtos.CommitResult>() {});
+        if (result.snapshotId() <= 0) {
+            throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Hoglake commit response is missing a valid snapshot; commit outcome may be unknown");
+        }
+    }
+
+    private <T> T post(String path, Object body, TypeReference<T> type)
+    {
+        return write("POST", path, body, type);
+    }
+
+    private <T> T write(String method, String path, Object body, TypeReference<T> type)
+    {
+        URI uri = URI.create(baseUri + path);
+        try {
+            HttpRequest request = HttpRequest.newBuilder(uri)
+                    .timeout(requestTimeout)
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .method(method, HttpRequest.BodyPublishers.ofByteArray(mapper.writeValueAsBytes(body)))
+                    .build();
+            // Send once at the transport layer. Creation recovery uses its operation ID;
+            // the append API has no idempotency key.
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            int status = response.statusCode();
+            if (status == 409) {
+                throw new TrinoException(StandardErrorCode.TRANSACTION_CONFLICT, "Hoglake write conflict: " + response.body());
+            }
+            if (status == 404 && method.equals("DELETE")) {
+                return null;
+            }
+            if (status == 410) {
+                throw new TrinoException(HOGLAKE_SNAPSHOT_EXPIRED, "Hoglake write snapshot expired");
+            }
+            if (status == 404) {
+                throw new TrinoException(HOGLAKE_CATALOG_NOT_FOUND, "Hoglake write target not found");
+            }
+            if (status == 400 || status == 422) {
+                throw new TrinoException(StandardErrorCode.INVALID_ARGUMENTS, "Hoglake rejected write: " + response.body());
+            }
+            if (status >= 500) {
+                throw new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "Hoglake write failed with HTTP " + status + "; commit outcome may be unknown");
+            }
+            if (status != 200 && status != 201) {
+                throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Unexpected Hoglake write status: " + status);
+            }
+            try {
+                T result = mapper.readValue(response.body(), type);
+                if (result == null) {
+                    throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Null Hoglake write response; write may have succeeded");
+                }
+                return result;
+            }
+            catch (IOException e) {
+                throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Malformed Hoglake write response; write may have succeeded", e);
+            }
+        }
+        catch (IOException e) {
+            throw new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "Hoglake write request failed; write outcome may be unknown", e);
+        }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Hoglake write interrupted; write outcome may be unknown", e);
+        }
     }
 
     @Override

@@ -15,35 +15,46 @@ package io.trino.plugin.hoglake;
 
 import io.airlift.bootstrap.LifeCycleManager;
 import io.trino.spi.connector.Connector;
+import io.trino.spi.connector.ConnectorCapabilities;
 import io.trino.spi.connector.ConnectorMetadata;
+import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.transaction.IsolationLevel;
 
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
 import static java.util.Objects.requireNonNull;
 
 /**
- * Read-only hoglake connector: metadata + splits from the REST control plane, parquet from S3.
+ * Hoglake connector: metadata and commits through REST, Parquet through the filesystem.
  */
 public class HoglakeConnector
         implements Connector
 {
     private final HoglakeMetadata metadata;
+    private final Map<ConnectorTransactionHandle, HoglakeMetadata> transactions = new ConcurrentHashMap<>();
     private final ConnectorSplitManager splitManager;
     private final ConnectorPageSourceProvider pageSourceProvider;
+    private final ConnectorPageSinkProvider pageSinkProvider;
     private final LifeCycleManager lifeCycleManager;
 
     public HoglakeConnector(
             HoglakeMetadata metadata,
             ConnectorSplitManager splitManager,
             ConnectorPageSourceProvider pageSourceProvider,
+            ConnectorPageSinkProvider pageSinkProvider,
             LifeCycleManager lifeCycleManager)
     {
         this.metadata = requireNonNull(metadata, "metadata is null");
         this.splitManager = requireNonNull(splitManager, "splitManager is null");
         this.pageSourceProvider = requireNonNull(pageSourceProvider, "pageSourceProvider is null");
+        this.pageSinkProvider = requireNonNull(pageSinkProvider, "pageSinkProvider is null");
         this.lifeCycleManager = requireNonNull(lifeCycleManager, "lifeCycleManager is null");
     }
 
@@ -53,13 +64,30 @@ public class HoglakeConnector
             boolean readOnly,
             boolean autoCommit)
     {
-        return HoglakeTransactionHandle.INSTANCE;
+        HoglakeTransactionHandle handle = new HoglakeTransactionHandle(UUID.randomUUID());
+        transactions.put(handle, metadata.newTransaction());
+        return handle;
     }
 
     @Override
     public ConnectorMetadata getMetadata(ConnectorSession session, ConnectorTransactionHandle transactionHandle)
     {
-        return metadata;
+        return requireNonNull(transactions.get(transactionHandle), "Unknown transaction");
+    }
+
+    @Override
+    public void commit(ConnectorTransactionHandle handle)
+    {
+        transactions.remove(handle);
+    }
+
+    @Override
+    public void rollback(ConnectorTransactionHandle handle)
+    {
+        HoglakeMetadata transaction = transactions.remove(handle);
+        if (transaction != null) {
+            transaction.rollback();
+        }
     }
 
     @Override
@@ -72,6 +100,24 @@ public class HoglakeConnector
     public ConnectorPageSourceProvider getPageSourceProvider()
     {
         return pageSourceProvider;
+    }
+
+    @Override
+    public Set<ConnectorCapabilities> getCapabilities()
+    {
+        return Set.of(ConnectorCapabilities.NOT_NULL_COLUMN_CONSTRAINT);
+    }
+
+    @Override
+    public boolean isSingleStatementWritesOnly()
+    {
+        return true;
+    }
+
+    @Override
+    public ConnectorPageSinkProvider getPageSinkProvider()
+    {
+        return pageSinkProvider;
     }
 
     @Override

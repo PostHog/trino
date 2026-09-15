@@ -47,7 +47,8 @@ public enum HoglakeErrorCode
     /**
      * The configured hoglake.catalog does not exist on the control plane.
      */
-    HOGLAKE_CATALOG_NOT_FOUND(3, USER_ERROR);
+    HOGLAKE_CATALOG_NOT_FOUND(3, USER_ERROR),
+    HOGLAKE_WRITE_ERROR(4, EXTERNAL);
 
     // Arbitrary plugin-private range; only uniqueness within this
     // connector matters (external plugins pick their own base).

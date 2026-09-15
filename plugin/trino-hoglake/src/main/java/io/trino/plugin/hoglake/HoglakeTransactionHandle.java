@@ -13,13 +13,13 @@
  */
 package io.trino.plugin.hoglake;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 
-/**
- * Read-only connector: transactions carry no state.
- */
-public enum HoglakeTransactionHandle
+import java.util.UUID;
+
+public record HoglakeTransactionHandle(@JsonProperty("id") UUID id)
         implements ConnectorTransactionHandle
 {
-    INSTANCE
+    public static final HoglakeTransactionHandle INSTANCE = new HoglakeTransactionHandle(new UUID(0, 0));
 }

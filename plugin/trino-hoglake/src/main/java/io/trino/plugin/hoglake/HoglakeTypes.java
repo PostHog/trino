@@ -105,11 +105,9 @@ public final class HoglakeTypes
     }
 
     /**
-     * Map a Trino type back to the hoglake wire type. Read-only v1 uses
-     * this only for round-trip validation; it is the seed of the future
-     * write-path (CREATE TABLE) mapping. Types outside hoglake's closed
-     * vocabulary (SMALLINT, CHAR, non-micro precisions, ARRAY, ...) are
-     * rejected.
+     * Map a Trino type back to the hoglake wire type. Types outside Hoglake's
+     * scalar vocabulary are rejected. Metadata widens lower temporal precisions
+     * to microseconds before creating tables.
      */
     public static String toHoglakeType(Type type)
     {
@@ -128,7 +126,7 @@ public final class HoglakeTypes
         if (type.equals(DoubleType.DOUBLE)) {
             return "double";
         }
-        if (type.equals(VarcharType.VARCHAR)) {
+        if (type instanceof VarcharType) {
             return "string";
         }
         if (type.equals(VarbinaryType.VARBINARY)) {
