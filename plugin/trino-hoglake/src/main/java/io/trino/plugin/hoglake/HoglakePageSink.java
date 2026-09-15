@@ -1,0 +1,199 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.trino.plugin.hoglake;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.airlift.slice.Slice;
+import io.trino.filesystem.Location;
+import io.trino.filesystem.TrinoFileSystem;
+import io.trino.memory.context.AggregatedMemoryContext;
+import io.trino.parquet.writer.ParquetWriter;
+import io.trino.parquet.writer.ParquetWriterOptions;
+import io.trino.plugin.hoglake.rest.HoglakeDtos;
+import io.trino.spi.Page;
+import io.trino.spi.TrinoException;
+import io.trino.spi.block.Block;
+import io.trino.spi.block.RunLengthEncodedBlock;
+import io.trino.spi.connector.ConnectorPageSink;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+
+import static io.airlift.slice.Slices.wrappedBuffer;
+import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_WRITE_ERROR;
+import static io.trino.spi.StandardErrorCode.CONSTRAINT_VIOLATION;
+import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.CompletableFuture.completedFuture;
+import static org.apache.parquet.format.CompressionCodec.SNAPPY;
+
+/**
+ * Writes immutable files; only the coordinator registers them with the catalog.
+ */
+public class HoglakePageSink
+        implements ConnectorPageSink
+{
+    private static final long TARGET_FILE_SIZE = 128L * 1024 * 1024;
+
+    private final TrinoFileSystem fileSystem;
+    private final HoglakeWriteHandle handle;
+    private final HoglakeParquetSchema schema;
+    private final String trinoVersion;
+    private final AggregatedMemoryContext memoryContext = AggregatedMemoryContext.newSimpleAggregatedMemoryContext();
+    private final List<Location> locations = new ArrayList<>();
+    private final List<Slice> fragments = new ArrayList<>();
+    private ParquetWriter writer;
+    private Location location;
+    private long rows;
+    private long completedBytes;
+    private boolean finished;
+    private boolean aborted;
+
+    public HoglakePageSink(TrinoFileSystem fileSystem, HoglakeWriteHandle handle, String trinoVersion)
+    {
+        this.fileSystem = requireNonNull(fileSystem, "fileSystem is null");
+        this.handle = requireNonNull(handle, "handle is null");
+        this.schema = HoglakeParquetSchema.create(handle.columns());
+        this.trinoVersion = requireNonNull(trinoVersion, "trinoVersion is null");
+    }
+
+    @Override
+    public long getCompletedBytes()
+    {
+        return completedBytes;
+    }
+
+    @Override
+    public long getMemoryUsage()
+    {
+        return memoryContext.getBytes() + (writer == null ? 0 : writer.getRetainedBytes());
+    }
+
+    @Override
+    public CompletableFuture<?> appendPage(Page page)
+    {
+        if (finished || aborted) {
+            throw new IllegalStateException("Sink is finished");
+        }
+        if (page.getPositionCount() == 0) {
+            return NOT_BLOCKED;
+        }
+        Block[] blocks = new Block[handle.columns().size()];
+        for (int index = 0; index < blocks.length; index++) {
+            HoglakeColumnHandle column = handle.columns().get(index);
+            int channel = handle.inputColumns().indexOf(column);
+            Block block = channel < 0 ? RunLengthEncodedBlock.create(column.type(), null, page.getPositionCount()) : page.getBlock(channel);
+            if (!column.nullable() && block.mayHaveNull()) {
+                for (int position = 0; position < page.getPositionCount(); position++) {
+                    if (block.isNull(position)) {
+                        throw new TrinoException(CONSTRAINT_VIOLATION, "NULL value for required column: " + column.name());
+                    }
+                }
+            }
+            blocks[index] = block;
+        }
+        try {
+            if (writer == null) {
+                String dataPath = handle.dataPath();
+                // Location requires a slash after the authority, even for a bucket root.
+                location = Location.of(dataPath.endsWith("/") ? dataPath : dataPath + "/")
+                        .appendPath("data/" + UUID.randomUUID() + ".parquet");
+                locations.add(location);
+                writer = new ParquetWriter(
+                        fileSystem.newOutputFile(location).create(memoryContext),
+                        schema.messageType(),
+                        schema.primitiveTypes(),
+                        ParquetWriterOptions.builder().build(),
+                        SNAPPY,
+                        trinoVersion,
+                        Optional.empty(),
+                        Optional.empty());
+            }
+            writer.write(new Page(page.getPositionCount(), blocks));
+            rows += page.getPositionCount();
+            if (writer.getEstimatedWrittenBytes() >= TARGET_FILE_SIZE) {
+                closeFile();
+            }
+            return NOT_BLOCKED;
+        }
+        catch (IOException e) {
+            throw new TrinoException(HOGLAKE_WRITE_ERROR, "Failed to write Hoglake Parquet file", e);
+        }
+    }
+
+    private void closeFile()
+            throws IOException
+    {
+        if (writer == null) {
+            return;
+        }
+        writer.close();
+        long size = fileSystem.newInputFile(location).length();
+        HoglakeDtos.FileRegistration file = new HoglakeDtos.FileRegistration(location.toString(), rows, size, writer.getFooterSize());
+        fragments.add(wrappedBuffer(new ObjectMapper().writeValueAsBytes(file)));
+        completedBytes += size;
+        writer = null;
+        rows = 0;
+    }
+
+    @Override
+    public CompletableFuture<Collection<Slice>> finish()
+    {
+        if (aborted) {
+            throw new IllegalStateException("Sink is aborted");
+        }
+        try {
+            closeFile();
+            finished = true;
+            memoryContext.close();
+            return completedFuture(List.copyOf(fragments));
+        }
+        catch (IOException e) {
+            throw new TrinoException(HOGLAKE_WRITE_ERROR, "Failed to finish Hoglake Parquet file", e);
+        }
+    }
+
+    @Override
+    public void abort()
+    {
+        // After fragments have been handed off, a catalog timeout can mean a successful
+        // commit. Never delete those files: orphan cleanup belongs to the catalog operator.
+        if (finished || aborted) {
+            return;
+        }
+        aborted = true;
+        try {
+            if (writer != null) {
+                writer.close();
+            }
+        }
+        catch (IOException e) {
+            // Still attempt to remove every file opened by this sink.
+        }
+        finally {
+            writer = null;
+            memoryContext.close();
+        }
+        try {
+            fileSystem.deleteFiles(locations);
+        }
+        catch (IOException e) {
+            throw new TrinoException(HOGLAKE_WRITE_ERROR, "Failed to clean up aborted Hoglake write", e);
+        }
+    }
+}
