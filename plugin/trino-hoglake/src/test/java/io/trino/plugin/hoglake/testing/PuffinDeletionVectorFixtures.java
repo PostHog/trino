@@ -26,6 +26,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.function.Consumer;
 import java.util.zip.CRC32;
 
 /**
@@ -56,7 +57,7 @@ public final class PuffinDeletionVectorFixtures
 
     /**
      * A complete puffin deletion vector for the given 0-based file row
-     * positions.
+     * positions, with the big-endian length prefix the DuckDB client writes.
      */
     public static byte[] deletionVector(long... positions)
     {
@@ -69,7 +70,43 @@ public final class PuffinDeletionVectorFixtures
      */
     public static byte[] deletionVector(String dataFilePath, long... positions)
     {
-        return puffin(deletionVectorBlob(toBoxed(positions)), dataFilePath, positions.length);
+        return puffin(deletionVectorBlob(toBoxed(positions), ByteOrder.BIG_ENDIAN), dataFilePath, positions.length);
+    }
+
+    /**
+     * The same vector in the layout the Hoglake server's compaction writer
+     * produces: the length prefix is little-endian. Only the prefix differs;
+     * the checksum and the bitmap are identical in both layouts.
+     */
+    public static byte[] serverDeletionVector(long... positions)
+    {
+        return puffin(deletionVectorBlob(toBoxed(positions), ByteOrder.LITTLE_ENDIAN), DEFAULT_DATA_FILE_PATH, positions.length);
+    }
+
+    public static byte[] serverDeletionVectorBlob(long... positions)
+    {
+        return deletionVectorBlob(toBoxed(positions), ByteOrder.LITTLE_ENDIAN);
+    }
+
+    /**
+     * A well-formed blob around a caller-corrupted vector, with a correct
+     * length prefix and CRC, so only the corruption is under test.
+     */
+    public static byte[] puffinFromVector(byte[] vector)
+    {
+        return puffin(blob(vector, ByteOrder.BIG_ENDIAN), DEFAULT_DATA_FILE_PATH, 0);
+    }
+
+    /**
+     * The vector payload of a valid vector for the given positions.
+     * Positions are not added; mutate the returned array to corrupt the
+     * portable bitmap itself.
+     */
+    public static byte[] malformedVector(Consumer<byte[]> corrupt)
+    {
+        byte[] vector = portableBitmap(toBoxed(new long[] {1L, 2L, 3L}));
+        corrupt.accept(vector);
+        return vector;
     }
 
     /**
@@ -78,19 +115,32 @@ public final class PuffinDeletionVectorFixtures
      */
     public static byte[] deletionVectorBlob(long... positions)
     {
-        return deletionVectorBlob(toBoxed(positions));
+        return deletionVectorBlob(toBoxed(positions), ByteOrder.BIG_ENDIAN);
     }
 
-    private static byte[] deletionVectorBlob(List<Long> positions)
+    /**
+     * The blob with an explicit length-prefix byte order, so a test can
+     * build one that matches neither writer.
+     */
+    public static byte[] deletionVectorBlob(ByteOrder prefixOrder, long... positions)
     {
-        byte[] vector = portableBitmap(positions);
+        return deletionVectorBlob(toBoxed(positions), prefixOrder);
+    }
+
+    private static byte[] deletionVectorBlob(List<Long> positions, ByteOrder prefixOrder)
+    {
+        return blob(portableBitmap(positions), prefixOrder);
+    }
+
+    private static byte[] blob(byte[] vector, ByteOrder prefixOrder)
+    {
         ByteArrayOutputStream blob = new ByteArrayOutputStream();
         try (DataOutputStream out = new DataOutputStream(blob)) {
-            // The length prefix and the checksum mix endianness, exactly as
-            // Iceberg's deletion-vector-v1 does: the prefix is little-endian,
-            // the CRC-32 over magic + vector is big-endian.
+            // Hoglake's writers disagree about the prefix (server:
+            // little-endian, DuckDB client: big-endian); the CRC-32 over
+            // magic + vector is big-endian in both.
             out.write(ByteBuffer.allocate(Integer.BYTES)
-                    .order(ByteOrder.LITTLE_ENDIAN)
+                    .order(prefixOrder)
                     .putInt(DELETION_VECTOR_MAGIC.length + vector.length)
                     .array());
             out.write(DELETION_VECTOR_MAGIC);

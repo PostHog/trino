@@ -23,6 +23,7 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.MemoryContext;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
@@ -330,6 +331,145 @@ class TestHoglakeDeletionVectorReads
         close(pageSource);
     }
 
+    // ---- engine memory accounting -------------------------------------------
+
+    /**
+     * The page source must report its memory to the engine's context, not
+     * only to its own {@code getMemoryUsage()}: the engine reserves query
+     * memory from what the context receives, and a page source that never
+     * reports holds buffers without a reservation.
+     */
+    @Test
+    void parquetReadsReportReaderMemoryToTheEngineContext()
+    {
+        // A multi-row-group file, so the reader holds buffers mid-read. The
+        // engine must see them: without the wrapper the context stays at
+        // zero and a query can hold Parquet buffers unreserved.
+        RecordingMemoryContext memory = new RecordingMemoryContext();
+        ConnectorPageSource pageSource = open(
+                ConnectorTestFixtures.memoryFileSystem(Map.of(DATA_PATH, multiRowGroupParquet())),
+                List.of(value()),
+                new HoglakeSplit(DATA_PATH, multiRowGroupParquet().length, 8, Optional.empty(), 0),
+                Optional.empty(),
+                memory);
+        try {
+            drainMaterializingBlocks(pageSource);
+        }
+        finally {
+            close(pageSource);
+        }
+
+        assertThat(memory.peakBytes())
+                .describedAs("reader memory reported to the engine while reading")
+                .isPositive();
+        assertThat(memory.lastBytes()).isZero();
+    }
+
+    @Test
+    void deletionVectorReadsReportTheirRetainedMemoryToTheEngineContext()
+    {
+        RecordingMemoryContext memory = new RecordingMemoryContext();
+        ConnectorPageSource pageSource = open(
+                ConnectorTestFixtures.memoryFileSystem(Map.of(DATA_PATH, parquet(), DV_PATH, vector(0, 1).orElseThrow())),
+                List.of(value()),
+                splitWithCatalogDeleteCount(parquet().length, vector(0, 1).orElseThrow(), 10),
+                Optional.empty(),
+                memory);
+        try {
+            // The bitmap is held for the life of the split, so the engine
+            // holds a reservation for it until the page source closes.
+            SourcePage page = pageSource.getNextSourcePage();
+            for (int channel = 0; channel < page.getChannelCount(); channel++) {
+                page.getBlock(channel);
+            }
+            assertThat(memory.lastBytes())
+                    .describedAs("retained deletion-vector memory while the split is open")
+                    .isPositive();
+        }
+        finally {
+            close(pageSource);
+        }
+        assertThat(memory.lastBytes()).isZero();
+    }
+
+    @Test
+    void countPageSourceKeepsTheEngineContextAtZero()
+    {
+        // The catalog-count path holds nothing: it must report zero rather
+        // than leave a stale reservation behind.
+        RecordingMemoryContext memory = new RecordingMemoryContext();
+        ConnectorPageSource pageSource = open(
+                ConnectorTestFixtures.memoryFileSystem(Map.of(DATA_PATH, parquet(), DV_PATH, vector(0).orElseThrow())),
+                List.of(),
+                splitWithCatalogDeleteCount(parquet().length, vector(0).orElseThrow(), 10),
+                Optional.empty(),
+                memory);
+        try {
+            drainMaterializingBlocks(pageSource);
+        }
+        finally {
+            close(pageSource);
+        }
+        assertThat(memory.lastBytes()).isZero();
+        assertThat(memory.peakBytes()).isZero();
+    }
+
+    /**
+     * Reads every page and loads every block, which is what makes a page
+     * source hold memory; a page whose blocks are never touched reports
+     * nothing.
+     */
+    private static void drainMaterializingBlocks(ConnectorPageSource pageSource)
+    {
+        while (!pageSource.isFinished()) {
+            SourcePage page = pageSource.getNextSourcePage();
+            if (page == null) {
+                break;
+            }
+            for (int channel = 0; channel < page.getChannelCount(); channel++) {
+                page.getBlock(channel);
+            }
+        }
+    }
+
+    private static byte[] multiRowGroupParquet()
+    {
+        return ConnectorTestFixtures.writeParquet(
+                List.of(new FileColumn(
+                        Types.optional(PrimitiveTypeName.INT64).id(1).named("value"),
+                        BIGINT,
+                        Arrays.asList(0L, 1L, 2L, 3L, 4L, 5L, 6L, 7L))),
+                ParquetWriterOptions.builder().setMaxRowGroupRowCount(2).build());
+    }
+
+    /**
+     * Stands in for the engine's query memory context: records what the page
+     * source reports.
+     */
+    private static final class RecordingMemoryContext
+            implements MemoryContext
+    {
+        private long lastBytes = -1;
+        private long peakBytes;
+
+        @Override
+        public void setBytes(long currentBytes)
+        {
+            lastBytes = currentBytes;
+            peakBytes = Math.max(peakBytes, currentBytes);
+        }
+
+        public long lastBytes()
+        {
+            return lastBytes;
+        }
+
+        public long peakBytes()
+        {
+            return peakBytes;
+        }
+    }
+
     // ---- plumbing -----------------------------------------------------------
 
     private static byte[] parquet()
@@ -468,6 +608,16 @@ class TestHoglakeDeletionVectorReads
             HoglakeSplit split,
             Optional<TupleDomain<HoglakeColumnHandle>> predicate)
     {
+        return open(fileSystem, columns, split, predicate, MemoryContext.NO_LIMIT);
+    }
+
+    private static ConnectorPageSource open(
+            TrinoFileSystemFactory fileSystem,
+            List<HoglakeColumnHandle> columns,
+            HoglakeSplit split,
+            Optional<TupleDomain<HoglakeColumnHandle>> predicate,
+            MemoryContext memoryContext)
+    {
         return new HoglakePageSourceProvider(fileSystem).createPageSource(
                 HoglakeTransactionHandle.INSTANCE,
                 ConnectorTestFixtures.session(),
@@ -476,7 +626,7 @@ class TestHoglakeDeletionVectorReads
                 Optional.empty(),
                 columns.stream().map(ColumnHandle.class::cast).toList(),
                 DynamicFilter.EMPTY,
-                MemoryContext.NO_LIMIT);
+                memoryContext);
     }
 
     /**

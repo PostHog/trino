@@ -42,6 +42,7 @@ import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.EmptyPageSource;
 import io.trino.spi.connector.MemoryContext;
+import io.trino.spi.connector.MemoryUsageReportingPageSource;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import org.apache.parquet.column.ColumnDescriptor;
@@ -116,7 +117,7 @@ public class HoglakePageSourceProvider
         // Splits cover whole files at the query's pinned snapshot. With no columns or
         // reader-side predicate, only row cardinality is needed (for example, COUNT(*)).
         if (columns.isEmpty() && predicate.isAll() && hoglakeSplit.recordCount() >= 0) {
-            return createCountPageSource(session, hoglakeSplit);
+            return new MemoryUsageReportingPageSource(createCountPageSource(session, hoglakeSplit), memoryContext);
         }
 
         List<HoglakeColumnHandle> hoglakeColumns = columns.stream()
@@ -131,12 +132,17 @@ public class HoglakePageSourceProvider
         try {
             dataSource = new HoglakeParquetDataSource(inputFile, hoglakeSplit.fileSizeBytes(), options);
             HoglakeDeletionVector deletionVector = loadDeletionVector(fileSystem, dataSource, hoglakeSplit);
-            return createParquetPageSource(
-                    dataSource,
-                    hoglakeColumns,
-                    predicate.simplify(DOMAIN_COMPACTION_THRESHOLD),
-                    deletionVector,
-                    options);
+            // The page source owns the reader's memory context (reader
+            // buffers plus any retained deletion vector); this wrapper is
+            // what forwards its usage to the engine's query memory context.
+            return new MemoryUsageReportingPageSource(
+                    createParquetPageSource(
+                            dataSource,
+                            hoglakeColumns,
+                            predicate.simplify(DOMAIN_COMPACTION_THRESHOLD),
+                            deletionVector,
+                            options),
+                    memoryContext);
         }
         catch (Exception e) {
             if (dataSource != null) {

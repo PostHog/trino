@@ -106,6 +106,13 @@ across projected columns, page and batch boundaries, and pruned row groups.
 Vectors are read through the same filesystem configuration, authentication, and
 caching as Parquet data.
 
+Hoglake's two deletion-vector writers disagree about the byte order of the
+blob's length prefix: the server's compaction writer emits it little-endian,
+while the DuckDB client writes it big-endian. The connector reads either, because
+the prefix must describe the blob it sits in and only one reading can. Everything
+else in the encoding, including the checksum and the bitmap's own fields, has a
+single form.
+
 An unfiltered `count(*)` still answers from catalog metadata: a file's visible
 rows are its record count minus its deletion vector's delete count. The vector
 is read and validated in that path too, so a count cannot silently ignore
@@ -118,8 +125,9 @@ deleted rows". Validated conditions include the container and blob structure,
 the blob checksum, the blob's declared length, the vector's bitmap encoding, the
 blob's `referenced-data-file` when the writer set one, that the catalog's delete
 count equals the vector's cardinality, and that every deleted position lies
-inside the Parquet file's own row count. Deletion vectors larger than 256 MB and
-compressed puffin footers are refused.
+inside the Parquet file's own row count. Deletion vectors larger than 256 MB,
+compressed puffin footers, and bucket counts larger than the vector that declares
+them can hold are refused.
 
 ## Read consistency and limitations
 

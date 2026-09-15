@@ -48,11 +48,18 @@ import static java.util.Objects.requireNonNull;
  *
  * <pre>
  * puffin file: "PFA1" | blob section | "PFA1" | footer payload | size (4, LE) | flags (4, LE) | "PFA1"
- * blob:        declared length (4, LE, covers magic + vector) | magic D1 D3 39 64
+ * blob:        declared length (4, LE or BE, covers magic + vector) | magic D1 D3 39 64
  *              | 64-bit portable roaring bitmap | CRC-32 of (magic + vector) (4, BE)
  * portable 64-bit roaring bitmap: bucket count (8, LE), then per bucket a
  *              high-32-bit key (4, LE) and a portable 32-bit roaring bitmap
  * </pre>
+ *
+ * <p>Hoglake's two writers disagree about the length prefix's byte order —
+ * the server's writer emits it little-endian, the DuckDB client's
+ * big-endian — so the decoder accepts whichever reading matches the blob it
+ * is in and refuses a prefix that matches neither. Everything else,
+ * including the checksum and the roaring bitmap's own fields, has one
+ * encoding.
  *
  * <p>Every structural check throws {@link TrinoException}
  * ({@code HOGLAKE_DELETION_VECTOR_INVALID}). A deletion vector that cannot
@@ -263,18 +270,22 @@ public final class HoglakeDeletionVector
         }
 
         /**
-         * {@code blob = declared length (4, LE) | magic | vector | CRC-32 (4, BE)},
+         * {@code blob = declared length | magic | vector | CRC-32 (4, BE)},
          * where the declared length and the checksum cover magic + vector.
-         * The encoding mixes endianness — like Iceberg's deletion-vector-v1,
-         * whose layout Hoglake reuses byte for byte.
+         *
+         * <p>Hoglake's two writers disagree about the byte order of that
+         * length prefix, so both are accepted: the server's compaction
+         * writer ({@code PuffinTestFiles} / {@code PuffinDeletionVector})
+         * emits it little-endian (its Kotlin writer byte-swaps an int into a
+         * big-endian {@code DataOutputStream}), while the DuckDB client's
+         * {@code Store<BSwap>(...)} emits it big-endian. A blob declares its
+         * own length, so the two readings cannot both equal the blob's
+         * actual length — the value that matches is the encoding used, and
+         * a prefix matching neither is refused.
          */
         private HoglakeDeletionVector decodeBlob(int offset, int length, Optional<String> referencedDataFile)
         {
-            int declared = ByteBuffer.wrap(bytes, offset, Integer.BYTES).order(ByteOrder.LITTLE_ENDIAN).getInt();
-            if (declared != length - 8) {
-                throw invalid(location, "%s length prefix %d does not match blob length %d"
-                        .formatted(DELETION_VECTOR_BLOB_TYPE, declared, length), null);
-            }
+            int declared = declaredLength(offset, length);
             for (int i = 0; i < DELETION_VECTOR_MAGIC.length; i++) {
                 if (bytes[offset + Integer.BYTES + i] != DELETION_VECTOR_MAGIC[i]) {
                     throw invalid(location, "bad %s magic".formatted(DELETION_VECTOR_BLOB_TYPE), null);
@@ -292,6 +303,29 @@ public final class HoglakeDeletionVector
         }
 
         /**
+         * The length the blob declares, in the one byte order that makes it
+         * describe the blob it is in.
+         */
+        private int declaredLength(int offset, int length)
+        {
+            int expected = length - 8;
+            // Absolute indices over the whole array: a ByteBuffer.wrap with
+            // an offset indexes relative to that offset, which would apply
+            // it twice.
+            ByteBuffer wholeFile = ByteBuffer.wrap(bytes);
+            int bigEndian = wholeFile.order(ByteOrder.BIG_ENDIAN).getInt(offset);
+            if (bigEndian == expected) {
+                return bigEndian;
+            }
+            int littleEndian = wholeFile.order(ByteOrder.LITTLE_ENDIAN).getInt(offset);
+            if (littleEndian == expected) {
+                return littleEndian;
+            }
+            throw invalid(location, "%s length prefix does not match blob length %d (big-endian %d, little-endian %d)"
+                    .formatted(DELETION_VECTOR_BLOB_TYPE, length, bigEndian, littleEndian), null);
+        }
+
+        /**
          * Portable 64-bit roaring bitmap: LE bucket count, then per bucket a
          * LE high-32-bit key and a portable 32-bit roaring bitmap. The Java
          * stream format is the portable 32-bit format.
@@ -303,11 +337,21 @@ public final class HoglakeDeletionVector
                 if (bucketCount < 0 || bucketCount > Integer.MAX_VALUE) {
                     throw invalid(location, "implausible bucket count %d".formatted(bucketCount), null);
                 }
-                int[] bucketKeys = new int[(int) bucketCount];
-                RoaringBitmap[] buckets = new RoaringBitmap[(int) bucketCount];
+                // Every bucket costs at least its 4-byte key and an 8-byte
+                // empty bitmap, so the count must fit the vector that
+                // declares it. Checking before allocating keeps a small
+                // blob from asking for gigabytes of arrays.
+                long maximumBuckets = (length - Long.BYTES) / 12;
+                if (bucketCount > maximumBuckets) {
+                    throw invalid(location, "bucket count %d exceeds the %d buckets %d vector bytes can hold"
+                            .formatted(bucketCount, maximumBuckets, length), null);
+                }
+                int bucketCountInt = (int) bucketCount;
+                int[] bucketKeys = new int[bucketCountInt];
+                RoaringBitmap[] buckets = new RoaringBitmap[bucketCountInt];
                 long cardinality = 0;
                 int previousKey = -1;
-                for (int i = 0; i < bucketCount; i++) {
+                for (int i = 0; i < bucketCountInt; i++) {
                     int key = Integer.reverseBytes(stream.readInt());
                     if (key < 0) {
                         // A negative high-32-bit key would sign-extend into a
