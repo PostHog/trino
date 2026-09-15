@@ -44,6 +44,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Semaphore;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 
@@ -51,6 +52,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.net.MediaType.JSON_UTF_8;
+import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.http.client.FullJsonResponseHandler.createFullJsonResponseHandler;
 import static io.airlift.http.client.HeaderNames.CONTENT_TYPE;
 import static io.airlift.http.client.JsonBodyGenerator.jsonBodyGenerator;
@@ -66,6 +68,7 @@ public class OpaHttpClient
     private final Executor executor;
     private final boolean logRequests;
     private final boolean logResponses;
+    private final Semaphore outstandingRequests;
     private static final Logger log = Logger.get(OpaHttpClient.class);
 
     @Inject
@@ -80,6 +83,7 @@ public class OpaHttpClient
         this.executor = requireNonNull(executor, "executor is null");
         this.logRequests = config.getLogRequests();
         this.logResponses = config.getLogResponses();
+        this.outstandingRequests = new Semaphore(config.getMaxOutstandingRequests(), true);
     }
 
     public <T> FluentFuture<T> submitOpaRequest(OpaQueryInput input, URI uri, JsonCodec<T> deserializer)
@@ -105,7 +109,24 @@ public class OpaHttpClient
                     new String(requestBodyGenerator.getBody(), UTF_8),
                     request.getHeaders());
         }
-        return FluentFuture.from(httpClient.executeAsync(request, createFullJsonResponseHandler(deserializer)))
+        try {
+            outstandingRequests.acquire();
+        }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new OpaQueryException.QueryFailed(e);
+        }
+
+        ListenableFuture<FullJsonResponseHandler.JsonResponse<T>> responseFuture;
+        try {
+            responseFuture = httpClient.executeAsync(request, createFullJsonResponseHandler(deserializer));
+        }
+        catch (RuntimeException e) {
+            outstandingRequests.release();
+            throw e;
+        }
+        responseFuture.addListener(outstandingRequests::release, directExecutor());
+        return FluentFuture.from(responseFuture)
                 .transform(response -> parseOpaResponse(response, uri), executor);
     }
 
