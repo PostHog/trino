@@ -57,7 +57,7 @@ public final class PuffinDeletionVectorFixtures
 
     /**
      * A complete puffin deletion vector for the given 0-based file row
-     * positions, with the big-endian length prefix the DuckDB client writes.
+     * positions.
      */
     public static byte[] deletionVector(long... positions)
     {
@@ -70,22 +70,7 @@ public final class PuffinDeletionVectorFixtures
      */
     public static byte[] deletionVector(String dataFilePath, long... positions)
     {
-        return puffin(deletionVectorBlob(toBoxed(positions), ByteOrder.BIG_ENDIAN), dataFilePath, positions.length);
-    }
-
-    /**
-     * The same vector in the layout the Hoglake server's compaction writer
-     * produces: the length prefix is little-endian. Only the prefix differs;
-     * the checksum and the bitmap are identical in both layouts.
-     */
-    public static byte[] serverDeletionVector(long... positions)
-    {
-        return puffin(deletionVectorBlob(toBoxed(positions), ByteOrder.LITTLE_ENDIAN), DEFAULT_DATA_FILE_PATH, positions.length);
-    }
-
-    public static byte[] serverDeletionVectorBlob(long... positions)
-    {
-        return deletionVectorBlob(toBoxed(positions), ByteOrder.LITTLE_ENDIAN);
+        return puffin(deletionVectorBlob(toBoxed(positions)), dataFilePath, positions.length);
     }
 
     /**
@@ -94,7 +79,7 @@ public final class PuffinDeletionVectorFixtures
      */
     public static byte[] puffinFromVector(byte[] vector)
     {
-        return puffin(blob(vector, ByteOrder.BIG_ENDIAN), DEFAULT_DATA_FILE_PATH, 0);
+        return puffin(blob(vector), DEFAULT_DATA_FILE_PATH, 0);
     }
 
     /**
@@ -115,32 +100,23 @@ public final class PuffinDeletionVectorFixtures
      */
     public static byte[] deletionVectorBlob(long... positions)
     {
-        return deletionVectorBlob(toBoxed(positions), ByteOrder.BIG_ENDIAN);
+        return deletionVectorBlob(toBoxed(positions));
     }
 
-    /**
-     * The blob with an explicit length-prefix byte order, so a test can
-     * build one that matches neither writer.
-     */
-    public static byte[] deletionVectorBlob(ByteOrder prefixOrder, long... positions)
+    private static byte[] deletionVectorBlob(List<Long> positions)
     {
-        return deletionVectorBlob(toBoxed(positions), prefixOrder);
+        return blob(portableBitmap(positions));
     }
 
-    private static byte[] deletionVectorBlob(List<Long> positions, ByteOrder prefixOrder)
-    {
-        return blob(portableBitmap(positions), prefixOrder);
-    }
-
-    private static byte[] blob(byte[] vector, ByteOrder prefixOrder)
+    private static byte[] blob(byte[] vector)
     {
         ByteArrayOutputStream blob = new ByteArrayOutputStream();
         try (DataOutputStream out = new DataOutputStream(blob)) {
-            // Hoglake's writers disagree about the prefix (server:
-            // little-endian, DuckDB client: big-endian); the CRC-32 over
-            // magic + vector is big-endian in both.
+            // Hoglake's one layout: the declared length and the CRC-32 over
+            // magic + vector are big-endian; the roaring fields below are
+            // little-endian.
             out.write(ByteBuffer.allocate(Integer.BYTES)
-                    .order(prefixOrder)
+                    .order(ByteOrder.BIG_ENDIAN)
                     .putInt(DELETION_VECTOR_MAGIC.length + vector.length)
                     .array());
             out.write(DELETION_VECTOR_MAGIC);

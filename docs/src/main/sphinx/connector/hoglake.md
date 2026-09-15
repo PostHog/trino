@@ -106,12 +106,10 @@ across projected columns, page and batch boundaries, and pruned row groups.
 Vectors are read through the same filesystem configuration, authentication, and
 caching as Parquet data.
 
-Hoglake's two deletion-vector writers disagree about the byte order of the
-blob's length prefix: the server's compaction writer emits it little-endian,
-while the DuckDB client writes it big-endian. The connector reads either, because
-the prefix must describe the blob it sits in and only one reading can. Everything
-else in the encoding, including the checksum and the bitmap's own fields, has a
-single form.
+The encoding mixes byte order the way Iceberg's `deletion-vector-v1` does: the
+blob's declared length and checksum are big-endian, while the roaring bitmap's
+own fields are little-endian. Hoglake's server reader, its writer, and its DuckDB
+client all use this layout, and the connector reads it.
 
 An unfiltered `count(*)` still answers from catalog metadata: a file's visible
 rows are its record count minus its deletion vector's delete count. The vector

@@ -77,13 +77,11 @@ class TestHoglakeDeletionVector
     }
 
     @Test
-    void decodesEmptyVectorFromEitherWriter()
+    void decodesEmptyVectorFromTheGoldenLayout()
     {
         // An empty vector is the smallest legal payload (a bucket count of
         // zero and nothing else), so it pins the bucket-count bound at its
-        // lower edge in both layouts.
-        assertThat(HoglakeDeletionVector.read(PuffinDeletionVectorFixtures.serverDeletionVector(), DV_PATH)
-                .cardinality()).isZero();
+        // lower edge.
         assertThat(HoglakeDeletionVector.read(PuffinDeletionVectorFixtures.deletionVector(), DV_PATH)
                 .cardinality()).isZero();
     }
@@ -109,40 +107,36 @@ class TestHoglakeDeletionVector
     }
 
     /**
-     * Golden vectors for positions {1, 2, 3}, minted with the exact byte
-     * operations of Hoglake's two writers and embedded so a change in this
-     * connector's fixture cannot silently redefine the format.
+     * Golden blob for positions {1, 2, 3}, minted with the exact byte
+     * operations of Hoglake's writer
+     * ({@code PuffinTestFiles.deletionVector} / {@code PuffinDeletionVector}):
+     * a big-endian declared length of 38 ({@code 00 00 00 26}), the vector
+     * magic, the portable bitmap, and the big-endian CRC-32.
      *
-     * <p>Both layouts carry the same magic, bitmap, and big-endian CRC; they
-     * differ only in the blob's 4-byte length prefix, because Hoglake's
-     * server writer byte-swaps it into a big-endian {@code DataOutputStream}
-     * (little-endian on disk) while the DuckDB client's
-     * {@code Store<BSwap>(...)} writes it big-endian.
+     * <p>Pinned here so a change in this connector's fixture cannot silently
+     * redefine the format. Produced by running the server's own writer, not
+     * by re-deriving the layout from this connector's decoder.
      */
-    private static final String SERVER_BLOB_HEX =
-            "26 00 00 00 D1 D3 39 64 01 00 00 00 00 00 00 00 00 00 00 00 3A 30 00 00 01 00 00 00 00 00 02 00 10 00 00 00 01 00 02 00 03 00 B4 78 9D DA";
-    private static final String DUCKDB_BLOB_HEX =
+    private static final String GOLDEN_BLOB_HEX =
             "00 00 00 26 D1 D3 39 64 01 00 00 00 00 00 00 00 00 00 00 00 3A 30 00 00 01 00 00 00 00 00 02 00 10 00 00 00 01 00 02 00 03 00 B4 78 9D DA";
 
     @Test
     void fixtureMatchesTheBytesHoglakeWritersProduce()
     {
-        // Pins the fixture against the writers' actual output; if this fails,
+        // Pins the fixture against the writer's actual output; if this fails,
         // the fixture no longer describes Hoglake's format.
-        assertThat(hex(PuffinDeletionVectorFixtures.serverDeletionVectorBlob(1L, 2L, 3L))).isEqualTo(SERVER_BLOB_HEX);
-        assertThat(hex(PuffinDeletionVectorFixtures.deletionVectorBlob(1L, 2L, 3L))).isEqualTo(DUCKDB_BLOB_HEX);
+        assertThat(hex(PuffinDeletionVectorFixtures.deletionVectorBlob(1L, 2L, 3L))).isEqualTo(GOLDEN_BLOB_HEX);
     }
 
     @Test
-    void decodesTheServerWritersLittleEndianLengthPrefix()
+    void decodesTheGoldenBlob()
     {
-        // The server's compaction writer is the format's reference producer;
-        // its prefix is the reverse of the DuckDB client's.
-        assertThat(SERVER_BLOB_HEX).startsWith("26 00 00 00");
-        assertThat(DUCKDB_BLOB_HEX).startsWith("00 00 00 26");
+        // The declared length is big-endian, the way every Hoglake writer and
+        // reader encodes it.
+        assertThat(GOLDEN_BLOB_HEX).startsWith("00 00 00 26");
 
         HoglakeDeletionVector vector = HoglakeDeletionVector.read(
-                PuffinDeletionVectorFixtures.serverDeletionVector(1L, 2L, 3L), DV_PATH);
+                containerWithBlob(PuffinDeletionVectorFixtures.deletionVectorBlob(1L, 2L, 3L)), DV_PATH);
 
         assertThat(vector.cardinality()).isEqualTo(3);
         assertThat(vector.isRowDeleted(1)).isTrue();
@@ -152,34 +146,29 @@ class TestHoglakeDeletionVector
     }
 
     @Test
-    void decodesBothWriterLayoutsToTheSameVector()
+    void aLittleEndianLengthPrefixIsRefused()
     {
-        HoglakeDeletionVector server = HoglakeDeletionVector.read(
-                PuffinDeletionVectorFixtures.serverDeletionVector(0L, 5L), DV_PATH);
-        HoglakeDeletionVector duckdb = HoglakeDeletionVector.read(
-                PuffinDeletionVectorFixtures.deletionVector(0L, 5L), DV_PATH);
-
-        assertThat(server.cardinality()).isEqualTo(duckdb.cardinality());
-        for (long position : new long[] {0, 1, 5, 6}) {
-            assertThat(server.isRowDeleted(position))
-                    .describedAs("position %d", position)
-                    .isEqualTo(duckdb.isRowDeleted(position));
-        }
-    }
-
-    @Test
-    void lengthPrefixInNeitherByteOrderIsRefused()
-    {
-        // A prefix whose big-endian reading (0x00002600 = 9728) and
-        // little-endian reading (0x00260000 = 2490368) both disagree with
-        // the blob's real length.
+        // The reverse reading of the golden blob's prefix (0x26000000) is the
+        // pre-fix misreading of this format and is not a second encoding any
+        // Hoglake writer produces.
         byte[] blob = PuffinDeletionVectorFixtures.deletionVectorBlob(1L, 2L, 3L);
-        blob[1] = 0x26;
+        byte[] littleEndian = {blob[3], blob[2], blob[1], blob[0]};
+        System.arraycopy(littleEndian, 0, blob, 0, Integer.BYTES);
 
         assertThatThrownBy(() -> HoglakeDeletionVector.read(containerWithBlob(blob), DV_PATH))
                 .isInstanceOfSatisfying(TrinoException.class, e ->
                         assertThat(e.getErrorCode()).isEqualTo(HOGLAKE_DELETION_VECTOR_INVALID.toErrorCode()))
-                .hasMessageContaining("length prefix does not match blob length");
+                .hasMessageContaining("length prefix 637534208 does not match blob length");
+    }
+
+    @Test
+    void aLengthPrefixThatMatchesNoOtherValueIsRefused()
+    {
+        byte[] blob = PuffinDeletionVectorFixtures.deletionVectorBlob(1L, 2L, 3L);
+        blob[0] = 0x01;
+
+        assertThatThrownBy(() -> HoglakeDeletionVector.read(containerWithBlob(blob), DV_PATH))
+                .hasMessageContaining("length prefix 16777254 does not match blob length 46");
     }
 
     @Test
