@@ -47,7 +47,17 @@ public enum HoglakeErrorCode
     /**
      * The configured hoglake.catalog does not exist on the control plane.
      */
-    HOGLAKE_CATALOG_NOT_FOUND(3, USER_ERROR);
+    HOGLAKE_CATALOG_NOT_FOUND(3, USER_ERROR),
+    /**
+     * A deletion vector the scan paired with a data file is missing from
+     * object storage.
+     */
+    HOGLAKE_DELETION_VECTOR_NOT_FOUND(4, USER_ERROR),
+    /**
+     * A deletion vector is corrupt, truncated, unsupported, or does not
+     * match the catalog metadata of the data file it is paired with.
+     */
+    HOGLAKE_DELETION_VECTOR_INVALID(5, USER_ERROR);
 
     // Arbitrary plugin-private range; only uniqueness within this
     // connector matters (external plugins pick their own base).

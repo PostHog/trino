@@ -51,7 +51,6 @@ import java.util.concurrent.ExecutionException;
 
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_SNAPSHOT_EXPIRED;
 import static io.trino.spi.StandardErrorCode.NOT_FOUND;
-import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
@@ -280,13 +279,50 @@ class TestHoglakeHeadRace
     }
 
     @Test
-    void dvRefusalFiresAtSplitGeneration_beforeAnyPageExists()
+    void everyScanUsesTheHandleSnapshotIncludingDeletionVectorLookups()
+            throws Exception
     {
-        // A scan whose second file carries a live DV. Regression (S4): the
-        // refusal fires at split generation, where the DV pairing is first
-        // visible — the query dies before ANY split is handed to the
-        // engine, so no worker can stream pages from the clean split to a
-        // client before the failure lands.
+        // Two snapshots serve the same data file with different deletion
+        // vectors. A query pinned at snapshot 3 must be planned against the
+        // vector that was live then -- never the newer one -- because the
+        // two describe different visible row sets.
+        String scan =
+                """
+                [
+                  {"data_file": {"data_file_id": 1, "path": "%s", "file_format": "parquet",
+                    "record_count": 2, "file_size_bytes": %d, "row_id_start": 0,
+                    "stats_state": "provided", "begin_snapshot": 1},
+                   "delete_file": {"delete_file_id": %d, "data_file_id": 1,
+                    "path": "%s", "file_format": "puffin-dv",
+                    "delete_count": 1, "file_size_bytes": 64, "begin_snapshot": %d}}
+                ]
+                """;
+        RESPONSES.put(SCAN_PATH + "?snapshot=3", ok(scan.formatted(
+                V1_FILE, v1Parquet.length, 7, "memory:///metrics-at-3.dv", 3)));
+        RESPONSES.put(SCAN_PATH + "?snapshot=4", ok(scan.formatted(
+                V1_FILE, v1Parquet.length, 8, "memory:///metrics-at-4.dv", 4)));
+
+        for (long snapshot : new long[] {3, 4}) {
+            ConnectorTableHandle handle = new HoglakeTableHandle(
+                    "analytics", "metrics", snapshot, "uuid-incarnation-1", List.of());
+            List<HoglakeSplit> splits = getAllSplits(splitManager.getSplits(
+                    HoglakeTransactionHandle.INSTANCE, session, handle, Set.of(), Constraint.alwaysTrue()));
+
+            assertThat(splits).hasSize(1);
+            assertThat(splits.getFirst().deleteFilePath())
+                    .contains("memory:///metrics-at-%d.dv".formatted(snapshot));
+            assertThat(splits.getFirst().deleteCount()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void deletionVectorRidesTheSplitFromThePinnedScan()
+            throws Exception
+    {
+        // A scan whose second file carries a live DV. The vector is a fact
+        // about that file at the pinned snapshot, so it must ride the split
+        // that the pinned scan produced -- never be re-resolved later, when
+        // head may already have superseded it.
         RESPONSES.put(SCAN_PATH + "?snapshot=4", ok(
                 """
                 [
@@ -304,12 +340,15 @@ class TestHoglakeHeadRace
         ConnectorTableHandle handle = metadata.getTableHandle(
                 session, new SchemaTableName("analytics", "metrics"), Optional.empty(), Optional.empty());
 
-        assertThatThrownBy(() -> splitManager.getSplits(
-                HoglakeTransactionHandle.INSTANCE, session, handle, Set.of(), Constraint.alwaysTrue()))
-                .isInstanceOfSatisfying(TrinoException.class, e ->
-                        assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
-                .hasMessageContaining("table has row-level deletes")
-                .hasMessageContaining("memory:///metrics.dv");
+        List<HoglakeSplit> splits = getAllSplits(splitManager.getSplits(
+                HoglakeTransactionHandle.INSTANCE, session, handle, Set.of(), Constraint.alwaysTrue()));
+
+        assertThat(splits).hasSize(2);
+        assertThat(splits.get(0).deleteFilePath()).isEmpty();
+        assertThat(splits.get(1).path()).isEqualTo(V2_FILE);
+        assertThat(splits.get(1).deleteFilePath()).contains("memory:///metrics.dv");
+        assertThat(splits.get(1).deleteFileFormat()).contains("puffin-dv");
+        assertThat(splits.get(1).deleteCount()).isEqualTo(1);
     }
 
     @Test

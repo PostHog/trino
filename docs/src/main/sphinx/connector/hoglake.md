@@ -91,6 +91,42 @@ Per-catalog cache metrics and tracing are provided by the shared cache infrastru
 | `uuid` | `UUID` |
 | `decimal(p,s)` | `DECIMAL(p,s)` |
 
+## Row-level deletes
+
+Hoglake pairs a data file with its live deletion vector at the snapshot being
+read. When a file has one, the connector reads the vector and drops the rows it
+marks deleted, so deleted rows contribute to no result, aggregate, filter, or
+join. The vector a query applies is the one the scan reported for the query's
+pinned snapshot, never a newer vector fetched during execution.
+
+Deletion vectors are puffin containers holding a single uncompressed
+`deletion-vector-v1` blob, the encoding Hoglake records as `puffin-dv`. The
+positions in the vector are file-relative row numbers, so the mask stays correct
+across projected columns, page and batch boundaries, and pruned row groups.
+Vectors are read through the same filesystem configuration, authentication, and
+caching as Parquet data.
+
+The encoding mixes byte order the way Iceberg's `deletion-vector-v1` does: the
+blob's declared length and checksum are big-endian, while the roaring bitmap's
+own fields are little-endian. Hoglake's server reader, its writer, and its DuckDB
+client all use this layout, and the connector reads it.
+
+An unfiltered `count(*)` still answers from catalog metadata: a file's visible
+rows are its record count minus its deletion vector's delete count. The vector
+is read and validated in that path too, so a count cannot silently ignore
+deletes. Counts with a filter, and every other aggregation, read the data and
+apply the vector.
+
+A deletion vector that is missing, corrupt, truncated, unsupported, or
+inconsistent with the catalog fails the query; it is never treated as "no
+deleted rows". Validated conditions include the container and blob structure,
+the blob checksum, the blob's declared length, the vector's bitmap encoding, the
+blob's `referenced-data-file` when the writer set one, that the catalog's delete
+count equals the vector's cardinality, and that every deleted position lies
+inside the Parquet file's own row count. Deletion vectors larger than 256 MB,
+compressed puffin footers, and bucket counts larger than the vector that declares
+them can hold are refused.
+
 ## Read consistency and limitations
 
 Each table handle pins the catalog snapshot and resolved columns during planning.
@@ -108,8 +144,9 @@ differs from Parquet's binary ordering.
 The connector creates one split per file. Catalog file pruning is not available:
 the Hoglake scan API exposes statistics state but no per-file column bounds.
 The connector does not support writes, DDL, time-travel SQL, or nested types.
-Queries encountering deletion vectors fail during split planning because applying row-level deletes is not yet
-supported.
+Only Hoglake's `puffin-dv` deletion-vector format is read; any other format
+fails the query. Equality deletes and any other row-level delete representation
+are not read.
 
 ## Development
 

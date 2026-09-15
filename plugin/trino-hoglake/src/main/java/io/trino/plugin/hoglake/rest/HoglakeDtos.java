@@ -14,6 +14,7 @@
 package io.trino.plugin.hoglake.rest;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.trino.plugin.hoglake.HoglakeDeletionVector;
 
 import java.util.List;
 import java.util.Map;
@@ -80,7 +81,23 @@ public final class HoglakeDtos
             @JsonProperty("file_format") String fileFormat,
             @JsonProperty("delete_count") long deleteCount,
             @JsonProperty("file_size_bytes") long fileSizeBytes,
-            @JsonProperty("begin_snapshot") long beginSnapshot) {}
+            @JsonProperty("begin_snapshot") long beginSnapshot)
+    {
+        /**
+         * The format the connector reads, for callers that do not carry the
+         * wire's {@code file_format} (the scan response always does).
+         */
+        public DeleteFile(
+                long deleteFileId,
+                long dataFileId,
+                String path,
+                long deleteCount,
+                long fileSizeBytes,
+                long beginSnapshot)
+        {
+            this(deleteFileId, dataFileId, path, HoglakeDeletionVector.PUFFIN_DELETION_VECTOR_FORMAT, deleteCount, fileSizeBytes, beginSnapshot);
+        }
+    }
 
     /**
      * One /scan entry: a data file paired with its live deletion vector, if any.

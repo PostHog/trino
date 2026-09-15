@@ -28,17 +28,23 @@ import static io.airlift.slice.SizeOf.sizeOf;
 import static java.util.Objects.requireNonNull;
 
 /**
- * One split per data file from GET /scan. When the scan paired the file
- * with a live deletion vector, the split carries it — and the page
- * source refuses the query (DV application is not implemented in v1;
- * silently returning deleted rows is not an option).
+ * One split per data file from GET /scan, carrying the deletion vector the
+ * scan paired with that file at the query's pinned snapshot. The page
+ * source reads the vector from object storage and drops the rows it marks
+ * deleted.
+ *
+ * <p>{@code deleteCount} is the catalog's count of rows deleted from the
+ * data file. It is compared against the decoded bitmap before a single row
+ * is dropped, so a catalog that disagrees with its own vector fails the
+ * query instead of returning a wrong row set.
  */
 public record HoglakeSplit(
         @JsonProperty("path") String path,
         @JsonProperty("fileSizeBytes") long fileSizeBytes,
         @JsonProperty("recordCount") long recordCount,
         @JsonProperty("deleteFilePath") Optional<String> deleteFilePath,
-        @JsonProperty("deleteCount") long deleteCount)
+        @JsonProperty("deleteCount") long deleteCount,
+        @JsonProperty("deleteFileFormat") Optional<String> deleteFileFormat)
         implements ConnectorSplit
 {
     private static final int INSTANCE_SIZE = instanceSize(HoglakeSplit.class);
@@ -48,6 +54,16 @@ public record HoglakeSplit(
     {
         requireNonNull(path, "path is null");
         requireNonNull(deleteFilePath, "deleteFilePath is null");
+        requireNonNull(deleteFileFormat, "deleteFileFormat is null");
+    }
+
+    /**
+     * A split for a data file without a deletion vector, or for callers that
+     * do not carry the wire's {@code file_format}.
+     */
+    public HoglakeSplit(String path, long fileSizeBytes, long recordCount, Optional<String> deleteFilePath, long deleteCount)
+    {
+        this(path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, Optional.empty());
     }
 
     /**
@@ -68,6 +84,9 @@ public record HoglakeSplit(
     @Override
     public long getRetainedSizeInBytes()
     {
-        return INSTANCE_SIZE + estimatedSizeOf(path) + sizeOf(deleteFilePath, SizeOf::estimatedSizeOf);
+        return INSTANCE_SIZE
+                + estimatedSizeOf(path)
+                + sizeOf(deleteFilePath, SizeOf::estimatedSizeOf)
+                + sizeOf(deleteFileFormat, SizeOf::estimatedSizeOf);
     }
 }
