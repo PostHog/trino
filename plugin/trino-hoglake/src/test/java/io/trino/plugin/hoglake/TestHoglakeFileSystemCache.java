@@ -147,7 +147,7 @@ class TestHoglakeFileSystemCache
                     "hoglake.uri", "http://localhost:8080", property, "false"), new TestingConnectorContext());
             try {
                 assertThatThrownBy(() -> read(connector, 100))
-                        .hasStackTraceContaining("No factory for location");
+                        .hasStackTraceContaining("Unsupported file system scheme s3");
             }
             finally {
                 connector.shutdown();
