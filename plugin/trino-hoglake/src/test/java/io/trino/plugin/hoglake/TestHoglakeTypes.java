@@ -109,6 +109,7 @@ class TestHoglakeTypes
         assertThat(HoglakeTypes.toHoglakeType(REAL)).isEqualTo("float");
         assertThat(HoglakeTypes.toHoglakeType(DOUBLE)).isEqualTo("double");
         assertThat(HoglakeTypes.toHoglakeType(VARCHAR)).isEqualTo("string");
+        assertThat(HoglakeTypes.toHoglakeType(VarcharType.createVarcharType(64))).isEqualTo("string");
         assertThat(HoglakeTypes.toHoglakeType(VARBINARY)).isEqualTo("binary");
         assertThat(HoglakeTypes.toHoglakeType(DATE)).isEqualTo("date");
         assertThat(HoglakeTypes.toHoglakeType(TIME_MICROS)).isEqualTo("time");
@@ -124,7 +125,6 @@ class TestHoglakeTypes
         for (Type type : new Type[] {
                 SmallintType.SMALLINT,
                 CharType.createCharType(10),
-                VarcharType.createVarcharType(64),
                 TimeType.TIME_MILLIS,
                 TimestampType.TIMESTAMP_MILLIS,
                 new ArrayType(BIGINT),

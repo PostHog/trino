@@ -20,17 +20,64 @@ import java.util.Map;
 
 /**
  * Wire DTOs for the hoglake REST API (openapi/hoglake.yaml, snake_case
- * wire). Only the read-planning subset the connector needs.
+ * wire). Read planning and initial table creation/append operations.
  */
 public final class HoglakeDtos
 {
     private HoglakeDtos() {}
 
+    public record ColumnDefinition(
+            @JsonProperty("name") String name,
+            @JsonProperty("type") String type,
+            @JsonProperty("type_params") Map<String, Object> typeParams,
+            @JsonProperty("nullable") boolean nullable) {}
+
+    public record CreateTable(
+            @JsonProperty("name") String name,
+            @JsonProperty("columns") List<ColumnDefinition> columns) {}
+
+    public record FileRegistration(
+            @JsonProperty("path") String path,
+            @JsonProperty("record_count") long recordCount,
+            @JsonProperty("file_size_bytes") long fileSizeBytes,
+            @JsonProperty("footer_size") long footerSize) {}
+
+    public record Append(
+            @JsonProperty("namespace") String namespace,
+            @JsonProperty("table") String table,
+            @JsonProperty("expected_table_uuid") String expectedTableUuid,
+            @JsonProperty("files") List<FileRegistration> files) {}
+
+    public record CommitResult(
+            @JsonProperty("snapshot_id") long snapshotId) {}
+
+    public record Commit(
+            @JsonProperty("read_snapshot") long readSnapshot,
+            @JsonProperty("appends") List<Append> appends) {}
+
     public record Catalog(
             @JsonProperty("name") String name,
             @JsonProperty("data_path") String dataPath,
             @JsonProperty("head_snapshot_id") long headSnapshotId,
-            @JsonProperty("schema_version") long schemaVersion) {}
+            @JsonProperty("schema_version") long schemaVersion,
+            @JsonProperty("capabilities") List<String> capabilities)
+    {
+        public Catalog(String name, String dataPath, long headSnapshotId, long schemaVersion)
+        {
+            this(name, dataPath, headSnapshotId, schemaVersion, List.of());
+        }
+    }
+
+    public record TableCreation(
+            @JsonProperty("operation_id") String operationId,
+            @JsonProperty("table_uuid") String tableUuid,
+            @JsonProperty("namespace") String namespace,
+            @JsonProperty("name") String name,
+            @JsonProperty("columns") List<Column> columns,
+            @JsonProperty("write_path") String writePath,
+            @JsonProperty("state") String state,
+            @JsonProperty("snapshot_id") Long snapshotId,
+            @JsonProperty("reason") String reason) {}
 
     public record Namespace(
             @JsonProperty("name") String name) {}
@@ -60,7 +107,14 @@ public final class HoglakeDtos
             @JsonProperty("columns") List<Column> columns,
             @JsonProperty("record_count") long recordCount,
             @JsonProperty("file_count") long fileCount,
-            @JsonProperty("file_size_bytes") long fileSizeBytes) {}
+            @JsonProperty("file_size_bytes") long fileSizeBytes,
+            @JsonProperty("partition_spec") Map<String, Object> partitionSpec)
+    {
+        public Table(String name, String namespace, String tableUuid, List<Column> columns, long recordCount, long fileCount, long fileSizeBytes)
+        {
+            this(name, namespace, tableUuid, columns, recordCount, fileCount, fileSizeBytes, null);
+        }
+    }
 
     public record DataFile(
             @JsonProperty("data_file_id") long dataFileId,
