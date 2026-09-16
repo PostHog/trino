@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.hoglake;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.testing.DistributedQueryRunner;
@@ -121,6 +122,21 @@ final class TestHoglakeLiveWrites
             runner.execute("INSERT INTO scalar_types " + scalarValues);
             runner.execute("INSERT INTO scalar_types VALUES (NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL)");
             assertThat(runner.execute("SELECT count(*) FROM scalar_types WHERE ts IS NOT NULL").getOnlyValue()).isEqualTo(2L);
+            if (!distributed && !bucketRoot) {
+                // Enough equal-sized files to reach the server's default compaction tier quota.
+                for (int index = 0; index < 8; index++) {
+                    runner.execute("INSERT INTO scalar_types " + scalarValues);
+                }
+                var beforeCompaction = runner.execute("SELECT * FROM scalar_types").getMaterializedRows();
+                long filesBefore = client.getTable("test", "scalar_types").orElseThrow().fileCount();
+                try (HttpClient http = HttpClient.newHttpClient()) {
+                    JsonNode result = post(http, uri + "/v1/catalogs/" + catalog + "/maintenance/compact?batch=100", Map.of());
+                    assertThat(result.path("unconvertible_schema").asLong()).isZero();
+                }
+                assertThat(client.getTable("test", "scalar_types").orElseThrow().fileCount()).isLessThan(filesBefore);
+                assertThat(runner.execute("SELECT * FROM scalar_types").getMaterializedRows())
+                        .containsExactlyInAnyOrderElementsOf(beforeCompaction);
+            }
             if (distributed) {
                 assertThat(runner.execute("SELECT count(*) FROM system.runtime.nodes WHERE state = 'active'").getOnlyValue()).isEqualTo(3L);
                 runner.execute("CREATE TABLE distributed_source AS SELECT CAST(id AS bigint) id FROM UNNEST(sequence(1, 10000)) AS t(id)");
@@ -136,7 +152,7 @@ final class TestHoglakeLiveWrites
         }
     }
 
-    private static void post(HttpClient http, String uri, Object body)
+    private static JsonNode post(HttpClient http, String uri, Object body)
             throws Exception
     {
         HttpResponse<String> response = http.send(HttpRequest.newBuilder(URI.create(uri))
@@ -144,5 +160,6 @@ final class TestHoglakeLiveWrites
                 .POST(HttpRequest.BodyPublishers.ofByteArray(new ObjectMapper().writeValueAsBytes(body)))
                 .build(), HttpResponse.BodyHandlers.ofString());
         assertThat(response.statusCode()).describedAs(response.body()).isIn(200, 201);
+        return new ObjectMapper().readTree(response.body());
     }
 }
