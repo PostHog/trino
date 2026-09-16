@@ -16,6 +16,7 @@ package io.trino.plugin.hoglake;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import io.airlift.slice.Slices;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
@@ -137,7 +138,7 @@ final class TestHoglakeLiveWriteFailures
             // Reuse a real, already uploaded Parquet file: rejected commits cannot register it.
             HoglakeDtos.DataFile existing = client.scan("test", "append_target", client.getCatalog().headSnapshotId()).getFirst().dataFile();
             HoglakeDtos.FileRegistration file = new HoglakeDtos.FileRegistration(existing.path(), existing.recordCount(), existing.fileSizeBytes(), existing.footerSize());
-            var fragments = List.of(io.airlift.slice.Slices.wrappedBuffer(new ObjectMapper().writeValueAsBytes(file)));
+            var fragments = List.of(Slices.wrappedBuffer(new ObjectMapper().writeValueAsBytes(file)));
             proxy.post(base + "/namespaces/test/tables/stale/alter", Map.of("ops", List.of(Map.of("op", "add_column", "column", Map.of("name", "extra", "type", "long", "nullable", true)))));
             assertThatThrownBy(() -> metadata.finishInsert(session, handle, List.of(), fragments, List.of())).hasMessageContaining("conflict");
             client.dropStagingTable("test", "stale");

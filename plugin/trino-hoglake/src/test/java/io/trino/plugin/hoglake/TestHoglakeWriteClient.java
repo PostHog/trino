@@ -24,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import java.net.InetSocketAddress;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_NOT_FOUND;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_UNAVAILABLE;
@@ -48,7 +49,7 @@ final class TestHoglakeWriteClient
             throws Exception
     {
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        var received = new java.util.concurrent.atomic.AtomicReference<String>();
+        var received = new AtomicReference<String>();
         server.createContext("/", exchange -> {
             try (exchange) {
                 received.set(new String(exchange.getRequestBody().readAllBytes(), UTF_8));
