@@ -98,6 +98,7 @@ import static io.trino.sql.ir.Booleans.TRUE;
 import static io.trino.sql.ir.ComparisonOperator.EQUAL;
 import static io.trino.sql.ir.ComparisonOperator.GREATER_THAN;
 import static io.trino.sql.ir.ComparisonOperator.GREATER_THAN_OR_EQUAL;
+import static io.trino.sql.ir.ComparisonOperator.IDENTICAL;
 import static io.trino.sql.ir.ComparisonOperator.LESS_THAN;
 import static io.trino.sql.ir.ComparisonOperator.LESS_THAN_OR_EQUAL;
 import static io.trino.sql.ir.ComparisonOperator.NOT_EQUAL;
@@ -444,15 +445,19 @@ public final class DomainTranslator
             }
             NormalizedSimpleComparison normalized = optionalNormalized.get();
 
-            Expression symbolExpression = normalized.getSymbolExpression();
-            if (symbolExpression instanceof Reference) {
-                Symbol symbol = Symbol.from(symbolExpression);
+            Expression expression = normalized.getExpression();
+            if (expression instanceof Reference reference) {
+                Symbol symbol = Symbol.from(reference);
                 NullableValue value = normalized.getValue();
                 Type type = value.getType(); // common type for symbol and value
                 return createComparisonExtractionResult(normalized.getComparisonOperator(), symbol, type, value.getValue(), complement)
                         .orElseGet(() -> visitExpression(originalExpression, complement));
             }
-            if (symbolExpression instanceof Cast castExpression) {
+            if (normalized.getComparisonOperator() == IDENTICAL && normalized.getValue().getType().equals(BOOLEAN) && normalized.getValue().getValue() != null) {
+                return processBooleanIdentical(expression, (boolean) normalized.getValue().getValue(), complement)
+                        .orElseGet(() -> visitExpression(originalExpression, complement));
+            }
+            if (expression instanceof Cast castExpression && isOptionallyCastReference(castExpression.expression())) {
                 // type of expression which is then cast to type of value
                 Type castSourceType = castExpression.expression().type();
                 Type castTargetType = castExpression.type();
@@ -502,6 +507,51 @@ public final class DomainTranslator
         }
 
         /**
+         * Extracts a domain from {@code e IDENTICAL <boolean constant>}, where {@code e} is not a symbol,
+         * e.g. {@code (a < 0) IS NOT DISTINCT FROM TRUE}. Such a predicate selects the rows for which
+         * {@code e} is true (false, respectively), so the domain is the one for {@code e} itself.
+         * The negated predicate, {@code (a < 0) IS DISTINCT FROM TRUE}, also selects the rows for which
+         * {@code e} is null, so it is derived by complementing the domain for {@code e}, which requires
+         * that domain to be exact, to constrain a single column, and to keep NaN accounted for.
+         * Returns empty when there is nothing to extract, so that the caller keeps the original expression.
+         */
+        private Optional<ExtractionResult> processBooleanIdentical(Expression operand, boolean value, boolean complement)
+        {
+            ExtractionResult result = process(operand, !value);
+            if (!complement) {
+                if (result.getTupleDomain().isAll() && !result.getRemainingExpression().equals(TRUE)) {
+                    // no domain was extracted, so rewriting the predicate to the operand alone would gain nothing
+                    return Optional.empty();
+                }
+                return Optional.of(result);
+            }
+
+            if (result.getTupleDomain().isNone()) {
+                // the domain is a superset of the rows the operand selects, so an empty one means the operand is never true
+                return Optional.of(new ExtractionResult(TupleDomain.all(), TRUE));
+            }
+            if (!result.getRemainingExpression().equals(TRUE)) {
+                // the domain is a superset of the values the operand selects, so its complement would be a subset of what the negation selects
+                return Optional.empty();
+            }
+            Map<Symbol, Domain> domains = result.getTupleDomain().getDomains().orElseThrow();
+            if (domains.size() != 1) {
+                // a TupleDomain is a conjunction of per-column domains, so complementing more than one of them is not expressible
+                return Optional.empty();
+            }
+            Map.Entry<Symbol, Domain> entry = getOnlyElement(domains.entrySet());
+            Domain domain = entry.getValue();
+            if (typeHasNaN(domain.getType()) && !domain.getValues().isAll() && !domain.getValues().isNone()) {
+                // NaN belongs to no range, so complementing a proper subset of the values would drop it, while the negated predicate selects it.
+                // An all or empty value set is the exception: it contains NaN exactly when it contains everything, so complementing it flips NaN too.
+                return Optional.empty();
+            }
+            return Optional.of(new ExtractionResult(
+                    TupleDomain.withColumnDomains(ImmutableMap.of(entry.getKey(), domain.complement())),
+                    TRUE));
+        }
+
+        /**
          * Extract a normalized simple comparison between a QualifiedNameReference and a native value if possible.
          */
         private Optional<NormalizedSimpleComparison> toNormalizedSimpleComparison(Comparison comparison)
@@ -520,6 +570,15 @@ public final class DomainTranslator
             else {
                 return Optional.of(new NormalizedSimpleComparison(left, comparison.operator(), new NullableValue(right.type(), ((Constant) right).value())));
             }
+        }
+
+        private static boolean isOptionallyCastReference(Expression expression)
+        {
+            return switch (expression) {
+                case Reference _ -> true;
+                case Cast(Expression source, Type _, Cast.Kind _) -> isOptionallyCastReference(source);
+                default -> false;
+            };
         }
 
         private boolean isOrderPreserving(Cast cast)
@@ -545,18 +604,18 @@ public final class DomainTranslator
                 boolean complement,
                 Expression originalExpression)
         {
-            Expression sourceExpression = ((Cast) comparison.getSymbolExpression()).expression();
+            Expression sourceExpression = ((Cast) comparison.getExpression()).expression();
             ComparisonOperator operator = comparison.getComparisonOperator();
             NullableValue value = comparison.getValue();
 
             if (complement || value.isNull()) {
                 return Optional.empty();
             }
-            if (!(sourceExpression instanceof Reference)) {
+            if (!(sourceExpression instanceof Reference sourceReference)) {
                 // Calculation is not useful
                 return Optional.empty();
             }
-            Symbol sourceSymbol = Symbol.from(sourceExpression);
+            Symbol sourceSymbol = Symbol.from(sourceReference);
 
             if (!sourceType.isUnbounded() && sourceType.getBoundedLength() < 10) {
                 // too short
@@ -889,11 +948,11 @@ public final class DomainTranslator
 
         private Optional<ExtractionResult> processSimpleInPredicate(In node, Boolean complement)
         {
-            if (!(node.value() instanceof Reference)) {
+            if (!(node.value() instanceof Reference reference)) {
                 return Optional.empty();
             }
-            Symbol symbol = Symbol.from(node.value());
-            Type type = node.value().type();
+            Symbol symbol = Symbol.from(reference);
+            Type type = reference.type();
             List<Object> inValues = new ArrayList<>(node.valueList().size());
             List<Expression> excludedExpressions = new ArrayList<>();
 
@@ -960,7 +1019,7 @@ public final class DomainTranslator
             Expression value = node.arguments().get(0);
             Expression patternArgument = node.arguments().get(1);
 
-            if (!(value instanceof Reference)) {
+            if (!(value instanceof Reference valueReference)) {
                 // LIKE not on a symbol
                 return Optional.empty();
             }
@@ -971,7 +1030,7 @@ public final class DomainTranslator
                 return Optional.empty();
             }
 
-            Symbol symbol = Symbol.from(value);
+            Symbol symbol = Symbol.from(valueReference);
 
             if (node.arguments().size() > 2 || !(patternArgument instanceof Constant patternConstant)) {
                 // dynamic pattern or escape
@@ -1044,7 +1103,7 @@ public final class DomainTranslator
             }
 
             Expression target = args.get(0);
-            if (!(target instanceof Reference)) {
+            if (!(target instanceof Reference targetReference)) {
                 // Target is not a symbol
                 return Optional.empty();
             }
@@ -1064,7 +1123,7 @@ public final class DomainTranslator
                 return Optional.empty();
             }
 
-            Symbol symbol = Symbol.from(target);
+            Symbol symbol = Symbol.from(targetReference);
             Slice constantPrefix = (Slice) literal.value();
 
             return createRangeDomain(type, constantPrefix).map(domain -> new ExtractionResult(TupleDomain.withColumnDomains(ImmutableMap.of(symbol, domain)), node));
@@ -1097,11 +1156,11 @@ public final class DomainTranslator
         @Override
         protected ExtractionResult visitIsNull(IsNull node, Boolean complement)
         {
-            if (!(node.value() instanceof Reference)) {
+            if (!(node.value() instanceof Reference reference)) {
                 return super.visitIsNull(node, complement);
             }
 
-            Symbol symbol = Symbol.from(node.value());
+            Symbol symbol = Symbol.from(reference);
             Type columnType = symbol.type();
             Domain domain = complementIfNecessary(Domain.onlyNull(columnType), complement);
             return new ExtractionResult(
@@ -1128,20 +1187,20 @@ public final class DomainTranslator
 
     private static class NormalizedSimpleComparison
     {
-        private final Expression symbolExpression;
+        private final Expression expression;
         private final ComparisonOperator comparisonOperator;
         private final NullableValue value;
 
-        public NormalizedSimpleComparison(Expression symbolExpression, ComparisonOperator comparisonOperator, NullableValue value)
+        public NormalizedSimpleComparison(Expression expression, ComparisonOperator comparisonOperator, NullableValue value)
         {
-            this.symbolExpression = requireNonNull(symbolExpression, "symbolExpression is null");
+            this.expression = requireNonNull(expression, "expression is null");
             this.comparisonOperator = requireNonNull(comparisonOperator, "comparisonOperator is null");
             this.value = requireNonNull(value, "value is null");
         }
 
-        public Expression getSymbolExpression()
+        public Expression getExpression()
         {
-            return symbolExpression;
+            return expression;
         }
 
         public ComparisonOperator getComparisonOperator()
