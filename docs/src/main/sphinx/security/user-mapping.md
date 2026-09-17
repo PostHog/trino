@@ -118,3 +118,37 @@ types when multiple authentication methods are enabled:
 | JSON Web Token                    | `http-server.authentication.jwt.user-mapping.file`         |
 | Kerberos                          | `http-server.authentication.krb5.user-mapping.file`        |
 | Insecure                          | `http-server.authentication.insecure.user-mapping.file`    |
+
+## Host-qualified password users
+
+A deployment that serves several tenants from one cluster can give each tenant
+its own host name, `<tenant>.<domain>`, and keep one password file. Configure
+the domains, and a password login is qualified with the tenant the requested
+host names before the password is checked:
+
+```properties
+http-server.authentication.password.host-qualified-user.domains=tenants.example.com
+http-server.authentication.password.host-qualified-user.excluded-labels=coordinator
+```
+
+A client that connects to `https://tenant-a.tenants.example.com` as `alice`
+authenticates as `tenant-a.alice`, and the password file holds a
+`tenant-a.alice` entry. A client whose `X-Trino-User` matches the typed user
+runs as the qualified user, without an impersonation check. The password is
+always verified, so the host only chooses which entry a login is checked
+against.
+
+The user is unchanged when the host is the domain itself, is outside every
+configured domain, has more than one label below the domain, or has a label in
+`excluded-labels`. Use excluded labels for operational host names below the
+same domain. Qualification applies before user mapping.
+
+The host is the request host. Behind a proxy, enable
+`http-server.process-forwarded` so the forwarded host is used, and the
+`nextUri` a client follows keeps the tenant host name. This setting affects
+only the client protocol. It does not apply to the web UI login form.
+
+| Property                                                                 | Description                                                      |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| `http-server.authentication.password.host-qualified-user.domains`        | Comma-separated domains whose subdomain names a tenant. Default: empty, which disables qualification. |
+| `http-server.authentication.password.host-qualified-user.excluded-labels` | Comma-separated subdomain labels that do not name a tenant. Default: empty. |

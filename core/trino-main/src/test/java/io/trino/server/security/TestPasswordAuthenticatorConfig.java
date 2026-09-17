@@ -15,6 +15,7 @@ package io.trino.server.security;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -34,7 +35,9 @@ public class TestPasswordAuthenticatorConfig
         assertRecordedDefaults(recordDefaults(PasswordAuthenticatorConfig.class)
                 .setUserMappingPattern(null)
                 .setUserMappingFile(null)
-                .setPasswordAuthenticatorFiles(ImmutableList.of("etc/password-authenticator.properties")));
+                .setPasswordAuthenticatorFiles(ImmutableList.of("etc/password-authenticator.properties"))
+                .setHostQualifiedUserDomains(ImmutableList.of())
+                .setHostQualifiedUserExcludedLabels(ImmutableSet.of()));
     }
 
     @Test
@@ -49,12 +52,16 @@ public class TestPasswordAuthenticatorConfig
                 .put("http-server.authentication.password.user-mapping.pattern", "(.*)@something")
                 .put("http-server.authentication.password.user-mapping.file", userMappingFile.toString())
                 .put("password-authenticator.config-files", config1.toString() + "," + config2.toString())
+                .put("http-server.authentication.password.host-qualified-user.domains", "tenants.example.com,other.example.com")
+                .put("http-server.authentication.password.host-qualified-user.excluded-labels", "coordinator,gateway")
                 .buildOrThrow();
 
         PasswordAuthenticatorConfig expected = new PasswordAuthenticatorConfig()
                 .setUserMappingPattern("(.*)@something")
                 .setUserMappingFile(userMappingFile.toFile())
-                .setPasswordAuthenticatorFiles(ImmutableList.of(config1.toAbsolutePath().toString(), config2.toAbsolutePath().toString()));
+                .setPasswordAuthenticatorFiles(ImmutableList.of(config1.toAbsolutePath().toString(), config2.toAbsolutePath().toString()))
+                .setHostQualifiedUserDomains(ImmutableList.of("tenants.example.com", "other.example.com"))
+                .setHostQualifiedUserExcludedLabels(ImmutableSet.of("coordinator", "gateway"));
 
         assertFullMapping(properties, expected);
     }
