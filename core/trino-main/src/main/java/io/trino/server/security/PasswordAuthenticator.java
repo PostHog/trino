@@ -35,12 +35,14 @@ public class PasswordAuthenticator
 {
     private final PasswordAuthenticatorManager authenticatorManager;
     private final UserMapping userMapping;
+    private final HostQualifiedUsers hostQualifiedUsers;
     private final Optional<String> alternateHeaderName;
 
     @Inject
     public PasswordAuthenticator(PasswordAuthenticatorManager authenticatorManager, PasswordAuthenticatorConfig config, ProtocolConfig protocolConfig)
     {
         this.userMapping = createUserMapping(config.getUserMappingPattern(), config.getUserMappingFile());
+        this.hostQualifiedUsers = config.createHostQualifiedUsers();
         this.authenticatorManager = requireNonNull(authenticatorManager, "authenticatorManager is null");
         authenticatorManager.setRequired();
         this.alternateHeaderName = protocolConfig.getAlternateHeaderName();
@@ -52,7 +54,9 @@ public class PasswordAuthenticator
     {
         BasicAuthCredentials basicAuthCredentials = extractBasicAuthCredentials(request)
                 .orElseThrow(() -> needAuthentication(null));
-        String user = basicAuthCredentials.getUser();
+        // The typed user stays in basicAuthCredentials: rewriteUserHeaderToMappedUser compares the
+        // client's X-Trino-User against it, and replaces it with the qualified identity on a match.
+        String user = hostQualifiedUsers.qualify(basicAuthCredentials.getUser(), requestHost(request));
         String password = basicAuthCredentials.getPassword()
                 .orElseThrow(() -> new AuthenticationException("Malformed credentials: password is empty"));
 
@@ -116,6 +120,15 @@ public class PasswordAuthenticator
             userHeader = detectProtocol(alternateHeaderName, headers.keySet()).requestUser();
         }
         return userHeader;
+    }
+
+    /**
+     * The host the client addressed. This is the request URI host, so it honors forwarded headers
+     * exactly when the HTTP server is configured to process them.
+     */
+    private static Optional<String> requestHost(ContainerRequestContext request)
+    {
+        return Optional.ofNullable(request.getUriInfo().getRequestUri().getHost());
     }
 
     private static AuthenticationException needAuthentication(String message)

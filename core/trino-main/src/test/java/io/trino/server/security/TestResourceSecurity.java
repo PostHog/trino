@@ -56,8 +56,10 @@ import okhttp3.Credentials;
 import okhttp3.Headers;
 import okhttp3.HttpUrl;
 import okhttp3.JavaNetCookieJar;
+import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
+import okhttp3.RequestBody;
 import okhttp3.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -130,6 +132,7 @@ public class TestResourceSecurity
 {
     private static final String LOCALHOST_KEYSTORE = Resources.getResource("cert/localhost.pem").getPath();
     private static final String ALLOWED_USER_MAPPING_PATTERN = "(.*)@allowed";
+    private static final String TENANT_DOMAIN = "tenants.example.com";
     private static final Map<String, String> SECURE_PROPERTIES = ImmutableMap.<String, String>builder()
             .put("http-server.https.enabled", "true")
             .put("http-server.https.keystore.path", LOCALHOST_KEYSTORE)
@@ -988,6 +991,126 @@ public class TestResourceSecurity
         }
     }
 
+    @Test
+    public void testPasswordAuthenticatorHostQualifiedUsers()
+            throws Exception
+    {
+        try (TestingTrinoServer server = TestingTrinoServer.builder()
+                .setProperties(ImmutableMap.<String, String>builder()
+                        .putAll(SECURE_PROPERTIES)
+                        .put("password-authenticator.config-files", passwordConfigDummy.toString())
+                        .put("http-server.authentication.type", "password")
+                        .put("http-server.authentication.password.host-qualified-user.domains", TENANT_DOMAIN)
+                        .put("http-server.authentication.password.host-qualified-user.excluded-labels", "coordinator")
+                        .buildOrThrow())
+                .setAdditionalModule(binder -> jaxrsBinder(binder).bind(TestResource.class))
+                .setSystemAccessControl(TestSystemAccessControl.NO_IMPERSONATION)
+                .build()) {
+            server.getInstance(Key.get(PasswordAuthenticatorManager.class)).setAuthenticators(TestResourceSecurity::authenticateTenantUser);
+            URI httpsUri = server.getInstance(Key.get(HttpServerInfo.class)).getHttpsUri();
+            String identityLocation = getLocation(httpsUri, "/protocol/identity");
+            String tenantHost = "tenant-a." + TENANT_DOMAIN;
+
+            // The typed user is qualified with the tenant the host names, and the client's matching
+            // X-Trino-User follows it, so no impersonation check is made (NO_IMPERSONATION would deny one).
+            Request request = new Request.Builder()
+                    .url(identityLocation)
+                    .header("Host", hostHeader(tenantHost, httpsUri))
+                    .addHeader("Authorization", Credentials.basic(TEST_USER_LOGIN, TEST_PASSWORD))
+                    .addHeader("X-Trino-User", TEST_USER_LOGIN)
+                    .build();
+            try (Response response = client.newCall(request).execute()) {
+                assertThat(response.code()).isEqualTo(SC_OK);
+                assertThat(response.header("user")).isEqualTo("tenant-a." + TEST_USER_LOGIN);
+                assertThat(response.header("principal")).isEqualTo("tenant-a." + TEST_USER_LOGIN);
+            }
+
+            // The same credentials do not authenticate for another tenant, or without a tenant host
+            assertResponseCode(client, identityLocation, SC_UNAUTHORIZED, Headers.of(
+                    "Host",
+                    hostHeader("tenant-b." + TENANT_DOMAIN, httpsUri),
+                    "Authorization",
+                    Credentials.basic(TEST_USER_LOGIN, TEST_PASSWORD)));
+            assertResponseCode(client, identityLocation, SC_UNAUTHORIZED, Headers.of(
+                    "Authorization", Credentials.basic(TEST_USER_LOGIN, TEST_PASSWORD)));
+
+            // A host outside the tenant hosts, or an excluded label, authenticates the user as typed
+            assertResponseCode(client, identityLocation, SC_OK, Headers.of(
+                    "Authorization", Credentials.basic(MANAGEMENT_USER_LOGIN, MANAGEMENT_PASSWORD)));
+            assertResponseCode(client, identityLocation, SC_OK, Headers.of(
+                    "Host",
+                    hostHeader("coordinator." + TENANT_DOMAIN, httpsUri),
+                    "Authorization",
+                    Credentials.basic(MANAGEMENT_USER_LOGIN, MANAGEMENT_PASSWORD)));
+            assertResponseCode(client, identityLocation, SC_OK, Headers.of(
+                    "Host",
+                    hostHeader(TENANT_DOMAIN, httpsUri),
+                    "Authorization",
+                    Credentials.basic("tenant-a." + TEST_USER_LOGIN, TEST_PASSWORD)));
+
+            // The client follows nextUri with the same credentials, so it must keep the tenant host
+            Request statement = new Request.Builder()
+                    .url(getLocation(httpsUri, "/v1/statement"))
+                    .header("Host", hostHeader(tenantHost, httpsUri))
+                    .addHeader("Authorization", Credentials.basic(TEST_USER_LOGIN, TEST_PASSWORD))
+                    .addHeader("X-Trino-User", TEST_USER_LOGIN)
+                    .post(RequestBody.create("SELECT 1", MediaType.get("text/plain")))
+                    .build();
+            try (Response response = client.newCall(statement).execute()) {
+                assertThat(response.code()).isEqualTo(SC_OK);
+                URI nextUri = URI.create(json.readTree(response.body().string()).get("nextUri").asText());
+                assertThat(nextUri.getHost()).isEqualTo(tenantHost);
+            }
+        }
+    }
+
+    @Test
+    public void testPasswordAuthenticatorHostQualifiedUsersBehindProxy()
+            throws Exception
+    {
+        try (TestingTrinoServer server = TestingTrinoServer.builder()
+                .setProperties(ImmutableMap.<String, String>builder()
+                        .putAll(SECURE_PROPERTIES)
+                        .put("password-authenticator.config-files", passwordConfigDummy.toString())
+                        .put("http-server.authentication.type", "password")
+                        .put("http-server.authentication.password.host-qualified-user.domains", TENANT_DOMAIN)
+                        .buildOrThrow())
+                .setAdditionalModule(binder -> jaxrsBinder(binder).bind(TestResource.class))
+                .setSystemAccessControl(TestSystemAccessControl.NO_IMPERSONATION)
+                .build()) {
+            server.getInstance(Key.get(PasswordAuthenticatorManager.class)).setAuthenticators(TestResourceSecurity::authenticateTenantUser);
+            URI httpsUri = server.getInstance(Key.get(HttpServerInfo.class)).getHttpsUri();
+            String tenantHost = "tenant-a." + TENANT_DOMAIN;
+
+            // A proxy addresses the backend by its own name and forwards the host the client used
+            Request request = new Request.Builder()
+                    .url(getLocation(httpsUri, "/protocol/identity"))
+                    .addHeader("X-Forwarded-Host", tenantHost)
+                    .addHeader("X-Forwarded-Proto", "https")
+                    .addHeader("Authorization", Credentials.basic(TEST_USER_LOGIN, TEST_PASSWORD))
+                    .addHeader("X-Trino-User", TEST_USER_LOGIN)
+                    .build();
+            try (Response response = client.newCall(request).execute()) {
+                assertThat(response.code()).isEqualTo(SC_OK);
+                assertThat(response.header("user")).isEqualTo("tenant-a." + TEST_USER_LOGIN);
+            }
+
+            Request statement = new Request.Builder()
+                    .url(getLocation(httpsUri, "/v1/statement"))
+                    .addHeader("X-Forwarded-Host", tenantHost)
+                    .addHeader("X-Forwarded-Proto", "https")
+                    .addHeader("Authorization", Credentials.basic(TEST_USER_LOGIN, TEST_PASSWORD))
+                    .addHeader("X-Trino-User", TEST_USER_LOGIN)
+                    .post(RequestBody.create("SELECT 1", MediaType.get("text/plain")))
+                    .build();
+            try (Response response = client.newCall(statement).execute()) {
+                assertThat(response.code()).isEqualTo(SC_OK);
+                URI nextUri = URI.create(json.readTree(response.body().string()).get("nextUri").asText());
+                assertThat(nextUri.getHost()).isEqualTo(tenantHost);
+            }
+        }
+    }
+
     private static Module oauth2Module(TokenServer tokenServer)
     {
         return binder -> {
@@ -1387,6 +1510,20 @@ public class TestResourceSecurity
             return new BasicPrincipal(user);
         }
         throw new AccessDeniedException("Invalid credentials");
+    }
+
+    private static Principal authenticateTenantUser(String user, String password)
+    {
+        // The password file holds only qualified tenant users, plus unqualified operational users
+        if ((("tenant-a." + TEST_USER_LOGIN).equals(user) && TEST_PASSWORD.equals(password)) || (MANAGEMENT_USER_LOGIN.equals(user) && MANAGEMENT_PASSWORD.equals(password))) {
+            return new BasicPrincipal(user);
+        }
+        throw new AccessDeniedException("Invalid credentials");
+    }
+
+    private static String hostHeader(String host, URI baseUri)
+    {
+        return host + ":" + baseUri.getPort();
     }
 
     private static Principal authenticate2(String user, String password)
