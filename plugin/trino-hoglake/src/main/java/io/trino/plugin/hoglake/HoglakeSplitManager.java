@@ -29,20 +29,22 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
-import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Split planning: GET /scan at the handle's pinned snapshot, one split
- * per data file. A 410 here is the typed "snapshot expired during
- * query" failure; a 404 is the table vanishing beneath the query
- * (TABLE_NOT_FOUND) — never a generic internal error.
+ * Split planning: GET /scan at the handle's pinned snapshot, one split per
+ * data file, each carrying the deletion vector that scan paired with the
+ * file. A 410 here is the typed "snapshot expired during query" failure; a
+ * 404 is the table vanishing beneath the query (TABLE_NOT_FOUND) — never a
+ * generic internal error.
  *
- * <p>DV refusal happens HERE, at planning, where the scan's
- * data-file/DV pairing is first visible: a query touching any DV-bearing
- * file fails before a single split is handed to the engine, so no
- * partial results can reach a streaming client first (v1 has no DV
- * application). The page source keeps a defense-in-depth guard.
+ * <p>The vector's bytes are not fetched at planning: a split describes a
+ * worker's job, and the page source reads the vector through the
+ * connector's filesystem for the split it is actually running. What is
+ * checked here is that the scan's pairing is internally consistent, so an
+ * inconsistent scan is rejected before any split reaches the engine rather
+ * than being papered over per worker.
  */
 public class HoglakeSplitManager
         implements ConnectorSplitManager
@@ -68,27 +70,7 @@ public class HoglakeSplitManager
         }
         List<HoglakeDtos.ScanFile> scan =
                 client.scan(handle.schemaName(), handle.tableName(), handle.snapshotId());
-        ensureNoRowLevelDeletes(scan);
         return new FixedSplitSource(toSplits(scan));
-    }
-
-    /**
-     * v1 refusal, at planning: a scan containing any live deletion
-     * vector cannot be read correctly without applying the DVs, so the
-     * query fails loudly before any split exists — instead of silently
-     * returning deleted rows, and instead of streaming partial results
-     * from clean splits before a worker hits the DV-bearing one.
-     */
-    static void ensureNoRowLevelDeletes(List<HoglakeDtos.ScanFile> scan)
-    {
-        for (HoglakeDtos.ScanFile file : scan) {
-            if (file.deleteFile() != null) {
-                throw new TrinoException(NOT_SUPPORTED,
-                        "table has row-level deletes; DV application not yet implemented in the hoglake connector"
-                                + " (data file " + file.dataFile().path() + " has deletion vector "
-                                + file.deleteFile().path() + " covering " + file.deleteFile().deleteCount() + " rows)");
-            }
-        }
     }
 
     /**
@@ -97,12 +79,45 @@ public class HoglakeSplitManager
     static List<HoglakeSplit> toSplits(List<HoglakeDtos.ScanFile> scan)
     {
         return scan.stream()
-                .map(file -> new HoglakeSplit(
-                        file.dataFile().path(),
-                        file.dataFile().fileSizeBytes(),
-                        file.dataFile().recordCount(),
-                        Optional.ofNullable(file.deleteFile()).map(HoglakeDtos.DeleteFile::path),
-                        file.deleteFile() == null ? 0 : file.deleteFile().deleteCount()))
+                .map(HoglakeSplitManager::toSplit)
                 .toList();
+    }
+
+    private static HoglakeSplit toSplit(HoglakeDtos.ScanFile file)
+    {
+        HoglakeDtos.DataFile dataFile = file.dataFile();
+        if (dataFile == null) {
+            throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "hoglake scan returned an entry without a data file");
+        }
+        HoglakeDtos.DeleteFile deleteFile = file.deleteFile();
+        if (deleteFile == null) {
+            return new HoglakeSplit(
+                    dataFile.path(),
+                    dataFile.fileSizeBytes(),
+                    dataFile.recordCount(),
+                    Optional.empty(),
+                    0);
+        }
+        if (deleteFile.path() == null) {
+            throw new TrinoException(
+                    HOGLAKE_INVALID_RESPONSE,
+                    "hoglake scan paired data file %s with a deletion vector that has no path".formatted(dataFile.path()));
+        }
+        // The scan pairs a vector with the file it deletes from; a mismatch
+        // means the pairing cannot be trusted at all, so the query fails
+        // here instead of a worker deleting rows from the wrong file.
+        if (deleteFile.dataFileId() != dataFile.dataFileId()) {
+            throw new TrinoException(
+                    HOGLAKE_INVALID_RESPONSE,
+                    "hoglake scan paired deletion vector %s (data_file_id %d) with data file %s (data_file_id %d)"
+                            .formatted(deleteFile.path(), deleteFile.dataFileId(), dataFile.path(), dataFile.dataFileId()));
+        }
+        return new HoglakeSplit(
+                dataFile.path(),
+                dataFile.fileSizeBytes(),
+                dataFile.recordCount(),
+                Optional.of(deleteFile.path()),
+                deleteFile.deleteCount(),
+                Optional.ofNullable(deleteFile.fileFormat()));
     }
 }

@@ -24,15 +24,16 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Optional;
 
-import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Split generation from /scan responses, including the DV refusal.
+ * Split generation from /scan responses: the data-file/deletion-vector
+ * pairing the scan reports is carried into the split unchanged, and a
+ * pairing that cannot be trusted is rejected at planning.
  */
 class TestHoglakeSplits
 {
@@ -57,57 +58,51 @@ class TestHoglakeSplits
         assertThat(bare.fileSizeBytes()).isEqualTo(2048);
         assertThat(bare.recordCount()).isEqualTo(25);
         assertThat(bare.deleteFilePath()).isEmpty();
+        assertThat(bare.deleteFileFormat()).isEmpty();
+        assertThat(bare.deleteCount()).isZero();
 
         HoglakeSplit paired = splits.get(1);
         assertThat(paired.path()).isEqualTo("s3://lake/t/b.parquet");
         assertThat(paired.deleteFilePath()).contains("s3://lake/t/b.dv");
+        assertThat(paired.deleteFileFormat()).contains("puffin-dv");
         assertThat(paired.deleteCount()).isEqualTo(3);
-    }
-
-    @Test
-    void scanWithoutDeleteFilesPassesThePlanningDvGuard()
-    {
-        assertThatCode(() -> HoglakeSplitManager.ensureNoRowLevelDeletes(
-                List.of(new HoglakeDtos.ScanFile(DATA_FILE, null))))
-                .doesNotThrowAnyException();
+        assertThat(paired.recordCount()).isEqualTo(17);
     }
 
     /**
-     * Regression (S4): the DV refusal fires at split generation — where
-     * the scan's DV pairing is first visible — so the query dies before
-     * any split reaches the engine and no partial results can stream out
-     * of clean splits first.
+     * Every file in the scan is planned; a deletion vector stays attached to
+     * the file it deletes from, and its format rides along so the worker can
+     * refuse one it cannot decode.
      */
     @Test
-    void scanWithDeleteFileRefusesTheQueryAtPlanning()
+    void scanWithDeletionVectorsPlansEveryFile()
     {
-        assertThatThrownBy(() -> HoglakeSplitManager.ensureNoRowLevelDeletes(List.of(
+        List<HoglakeSplit> splits = HoglakeSplitManager.toSplits(List.of(
                 new HoglakeDtos.ScanFile(DATA_FILE, null),
-                new HoglakeDtos.ScanFile(DELETED_FROM, DELETE_FILE))))
-                .isInstanceOfSatisfying(TrinoException.class, e ->
-                        assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
-                .hasMessageContaining("table has row-level deletes; DV application not yet implemented in the hoglake connector")
-                .hasMessageContaining("s3://lake/t/b.parquet")
-                .hasMessageContaining("s3://lake/t/b.dv");
+                new HoglakeDtos.ScanFile(DELETED_FROM, DELETE_FILE)));
+
+        assertThat(splits).extracting(HoglakeSplit::path)
+                .containsExactly("s3://lake/t/a.parquet", "s3://lake/t/b.parquet");
+        assertThat(splits.get(1).deleteFilePath()).contains("s3://lake/t/b.dv");
     }
 
     /**
-     * Defense-in-depth: the worker-side page-source guard still refuses a
-     * DV-carrying split should one ever arrive despite the planning
-     * refusal.
+     * A scan that pairs a vector with a different data file cannot be
+     * trusted at all: the pairing is refused before any split exists, rather
+     * than letting a worker delete rows from the wrong file.
      */
     @Test
-    void splitWithDeleteFileRefusesAtThePageSourceToo()
+    void scanPairingAVectorWithAnotherDataFileIsRefused()
     {
-        HoglakeSplit split = HoglakeSplitManager
-                .toSplits(List.of(new HoglakeDtos.ScanFile(DELETED_FROM, DELETE_FILE)))
-                .get(0);
-        assertThatThrownBy(() -> HoglakePageSourceProvider.ensureNoRowLevelDeletes(split))
+        HoglakeDtos.DeleteFile mismatched =
+                new HoglakeDtos.DeleteFile(5, 99, "s3://lake/t/b.dv", "puffin-dv", 3, 64, 6);
+
+        assertThatThrownBy(() -> HoglakeSplitManager.toSplits(List.of(
+                new HoglakeDtos.ScanFile(DELETED_FROM, mismatched))))
                 .isInstanceOfSatisfying(TrinoException.class, e ->
-                        assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
-                .hasMessageContaining("table has row-level deletes; DV application not yet implemented in the hoglake connector")
-                .hasMessageContaining("s3://lake/t/b.parquet")
-                .hasMessageContaining("s3://lake/t/b.dv");
+                        assertThat(e.getErrorCode()).isEqualTo(HOGLAKE_INVALID_RESPONSE.toErrorCode()))
+                .hasMessageContaining("s3://lake/t/b.dv")
+                .hasMessageContaining("s3://lake/t/b.parquet");
     }
 
     /**
