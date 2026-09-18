@@ -61,6 +61,7 @@ public class FileAuthenticator
     @Override
     public String loadedRevision()
     {
-        return passwordStoreSupplier.get().revision();
+        return passwordStoreSupplier.get().revision()
+                .orElseThrow(() -> new IllegalStateException("Password store was not loaded from a file"));
     }
 }

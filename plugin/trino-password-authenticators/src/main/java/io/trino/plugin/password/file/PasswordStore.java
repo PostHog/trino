@@ -27,6 +27,7 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static io.trino.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.plugin.password.file.EncryptionUtil.doesBCryptPasswordMatch;
@@ -40,25 +41,27 @@ public class PasswordStore
 {
     private static final Splitter LINE_SPLITTER = Splitter.on(":").limit(2);
 
-    private final String revision;
+    private final Optional<String> revision;
     private final Map<String, HashedPassword> credentials;
     private final NonEvictableLoadingCache<Credential, Boolean> cache;
 
     public PasswordStore(File file, int cacheMaxSize)
     {
-        this(readPasswordFile(file), cacheMaxSize);
+        LoadedFile passwordFile = readPasswordFile(file);
+        revision = Optional.of(passwordFile.revision());
+        credentials = loadPasswordFile(passwordFile.lines());
+        cache = buildNonEvictableCache(
+                CacheBuilder.newBuilder().maximumSize(cacheMaxSize),
+                CacheLoader.from(this::matches));
     }
 
     @VisibleForTesting
     public PasswordStore(List<String> lines, int cacheMaxSize)
     {
-        this(LoadedFile.ofLines(lines), cacheMaxSize);
-    }
-
-    private PasswordStore(LoadedFile passwordFile, int cacheMaxSize)
-    {
-        revision = passwordFile.revision();
-        credentials = loadPasswordFile(passwordFile.lines());
+        // Credentials that never came from a file have no fingerprint: the published contract is the
+        // hash of the file's bytes, and inventing a value here would be a revision nothing can match
+        revision = Optional.empty();
+        credentials = loadPasswordFile(lines);
         cache = buildNonEvictableCache(
                 CacheBuilder.newBuilder().maximumSize(cacheMaxSize),
                 CacheLoader.from(this::matches));
@@ -66,9 +69,10 @@ public class PasswordStore
 
     /**
      * Fingerprint of the credentials this store answers with, see
-     * {@link io.trino.spi.security.LoadedConfiguration}.
+     * {@link io.trino.spi.security.LoadedConfiguration}. Empty when the credentials did not come
+     * from a file.
      */
-    public String revision()
+    public Optional<String> revision()
     {
         return revision;
     }

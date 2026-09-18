@@ -127,8 +127,9 @@ public class GroupProviderManager
             groupProvider = factory.create(ImmutableMap.copyOf(secretsResolver.getResolvedConfiguration(properties)));
         }
 
-        setConfiguredGroupProvider(groupProvider);
+        // Named before it is published, so a readiness answer never sees a provider without its name
         configuredGroupProviderName.set(name);
+        setConfiguredGroupProvider(groupProvider);
 
         log.info("-- Loaded group provider %s --", name);
     }

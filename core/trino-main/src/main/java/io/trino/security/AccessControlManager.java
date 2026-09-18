@@ -114,6 +114,10 @@ public class AccessControlManager
     private final AtomicReference<CatalogServiceProvider<Optional<ConnectorAccessControl>>> connectorAccessControlProvider = new AtomicReference<>();
 
     private final AtomicReference<List<SystemAccessControl>> systemAccessControls = new AtomicReference<>();
+    /**
+     * Configured names of the loaded access controls, in the order of {@link #systemAccessControls}.
+     */
+    private final AtomicReference<List<String>> accessControlNames = new AtomicReference<>(ImmutableList.of());
 
     private final CounterStat authorizationSuccess = new CounterStat();
     private final CounterStat authorizationFail = new CounterStat();
@@ -173,8 +177,14 @@ public class AccessControlManager
             configFiles = ImmutableList.of(CONFIG_FILE);
         }
 
-        List<SystemAccessControl> systemAccessControls = configFiles.stream()
+        List<NamedAccessControl> namedAccessControls = configFiles.stream()
                 .map(this::createSystemAccessControl)
+                .collect(toImmutableList());
+        accessControlNames.set(namedAccessControls.stream()
+                .map(NamedAccessControl::name)
+                .collect(toImmutableList()));
+        List<SystemAccessControl> systemAccessControls = namedAccessControls.stream()
+                .map(NamedAccessControl::accessControl)
                 .collect(toImmutableList());
 
         systemAccessControls.stream()
@@ -199,7 +209,7 @@ public class AccessControlManager
         }
     }
 
-    private SystemAccessControl createSystemAccessControl(File configFile)
+    private NamedAccessControl createSystemAccessControl(File configFile)
     {
         log.info("-- Loading system access control %s --", configFile);
         configFile = configFile.getAbsoluteFile();
@@ -224,7 +234,16 @@ public class AccessControlManager
         }
 
         log.info("-- Loaded system access control %s --", name);
-        return systemAccessControl;
+        return new NamedAccessControl(name, systemAccessControl);
+    }
+
+    private record NamedAccessControl(String name, SystemAccessControl accessControl)
+    {
+        private NamedAccessControl
+        {
+            requireNonNull(name, "name is null");
+            requireNonNull(accessControl, "accessControl is null");
+        }
     }
 
     @VisibleForTesting
@@ -244,6 +263,7 @@ public class AccessControlManager
         systemAccessControl.getEventListeners()
                 .forEach(eventListenerManager::addEventListener);
 
+        accessControlNames.set(ImmutableList.of(name));
         setSystemAccessControls(ImmutableList.of(systemAccessControl));
     }
 
@@ -285,9 +305,15 @@ public class AccessControlManager
         if (loaded == null) {
             return ImmutableList.of();
         }
-        return loaded.stream()
-                .map(accessControl -> ComponentRevision.of("system-access-control", accessControl.getClass().getSimpleName(), accessControl))
-                .collect(toImmutableList());
+        List<String> names = accessControlNames.get();
+        ImmutableList.Builder<ComponentRevision> revisions = ImmutableList.builder();
+        for (int i = 0; i < loaded.size(); i++) {
+            // The configured name, the same way a password authenticator or a group provider is named,
+            // so that a caller can key on the kind and the name it configured
+            String name = i < names.size() ? names.get(i) : loaded.get(i).getClass().getSimpleName();
+            revisions.add(ComponentRevision.of("system-access-control", name, loaded.get(i)));
+        }
+        return revisions.build();
     }
 
     public void setSystemAccessControls(List<SystemAccessControl> systemAccessControls)

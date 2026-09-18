@@ -16,6 +16,7 @@ package io.trino.server;
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Inject;
 import io.airlift.node.NodeInfo;
+import io.trino.connector.CatalogSyncFailure;
 import io.trino.connector.CatalogSynchronizer;
 import io.trino.connector.CatalogSynchronizer.CatalogSyncState;
 import io.trino.execution.QueryIdGenerator;
@@ -102,8 +103,7 @@ public class CatalogSyncResource
                 state.failedCatalogs(),
                 boxed(state.lastSuccessMillis()),
                 boxed(state.lastSuccessMillis().stream().map(millis -> System.currentTimeMillis() - millis).findFirst()),
-                state.lastFailure().orElse(null),
-                ready ? null : notReadyReason(enabled, state),
+                state.lastFailure().map(CatalogSyncFailure::name).orElse(null),
                 securityRevisions());
     }
 
@@ -131,23 +131,6 @@ public class CatalogSyncResource
         return value.stream().boxed().findFirst().orElse(null);
     }
 
-    private static String notReadyReason(boolean enabled, CatalogSyncState state)
-    {
-        if (!enabled) {
-            return "Catalog synchronization is not enabled on this coordinator";
-        }
-        if (state.appliedRevision().isEmpty()) {
-            return "No catalog revision has been applied yet";
-        }
-        if (state.failedCatalogs() > 0) {
-            return "%s catalogs could not be applied".formatted(state.failedCatalogs());
-        }
-        if (state.lastFailure().isPresent()) {
-            return state.lastFailure().get();
-        }
-        return "The published catalog revision is not applied yet";
-    }
-
     public record CatalogSyncStatus(
             String nodeId,
             String nodeVersion,
@@ -162,6 +145,5 @@ public class CatalogSyncResource
             Long lastSuccessMillis,
             Long lastSuccessAgeMillis,
             String lastFailure,
-            String notReadyReason,
             List<ComponentRevision> securityRevisions) {}
 }

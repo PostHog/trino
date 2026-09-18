@@ -23,6 +23,7 @@ import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.catalog.CatalogProperties;
 import io.trino.spi.catalog.RevisionedCatalogStore;
 import io.trino.spi.catalog.RevisionedCatalogStore.CatalogSnapshot;
+import io.trino.spi.catalog.RevisionedCatalogStore.IncompleteSnapshotException;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 
@@ -36,6 +37,14 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
+import static io.trino.connector.CatalogSyncFailure.CATALOGS_NOT_APPLIED;
+import static io.trino.connector.CatalogSyncFailure.NOTHING_PUBLISHED;
+import static io.trino.connector.CatalogSyncFailure.NOT_INITIALIZED;
+import static io.trino.connector.CatalogSyncFailure.REVISION_REGRESSED;
+import static io.trino.connector.CatalogSyncFailure.SNAPSHOT_INCOMPLETE;
+import static io.trino.connector.CatalogSyncFailure.STORE_NOT_REVISIONED;
+import static io.trino.connector.CatalogSyncFailure.STORE_UNREACHABLE;
+import static io.trino.connector.CatalogSyncFailure.SYNCHRONIZATION_DISABLED;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
 import static java.util.Objects.requireNonNull;
@@ -91,7 +100,16 @@ public class CatalogSynchronizer
     @PostConstruct
     public void start()
     {
-        if (!enabled || started.getAndSet(true)) {
+        if (started.getAndSet(true)) {
+            return;
+        }
+        if (!enabled) {
+            // Reading a managed store without following it is a valid way to inspect a cell, and it
+            // is also what a half-configured serving coordinator looks like. It is not failed here,
+            // because failing startup would take a coordinator down over a diagnostic setting; it
+            // is reported as loudly as it can be instead, and readiness stays false.
+            recordFailure(SYNCHRONIZATION_DISABLED);
+            scheduleTask(this::warnWhenStoreIsManaged, 0);
             return;
         }
         log.info("Following published catalogs, polling every %s", Duration.succinctDuration(pollIntervalMillis, MILLISECONDS));
@@ -117,16 +135,34 @@ public class CatalogSynchronizer
 
     private void schedule(long delayMillis)
     {
+        scheduleTask(this::runOnce, delayMillis);
+    }
+
+    private void scheduleTask(Runnable task, long delayMillis)
+    {
         if (stopped.get()) {
             return;
         }
         try {
-            executor.schedule(this::runOnce, delayMillis, MILLISECONDS);
+            executor.schedule(task, delayMillis, MILLISECONDS);
         }
         catch (RuntimeException e) {
             if (!stopped.get()) {
                 log.error(e, "Could not schedule the next catalog synchronization");
             }
+        }
+    }
+
+    /**
+     * A coordinator whose catalogs are published by someone else, but which was not told to follow
+     * them, only ever serves what it loaded at startup. Nothing can repair that at runtime, so it
+     * is stated once, clearly, at startup.
+     */
+    private void warnWhenStoreIsManaged()
+    {
+        if (catalogStoreManager.revisionedCatalogStore().isPresent()) {
+            log.error("The catalog store publishes catalog revisions, but catalog.sync.enabled is false: " +
+                    "this coordinator will not follow catalogs published after it started, and reports itself as not ready");
         }
     }
 
@@ -152,22 +188,33 @@ public class CatalogSynchronizer
     {
         Optional<RevisionedCatalogStore> store = catalogStoreManager.revisionedCatalogStore();
         if (store.isEmpty()) {
-            recordFailure("Configured catalog store does not publish catalog revisions");
+            recordFailure(STORE_NOT_REVISIONED);
             return false;
         }
         if (!catalogManager.isInitialized()) {
             // Reconciling before the initial load would fight with it over the same catalogs
-            recordFailure("Initial catalogs are not loaded yet");
+            recordFailure(NOT_INITIALIZED);
             return false;
         }
 
         CatalogSyncState current = state.get();
-        long revision;
+        OptionalLong published;
         try {
-            revision = store.get().currentRevision();
+            published = store.get().currentRevision();
         }
         catch (RuntimeException e) {
-            recordFailure(e);
+            recordFailure(STORE_UNREACHABLE, e);
+            return false;
+        }
+
+        if (published.isEmpty()) {
+            // A store nothing has published to is not an empty desired state. It is also what a
+            // restored, emptied or wrongly addressed store looks like, so nothing is removed here
+            recordFailure(NOTHING_PUBLISHED);
+            return false;
+        }
+        long revision = published.orElseThrow();
+        if (hasRegressed(current, revision)) {
             return false;
         }
 
@@ -181,7 +228,13 @@ public class CatalogSynchronizer
             snapshot = store.get().fetchSnapshot();
         }
         catch (RuntimeException e) {
-            recordFailure(e);
+            recordFailure(snapshotFailure(e), e);
+            return false;
+        }
+
+        // The snapshot is read after the revision was polled, so it is checked again: the store can
+        // have been replaced by an older one in between
+        if (hasRegressed(current, snapshot.revision())) {
             return false;
         }
 
@@ -192,6 +245,35 @@ public class CatalogSynchronizer
         }
         recordSuccess(snapshot.revision(), snapshot.revision(), 0);
         return true;
+    }
+
+    /**
+     * A published revision below the one already applied here means the shared state went
+     * backwards - an older dump, a lagging replica, a different cell answering. Applying it would
+     * remove catalogs that are working. The coordinator freezes on its last good state instead and
+     * says so, which also stops it from claiming readiness.
+     */
+    private boolean hasRegressed(CatalogSyncState current, long revision)
+    {
+        if (current.appliedRevision().stream().noneMatch(applied -> revision < applied)) {
+            return false;
+        }
+        log.error(
+                "Published catalog revision %s is older than the applied revision %s; keeping the catalogs this coordinator has",
+                revision,
+                current.appliedRevision().orElseThrow());
+        recordFailure(REVISION_REGRESSED);
+        return true;
+    }
+
+    private static CatalogSyncFailure snapshotFailure(RuntimeException failure)
+    {
+        // The store distinguishes damaged contents from a store it could not reach; either way the
+        // reason itself stays in the log and only the category is reported
+        if (failure instanceof IncompleteSnapshotException) {
+            return SNAPSHOT_INCOMPLETE;
+        }
+        return STORE_UNREACHABLE;
     }
 
     /**
@@ -210,6 +292,12 @@ public class CatalogSynchronizer
                 failedCatalogs++;
                 log.error(e, "Could not apply catalog %s of revision %s", catalog.name(), snapshot.revision());
             }
+        }
+
+        if (failedCatalogs > 0) {
+            // Removing while part of the revision could not be installed would widen the damage of a
+            // snapshot that turns out to be wrong; the removals happen once the additions succeed
+            return failedCatalogs;
         }
 
         Set<CatalogName> publishedNames = snapshot.catalogs().stream()
@@ -254,16 +342,17 @@ public class CatalogSynchronizer
                 current.appliedRevision(),
                 failedCatalogs,
                 current.lastSuccessMillis(),
-                Optional.of("%s catalogs of revision %s could not be applied".formatted(failedCatalogs, observedRevision))));
+                Optional.of(CATALOGS_NOT_APPLIED)));
     }
 
-    private void recordFailure(Throwable failure)
+    private void recordFailure(CatalogSyncFailure failure, Throwable cause)
     {
-        log.warn(failure, "Could not read the published catalogs; keeping the catalogs this coordinator already has");
-        recordFailure(failure.getMessage() == null ? failure.toString() : failure.getMessage());
+        // The cause can name the store, its URL or a property value, so it is logged and not reported
+        log.warn(cause, "Catalog synchronization failed with %s; keeping the catalogs this coordinator already has", failure);
+        recordFailure(failure);
     }
 
-    private void recordFailure(String message)
+    private void recordFailure(CatalogSyncFailure failure)
     {
         consecutiveFailures++;
         CatalogSyncState current = state.get();
@@ -272,7 +361,7 @@ public class CatalogSynchronizer
                 current.appliedRevision(),
                 current.failedCatalogs(),
                 current.lastSuccessMillis(),
-                Optional.of(message)));
+                Optional.of(failure)));
     }
 
     private long nextPollDelay()
@@ -302,7 +391,7 @@ public class CatalogSynchronizer
             OptionalLong appliedRevision,
             int failedCatalogs,
             OptionalLong lastSuccessMillis,
-            Optional<String> lastFailure)
+            Optional<CatalogSyncFailure> lastFailure)
     {
         public CatalogSyncState
         {

@@ -32,6 +32,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Collection;
 import java.util.Map;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 
 import static io.airlift.json.JsonCodec.mapJsonCodec;
@@ -117,7 +118,7 @@ public class PostHogManagedCatalogStore
     public Collection<StoredCatalog> getCatalogs()
     {
         ImmutableList.Builder<StoredCatalog> catalogs = ImmutableList.builder();
-        try (Connection connection = connectionFactory.openConnection();
+        try (Connection connection = openReaderConnection();
                 PreparedStatement statement = prepare(connection, SELECT_CATALOGS_SQL)) {
             statement.setString(1, cellId);
             try (ResultSet resultSet = statement.executeQuery()) {
@@ -162,16 +163,18 @@ public class PostHogManagedCatalogStore
      * published. This is polled often, so it reads one small row and nothing else.
      */
     @Override
-    public long currentRevision()
+    public OptionalLong currentRevision()
     {
-        try (Connection connection = connectionFactory.openConnection();
+        try (Connection connection = openReaderConnection();
                 PreparedStatement statement = prepare(connection, SELECT_REVISION_SQL)) {
             statement.setString(1, cellId);
             try (ResultSet resultSet = statement.executeQuery()) {
                 if (!resultSet.next()) {
-                    return 0;
+                    // No publisher has ever adopted this cell. Reporting a revision here would make an
+                    // emptied, restored or wrongly addressed store look like a published empty state
+                    return OptionalLong.empty();
                 }
-                return resultSet.getLong("revision");
+                return OptionalLong.of(resultSet.getLong("revision"));
             }
         }
         catch (SQLException e) {
@@ -188,7 +191,7 @@ public class PostHogManagedCatalogStore
     @Override
     public CatalogSnapshot fetchSnapshot()
     {
-        try (Connection connection = connectionFactory.openConnection()) {
+        try (Connection connection = openReaderConnection()) {
             connection.setAutoCommit(false);
             connection.setTransactionIsolation(TRANSACTION_REPEATABLE_READ);
             connection.setReadOnly(true);
@@ -206,14 +209,14 @@ public class PostHogManagedCatalogStore
                     }
                 }
                 if (publishedState.catalogCount().isEmpty()) {
-                    if (rows > 0) {
-                        throw new TrinoException(CATALOG_STORE_ERROR, "Cell '%s' has %s catalogs but no published writer state".formatted(cellId, rows));
-                    }
-                    return new CatalogSnapshot(0, ImmutableList.of());
+                    // Nothing was ever published here. Whether the cell is untouched or was emptied
+                    // cannot be told apart from this side, so neither is treated as desired state
+                    throw new IncompleteSnapshotException(
+                            "Cell '%s' has no published writer state, but %s catalogs".formatted(cellId, rows));
                 }
                 long publishedCount = publishedState.catalogCount().orElseThrow();
                 if (publishedCount != rows) {
-                    throw new TrinoException(CATALOG_STORE_ERROR, "Catalog snapshot of cell '%s' is incomplete: revision %s declares %s catalogs but %s were read"
+                    throw new IncompleteSnapshotException("Catalog snapshot of cell '%s' is incomplete: revision %s declares %s catalogs but %s were read"
                             .formatted(cellId, publishedState.revision(), publishedCount, rows));
                 }
                 return new CatalogSnapshot(publishedState.revision(), catalogs.build());
@@ -258,7 +261,7 @@ public class PostHogManagedCatalogStore
         }
         catch (RuntimeException e) {
             // Never silently drop the row: a catalog that cannot be read is not a catalog that was deleted
-            throw new TrinoException(CATALOG_STORE_ERROR, "Catalog '%s' of cell '%s' cannot be read".formatted(catalogName, cellId), e);
+            throw new IncompleteSnapshotException("Catalog '%s' of cell '%s' cannot be read".formatted(catalogName, cellId), e);
         }
     }
 
@@ -268,9 +271,16 @@ public class PostHogManagedCatalogStore
     }
 
     /**
-     * Every statement of this store carries a budget: a coordinator that cannot read the published
-     * state within it keeps the catalogs it already has, instead of blocking on the store.
+     * A connection of this store carries the same budget end to end: connecting, waiting for the
+     * socket and executing a statement are all bounded, so a store that stops answering leaves this
+     * coordinator with the catalogs it already has instead of a thread that never returns.
      */
+    private Connection openReaderConnection()
+            throws SQLException
+    {
+        return connectionFactory.openConnection(OptionalInt.of(snapshotTimeoutSeconds));
+    }
+
     private PreparedStatement prepare(Connection connection, String sql)
             throws SQLException
     {

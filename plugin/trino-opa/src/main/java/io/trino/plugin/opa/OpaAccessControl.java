@@ -41,6 +41,7 @@ import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.function.SchemaFunctionName;
 import io.trino.spi.security.AccessDeniedException;
 import io.trino.spi.security.Identity;
+import io.trino.spi.security.LoadedConfiguration;
 import io.trino.spi.security.Privilege;
 import io.trino.spi.security.SystemAccessControl;
 import io.trino.spi.security.SystemSecurityContext;
@@ -84,7 +85,7 @@ import static io.trino.spi.security.AccessDeniedException.denyShowTables;
 import static java.util.Objects.requireNonNull;
 
 public sealed class OpaAccessControl
-        implements SystemAccessControl
+        implements SystemAccessControl, LoadedConfiguration
         permits OpaBatchAccessControl
 {
     private final LifeCycleManager lifeCycleManager;
@@ -99,6 +100,20 @@ public sealed class OpaAccessControl
         this.opaHighLevelClient = requireNonNull(opaHighLevelClient, "opaHighLevelClient is null");
         this.allowPermissionManagementOperations = config.getAllowPermissionManagementOperations();
         this.pluginContext = requireNonNull(pluginContext, "pluginContext is null");
+    }
+
+    /**
+     * The revision of the policy data the OPA serving this coordinator has loaded, read from that
+     * OPA. A deployment that wants this acknowledged configures {@code opa.policy.revision-uri} and
+     * has its bundle define that document; without it nothing is claimed, because a coordinator
+     * cannot know a remote policy engine's state by assumption.
+     */
+    @Override
+    public String loadedRevision()
+    {
+        return opaHighLevelClient.queryPolicyRevision()
+                .orElseThrow(() -> new UnsupportedOperationException(
+                        "opa.policy.revision-uri is not configured, so the loaded policy revision is unknown"));
     }
 
     @Override

@@ -14,6 +14,7 @@
 package io.trino.spi.catalog;
 
 import java.util.List;
+import java.util.OptionalLong;
 
 import static java.util.Objects.requireNonNull;
 
@@ -39,18 +40,42 @@ public interface RevisionedCatalogStore
 {
     /**
      * Revision of the currently published state. This is polled frequently, so it must be cheap.
-     * A store that has never been written to reports {@code 0}.
+     *
+     * <p>Empty means that nothing has ever been published, which is not the same as a published
+     * state that happens to contain no catalogs. A caller must not treat it as an empty desired
+     * state: a store that was restored, emptied or never adopted looks exactly like this.
      *
      * @throws RuntimeException if the current revision cannot be determined
      */
-    long currentRevision();
+    OptionalLong currentRevision();
 
     /**
      * Complete published state, read as one consistent snapshot.
      *
-     * @throws RuntimeException if the state is incomplete, unreadable or inconsistent
+     * @throws RuntimeException if nothing has been published, or if the state is incomplete,
+     *         unreadable or inconsistent
      */
     CatalogSnapshot fetchSnapshot();
+
+    /**
+     * Thrown when the published state exists but cannot be read as a whole: a definition that
+     * cannot be parsed, or contents that disagree with what the publisher recorded. It is
+     * distinct from a store that cannot be reached, because a caller may want to treat a store
+     * that is answering with damaged data differently from one that is not answering at all.
+     */
+    class IncompleteSnapshotException
+            extends RuntimeException
+    {
+        public IncompleteSnapshotException(String message)
+        {
+            super(message);
+        }
+
+        public IncompleteSnapshotException(String message, Throwable cause)
+        {
+            super(message, cause);
+        }
+    }
 
     /**
      * A complete set of catalog definitions and the revision they belong to.

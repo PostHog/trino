@@ -19,6 +19,7 @@ import io.trino.spi.catalog.CatalogProperties;
 import io.trino.spi.catalog.CatalogStore;
 import io.trino.spi.catalog.RevisionedCatalogStore;
 import io.trino.spi.catalog.RevisionedCatalogStore.CatalogSnapshot;
+import io.trino.spi.catalog.RevisionedCatalogStore.IncompleteSnapshotException;
 import io.trino.spi.connector.ConnectorName;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -66,14 +67,22 @@ final class TestPostHogManagedCatalogStore
     void testFollowsPublishedRevisions()
     {
         String cellId = newCell();
-        TestingCatalogPublisher publisher = publisher(cellId, 1);
         RevisionedCatalogStore store = managedStore(cellId);
 
-        assertThat(store.currentRevision()).isEqualTo(0);
+        // Nobody owns this cell yet: not an empty state, an unknown one
+        new TestingCatalogPublisher(database, cellId, 1, PUBLISHER).createTables();
+        assertThat(store.currentRevision()).isEmpty();
+        assertThatThrownBy(store::fetchSnapshot)
+                .isInstanceOf(IncompleteSnapshotException.class)
+                .hasMessageContaining("no published writer state");
+
+        // Adopted, and genuinely holding nothing: that is a published state and readable as one
+        TestingCatalogPublisher publisher = publisher(cellId, 1);
+        assertThat(store.currentRevision()).hasValue(0);
         assertThat(store.fetchSnapshot().catalogs()).isEmpty();
 
         long first = publisher.publishCatalog("op-1", "org_17", "tpch", ImmutableMap.of("tpch.splits-per-node", "2"));
-        assertThat(store.currentRevision()).isEqualTo(first);
+        assertThat(store.currentRevision()).hasValue(first);
 
         CatalogSnapshot snapshot = store.fetchSnapshot();
         assertThat(snapshot.revision()).isEqualTo(first);
@@ -107,6 +116,40 @@ final class TestPostHogManagedCatalogStore
 
         assertThat(catalog.properties()).containsExactlyInAnyOrderEntriesOf(properties);
         assertThat(catalog.version()).isEqualTo(computeCatalogVersion(new CatalogName("org_29"), new ConnectorName("tpch"), properties));
+    }
+
+    /**
+     * The publisher is written in another language than this reader, and both have to compute the
+     * same payload hash for the same intent, or a retried mutation looks like a new one. These are
+     * golden vectors: the values are asserted here and in the publisher's own tests, so a change to
+     * the encoding on either side fails somewhere instead of silently disagreeing in production.
+     */
+    @Test
+    void testPayloadHashGoldenVectors()
+    {
+        assertThat(TestingCatalogPublisher.payloadHash("ADD_OR_REPLACE", "org_17", "tpch", ImmutableMap.of()))
+                .isEqualTo("b9a2caa65c76d6031ee2b1248bf54aade0b638fe01d83240586896956c0c08ef");
+        assertThat(TestingCatalogPublisher.payloadHash(
+                "ADD_OR_REPLACE",
+                "org_17",
+                "tpch",
+                ImmutableMap.of("b", "2", "a", "1", "ünïcode", "wärehöuse")))
+                .isEqualTo("c0536fff6ac67b1f096d01f12d8dc27e0cbe14bf75d9ff43a5c55c3da8bb401c");
+        assertThat(TestingCatalogPublisher.payloadHash("REMOVE", "org_17", "", ImmutableMap.of()))
+                .isEqualTo("3b23c6f6e82b79e19fb5a459433f33106fd14499db254fec21262f8f41b8949b");
+    }
+
+    /**
+     * Both repositories create the store from the same file, so the reader's expectations and the
+     * publisher's DDL cannot drift apart in wording, types or constraints.
+     */
+    @Test
+    void testSharedSchemaFixtureIsTheOneThatIsUsed()
+    {
+        assertThat(TestingCatalogPublisher.sharedSchemaStatements())
+                .hasSize(4)
+                .anySatisfy(statement -> assertThat(statement).contains("CREATE TABLE IF NOT EXISTS trino_catalog_writer_state"))
+                .anySatisfy(statement -> assertThat(statement).contains("CREATE UNIQUE INDEX IF NOT EXISTS trino_catalog_journal_operation"));
     }
 
     @Test
@@ -149,7 +192,8 @@ final class TestPostHogManagedCatalogStore
     void testCatalogsWithoutWriterStateAreNotReportedAsEmpty()
     {
         String cellId = newCell();
-        publisher(cellId, 1).createTables();
+        // Tables exist, but no publisher has claimed the cell yet
+        new TestingCatalogPublisher(database, cellId, 1, PUBLISHER).createTables();
         database.execute(
                 """
                 INSERT INTO trino_catalogs (cell_id, catalog_name, connector_name, catalog_version, properties)
@@ -157,7 +201,7 @@ final class TestPostHogManagedCatalogStore
                 """.formatted(cellId));
 
         assertThatThrownBy(managedStore(cellId)::fetchSnapshot)
-                .hasMessageContaining("has 1 catalogs but no published writer state");
+                .hasMessageContaining("no published writer state, but 1 catalogs");
     }
 
     /**
@@ -168,7 +212,7 @@ final class TestPostHogManagedCatalogStore
     void testAdoptingAnExistingStoreKeepsItsCatalogs()
     {
         String cellId = newCell();
-        TestingCatalogPublisher publisher = publisher(cellId, 1);
+        TestingCatalogPublisher publisher = new TestingCatalogPublisher(database, cellId, 1, PUBLISHER);
         publisher.createTables();
         database.execute(
                 """
@@ -176,6 +220,8 @@ final class TestPostHogManagedCatalogStore
                 VALUES ('%s', 'org_17', 'tpch', '%s', '{}')
                 """.formatted(cellId, computeCatalogVersion(new CatalogName("org_17"), new ConnectorName("tpch"), ImmutableMap.of())));
 
+        // Claiming the cell seeds the state from the rows that are already there
+        publisher.takeOver();
         publisher.publishCatalog("op-1", "org_18", "tpch", ImmutableMap.of());
 
         CatalogSnapshot snapshot = managedStore(cellId).fetchSnapshot();
@@ -191,13 +237,20 @@ final class TestPostHogManagedCatalogStore
         first.publishCatalog("op-1", "org_17", "tpch", ImmutableMap.of());
 
         TestingCatalogPublisher second = new TestingCatalogPublisher(database, cellId, 2, "publisher-2");
-        second.takeOverFrom(1);
+        second.takeOver();
         long afterTakeover = second.publishCatalog("op-2", "org_18", "tpch", ImmutableMap.of());
 
         assertThatThrownBy(() -> first.publishCatalog("op-3", "org_19", "tpch", ImmutableMap.of()))
                 .isInstanceOf(TestingCatalogPublisher.FencedWriterException.class)
-                .hasMessageContaining("is fenced");
-        assertThat(managedStore(cellId).currentRevision()).isEqualTo(afterTakeover);
+                .hasMessageContaining("Recorded epoch 2 is newer than 1");
+
+        // A writer of the same epoch that is not the recorded owner is refused too, and never
+        // claims ownership as a side effect of publishing
+        TestingCatalogPublisher sameEpochStranger = new TestingCatalogPublisher(database, cellId, 2, "publisher-3");
+        assertThatThrownBy(() -> sameEpochStranger.publishCatalog("op-4", "org_20", "tpch", ImmutableMap.of()))
+                .isInstanceOf(TestingCatalogPublisher.FencedWriterException.class)
+                .hasMessageContaining("owned by 'publisher-2'");
+        assertThat(managedStore(cellId).currentRevision()).hasValue(afterTakeover);
     }
 
     /**
@@ -211,7 +264,7 @@ final class TestPostHogManagedCatalogStore
         long revision = publisher.publishCatalog("op-1", "org_17", "tpch", ImmutableMap.of());
 
         assertThat(publisher.publishCatalog("op-1", "org_17", "tpch", ImmutableMap.of())).isEqualTo(revision);
-        assertThat(managedStore(cellId).currentRevision()).isEqualTo(revision);
+        assertThat(managedStore(cellId).currentRevision()).hasValue(revision);
 
         assertThatThrownBy(() -> publisher.publishCatalog("op-1", "org_17", "tpch", ImmutableMap.of("changed", "intent")))
                 .hasMessageContaining("was recorded with a different intent");
@@ -247,10 +300,15 @@ final class TestPostHogManagedCatalogStore
         return "cell" + randomNameSuffix();
     }
 
+    /**
+     * A publisher that owns the cell: it creates the schema and claims the writer row, which is the
+     * explicit step a publisher has to take before it may publish anything.
+     */
     private TestingCatalogPublisher publisher(String cellId, long epoch)
     {
         TestingCatalogPublisher publisher = new TestingCatalogPublisher(database, cellId, epoch, PUBLISHER);
         publisher.createTables();
+        publisher.takeOver();
         return publisher;
     }
 

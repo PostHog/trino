@@ -40,10 +40,11 @@ import static java.util.Objects.requireNonNull;
 record LoadedFile(String revision, List<String> lines)
 {
     /**
-     * Line terminators as {@code Files.readAllLines} understands them, so that a file behaves the
-     * same whether it was written with Unix, Windows or classic Mac line endings.
+     * Exactly the line terminators {@code Files.readAllLines} recognizes - and only those, so that
+     * a file that used to parse one way does not start parsing another way because it contains a
+     * form feed or a line separator character.
      */
-    private static final Splitter LINE_SPLITTER = Splitter.onPattern("\\R");
+    private static final Splitter LINE_SPLITTER = Splitter.onPattern("\r\n|\n|\r");
 
     LoadedFile
     {
@@ -60,15 +61,6 @@ record LoadedFile(String revision, List<String> lines)
     {
         byte[] content = Files.readAllBytes(file.toPath());
         return new LoadedFile(fingerprint(content), LINE_SPLITTER.splitToList(decodeUtf8(content)));
-    }
-
-    /**
-     * The same content as a file whose lines are already known, for tests and callers that do not
-     * read from disk.
-     */
-    static LoadedFile ofLines(List<String> lines)
-    {
-        return new LoadedFile(fingerprint(String.join("\n", lines).getBytes(UTF_8)), lines);
     }
 
     /**
