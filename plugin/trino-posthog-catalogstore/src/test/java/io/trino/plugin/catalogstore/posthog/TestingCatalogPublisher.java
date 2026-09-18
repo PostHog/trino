@@ -192,7 +192,7 @@ public final class TestingCatalogPublisher
                     connection.commit();
                     return replayed.get();
                 }
-                applyMutation(connection, operation, catalogName, definition);
+                applyMutation(connection, catalogName, definition);
                 long revision = advanceWriterState(connection);
                 recordOperation(connection, revision, operationId, operation, catalogName, definition, payloadHash);
                 connection.commit();
@@ -261,7 +261,11 @@ public final class TestingCatalogPublisher
         }
     }
 
-    private void applyMutation(Connection connection, String operation, String catalogName, Optional<Definition> definition)
+    /**
+     * A removal is a definition that is absent, so the operation name says nothing here that the
+     * definition does not.
+     */
+    private void applyMutation(Connection connection, String catalogName, Optional<Definition> definition)
             throws SQLException
     {
         if (definition.isEmpty()) {
