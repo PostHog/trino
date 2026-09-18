@@ -24,7 +24,6 @@ import io.trino.spi.TrinoException;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -41,6 +40,7 @@ public class PasswordStore
 {
     private static final Splitter LINE_SPLITTER = Splitter.on(":").limit(2);
 
+    private final String revision;
     private final Map<String, HashedPassword> credentials;
     private final NonEvictableLoadingCache<Credential, Boolean> cache;
 
@@ -52,10 +52,25 @@ public class PasswordStore
     @VisibleForTesting
     public PasswordStore(List<String> lines, int cacheMaxSize)
     {
-        credentials = loadPasswordFile(lines);
+        this(LoadedFile.ofLines(lines), cacheMaxSize);
+    }
+
+    private PasswordStore(LoadedFile passwordFile, int cacheMaxSize)
+    {
+        revision = passwordFile.revision();
+        credentials = loadPasswordFile(passwordFile.lines());
         cache = buildNonEvictableCache(
                 CacheBuilder.newBuilder().maximumSize(cacheMaxSize),
                 CacheLoader.from(this::matches));
+    }
+
+    /**
+     * Fingerprint of the credentials this store answers with, see
+     * {@link io.trino.spi.security.LoadedConfiguration}.
+     */
+    public String revision()
+    {
+        return revision;
     }
 
     public boolean authenticate(String user, String password)
@@ -102,10 +117,10 @@ public class PasswordStore
         return new TrinoException(CONFIGURATION_INVALID, format("Error in password file line %s: %s", lineNumber, message), cause);
     }
 
-    private static List<String> readPasswordFile(File file)
+    private static LoadedFile readPasswordFile(File file)
     {
         try {
-            return Files.readAllLines(file.toPath());
+            return LoadedFile.read(file);
         }
         catch (IOException e) {
             throw new TrinoException(CONFIGURATION_UNAVAILABLE, "Failed to read password file: " + file, e);

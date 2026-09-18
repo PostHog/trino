@@ -17,12 +17,16 @@ import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.ConfigSecuritySensitive;
 import io.airlift.configuration.validation.FileExists;
+import io.airlift.units.Duration;
+import io.airlift.units.MinDuration;
 import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 
 import java.io.File;
 import java.util.Optional;
+
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 public class PostHogCatalogStoreConfig
 {
@@ -31,6 +35,8 @@ public class PostHogCatalogStoreConfig
     private String connectionUser;
     private String connectionPassword;
     private File connectionPasswordFile;
+    private boolean readOnly;
+    private Duration snapshotTimeout = new Duration(5, SECONDS);
 
     @NotEmpty
     public String getCellId()
@@ -100,6 +106,34 @@ public class PostHogCatalogStoreConfig
     public PostHogCatalogStoreConfig setConnectionPasswordFile(File connectionPasswordFile)
     {
         this.connectionPasswordFile = connectionPasswordFile;
+        return this;
+    }
+
+    public boolean isReadOnly()
+    {
+        return readOnly;
+    }
+
+    @Config("catalog-store.read-only")
+    @ConfigDescription("Never write to the catalog store: skip the bootstrap DDL and reject catalog mutations, because an external writer publishes the catalogs")
+    public PostHogCatalogStoreConfig setReadOnly(boolean readOnly)
+    {
+        this.readOnly = readOnly;
+        return this;
+    }
+
+    @NotNull
+    @MinDuration("1s")
+    public Duration getSnapshotTimeout()
+    {
+        return snapshotTimeout;
+    }
+
+    @Config("catalog-store.snapshot-timeout")
+    @ConfigDescription("Budget for a single statement of a read-only store; the writable store keeps waiting as before")
+    public PostHogCatalogStoreConfig setSnapshotTimeout(Duration snapshotTimeout)
+    {
+        this.snapshotTimeout = snapshotTimeout;
         return this;
     }
 

@@ -20,10 +20,10 @@ import com.google.common.collect.Multimap;
 import com.google.inject.Inject;
 import io.trino.spi.TrinoException;
 import io.trino.spi.security.GroupProvider;
+import io.trino.spi.security.LoadedConfiguration;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -40,12 +40,12 @@ import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 public class FileGroupProvider
-        implements GroupProvider
+        implements GroupProvider, LoadedConfiguration
 {
     private static final Splitter LINE_SPLITTER = Splitter.on(":").limit(2).trimResults();
     private static final Splitter GROUP_SPLITTER = Splitter.on(',').trimResults().omitEmptyStrings();
 
-    private final Supplier<Function<String, Set<String>>> userGroupSupplier;
+    private final Supplier<LoadedGroups> userGroupSupplier;
 
     @Inject
     public FileGroupProvider(FileGroupConfig config)
@@ -62,13 +62,34 @@ public class FileGroupProvider
     public Set<String> getGroups(String user)
     {
         requireNonNull(user, "user is null");
-        return userGroupSupplier.get().apply(user);
+        return userGroupSupplier.get().groupsOf().apply(user);
     }
 
-    private static Function<String, Set<String>> loadGroupFile(File file)
+    /**
+     * Fingerprint of the group file in effect right now. A replaced file that this provider has
+     * not loaded yet is deliberately not reported, so an acknowledgement always describes the
+     * groups the next lookup uses.
+     */
+    @Override
+    public String loadedRevision()
     {
-        Map<String, Set<String>> groups = loadGroupFile(readGroupFile(file));
-        return user -> groups.getOrDefault(user, ImmutableSet.of());
+        return userGroupSupplier.get().revision();
+    }
+
+    private static LoadedGroups loadGroupFile(File file)
+    {
+        LoadedFile groupFile = readGroupFile(file);
+        Map<String, Set<String>> groups = loadGroupFile(groupFile.lines());
+        return new LoadedGroups(groupFile.revision(), user -> groups.getOrDefault(user, ImmutableSet.of()));
+    }
+
+    private record LoadedGroups(String revision, Function<String, Set<String>> groupsOf)
+    {
+        private LoadedGroups
+        {
+            requireNonNull(revision, "revision is null");
+            requireNonNull(groupsOf, "groupsOf is null");
+        }
     }
 
     private static Map<String, Set<String>> loadGroupFile(List<String> lines)
@@ -97,10 +118,10 @@ public class FileGroupProvider
         return new TrinoException(CONFIGURATION_INVALID, format("Error in group file line %s: %s", lineNumber, message), cause);
     }
 
-    private static List<String> readGroupFile(File file)
+    private static LoadedFile readGroupFile(File file)
     {
         try {
-            return Files.readAllLines(file.toPath());
+            return LoadedFile.read(file);
         }
         catch (IOException e) {
             throw new TrinoException(CONFIGURATION_UNAVAILABLE, "Failed to read group file: " + file, e);

@@ -21,10 +21,12 @@ import io.airlift.units.Duration;
 import io.trino.connector.WorkerDynamicCatalogManager.NoOpWorkerCatalogManager;
 import io.trino.connector.system.GlobalSystemConnector;
 import io.trino.metadata.CatalogManager;
+import io.trino.server.CatalogSyncResource;
 import io.trino.server.ServerConfig;
 import io.trino.spi.catalog.CatalogStore;
 
 import static io.airlift.configuration.ConfigBinder.configBinder;
+import static io.airlift.jaxrs.JaxrsBinder.jaxrsBinder;
 import static io.trino.server.InternalCommunicationHttpClientModule.internalHttpClientModule;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
@@ -42,6 +44,10 @@ public class DynamicCatalogManagerModule
             binder.bind(ConnectorServicesProvider.class).to(CoordinatorDynamicCatalogManager.class).in(Scopes.SINGLETON);
             binder.bind(CatalogManager.class).to(CoordinatorDynamicCatalogManager.class).in(Scopes.SINGLETON);
             binder.bind(CoordinatorLazyRegister.class).asEagerSingleton();
+
+            configBinder(binder).bindConfig(CatalogSyncConfig.class);
+            binder.bind(CatalogSynchronizer.class).in(Scopes.SINGLETON);
+            jaxrsBinder(binder).bind(CatalogSyncResource.class);
 
             configBinder(binder).bindConfig(CatalogPruneTaskConfig.class);
             binder.bind(CatalogPruneTask.class).in(Scopes.SINGLETON);

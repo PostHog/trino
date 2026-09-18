@@ -34,6 +34,7 @@ import io.trino.plugin.base.security.FileBasedSystemAccessControl;
 import io.trino.plugin.base.security.ForwardingSystemAccessControl;
 import io.trino.plugin.base.security.ReadOnlySystemAccessControl;
 import io.trino.plugin.base.util.AutoCloseableCloser;
+import io.trino.server.ComponentRevision;
 import io.trino.spi.NodeVersion;
 import io.trino.spi.QueryId;
 import io.trino.spi.TrinoException;
@@ -271,6 +272,22 @@ public class AccessControlManager
                 return tracer;
             }
         };
+    }
+
+    /**
+     * What each loaded system access control reports about the authorization data it currently
+     * decides with. A control that cannot report it - anything that answers from a remote policy
+     * engine, for instance - is listed without a revision rather than assumed to be current.
+     */
+    public List<ComponentRevision> loadedRevisions()
+    {
+        List<SystemAccessControl> loaded = systemAccessControls.get();
+        if (loaded == null) {
+            return ImmutableList.of();
+        }
+        return loaded.stream()
+                .map(accessControl -> ComponentRevision.of("system-access-control", accessControl.getClass().getSimpleName(), accessControl))
+                .collect(toImmutableList());
     }
 
     public void setSystemAccessControls(List<SystemAccessControl> systemAccessControls)
