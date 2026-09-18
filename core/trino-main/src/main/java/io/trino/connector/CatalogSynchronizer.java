@@ -45,6 +45,7 @@ import static io.trino.connector.CatalogSyncFailure.SNAPSHOT_INCOMPLETE;
 import static io.trino.connector.CatalogSyncFailure.STORE_NOT_REVISIONED;
 import static io.trino.connector.CatalogSyncFailure.STORE_UNREACHABLE;
 import static io.trino.connector.CatalogSyncFailure.SYNCHRONIZATION_DISABLED;
+import static io.trino.server.FailureSummary.summarize;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
 import static java.util.Objects.requireNonNull;
@@ -174,7 +175,8 @@ public class CatalogSynchronizer
         }
         catch (Throwable e) {
             // Never let the loop die: the next attempt has to keep the coordinator's state converging
-            log.error(e, "Unexpected error while synchronizing catalogs");
+            log.error("Unexpected error while synchronizing catalogs (%s)", summarize(e));
+            log.debug(e, "Unexpected error while synchronizing catalogs");
             delayMillis = nextRetryDelay();
         }
         schedule(delayMillis);
@@ -290,7 +292,9 @@ public class CatalogSynchronizer
             }
             catch (Throwable e) {
                 failedCatalogs++;
-                log.error(e, "Could not apply catalog %s of revision %s", catalog.name(), snapshot.revision());
+                // A connector reports what it could not reach, which can include a resolved credential
+                log.error("Could not apply catalog %s of revision %s (%s)", catalog.name(), snapshot.revision(), summarize(e));
+                log.debug(e, "Could not apply catalog %s of revision %s", catalog.name(), snapshot.revision());
             }
         }
 
@@ -316,7 +320,8 @@ public class CatalogSynchronizer
             }
             catch (Throwable e) {
                 failedCatalogs++;
-                log.error(e, "Could not remove catalog %s of revision %s", catalogName, snapshot.revision());
+                log.error("Could not remove catalog %s of revision %s (%s)", catalogName, snapshot.revision(), summarize(e));
+                log.debug(e, "Could not remove catalog %s of revision %s", catalogName, snapshot.revision());
             }
         }
         return failedCatalogs;
@@ -347,8 +352,11 @@ public class CatalogSynchronizer
 
     private void recordFailure(CatalogSyncFailure failure, Throwable cause)
     {
-        // The cause can name the store, its URL or a property value, so it is logged and not reported
-        log.warn(cause, "Catalog synchronization failed with %s; keeping the catalogs this coordinator already has", failure);
+        // The cause can name the store, its connection URL or a property value. It is not reported
+        // through readiness, and the ordinary log line carries only the types it is made of; the
+        // message and the stack trace are available at debug level
+        log.warn("Catalog synchronization failed with %s (%s); keeping the catalogs this coordinator already has", failure, summarize(cause));
+        log.debug(cause, "Catalog synchronization failed with %s", failure);
         recordFailure(failure);
     }
 

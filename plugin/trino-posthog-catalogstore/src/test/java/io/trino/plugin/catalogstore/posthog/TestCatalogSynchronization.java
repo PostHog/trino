@@ -411,6 +411,20 @@ final class TestCatalogSynchronization
             assertThat(status.coordinatorId()).isNotEqualTo(processId);
             assertThat(status.observedRevision()).isEqualTo(status.appliedRevision());
             assertThat(status.failedCatalogs()).isZero();
+            // Security components are reported beside the catalogs, and a component that cannot say
+            // what it loaded is reported with a category, never with the text of its failure. This
+            // runner configures none, so the list is empty here; the categories are covered in
+            // TestComponentRevision
+            assertThat(status.securityRevisions()).allSatisfy(component -> {
+                assertThat(component.kind()).isNotEmpty();
+                assertThat(component.name()).isNotEmpty();
+                if (component.error() != null) {
+                    assertThat(component.error()).isIn(
+                            "COMPONENT_DOES_NOT_REPORT",
+                            "COMPONENT_NOT_CONFIGURED",
+                            "COMPONENT_UNAVAILABLE");
+                }
+            });
         }
 
         try (DistributedQueryRunner restarted = managedCoordinator(cellId)) {

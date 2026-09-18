@@ -14,11 +14,12 @@
 package io.trino.connector;
 
 /**
- * Why a coordinator is not following the published catalogs. This is what the readiness endpoint
- * reports, so it is a closed set of stable categories and never the text of the underlying
- * failure: a store error can carry a JDBC URL, a property value or a credential, and a caller
- * authorized to read readiness is not thereby authorized to read those. The details stay in the
- * server log.
+ * Why a coordinator is not following the published catalogs, or why a security component cannot say
+ * what it has loaded. This is everything the readiness endpoint reports about failures, so it is a
+ * closed set of stable categories and never the text of the underlying failure: a store error can
+ * carry a JDBC URL, a property value or a credential, an authorization backend error can carry its
+ * endpoint, and a caller authorized to read readiness is not thereby authorized to read those. The
+ * details stay in the server log.
  */
 public enum CatalogSyncFailure
 {
@@ -66,4 +67,22 @@ public enum CatalogSyncFailure
      * configured to follow it. It serves the catalogs it loaded at startup and nothing else.
      */
     SYNCHRONIZATION_DISABLED,
+
+    /**
+     * The configured component cannot report the configuration data it has loaded at all. Not an
+     * acknowledgement, and not something a controller can wait for.
+     */
+    COMPONENT_DOES_NOT_REPORT,
+
+    /**
+     * The component can report what it has loaded, but is missing the configuration it needs to do
+     * so - an OPA access control without a revision URI, for instance.
+     */
+    COMPONENT_NOT_CONFIGURED,
+
+    /**
+     * The component tried and failed: its data could not be read, or the backend that holds it did
+     * not answer. Nothing is acknowledged.
+     */
+    COMPONENT_UNAVAILABLE,
 }

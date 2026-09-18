@@ -16,10 +16,21 @@ package io.trino.server;
 import io.trino.spi.security.LoadedConfiguration;
 import org.junit.jupiter.api.Test;
 
+import java.sql.SQLException;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 final class TestComponentRevision
 {
+    /**
+     * What a driver, a file reader or an authorization backend puts in a message when it fails.
+     * None of it may reach a caller of the readiness endpoint.
+     */
+    private static final String HOSTILE_MESSAGE =
+            "FATAL: password authentication failed for user \"catalog_writer\" " +
+                    "connecting to jdbc:postgresql://store.internal:5432/catalogs?user=catalog_writer&password=hunter2 " +
+                    "while reading /etc/trino/secrets/password.db for org_17";
+
     @Test
     void testReportingComponent()
     {
@@ -41,17 +52,63 @@ final class TestComponentRevision
         ComponentRevision revision = ComponentRevision.of("system-access-control", "opa", new Object());
 
         assertThat(revision.revision()).isNull();
-        assertThat(revision.error()).contains("does not report the configuration it has loaded");
+        assertThat(revision.error()).isEqualTo("COMPONENT_DOES_NOT_REPORT");
     }
 
     @Test
-    void testComponentThatFailsToLoad()
+    void testComponentThatIsNotConfiguredToReport()
     {
-        ComponentRevision revision = ComponentRevision.of("group-provider", "file", (LoadedConfiguration) () -> {
-            throw new IllegalStateException("group file is missing");
+        ComponentRevision revision = ComponentRevision.of("system-access-control", "opa", (LoadedConfiguration) () -> {
+            throw new UnsupportedOperationException("opa.policy.revision-uri is not configured, see " + HOSTILE_MESSAGE);
         });
 
         assertThat(revision.revision()).isNull();
-        assertThat(revision.error()).isEqualTo("group file is missing");
+        assertThat(revision.error()).isEqualTo("COMPONENT_NOT_CONFIGURED");
+        assertThat(revision.toString()).doesNotContain("hunter2");
+    }
+
+    /**
+     * The failure of a component is reported as a category. Its message belongs in the log, because
+     * it routinely names the endpoint it could not reach, the file it could not read, and sometimes
+     * the credentials it tried.
+     */
+    @Test
+    void testFailureTextNeverReachesTheReport()
+    {
+        ComponentRevision revision = ComponentRevision.of("group-provider", "file", (LoadedConfiguration) () -> {
+            throw new RuntimeException(HOSTILE_MESSAGE, new SQLException(HOSTILE_MESSAGE));
+        });
+
+        assertThat(revision.revision()).isNull();
+        assertThat(revision.error()).isEqualTo("COMPONENT_UNAVAILABLE");
+        assertThat(revision.toString())
+                .doesNotContain("hunter2")
+                .doesNotContain("store.internal")
+                .doesNotContain("catalog_writer")
+                .doesNotContain("password.db")
+                .doesNotContain("org_17");
+    }
+
+    /**
+     * The log line that replaces the message says which types failed, and nothing they carried.
+     */
+    @Test
+    void testFailureSummaryIsOnlyTypes()
+    {
+        String summary = FailureSummary.summarize(new IllegalStateException(HOSTILE_MESSAGE, new SQLException(HOSTILE_MESSAGE)));
+
+        assertThat(summary).isEqualTo("java.lang.IllegalStateException caused by java.sql.SQLException");
+        assertThat(summary).doesNotContain("hunter2");
+    }
+
+    @Test
+    void testFailureSummaryStopsAtACycle()
+    {
+        RuntimeException first = new RuntimeException(HOSTILE_MESSAGE);
+        RuntimeException second = new RuntimeException(HOSTILE_MESSAGE, first);
+        first.initCause(second);
+
+        assertThat(FailureSummary.summarize(first))
+                .isEqualTo("java.lang.RuntimeException caused by java.lang.RuntimeException");
     }
 }
