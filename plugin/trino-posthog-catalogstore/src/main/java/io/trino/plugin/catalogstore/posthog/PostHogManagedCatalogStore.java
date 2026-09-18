@@ -128,8 +128,11 @@ public class PostHogManagedCatalogStore
                         catalogs.add(new DatabaseStoredCatalog(readCatalog(resultSet)));
                     }
                     catch (RuntimeException e) {
-                        // A single unusable row must not keep the healthy catalogs of this cell from loading
-                        log.error(e, "Skipping unreadable catalog '%s' of cell '%s'", catalogName, cellId);
+                        // A single unusable row must not keep the healthy catalogs of this cell from loading.
+                        // What made it unusable is a parse failure that quotes the row, and a catalog
+                        // property can hold a credential, so the ordinary line names the failure's types
+                        log.error("Skipping unreadable catalog '%s' of cell '%s' (%s)", catalogName, cellId, failureTypes(e));
+                        log.debug(e, "Skipping unreadable catalog '%s' of cell '%s'", catalogName, cellId);
                     }
                 }
             }
@@ -159,8 +162,10 @@ public class PostHogManagedCatalogStore
     }
 
     /**
-     * Revision the publisher of this cell last committed, or {@code 0} while nothing has been
-     * published. This is polled often, so it reads one small row and nothing else.
+     * Revision the publisher of this cell last committed, or empty while no publisher has adopted
+     * the cell at all. Empty is not revision zero: an emptied, restored or wrongly addressed store
+     * looks exactly like one that was never written, and neither is a desired state. This is polled
+     * often, so it reads one small row and nothing else.
      */
     @Override
     public OptionalLong currentRevision()
@@ -263,6 +268,25 @@ public class PostHogManagedCatalogStore
             // Never silently drop the row: a catalog that cannot be read is not a catalog that was deleted
             throw new IncompleteSnapshotException("Catalog '%s' of cell '%s' cannot be read".formatted(catalogName, cellId), e);
         }
+    }
+
+    /**
+     * A failure described by the types it is made of. The messages of the failures this store sees
+     * quote the row or the connection they came from, and neither belongs in an ordinary log line;
+     * they are logged at debug level instead.
+     */
+    private static String failureTypes(Throwable failure)
+    {
+        StringBuilder types = new StringBuilder();
+        Throwable current = failure;
+        for (int depth = 0; current != null && depth < 5; depth++) {
+            if (depth > 0) {
+                types.append(" caused by ");
+            }
+            types.append(current.getClass().getName());
+            current = current.getCause() == current ? null : current.getCause();
+        }
+        return types.toString();
     }
 
     private static TrinoException rejectMutation(CatalogName catalogName)
