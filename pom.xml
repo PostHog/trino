@@ -196,7 +196,7 @@
         <dep.confluent.version>8.1.1</dep.confluent.version>
         <dep.datasketches.version>9.0.0</dep.datasketches.version>
         <dep.derby.version>10.17.1.0</dep.derby.version>
-        <dep.docker.images.version>129</dep.docker.images.version>
+        <dep.docker.images.version>131</dep.docker.images.version>
         <dep.drift.version>1.24</dep.drift.version>
         <dep.frontend-maven-plugin.version>2.0.2</dep.frontend-maven-plugin.version>
         <dep.frontend-bun.version>v1.4.2</dep.frontend-bun.version>
@@ -210,7 +210,7 @@
         <dep.okhttp.version>5.5.0</dep.okhttp.version>
         <dep.okio.version>3.18.2</dep.okio.version>
         <dep.parquet.version>1.18.1</dep.parquet.version>
-        <dep.protobuf.version>4.36.1</dep.protobuf.version>
+        <dep.protobuf.version>4.36.2</dep.protobuf.version>
         <dep.sis.version>1.6</dep.sis.version>
         <dep.snowflake.version>4.3.4</dep.snowflake.version>
         <dep.swagger.version>2.2.55</dep.swagger.version>
@@ -250,7 +250,7 @@
             <dependency>
                 <groupId>com.google.cloud</groupId>
                 <artifactId>libraries-bom</artifactId>
-                <version>26.88.0</version>
+                <version>26.88.1</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
@@ -306,7 +306,7 @@
             <dependency>
                 <groupId>org.bouncycastle</groupId>
                 <artifactId>bc-jdk18on-bom</artifactId>
-                <version>1.85.2</version>
+                <version>1.86.1</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
@@ -330,7 +330,7 @@
             <dependency>
                 <groupId>software.amazon.awssdk</groupId>
                 <artifactId>bom</artifactId>
-                <version>2.54.15</version>
+                <version>2.55.0</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
@@ -340,13 +340,13 @@
                 <!-- https://github.com/ClickHouse/clickhouse-docs/pull/2408/files -->
                 <groupId>at.yawk.lz4</groupId>
                 <artifactId>lz4-java</artifactId>
-                <version>1.11.2</version>
+                <version>1.11.3</version>
             </dependency>
 
             <dependency>
                 <groupId>com.adobe.testing</groupId>
                 <artifactId>s3mock-testcontainers</artifactId>
-                <version>5.2.0</version>
+                <version>5.2.2</version>
             </dependency>
 
             <dependency>
@@ -523,7 +523,7 @@
             <dependency>
                 <groupId>com.nimbusds</groupId>
                 <artifactId>nimbus-jose-jwt</artifactId>
-                <version>10.9.1</version>
+                <version>10.10</version>
             </dependency>
 
             <dependency>
@@ -2294,7 +2294,7 @@
             <dependency>
                 <groupId>org.roaringbitmap</groupId>
                 <artifactId>RoaringBitmap</artifactId>
-                <version>1.6.22</version>
+                <version>1.6.23</version>
             </dependency>
 
             <dependency>
