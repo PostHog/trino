@@ -16,6 +16,7 @@ package io.trino.plugin.opa;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.validation.FileExists;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 
 import java.net.URI;
@@ -34,6 +35,7 @@ public class OpaConfig
     private Optional<URI> opaColumnMaskingUri = Optional.empty();
     private Optional<URI> opaBatchColumnMaskingUri = Optional.empty();
     private Optional<Path> additionalContextFile = Optional.empty();
+    private int maxOutstandingRequests = 512;
 
     @NotNull
     public URI getOpaUri()
@@ -154,6 +156,20 @@ public class OpaConfig
     public OpaConfig setAdditionalContextFile(Path additionalContextFile)
     {
         this.additionalContextFile = Optional.ofNullable(additionalContextFile);
+        return this;
+    }
+
+    @Min(1)
+    public int getMaxOutstandingRequests()
+    {
+        return maxOutstandingRequests;
+    }
+
+    @Config("opa.max-outstanding-requests")
+    @ConfigDescription("Maximum number of OPA requests awaiting responses")
+    public OpaConfig setMaxOutstandingRequests(int maxOutstandingRequests)
+    {
+        this.maxOutstandingRequests = maxOutstandingRequests;
         return this;
     }
 }
