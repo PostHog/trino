@@ -19,6 +19,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import io.airlift.configuration.secrets.SecretsResolver;
 import io.airlift.log.Logger;
+import io.trino.server.ComponentRevision;
 import io.trino.spi.classloader.ThreadContextClassLoader;
 import io.trino.spi.security.PasswordAuthenticator;
 import io.trino.spi.security.PasswordAuthenticatorFactory;
@@ -49,6 +50,11 @@ public class PasswordAuthenticatorManager
     private final AtomicBoolean required = new AtomicBoolean();
     private final Map<String, PasswordAuthenticatorFactory> factories = new ConcurrentHashMap<>();
     private final AtomicReference<List<PasswordAuthenticator>> authenticators = new AtomicReference<>();
+    /**
+     * Names of the loaded authenticators, in the order of {@link #authenticators}, so that a
+     * readiness report can say which implementation a revision belongs to.
+     */
+    private final AtomicReference<List<String>> authenticatorNames = new AtomicReference<>(ImmutableList.of());
     private final SecretsResolver secretsResolver;
 
     @Inject
@@ -83,13 +89,17 @@ public class PasswordAuthenticatorManager
         }
 
         ImmutableList.Builder<PasswordAuthenticator> authenticators = ImmutableList.builder();
+        ImmutableList.Builder<String> names = ImmutableList.builder();
         for (File configFile : configFiles) {
-            authenticators.add(loadAuthenticator(configFile.getAbsoluteFile()));
+            NamedAuthenticator authenticator = loadAuthenticator(configFile.getAbsoluteFile());
+            authenticators.add(authenticator.authenticator());
+            names.add(authenticator.name());
         }
+        this.authenticatorNames.set(names.build());
         this.authenticators.set(authenticators.build());
     }
 
-    private PasswordAuthenticator loadAuthenticator(File configFile)
+    private NamedAuthenticator loadAuthenticator(File configFile)
     {
         Map<String, String> properties;
         try {
@@ -113,7 +123,7 @@ public class PasswordAuthenticatorManager
         }
 
         log.info("-- Loaded password authenticator %s --", name);
-        return authenticator;
+        return new NamedAuthenticator(name, authenticator);
     }
 
     public List<PasswordAuthenticator> getAuthenticators()
@@ -122,11 +132,39 @@ public class PasswordAuthenticatorManager
         return authenticators.get();
     }
 
+    /**
+     * What each loaded authenticator reports about the credentials it currently authenticates
+     * against. Empty while no authenticator is loaded, which is not an acknowledgement either.
+     */
+    public List<ComponentRevision> loadedRevisions()
+    {
+        List<PasswordAuthenticator> loaded = authenticators.get();
+        if (loaded == null) {
+            return ImmutableList.of();
+        }
+        List<String> names = authenticatorNames.get();
+        ImmutableList.Builder<ComponentRevision> revisions = ImmutableList.builder();
+        for (int i = 0; i < loaded.size(); i++) {
+            String name = i < names.size() ? names.get(i) : loaded.get(i).getClass().getSimpleName();
+            revisions.add(ComponentRevision.of("password-authenticator", name, loaded.get(i)));
+        }
+        return revisions.build();
+    }
+
     @VisibleForTesting
     public void setAuthenticators(PasswordAuthenticator... authenticators)
     {
         if (!this.authenticators.compareAndSet(null, ImmutableList.copyOf(authenticators))) {
             throw new IllegalStateException("authenticators already loaded");
+        }
+    }
+
+    private record NamedAuthenticator(String name, PasswordAuthenticator authenticator)
+    {
+        private NamedAuthenticator
+        {
+            requireNonNull(name, "name is null");
+            requireNonNull(authenticator, "authenticator is null");
         }
     }
 }

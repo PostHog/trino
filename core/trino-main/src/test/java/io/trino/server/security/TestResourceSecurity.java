@@ -1111,6 +1111,140 @@ public class TestResourceSecurity
         }
     }
 
+    /**
+     * A coordinator that is reached over plain HTTP by a proxy which terminated TLS itself. This is
+     * the documented way to put Trino behind a load balancer or a gateway, and it is the hop the
+     * pooled coordinators are addressed on: the proxy states the protocol the client used, and the
+     * coordinator authenticates the password because that statement is trusted.
+     *
+     * <p>Everything here runs against the server's plain HTTP port, deliberately without
+     * {@code http-server.authentication.allow-insecure-over-http}: the point is that the password
+     * is still required, and that a request which does not carry the forwarded protocol is refused
+     * rather than silently downgraded.
+     */
+    @Test
+    public void testPasswordAuthenticationOverForwardedHttps()
+            throws Exception
+    {
+        try (TestingTrinoServer server = TestingTrinoServer.builder()
+                .setProperties(ImmutableMap.<String, String>builder()
+                        .put("http-server.process-forwarded", "true")
+                        .put("http-server.authentication.insecure.user-mapping.pattern", ALLOWED_USER_MAPPING_PATTERN)
+                        .put("password-authenticator.config-files", passwordConfigDummy.toString())
+                        .put("http-server.authentication.type", "password")
+                        .put("http-server.authentication.password.host-qualified-user.domains", TENANT_DOMAIN)
+                        .buildOrThrow())
+                .setAdditionalModule(binder -> jaxrsBinder(binder).bind(TestResource.class))
+                .setSystemAccessControl(TestSystemAccessControl.NO_IMPERSONATION)
+                .build()) {
+            server.getInstance(Key.get(PasswordAuthenticatorManager.class)).setAuthenticators(TestResourceSecurity::authenticateTenantUser);
+            URI httpUri = server.getInstance(Key.get(HttpServerInfo.class)).getHttpUri();
+            // Nothing in this test reaches the server over TLS; the hop itself is plain HTTP
+            assertThat(httpUri.getScheme()).isEqualTo("http");
+            String identityLocation = getLocation(httpUri, "/protocol/identity");
+            String tenantHost = "tenant-a." + TENANT_DOMAIN;
+            // How an operator's client addresses one coordinator directly, rather than the gateway
+            String internalHost = "coordinator-1.trino-pool.svc.cluster.local";
+
+            // The forwarded protocol is what makes the password acceptable, and the forwarded host is
+            // what qualifies the user with its tenant
+            Request request = new Request.Builder()
+                    .url(identityLocation)
+                    .addHeader("X-Forwarded-Proto", "https")
+                    .addHeader("X-Forwarded-Host", tenantHost)
+                    .addHeader("Authorization", Credentials.basic(TEST_USER_LOGIN, TEST_PASSWORD))
+                    .addHeader("X-Trino-User", TEST_USER_LOGIN)
+                    .build();
+            try (Response response = client.newCall(request).execute()) {
+                assertThat(response.code()).isEqualTo(SC_OK);
+                assertThat(response.header("user")).isEqualTo("tenant-a." + TEST_USER_LOGIN);
+                assertThat(response.header("principal")).isEqualTo("tenant-a." + TEST_USER_LOGIN);
+            }
+
+            // A wrong or missing password is still a wrong or missing password
+            assertResponseCode(client, identityLocation, SC_UNAUTHORIZED, Headers.of(
+                    "X-Forwarded-Proto",
+                    "https",
+                    "X-Forwarded-Host",
+                    tenantHost,
+                    "Authorization",
+                    Credentials.basic(TEST_USER_LOGIN, "not-the-password")));
+            assertResponseCode(client, identityLocation, SC_UNAUTHORIZED, Headers.of(
+                    "X-Forwarded-Proto",
+                    "https",
+                    "X-Forwarded-Host",
+                    tenantHost));
+
+            // Without the forwarded protocol the request is plain HTTP as far as the coordinator is
+            // concerned, and authentication over plain HTTP is refused instead of downgraded
+            assertResponseCode(client, identityLocation, SC_FORBIDDEN, Headers.of(
+                    "X-Forwarded-Host",
+                    tenantHost,
+                    "Authorization",
+                    Credentials.basic(TEST_USER_LOGIN, TEST_PASSWORD)));
+            assertResponseCode(client, identityLocation, SC_FORBIDDEN, Headers.of(
+                    "X-Forwarded-Proto",
+                    "http",
+                    "X-Forwarded-Host",
+                    tenantHost,
+                    "Authorization",
+                    Credentials.basic(TEST_USER_LOGIN, TEST_PASSWORD)));
+
+            // The client follows nextUri with the same credentials, so it has to point back at the
+            // gateway: the tenant host it used, over the protocol it used, not this internal hop
+            Request statement = new Request.Builder()
+                    .url(getLocation(httpUri, "/v1/statement"))
+                    .addHeader("X-Forwarded-Proto", "https")
+                    .addHeader("X-Forwarded-Host", tenantHost)
+                    .addHeader("Authorization", Credentials.basic(TEST_USER_LOGIN, TEST_PASSWORD))
+                    .addHeader("X-Trino-User", TEST_USER_LOGIN)
+                    .post(RequestBody.create("SELECT 1", MediaType.get("text/plain")))
+                    .build();
+            try (Response response = client.newCall(statement).execute()) {
+                assertThat(response.code()).isEqualTo(SC_OK);
+                URI nextUri = URI.create(json.readTree(response.body().string()).get("nextUri").asText());
+                assertThat(nextUri.getScheme()).isEqualTo("https");
+                assertThat(nextUri.getHost()).isEqualTo(tenantHost);
+            }
+
+            // An operational client addressing one coordinator by its internal name is not addressing a
+            // tenant, so its user is left as typed. It still has to state the forwarded protocol.
+            Request internalRequest = new Request.Builder()
+                    .url(identityLocation)
+                    .header("Host", hostHeader(internalHost, httpUri))
+                    .addHeader("X-Forwarded-Proto", "https")
+                    .addHeader("Authorization", Credentials.basic(MANAGEMENT_USER_LOGIN, MANAGEMENT_PASSWORD))
+                    .build();
+            try (Response response = client.newCall(internalRequest).execute()) {
+                assertThat(response.code()).isEqualTo(SC_OK);
+                assertThat(response.header("user")).isEqualTo(MANAGEMENT_USER_LOGIN);
+                assertThat(response.header("principal")).isEqualTo(MANAGEMENT_USER_LOGIN);
+            }
+            assertResponseCode(client, identityLocation, SC_FORBIDDEN, Headers.of(
+                    "Host",
+                    hostHeader(internalHost, httpUri),
+                    "Authorization",
+                    Credentials.basic(MANAGEMENT_USER_LOGIN, MANAGEMENT_PASSWORD)));
+
+            // And a tenant credential is not qualified into existence by that host either: the internal
+            // name is outside the tenant domain, so the user stays as typed and does not authenticate
+            assertResponseCode(client, identityLocation, SC_UNAUTHORIZED, Headers.of(
+                    "Host",
+                    hostHeader(internalHost, httpUri),
+                    "X-Forwarded-Proto",
+                    "https",
+                    "Authorization",
+                    Credentials.basic(TEST_USER_LOGIN, TEST_PASSWORD)));
+            assertResponseCode(client, identityLocation, SC_UNAUTHORIZED, Headers.of(
+                    "X-Forwarded-Proto",
+                    "https",
+                    "X-Forwarded-Host",
+                    internalHost,
+                    "Authorization",
+                    Credentials.basic(TEST_USER_LOGIN, TEST_PASSWORD)));
+        }
+    }
+
     private static Module oauth2Module(TokenServer tokenServer)
     {
         return binder -> {

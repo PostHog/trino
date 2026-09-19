@@ -24,10 +24,10 @@ import io.trino.spi.TrinoException;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static io.trino.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.plugin.password.file.EncryptionUtil.doesBCryptPasswordMatch;
@@ -41,21 +41,40 @@ public class PasswordStore
 {
     private static final Splitter LINE_SPLITTER = Splitter.on(":").limit(2);
 
+    private final Optional<String> revision;
     private final Map<String, HashedPassword> credentials;
     private final NonEvictableLoadingCache<Credential, Boolean> cache;
 
     public PasswordStore(File file, int cacheMaxSize)
     {
-        this(readPasswordFile(file), cacheMaxSize);
+        LoadedFile passwordFile = readPasswordFile(file);
+        revision = Optional.of(passwordFile.revision());
+        credentials = loadPasswordFile(passwordFile.lines());
+        cache = buildNonEvictableCache(
+                CacheBuilder.newBuilder().maximumSize(cacheMaxSize),
+                CacheLoader.from(this::matches));
     }
 
     @VisibleForTesting
     public PasswordStore(List<String> lines, int cacheMaxSize)
     {
+        // Credentials that never came from a file have no fingerprint: the published contract is the
+        // hash of the file's bytes, and inventing a value here would be a revision nothing can match
+        revision = Optional.empty();
         credentials = loadPasswordFile(lines);
         cache = buildNonEvictableCache(
                 CacheBuilder.newBuilder().maximumSize(cacheMaxSize),
                 CacheLoader.from(this::matches));
+    }
+
+    /**
+     * Fingerprint of the credentials this store answers with, see
+     * {@link io.trino.spi.security.LoadedConfiguration}. Empty when the credentials did not come
+     * from a file.
+     */
+    public Optional<String> revision()
+    {
+        return revision;
     }
 
     public boolean authenticate(String user, String password)
@@ -102,10 +121,10 @@ public class PasswordStore
         return new TrinoException(CONFIGURATION_INVALID, format("Error in password file line %s: %s", lineNumber, message), cause);
     }
 
-    private static List<String> readPasswordFile(File file)
+    private static LoadedFile readPasswordFile(File file)
     {
         try {
-            return Files.readAllLines(file.toPath());
+            return LoadedFile.read(file);
         }
         catch (IOException e) {
             throw new TrinoException(CONFIGURATION_UNAVAILABLE, "Failed to read password file: " + file, e);

@@ -19,6 +19,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.inject.Inject;
 import io.airlift.configuration.secrets.SecretsResolver;
 import io.airlift.log.Logger;
+import io.trino.server.ComponentRevision;
 import io.trino.spi.classloader.ThreadContextClassLoader;
 import io.trino.spi.security.GroupProvider;
 import io.trino.spi.security.GroupProviderFactory;
@@ -53,6 +54,7 @@ public class GroupProviderManager
     private static final String GROUP_PROVIDER_PROPERTY_GROUP_CASE = "group-provider.group-case";
     private final Map<String, GroupProviderFactory> groupProviderFactories = new ConcurrentHashMap<>();
     private final AtomicReference<Optional<GroupProvider>> configuredGroupProvider = new AtomicReference<>(Optional.empty());
+    private final AtomicReference<String> configuredGroupProviderName = new AtomicReference<>("unknown");
     private final SecretsResolver secretsResolver;
     private Case groupCase = KEEP;
 
@@ -125,6 +127,8 @@ public class GroupProviderManager
             groupProvider = factory.create(ImmutableMap.copyOf(secretsResolver.getResolvedConfiguration(properties)));
         }
 
+        // Named before it is published, so a readiness answer never sees a provider without its name
+        configuredGroupProviderName.set(name);
         setConfiguredGroupProvider(groupProvider);
 
         log.info("-- Loaded group provider %s --", name);
@@ -134,6 +138,16 @@ public class GroupProviderManager
     protected void setConfiguredGroupProvider(GroupProvider groupProvider)
     {
         checkState(configuredGroupProvider.compareAndSet(Optional.empty(), Optional.of(groupProvider)), "groupProvider is already set");
+    }
+
+    /**
+     * What the configured group provider reports about the group data it currently answers with,
+     * or empty when no group provider is configured.
+     */
+    public Optional<ComponentRevision> loadedRevision()
+    {
+        return configuredGroupProvider.get()
+                .map(groupProvider -> ComponentRevision.of("group-provider", configuredGroupProviderName.get(), groupProvider));
     }
 
     @Override
