@@ -5031,6 +5031,11 @@ public abstract class BaseIcebergConnectorTest
         assertQuery(session, "SELECT DISTINCT b FROM test_metadata_optimization WHERE b < 7", "VALUES (6)");
         assertQuery(session, "SELECT DISTINCT b FROM test_metadata_optimization WHERE c > 8", "VALUES (9)");
 
+        // Predicates on hidden columns are enforced by the split source, so the optimization must not apply
+        assertQuery(session, "SELECT DISTINCT b, c FROM test_metadata_optimization WHERE \"$partition\" = 'b=6/c=7'", "VALUES (6, 7)");
+        assertQuery(session, "SELECT DISTINCT b, c FROM test_metadata_optimization WHERE \"$path\" = (SELECT \"$path\" FROM test_metadata_optimization WHERE a = 5)", "VALUES (6, 7)");
+        assertQueryReturnsEmptyResult(session, "SELECT DISTINCT b, c FROM test_metadata_optimization WHERE \"$file_modified_time\" < TIMESTAMP '2000-01-01 00:00:00 UTC'");
+
         // Assert behavior after metadata delete
         assertUpdate("DELETE FROM test_metadata_optimization WHERE b = 6", 1);
         assertQuery(session, "SELECT DISTINCT b FROM test_metadata_optimization", "VALUES (9)");
@@ -6196,6 +6201,50 @@ public abstract class BaseIcebergConnectorTest
                 .isEqualTo(expectedFilesAfterOptimize);
 
         assertUpdate("DROP TABLE " + tableName);
+    }
+
+    @Test
+    public void testInIntegerPredicatePushdown()
+    {
+        try (TestTable table = newTrinoTable("test_in_predicate", "(an_integer integer, a_bigint bigint, data varchar) WITH (partitioning = ARRAY['an_integer', 'a_bigint'])")) {
+            assertUpdate("INSERT INTO " + table.getName() + " SELECT i, i, CAST(i AS varchar) FROM UNNEST(sequence(1, 10)) AS t(i)", 10);
+
+            // integer column + IN with consecutive values
+            assertThat(query("SELECT * FROM " + table.getName() + " WHERE CAST(an_integer AS smallint) IN (SMALLINT '1', SMALLINT '2', SMALLINT '3')")).isNotFullyPushedDown(FilterNode.class);
+            assertThat(query("SELECT * FROM " + table.getName() + " WHERE an_integer                   IN (INTEGER  '1', INTEGER  '2', INTEGER  '3')")).isFullyPushedDown();
+            assertThat(query("SELECT * FROM " + table.getName() + " WHERE CAST(an_integer AS bigint)   IN (BIGINT   '1', BIGINT   '2', BIGINT   '3')")).isFullyPushedDown();
+
+            // bigint column + IN with consecutive values
+            assertThat(query("SELECT * FROM " + table.getName() + " WHERE CAST(a_bigint AS smallint)   IN (SMALLINT '1', SMALLINT '2', SMALLINT '3')")).isNotFullyPushedDown(FilterNode.class);
+            assertThat(query("SELECT * FROM " + table.getName() + " WHERE CAST(a_bigint AS integer)    IN (INTEGER  '1', INTEGER  '2', INTEGER  '3')")).isNotFullyPushedDown(FilterNode.class);
+            assertThat(query("SELECT * FROM " + table.getName() + " WHERE a_bigint                     IN (BIGINT   '1', BIGINT   '2', BIGINT   '3')")).isFullyPushedDown();
+
+            // integer column + IN with non-consecutive values
+            assertThat(query("SELECT * FROM " + table.getName() + " WHERE CAST(an_integer AS smallint) IN (SMALLINT '1', SMALLINT '7', SMALLINT '3')")).isNotFullyPushedDown(FilterNode.class);
+            assertThat(query("SELECT * FROM " + table.getName() + " WHERE an_integer                   IN (INTEGER  '1', INTEGER  '7', INTEGER  '3')")).isFullyPushedDown();
+            assertThat(query("SELECT * FROM " + table.getName() + " WHERE CAST(an_integer AS bigint)   IN (BIGINT   '1', BIGINT   '7', BIGINT   '3')")).isFullyPushedDown();
+
+            // bigint column + IN with non-consecutive values
+            assertThat(query("SELECT * FROM " + table.getName() + " WHERE CAST(a_bigint AS smallint)   IN (SMALLINT '1', SMALLINT '7', SMALLINT '3')")).isNotFullyPushedDown(FilterNode.class);
+            assertThat(query("SELECT * FROM " + table.getName() + " WHERE CAST(a_bigint AS integer)    IN (INTEGER  '1', INTEGER  '7', INTEGER  '3')")).isNotFullyPushedDown(FilterNode.class);
+            assertThat(query("SELECT * FROM " + table.getName() + " WHERE a_bigint                     IN (BIGINT   '1', BIGINT   '7', BIGINT   '3')")).isFullyPushedDown();
+        }
+    }
+
+    @Test
+    public void testInTimestampDatePredicatePushdown()
+    {
+        try (TestTable table = newTrinoTable("test_in_timestamp_date_predicate", "(a_timestamp timestamp(6), data varchar) WITH (partitioning = ARRAY['day(a_timestamp)'])")) {
+            assertUpdate("INSERT INTO " + table.getName() + " SELECT date_add('day', i, TIMESTAMP '2025-01-01 12:34:56.123456'), CAST(i AS varchar) FROM UNNEST(sequence(1, 10)) AS t(i)", 10);
+
+            assertThat(query("SELECT * FROM " + table.getName() + " WHERE CAST(a_timestamp AS date) =  DATE '2025-01-03'")).isFullyPushedDown();
+
+            // IN with consecutive values
+            assertThat(query("SELECT * FROM " + table.getName() + " WHERE CAST(a_timestamp AS date) IN (DATE '2025-01-03', DATE '2025-01-04', DATE '2025-01-05')")).isFullyPushedDown();
+
+            // IN with non-consecutive values
+            assertThat(query("SELECT * FROM " + table.getName() + " WHERE CAST(a_timestamp AS date) IN (DATE '2025-01-03', DATE '2025-01-09', DATE '2025-01-05')")).isFullyPushedDown();
+        }
     }
 
     @Test
