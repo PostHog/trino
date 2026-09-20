@@ -33,6 +33,7 @@ public class OpaConfig
     private Optional<URI> opaRowFiltersUri = Optional.empty();
     private Optional<URI> opaColumnMaskingUri = Optional.empty();
     private Optional<URI> opaBatchColumnMaskingUri = Optional.empty();
+    private Optional<URI> opaPolicyRevisionUri = Optional.empty();
     private Optional<Path> additionalContextFile = Optional.empty();
 
     @NotNull
@@ -141,6 +142,20 @@ public class OpaConfig
     public OpaConfig setOpaBatchColumnMaskingUri(URI opaBatchColumnMaskingUri)
     {
         this.opaBatchColumnMaskingUri = Optional.ofNullable(opaBatchColumnMaskingUri);
+        return this;
+    }
+
+    @NotNull
+    public Optional<URI> getOpaPolicyRevisionUri()
+    {
+        return opaPolicyRevisionUri;
+    }
+
+    @Config("opa.policy.revision-uri")
+    @ConfigDescription("URI answering with the revision of the policy data this OPA currently serves, for example .../v1/data/trino/revision - if not set, no revision is reported")
+    public OpaConfig setOpaPolicyRevisionUri(URI opaPolicyRevisionUri)
+    {
+        this.opaPolicyRevisionUri = Optional.ofNullable(opaPolicyRevisionUri);
         return this;
     }
 

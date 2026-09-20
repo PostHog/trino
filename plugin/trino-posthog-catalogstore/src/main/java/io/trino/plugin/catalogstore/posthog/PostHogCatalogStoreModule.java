@@ -14,20 +14,27 @@
 package io.trino.plugin.catalogstore.posthog;
 
 import com.google.inject.Binder;
-import com.google.inject.Module;
 import com.google.inject.Scopes;
+import io.airlift.configuration.AbstractConfigurationAwareModule;
 import io.trino.spi.catalog.CatalogStore;
 
 import static io.airlift.configuration.ConfigBinder.configBinder;
 
 public class PostHogCatalogStoreModule
-        implements Module
+        extends AbstractConfigurationAwareModule
 {
     @Override
-    public void configure(Binder binder)
+    protected void setup(Binder binder)
     {
         configBinder(binder).bindConfig(PostHogCatalogStoreConfig.class);
         binder.bind(PostHogCatalogStoreConnectionFactory.class).in(Scopes.SINGLETON);
-        binder.bind(CatalogStore.class).to(PostHogCatalogStore.class).in(Scopes.SINGLETON);
+        // The two stores are different implementations, not one store with a mode: a managed reader
+        // publishes revisions and writes nothing, and the writable store behaves as it always has
+        if (buildConfigObject(PostHogCatalogStoreConfig.class).isReadOnly()) {
+            binder.bind(CatalogStore.class).to(PostHogManagedCatalogStore.class).in(Scopes.SINGLETON);
+        }
+        else {
+            binder.bind(CatalogStore.class).to(PostHogCatalogStore.class).in(Scopes.SINGLETON);
+        }
     }
 }

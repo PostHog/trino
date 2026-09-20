@@ -16,6 +16,7 @@ package io.trino.plugin.password.file;
 import com.google.inject.Inject;
 import io.trino.spi.security.AccessDeniedException;
 import io.trino.spi.security.BasicPrincipal;
+import io.trino.spi.security.LoadedConfiguration;
 import io.trino.spi.security.PasswordAuthenticator;
 
 import java.io.File;
@@ -26,7 +27,7 @@ import static com.google.common.base.Suppliers.memoizeWithExpiration;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 public class FileAuthenticator
-        implements PasswordAuthenticator
+        implements PasswordAuthenticator, LoadedConfiguration
 {
     private final Supplier<PasswordStore> passwordStoreSupplier;
 
@@ -50,5 +51,17 @@ public class FileAuthenticator
         }
 
         return new BasicPrincipal(user);
+    }
+
+    /**
+     * Fingerprint of the password file this authenticator would authenticate against right now.
+     * It comes from the loaded store, so a file that was replaced but is not in effect yet - the
+     * refresh period has not elapsed - is not reported as loaded.
+     */
+    @Override
+    public String loadedRevision()
+    {
+        return passwordStoreSupplier.get().revision()
+                .orElseThrow(() -> new IllegalStateException("Password store was not loaded from a file"));
     }
 }

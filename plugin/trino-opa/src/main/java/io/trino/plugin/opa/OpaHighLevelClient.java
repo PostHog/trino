@@ -19,6 +19,7 @@ import com.google.inject.Inject;
 import io.airlift.json.JsonCodec;
 import io.trino.plugin.opa.schema.OpaBatchColumnMaskQueryResult;
 import io.trino.plugin.opa.schema.OpaColumnMaskQueryResult;
+import io.trino.plugin.opa.schema.OpaPolicyRevisionResult;
 import io.trino.plugin.opa.schema.OpaQueryContext;
 import io.trino.plugin.opa.schema.OpaQueryInput;
 import io.trino.plugin.opa.schema.OpaQueryInputAction;
@@ -61,6 +62,8 @@ public class OpaHighLevelClient
     private final Optional<URI> opaRowFiltersUri;
     private final Optional<URI> opaColumnMaskingUri;
     private final Optional<URI> opaBatchColumnMaskingUri;
+    private final Optional<URI> opaPolicyRevisionUri;
+    private final JsonCodec<OpaPolicyRevisionResult> policyRevisionResultCodec = JsonCodec.jsonCodec(OpaPolicyRevisionResult.class);
     private final ImmutableMap<String, String> opaAdditionalContext;
 
     @Inject
@@ -81,12 +84,30 @@ public class OpaHighLevelClient
         this.opaRowFiltersUri = config.getOpaRowFiltersUri();
         this.opaColumnMaskingUri = config.getOpaColumnMaskingUri();
         this.opaBatchColumnMaskingUri = config.getOpaBatchColumnMaskingUri();
+        this.opaPolicyRevisionUri = config.getOpaPolicyRevisionUri();
         this.opaAdditionalContext = ImmutableMap.copyOf(loadAdditionalContextFromFile(config.getAdditionalContextFile()));
     }
 
     public boolean queryOpa(OpaQueryInput input)
     {
         return opaHttpClient.consumeOpaResponse(opaHttpClient.submitOpaRequest(input, opaPolicyUri, queryResultCodec)).result();
+    }
+
+    /**
+     * The revision of the policy data the OPA that answers this coordinator's authorization
+     * questions currently serves. It is read from that OPA, so it describes what is in effect
+     * there, not what was published towards it.
+     *
+     * @throws io.trino.plugin.opa.OpaQueryException if OPA cannot be reached or answers with
+     *         nothing, which is not an acknowledgement either
+     */
+    public Optional<String> queryPolicyRevision()
+    {
+        return opaPolicyRevisionUri.map(uri ->
+                opaHttpClient.consumeOpaResponse(opaHttpClient.submitOpaQuery(uri, policyRevisionResultCodec))
+                        .result()
+                        .orElseThrow(() -> new OpaQueryException.QueryFailed(
+                                new IllegalStateException("OPA answered with no policy revision at " + uri))));
     }
 
     private boolean queryOpaWithSimpleAction(OpaQueryContext context, String operation)

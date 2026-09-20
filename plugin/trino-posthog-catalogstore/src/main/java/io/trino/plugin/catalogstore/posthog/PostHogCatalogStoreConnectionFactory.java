@@ -23,6 +23,7 @@ import java.sql.Connection;
 import java.sql.Driver;
 import java.sql.SQLException;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Properties;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -74,10 +75,30 @@ public class PostHogCatalogStoreConnectionFactory
     public Connection openConnection()
             throws SQLException
     {
+        return openConnection(OptionalInt.empty());
+    }
+
+    /**
+     * Opens a connection that gives up after {@code timeoutSeconds} instead of waiting forever.
+     * Without it a database that accepts packets but never answers - a dropped security-group
+     * rule, a black-holing load balancer - blocks the calling thread indefinitely, and a blocked
+     * socket read does not respond to interruption either, so the thread would outlive shutdown.
+     *
+     * <p>The bound is deliberately not applied to the connections of the writable store: the
+     * existing behavior there is to wait, including on a lock held by another writer.
+     */
+    public Connection openConnection(OptionalInt timeoutSeconds)
+            throws SQLException
+    {
         Properties properties = new Properties();
         connectionUser.ifPresent(user -> properties.setProperty("user", user));
         password().ifPresent(password -> properties.setProperty("password", password));
         properties.setProperty("ApplicationName", APPLICATION_NAME);
+        timeoutSeconds.ifPresent(timeout -> {
+            properties.setProperty("connectTimeout", String.valueOf(timeout));
+            properties.setProperty("socketTimeout", String.valueOf(timeout));
+            properties.setProperty("loginTimeout", String.valueOf(timeout));
+        });
         Connection connection = driver.connect(connectionUrl, properties);
         checkState(connection != null, "Driver returned null connection, make sure the connection URL is valid");
         return connection;
