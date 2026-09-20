@@ -54,6 +54,7 @@ import static com.google.common.net.MediaType.JSON_UTF_8;
 import static io.airlift.http.client.FullJsonResponseHandler.createFullJsonResponseHandler;
 import static io.airlift.http.client.HeaderNames.CONTENT_TYPE;
 import static io.airlift.http.client.JsonBodyGenerator.jsonBodyGenerator;
+import static io.airlift.http.client.Request.Builder.prepareGet;
 import static io.airlift.http.client.Request.Builder.preparePost;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
@@ -104,6 +105,23 @@ public class OpaHttpClient
                     uri.toString(),
                     new String(requestBodyGenerator.getBody(), UTF_8),
                     request.getHeaders());
+        }
+        return FluentFuture.from(httpClient.executeAsync(request, createFullJsonResponseHandler(deserializer)))
+                .transform(response -> parseOpaResponse(response, uri), executor);
+    }
+
+    /**
+     * Reads a document from OPA without asking it to decide anything. This is how the policy
+     * revision that OPA currently serves is obtained: from OPA itself, so it describes what is
+     * loaded there and not what someone intended to publish to it.
+     */
+    public <T> FluentFuture<T> submitOpaQuery(URI uri, JsonCodec<T> deserializer)
+    {
+        Request request = prepareGet()
+                .setUri(uri)
+                .build();
+        if (logRequests) {
+            log.debug("Sending OPA request to URI \"%s\" ; request headers = %s", uri.toString(), request.getHeaders());
         }
         return FluentFuture.from(httpClient.executeAsync(request, createFullJsonResponseHandler(deserializer)))
                 .transform(response -> parseOpaResponse(response, uri), executor);

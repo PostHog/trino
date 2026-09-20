@@ -22,6 +22,7 @@ import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.catalog.CatalogProperties;
 import io.trino.spi.catalog.CatalogStore;
 import io.trino.spi.catalog.CatalogStoreFactory;
+import io.trino.spi.catalog.RevisionedCatalogStore;
 import io.trino.spi.classloader.ThreadContextClassLoader;
 import io.trino.spi.connector.ConnectorName;
 
@@ -139,6 +140,18 @@ public class CatalogStoreManager
     public void removeCatalog(CatalogName catalogName)
     {
         getCatalogStore().removeCatalog(catalogName);
+    }
+
+    /**
+     * The configured store if it publishes revisioned snapshots, so that a coordinator can follow
+     * catalogs published by an external writer. Empty for a store without that capability, and
+     * empty as long as no store is configured yet.
+     */
+    public Optional<RevisionedCatalogStore> revisionedCatalogStore()
+    {
+        return configuredCatalogStore.get()
+                .filter(RevisionedCatalogStore.class::isInstance)
+                .map(RevisionedCatalogStore.class::cast);
     }
 
     @VisibleForTesting

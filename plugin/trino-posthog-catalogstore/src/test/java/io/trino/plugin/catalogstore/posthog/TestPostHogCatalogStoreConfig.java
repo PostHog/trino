@@ -16,6 +16,7 @@ package io.trino.plugin.catalogstore.posthog;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.configuration.ConfigurationFactory;
 import io.airlift.configuration.validation.FileExists;
+import io.airlift.units.Duration;
 import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.NotEmpty;
 import org.junit.jupiter.api.Test;
@@ -32,6 +33,7 @@ import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDe
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
 import static io.airlift.testing.ValidationAssertions.assertFailsValidation;
 import static io.airlift.testing.ValidationAssertions.assertValidates;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 final class TestPostHogCatalogStoreConfig
@@ -47,7 +49,9 @@ final class TestPostHogCatalogStoreConfig
                 .setConnectionUrl(null)
                 .setConnectionUser(null)
                 .setConnectionPassword(null)
-                .setConnectionPasswordFile(null));
+                .setConnectionPasswordFile(null)
+                .setReadOnly(false)
+                .setSnapshotTimeout(new Duration(5, SECONDS)));
     }
 
     /**
@@ -92,6 +96,8 @@ final class TestPostHogCatalogStoreConfig
                 .put("catalog-store.cell-id", "cell-eu-1")
                 .put("catalog-store.connection-url", "jdbc:postgresql://example.net:5432/catalogs")
                 .put("catalog-store.connection-user", "alice")
+                .put("catalog-store.read-only", "true")
+                .put("catalog-store.snapshot-timeout", "9s")
                 .buildOrThrow();
     }
 
@@ -100,6 +106,8 @@ final class TestPostHogCatalogStoreConfig
         assertThat(config.getCellId()).isEqualTo("cell-eu-1");
         assertThat(config.getConnectionUrl()).isEqualTo("jdbc:postgresql://example.net:5432/catalogs");
         assertThat(config.getConnectionUser()).isEqualTo(Optional.of("alice"));
+        assertThat(config.isReadOnly()).isTrue();
+        assertThat(config.getSnapshotTimeout()).isEqualTo(new Duration(9, SECONDS));
     }
 
     @Test

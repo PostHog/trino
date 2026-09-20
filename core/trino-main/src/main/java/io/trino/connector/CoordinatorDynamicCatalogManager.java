@@ -88,6 +88,13 @@ public class CoordinatorDynamicCatalogManager
      */
     private final ConcurrentMap<CatalogHandle, RegisteredCatalog> allCatalogs = new ConcurrentHashMap<>();
 
+    /**
+     * Names of the catalogs that come from the catalog store. Only these are reconciled against a
+     * published snapshot; the global system catalog and anything registered by other means is
+     * never removed because a snapshot does not mention it.
+     */
+    private final Set<CatalogName> storeCatalogs = ConcurrentHashMap.newKeySet();
+
     @GuardedBy("catalogsUpdateLock")
     private State state = State.CREATED;
 
@@ -142,17 +149,106 @@ public class CoordinatorDynamicCatalogManager
                                     CatalogConnector newCatalog = catalogFactory.createCatalog(catalog);
                                     activeCatalogs.put(storedCatalog.name(), newCatalog.getCatalog());
                                     allCatalogs.put(newCatalog.getCatalogHandle(), new RegisteredCatalog(new RegistrationToken(), newCatalog));
+                                    storeCatalogs.add(storedCatalog.name());
                                     log.debug("-- Added catalog %s using connector %s --", storedCatalog.name(), catalog.connectorName());
                                 }
                                 catch (Throwable e) {
                                     CatalogVersion catalogVersion = catalog != null ? catalog.version() : new CatalogVersion("failed");
                                     ConnectorName connectorName = catalog != null ? catalog.connectorName() : new ConnectorName("unknown");
                                     activeCatalogs.put(storedCatalog.name(), failedCatalog(storedCatalog.name(), catalogVersion, connectorName));
+                                    storeCatalogs.add(storedCatalog.name());
                                     log.error(e, "-- Failed to load catalog %s using connector %s --", storedCatalog.name(), connectorName);
                                 }
                                 return null;
                             })
                             .collect(toImmutableList()));
+        }
+    }
+
+    /**
+     * Whether the catalogs of the catalog store have been loaded. Until then the local state does
+     * not describe the store yet, so nothing may be reconciled against it.
+     */
+    public boolean isInitialized()
+    {
+        synchronized (catalogsUpdateLock) {
+            return state == State.INITIALIZED;
+        }
+    }
+
+    /**
+     * Names of the catalogs that came from the catalog store, whether they were loaded at startup,
+     * created here or applied from a published snapshot.
+     */
+    public Set<CatalogName> storeCatalogNames()
+    {
+        return ImmutableSet.copyOf(storeCatalogs);
+    }
+
+    /**
+     * Installs a catalog definition that an external writer published, without writing anything
+     * back to the catalog store. A definition that is already the active one is not reinstalled.
+     * An older version of the same catalog keeps its handle and connector, so queries and
+     * transactions that already use it continue to work until the usual pruning removes it.
+     *
+     * @return true if the local state changed
+     * @throws RuntimeException if the connector cannot be created; the previous local state of the
+     *         catalog is then left untouched
+     */
+    public boolean applyPublishedCatalog(CatalogProperties catalogProperties)
+    {
+        requireNonNull(catalogProperties, "catalogProperties is null");
+
+        synchronized (catalogsUpdateLock) {
+            if (state == State.STOPPED) {
+                // Shutting down: installing a connector now would only have to be shut down again
+                return false;
+            }
+
+            CatalogHandle catalogHandle = createRootCatalogHandle(catalogProperties.name(), catalogProperties.version());
+            Catalog activeCatalog = activeCatalogs.get(catalogProperties.name());
+            if (activeCatalog != null && activeCatalog.getCatalogHandle().equals(catalogHandle) && !activeCatalog.isFailed()) {
+                storeCatalogs.add(catalogProperties.name());
+                return false;
+            }
+
+            RegisteredCatalog registeredCatalog = allCatalogs.get(catalogHandle);
+            if (registeredCatalog == null) {
+                // Created before it is registered, so that a connector that fails to start leaves no trace
+                registeredCatalog = new RegisteredCatalog(new RegistrationToken(), catalogFactory.createCatalog(catalogProperties));
+                allCatalogs.put(catalogHandle, registeredCatalog);
+            }
+            activeCatalogs.put(catalogProperties.name(), registeredCatalog.catalog().getCatalog());
+            storeCatalogs.add(catalogProperties.name());
+
+            log.debug("Applied published catalog: %s", catalogHandle);
+            return true;
+        }
+    }
+
+    /**
+     * Removes the name of a catalog that an external writer no longer publishes, without writing
+     * anything back to the catalog store. Like {@link #dropCatalog}, the connector itself is kept
+     * until nothing uses it anymore.
+     *
+     * @return true if the local state changed
+     */
+    public boolean removePublishedCatalog(CatalogName catalogName)
+    {
+        requireNonNull(catalogName, "catalogName is null");
+
+        synchronized (catalogsUpdateLock) {
+            if (state == State.STOPPED) {
+                return false;
+            }
+
+            boolean removed = activeCatalogs.remove(catalogName) != null;
+            storeCatalogs.remove(catalogName);
+            if (removed) {
+                cacheManagerRegistry.drop(catalogName);
+                log.debug("Removed published catalog: %s", catalogName);
+            }
+            return removed;
         }
     }
 
@@ -282,6 +378,7 @@ public class CoordinatorDynamicCatalogManager
             CatalogConnector catalog = registeredCatalog.catalog();
             catalogStore.addOrReplaceCatalog(catalogProperties);
             activeCatalogs.put(catalogName, catalog.getCatalog());
+            storeCatalogs.add(catalogName);
 
             log.debug("Added catalog: %s", catalog.getCatalogHandle());
         }
@@ -315,6 +412,7 @@ public class CoordinatorDynamicCatalogManager
 
             catalogStore.removeCatalog(catalogName);
             removed = activeCatalogs.remove(catalogName) != null;
+            storeCatalogs.remove(catalogName);
             if (removed) {
                 cacheManagerRegistry.drop(catalogName);
             }
