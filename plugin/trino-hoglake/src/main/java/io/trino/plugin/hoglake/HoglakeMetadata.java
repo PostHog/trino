@@ -57,6 +57,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Comparator.comparing;
@@ -78,6 +79,7 @@ public class HoglakeMetadata
         implements ConnectorMetadata
 {
     private final HoglakeClient client;
+    private final Map<SchemaTableName, HoglakeDtos.ReplacementTarget> plannedTargets = new ConcurrentHashMap<>();
     private volatile Optional<String> creationOperation = Optional.empty();
 
     public HoglakeMetadata(HoglakeClient client)
@@ -120,7 +122,9 @@ public class HoglakeMetadata
         // table AT that snapshot (not at whatever head is by the time the
         // second request lands) so the handle is consistent-at-N.
         long snapshot = client.getCatalog().headSnapshotId();
-        return client.getTable(tableName.getSchemaName(), tableName.getTableName(), snapshot)
+        Optional<HoglakeDtos.Table> plannedTable = client.getTable(tableName.getSchemaName(), tableName.getTableName(), snapshot);
+        plannedTargets.putIfAbsent(tableName, new HoglakeDtos.ReplacementTarget(plannedTable.map(HoglakeDtos.Table::tableUuid).orElse(null), snapshot));
+        return plannedTable
                 .map(table -> (ConnectorTableHandle) new HoglakeTableHandle(
                         tableName.getSchemaName(),
                         tableName.getTableName(),
@@ -235,18 +239,15 @@ public class HoglakeMetadata
     @Override
     public void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, SaveMode saveMode)
     {
-        if (saveMode == SaveMode.REPLACE) {
-            throw new TrinoException(NOT_SUPPORTED, "Replacing Hoglake tables is not supported");
-        }
         SchemaTableName name = tableMetadata.getTable();
-        if (client.getTable(name.getSchemaName(), name.getTableName()).isPresent()) {
+        if (saveMode != SaveMode.REPLACE && client.getTable(name.getSchemaName(), name.getTableName()).isPresent()) {
             if (saveMode == SaveMode.IGNORE) {
                 return;
             }
             throw new TrinoException(StandardErrorCode.TABLE_ALREADY_EXISTS, "Table already exists: " + name);
         }
         try {
-            ConnectorOutputTableHandle handle = beginCreateTable(session, tableMetadata, Optional.empty(), RetryMode.NO_RETRIES, false);
+            ConnectorOutputTableHandle handle = beginCreateTable(session, tableMetadata, Optional.empty(), RetryMode.NO_RETRIES, saveMode == SaveMode.REPLACE);
             finishCreateTable(session, handle, List.of(), List.of());
         }
         catch (TrinoException e) {
@@ -277,18 +278,27 @@ public class HoglakeMetadata
     public ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata metadata, Optional<ConnectorTableLayout> layout, RetryMode retryMode, boolean replace)
     {
         checkRetryMode(retryMode);
-        if (replace || layout.isPresent()) {
-            throw new TrinoException(NOT_SUPPORTED, "Replacing tables and custom layouts are not supported");
+        if (layout.isPresent()) {
+            throw new TrinoException(NOT_SUPPORTED, "Custom layouts are not supported");
         }
         List<HoglakeDtos.ColumnDefinition> definitions = columnDefinitions(metadata);
         HoglakeDtos.Catalog catalog = client.getCatalog();
         if (catalog.capabilities() == null || !catalog.capabilities().contains("atomic-table-creation-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support atomic-table-creation-v1");
         }
+        HoglakeDtos.ReplacementTarget replacement = null;
+        if (replace) {
+            if (!catalog.capabilities().contains("atomic-table-replacement-v1")) {
+                throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support atomic-table-replacement-v1");
+            }
+            replacement = plannedTargets.computeIfAbsent(metadata.getTable(), name -> new HoglakeDtos.ReplacementTarget(
+                    client.getTable(name.getSchemaName(), name.getTableName(), catalog.headSnapshotId()).map(HoglakeDtos.Table::tableUuid).orElse(null),
+                    catalog.headSnapshotId()));
+        }
         String operation = UUID.randomUUID().toString();
         // Record before sending: a lost preparation response may still have created the operation.
         creationOperation = Optional.of(operation);
-        HoglakeDtos.TableCreation prepared = client.prepareTableCreation(operation, metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), definitions);
+        HoglakeDtos.TableCreation prepared = client.prepareTableCreation(operation, metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), definitions, replacement);
         if (!"prepared".equals(prepared.state()) || !operation.equals(prepared.operationId()) || prepared.tableUuid() == null || prepared.columns() == null || prepared.writePath() == null) {
             throw new TrinoException(HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake preparation response for operation " + operation);
         }

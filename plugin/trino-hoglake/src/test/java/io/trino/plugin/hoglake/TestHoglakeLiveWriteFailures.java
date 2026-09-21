@@ -169,6 +169,51 @@ final class TestHoglakeLiveWriteFailures
             assertThat(client.getTable("test", "stale").orElseThrow().recordCount()).isZero();
             assertThat(runner.execute("SELECT id FROM append_target").getOnlyValue()).isEqualTo(3L);
 
+            runner.execute("CREATE OR REPLACE TABLE replacement AS SELECT BIGINT '20' AS id");
+            HoglakeDtos.Table oldReplacement = client.getTable("test", "replacement").orElseThrow();
+            long replacementSnapshot = client.getCatalog().headSnapshotId();
+            proxy.failAfter("/commit");
+            runner.execute("CREATE OR REPLACE TABLE replacement AS SELECT id + 1 AS id FROM replacement");
+            assertThat(runner.execute("SELECT id FROM replacement").getOnlyValue()).isEqualTo(21L);
+            assertThat(client.getTable("test", "replacement").orElseThrow().tableUuid()).isNotEqualTo(oldReplacement.tableUuid());
+            assertThat(client.getTable("test", "replacement", replacementSnapshot).orElseThrow().tableUuid()).isEqualTo(oldReplacement.tableUuid());
+            assertThat(client.scan("test", "replacement", replacementSnapshot)).hasSize(1);
+
+            proxy.failAfter("prepare");
+            assertThatThrownBy(() -> runner.execute("CREATE OR REPLACE TABLE replacement AS SELECT BIGINT '22' AS id"))
+                    .hasMessageContaining("Malformed Hoglake write response");
+            assertThat(runner.execute("SELECT id FROM replacement").getOnlyValue()).isEqualTo(21L);
+
+            proxy.beforeCommit(() -> client.truncateTable("test", "replacement", client.getTable("test", "replacement").orElseThrow().tableUuid()));
+            assertThatThrownBy(() -> runner.execute("CREATE OR REPLACE TABLE replacement AS SELECT BIGINT '23' AS id"))
+                    .hasMessageContaining("target_changed");
+            assertThat(client.getTable("test", "replacement").orElseThrow().recordCount()).isZero();
+
+            proxy.failStatus = true;
+            proxy.failAfter("/commit");
+            assertThatThrownBy(() -> runner.execute("CREATE OR REPLACE TABLE replacement AS SELECT BIGINT '24' AS id"))
+                    .hasMessageContaining("outcome is unknown");
+            proxy.failStatus = false;
+            assertThat(runner.execute("SELECT id FROM replacement").getOnlyValue()).isEqualTo(24L);
+            runner.execute("CREATE OR REPLACE TABLE replacement (name varchar)");
+            assertThat(client.getTable("test", "replacement").orElseThrow().columns()).extracting(HoglakeDtos.Column::name).containsExactly("name");
+
+            // Planning must fence name reuse even when it happens before preparation.
+            HoglakeMetadata plannedReplacement = new HoglakeMetadata(client);
+            SchemaTableName plannedName = new SchemaTableName("test", "replacement");
+            plannedReplacement.getTableHandle(session, plannedName, Optional.empty(), Optional.empty());
+            client.dropStagingTable("test", "replacement");
+            client.createTable("test", "replacement", List.of(new HoglakeDtos.ColumnDefinition("winner", "long", Map.of(), true)));
+            HoglakeWriteHandle plannedOutput = (HoglakeWriteHandle) plannedReplacement.beginCreateTable(
+                    session,
+                    new ConnectorTableMetadata(plannedName, List.of(new ColumnMetadata("id", BIGINT))),
+                    Optional.empty(),
+                    RetryMode.NO_RETRIES,
+                    true);
+            assertThatThrownBy(() -> plannedReplacement.finishCreateTable(session, plannedOutput, List.of(), List.of()))
+                    .hasMessageContaining("target_changed");
+            assertThat(client.getTable("test", "replacement").orElseThrow().columns()).extracting(HoglakeDtos.Column::name).containsExactly("winner");
+
             runner.execute("CREATE TABLE lifecycle AS SELECT BIGINT '11' AS id");
             HoglakeDtos.Table original = client.getTable("test", "lifecycle").orElseThrow();
             long originalSnapshot = client.getCatalog().headSnapshotId();
