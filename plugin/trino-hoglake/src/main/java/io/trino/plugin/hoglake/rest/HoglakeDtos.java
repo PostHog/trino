@@ -97,7 +97,8 @@ public final class HoglakeDtos
             @JsonProperty("reason") String reason) {}
 
     public record Namespace(
-            @JsonProperty("name") String name) {}
+            @JsonProperty("name") String name,
+            @JsonProperty("namespace_id") Long namespaceId) {}
 
     public record TableSummary(
             @JsonProperty("name") String name,

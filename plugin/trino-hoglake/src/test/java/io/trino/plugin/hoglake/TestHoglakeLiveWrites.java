@@ -30,7 +30,9 @@ import java.util.Map;
 import java.util.UUID;
 
 import static io.trino.testing.TestingSession.testSessionBuilder;
+import static io.trino.testing.assertions.Assert.assertEventually;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Opt-in integration test. Requires an isolated Hoglake server and S3-compatible test bucket.
@@ -92,6 +94,34 @@ final class TestHoglakeLiveWrites
                     "s3.path-style-access", "true",
                     "s3.aws-access-key", "synthetic-test",
                     "s3.aws-secret-key", "synthetic-test-password"));
+            runner.execute("CREATE SCHEMA evolved");
+            runner.execute("CREATE TABLE evolved.records (id bigint, label varchar, discarded bigint)");
+            runner.execute("INSERT INTO evolved.records VALUES (1, 'old', 100)");
+            long labelId = client.getTable("evolved", "records").orElseThrow().columns().get(1).fieldId();
+            assertEventually(() -> assertThat(client.scan("evolved", "records", client.getCatalog().headSnapshotId()))
+                    .allMatch(file -> file.dataFile().statsState().equals("provided")));
+            runner.execute("ALTER TABLE evolved.records ADD COLUMN extra decimal(12,2)");
+            runner.execute("ALTER TABLE evolved.records RENAME COLUMN label TO renamed");
+            assertThat(client.getTable("evolved", "records").orElseThrow().columns().get(1).fieldId()).isEqualTo(labelId);
+            runner.execute("ALTER TABLE evolved.records DROP COLUMN discarded");
+            runner.execute("INSERT INTO evolved.records VALUES (2, 'new', 12.34)");
+            assertThat(runner.execute("SELECT * FROM evolved.records").getMaterializedRows())
+                    .containsExactlyInAnyOrderElementsOf(runner.execute("VALUES (BIGINT '1', 'old', CAST(NULL AS decimal(12,2))), (BIGINT '2', 'new', DECIMAL '12.34')").getMaterializedRows());
+            assertEventually(() -> assertThat(client.scan("evolved", "records", client.getCatalog().headSnapshotId()))
+                    .allMatch(file -> file.dataFile().statsState().equals("provided")));
+            runner.execute("ALTER TABLE evolved.records ADD COLUMN label varchar");
+            runner.execute("INSERT INTO evolved.records (id, label) VALUES (3, 'reused')");
+            assertThat(runner.execute("SELECT id, renamed, label FROM evolved.records").getMaterializedRows())
+                    .containsExactlyInAnyOrderElementsOf(runner.execute("VALUES (BIGINT '1', 'old', NULL), (BIGINT '2', 'new', NULL), (BIGINT '3', NULL, 'reused')").getMaterializedRows());
+            assertThatThrownBy(() -> runner.execute("ALTER TABLE evolved.records ALTER COLUMN id SET DATA TYPE double"))
+                    .hasMessageContaining("SQL column type changes are not supported");
+            assertThatThrownBy(() -> runner.execute("DROP SCHEMA evolved"))
+                    .hasMessageContaining("non-empty");
+            assertThatThrownBy(() -> runner.execute("DROP SCHEMA evolved CASCADE"))
+                    .hasMessageContaining("CASCADE is not supported");
+            runner.execute("DROP TABLE evolved.records");
+            runner.execute("DROP SCHEMA evolved");
+            assertThat(client.listNamespaces()).noneMatch(namespace -> namespace.name().equals("evolved"));
             runner.execute("CREATE TABLE measurements (id bigint NOT NULL, label varchar, amount decimal(12,2))");
             runner.execute("INSERT INTO measurements VALUES (1, 'hello', 12.34), (2, NULL, -0.01)");
             runner.execute("INSERT INTO measurements (label, id) VALUES ('omitted', 3)");

@@ -138,6 +138,36 @@ public class HoglakeClient
                 .orElseThrow(this::catalogNotFound);
     }
 
+    public void createNamespace(String name)
+    {
+        HoglakeDtos.Namespace result = post(catalogPath("/namespaces"), Map.of("name", name), new TypeReference<HoglakeDtos.Namespace>() {});
+        if (!name.equals(result.name()) || result.namespaceId() == null) {
+            throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake namespace response; outcome may be unknown");
+        }
+    }
+
+    public HoglakeDtos.Namespace getNamespace(String name)
+    {
+        return get(namespacePath(name, ""), new TypeReference<HoglakeDtos.Namespace>() {})
+                .orElseThrow(() -> new SchemaNotFoundException(name));
+    }
+
+    public void dropNamespace(String name, long expectedNamespaceId)
+    {
+        validateLifecycleResult(write("DELETE", namespacePath(name, "?expected_namespace_id=" + expectedNamespaceId), Map.of(), new TypeReference<HoglakeDtos.CommitResult>() {}));
+    }
+
+    public void alterColumns(String namespace, String table, String expectedTableUuid, long readSnapshot, Map<String, Object> operation)
+    {
+        HoglakeDtos.Table result = post(
+                tablePath(namespace, table, "/alter?expected_table_uuid=" + encode(expectedTableUuid) + "&read_snapshot=" + readSnapshot),
+                Map.of("ops", List.of(operation)),
+                new TypeReference<HoglakeDtos.Table>() {});
+        if (!expectedTableUuid.equals(result.tableUuid())) {
+            throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake alteration response; outcome may be unknown");
+        }
+    }
+
     public List<HoglakeDtos.TableSummary> listTables(String namespace)
     {
         return get(namespacePath(namespace, "/tables"), new TypeReference<List<HoglakeDtos.TableSummary>>() {})
