@@ -90,11 +90,33 @@ final class TestHoglakeLiveWriteFailures
             assertThat(runner.execute("SELECT id FROM uncertain_commit").getOnlyValue()).isEqualTo(2L);
             assertThat(client.getTableCreation(proxy.lastOperation()).state()).isEqualTo("committed");
 
-            // INSERT still uses the existing append API: uncertain outcomes preserve data.
+            // Lose the connection only AFTER the real server has committed INSERT.
             runner.execute("CREATE TABLE append_target (id bigint)");
+            proxy.dropAfterCommit = true;
             proxy.failAfter("/commit");
-            assertThatThrownBy(() -> runner.execute("INSERT INTO append_target VALUES 3"));
+            runner.execute("INSERT INTO append_target VALUES 3");
             assertThat(runner.execute("SELECT id FROM append_target").getOnlyValue()).isEqualTo(3L);
+
+            assertThat(client.scan("test", "append_target", client.getCatalog().headSnapshotId())).hasSize(1);
+            assertThat(client.getTable("test", "append_target").orElseThrow().recordCount()).isEqualTo(1);
+
+            runner.execute("CREATE TABLE retry_insert (id bigint)");
+            proxy.failBeforeCommit = true;
+            runner.execute("INSERT INTO retry_insert VALUES 8");
+            assertThat(runner.execute("SELECT id FROM retry_insert").getOnlyValue()).isEqualTo(8L);
+            assertThat(client.scan("test", "retry_insert", client.getCatalog().headSnapshotId())).hasSize(1);
+            assertThat(client.getTable("test", "retry_insert").orElseThrow().recordCount()).isEqualTo(1);
+
+            runner.execute("CREATE TABLE unresolved_insert (id bigint)");
+            proxy.failStatus = true;
+            proxy.dropAfterCommit = true;
+            proxy.failAfter("/commit");
+            assertThatThrownBy(() -> runner.execute("INSERT INTO unresolved_insert VALUES 9"))
+                    .hasMessageContaining("outcome is unknown");
+            proxy.failStatus = false;
+            assertThat(runner.execute("SELECT id FROM unresolved_insert").getOnlyValue()).isEqualTo(9L);
+            assertThat(client.scan("test", "unresolved_insert", client.getCatalog().headSnapshotId())).hasSize(1);
+            assertThat(client.getTable("test", "unresolved_insert").orElseThrow().recordCount()).isEqualTo(1);
 
             // Even when receipt lookup fails, rollback must not delete a committed table.
             proxy.failStatus = true;
@@ -103,7 +125,7 @@ final class TestHoglakeLiveWriteFailures
                     .hasMessageContaining("outcome is unknown");
             proxy.failStatus = false;
             assertThat(runner.execute("SELECT id FROM unresolved").getOnlyValue()).isEqualTo(4L);
-            assertThat(proxy.failures()).isEqualTo(5);
+            assertThat(proxy.failures()).isEqualTo(6);
 
             proxy.beforeCommit(() -> {
                 client.createTable("test", "contended", List.of(new HoglakeDtos.ColumnDefinition("original", "long", Map.of(), true)));
@@ -159,6 +181,8 @@ final class TestHoglakeLiveWriteFailures
         private volatile String failedSuffix;
         private volatile String lastOperation;
         private volatile boolean failStatus;
+        private volatile boolean dropAfterCommit;
+        private volatile boolean failBeforeCommit;
         private volatile Runnable beforeCommit;
 
         public FaultProxy(String upstream)
@@ -219,26 +243,37 @@ final class TestHoglakeLiveWriteFailures
                 String path = exchange.getRequestURI().toString();
                 boolean prepare = exchange.getRequestMethod().equals("PUT");
                 boolean write = prepare || exchange.getRequestMethod().equals("POST");
+                boolean commit = path.endsWith("/commit") || path.endsWith("/commit/prepared");
                 if (prepare && path.contains("/table-creations/")) {
                     lastOperation = path.substring(path.lastIndexOf('/') + 1);
                 }
-                if (write && path.endsWith("/commit") && beforeCommit != null) {
+                if (write && commit && beforeCommit != null) {
                     Runnable action = beforeCommit;
                     beforeCommit = null;
                     action.run();
+                }
+                if (write && commit && failBeforeCommit) {
+                    failBeforeCommit = false;
+                    exchange.getRequestBody().readAllBytes();
+                    exchange.sendResponseHeaders(503, -1);
+                    return;
                 }
                 HttpResponse<byte[]> response = http.send(HttpRequest.newBuilder(URI.create(upstream + path))
                         .header("Content-Type", "application/json")
                         .method(exchange.getRequestMethod(), HttpRequest.BodyPublishers.ofByteArray(exchange.getRequestBody().readAllBytes()))
                         .build(), HttpResponse.BodyHandlers.ofByteArray());
                 byte[] body = response.body();
-                if (write && failedSuffix != null && (path.endsWith(failedSuffix) || (prepare && failedSuffix.equals("prepare")))) {
+                if (write && failedSuffix != null && (path.endsWith(failedSuffix) || (commit && failedSuffix.equals("/commit")) || (prepare && failedSuffix.equals("prepare")))) {
                     assertThat(response.statusCode()).isIn(200, 201);
                     failedSuffix = null;
                     failures.incrementAndGet();
+                    if (dropAfterCommit) {
+                        dropAfterCommit = false;
+                        return;
+                    }
                     body = "response lost after successful mutation".getBytes(UTF_8);
                 }
-                if (failStatus && !write && path.contains("/table-creations/")) {
+                if (failStatus && !write && (path.contains("/table-creations/") || path.contains("/commit/receipts/"))) {
                     body = "receipt response unavailable".getBytes(UTF_8);
                 }
                 exchange.sendResponseHeaders(response.statusCode(), body.length);

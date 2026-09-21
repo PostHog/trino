@@ -209,9 +209,28 @@ Query/task retries, table replacement, comments, custom table properties, `UPDAT
 `DELETE`, and `MERGE` are not supported. Sort specifications on existing tables are
 advisory and are not applied by this writer.
 
-INSERT requests are not retried automatically because the append API has no
-write idempotency key. A timeout or lost response can leave the outcome unknown: check
-the catalog before repeating an insert. Files handed to the coordinator are not
+Servers advertising `idempotent-append-v1` support recovery of one INSERT
+operation. The connector creates one operation ID in `beginInsert` and sends it as
+`idempotency_key` with a deterministic commit payload through `/commit/prepared`,
+which requires the key and prevents older replicas from silently ignoring it.
+After a timeout, connection loss, or invalid success response, it checks `/commit/receipts/{operation}` and
+allows at most two identical commit retries, followed by a final receipt check.
+Recovery uses exponential backoff with jitter (100–200 ms, 200–400 ms, then
+400–800 ms) and honors `Retry-After` on HTTP 429 and 5xx responses. After the
+initial request, all recovery waits and requests share one
+`hoglake.client.request-timeout` budget (two minutes by default). A hint that
+exceeds the remaining budget ends recovery without sending another request.
+A missing receipt does not
+mean the original request stopped. If recovery remains unresolved, the error
+reports an unknown outcome and the operation ID. The receipt remains valid after
+later writes, rename, drop, or snapshot expiry; server receipts do not expire.
+
+Deploy the supporting server before the connector. Servers without the capability
+retain single-attempt INSERT behavior. Receipt lookup requires the same deployment
+access boundary as the catalog API; the standalone server does not implement
+application authentication. Recovery covers publication of one operation only:
+manual SQL reruns create a new operation and can duplicate rows. Query and task
+retries remain unsupported. Files handed to the coordinator are not
 deleted on an ambiguous commit failure, to avoid removing committed data. Failed
 writes can therefore leave unregistered objects for operator cleanup.
 

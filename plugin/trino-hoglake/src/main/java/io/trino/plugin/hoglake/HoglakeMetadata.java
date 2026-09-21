@@ -59,6 +59,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static java.util.Comparator.comparing;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -311,7 +312,12 @@ public class HoglakeMetadata
                 throw new TrinoException(StandardErrorCode.CONSTRAINT_VIOLATION, "Missing required column: " + column.name());
             }
         }
-        return new HoglakeWriteHandle(handle.schemaName(), handle.tableName(), handle.tableUuid(), handle.snapshotId(), client.getCatalog().dataPath(), handle.columns(), inputs, Optional.empty());
+        HoglakeDtos.Catalog catalog = client.getCatalog();
+        Optional<String> operation = Optional.empty();
+        if (catalog.capabilities() != null && catalog.capabilities().contains("idempotent-append-v1")) {
+            operation = Optional.of(UUID.randomUUID().toString());
+        }
+        return new HoglakeWriteHandle(handle.schemaName(), handle.tableName(), handle.tableUuid(), handle.snapshotId(), catalog.dataPath(), handle.columns(), inputs, Optional.empty(), operation);
     }
 
     @Override
@@ -366,9 +372,14 @@ public class HoglakeMetadata
 
     private void finishWrite(HoglakeWriteHandle handle, Collection<Slice> fragments)
     {
-        List<HoglakeDtos.FileRegistration> files = decodeFragments(fragments);
+        List<HoglakeDtos.FileRegistration> files = decodeFragments(fragments).stream()
+                .sorted(comparing(HoglakeDtos.FileRegistration::path)
+                        .thenComparingLong(HoglakeDtos.FileRegistration::recordCount)
+                        .thenComparingLong(HoglakeDtos.FileRegistration::fileSizeBytes)
+                        .thenComparingLong(HoglakeDtos.FileRegistration::footerSize))
+                .toList();
         if (!files.isEmpty()) {
-            client.commit(new HoglakeDtos.Commit(handle.snapshot(), List.of(new HoglakeDtos.Append(handle.namespace(), handle.table(), handle.tableUuid(), files))));
+            client.commit(new HoglakeDtos.Commit(handle.snapshot(), List.of(new HoglakeDtos.Append(handle.namespace(), handle.table(), handle.tableUuid(), files)), handle.insertOperation().orElse(null)));
         }
     }
 

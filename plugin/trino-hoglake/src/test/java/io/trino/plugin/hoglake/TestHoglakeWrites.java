@@ -72,6 +72,7 @@ final class TestHoglakeWrites
     private volatile int commitStatus = 200;
     private volatile int commits;
     private volatile boolean atomicCreation = true;
+    private volatile boolean idempotentAppend;
     private volatile boolean corruptCommitResponse;
     private HttpServer server;
     private HoglakeClient client;
@@ -125,7 +126,14 @@ final class TestHoglakeWrites
                 handleCreation(exchange, path.substring(path.indexOf("/table-creations/") + "/table-creations/".length()));
             }
             else if (path.equals("/v1/catalogs/lake")) {
-                respond(exchange, 200, new HoglakeDtos.Catalog("lake", "memory:///warehouse/", snapshot, 1, atomicCreation ? List.of("atomic-table-creation-v1") : List.of()));
+                List<String> capabilities = new ArrayList<>();
+                if (atomicCreation) {
+                    capabilities.add("atomic-table-creation-v1");
+                }
+                if (idempotentAppend) {
+                    capabilities.add("idempotent-append-v1");
+                }
+                respond(exchange, 200, new HoglakeDtos.Catalog("lake", "memory:///warehouse/", snapshot, 1, capabilities));
             }
             else if (path.equals("/v1/catalogs/lake/namespaces")) {
                 respond(exchange, 200, List.of(new HoglakeDtos.Namespace("test")));
@@ -448,6 +456,31 @@ final class TestHoglakeWrites
         }
         finally {
             atomicCreation = true;
+        }
+    }
+
+    @Test
+    void testInsertOperationCapabilityAndEmptyInsert()
+    {
+        runner.execute("CREATE TABLE insert_operations (id bigint)");
+        HoglakeMetadata metadata = new HoglakeMetadata(client);
+        var session = ConnectorTestFixtures.session();
+        var table = metadata.getTableHandle(session, new SchemaTableName("test", "insert_operations"), Optional.empty(), Optional.empty());
+        var columns = List.copyOf(metadata.getColumnHandles(session, table).values());
+        HoglakeWriteHandle legacy = (HoglakeWriteHandle) metadata.beginInsert(session, table, columns, RetryMode.NO_RETRIES);
+        assertThat(legacy.insertOperation()).isEmpty();
+        idempotentAppend = true;
+        try {
+            HoglakeWriteHandle first = (HoglakeWriteHandle) metadata.beginInsert(session, table, columns, RetryMode.NO_RETRIES);
+            HoglakeWriteHandle second = (HoglakeWriteHandle) metadata.beginInsert(session, table, columns, RetryMode.NO_RETRIES);
+            assertThat(first.insertOperation()).isPresent().isNotEqualTo(second.insertOperation());
+            assertThat(first.creationOperation()).isEmpty();
+            int before = commits;
+            metadata.finishInsert(session, first, List.of(), List.of(), List.of());
+            assertThat(commits).isEqualTo(before);
+        }
+        finally {
+            idempotentAppend = false;
         }
     }
 

@@ -30,10 +30,17 @@ import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeoutException;
 
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_NOT_FOUND;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_UNAVAILABLE;
@@ -41,7 +48,9 @@ import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_SNAPSHOT_EXPIRED;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
 /**
  * Minimal REST client for the hoglake control plane (/v1). Metadata
@@ -215,7 +224,100 @@ public class HoglakeClient
 
     public void commit(HoglakeDtos.Commit request)
     {
-        HoglakeDtos.CommitResult result = post(catalogPath("/commit"), request, new TypeReference<HoglakeDtos.CommitResult>() {});
+        try {
+            commitOnce(request, requestTimeout);
+            return;
+        }
+        catch (TrinoException failure) {
+            if (request.operationId() == null || isDefiniteCommitRejection(failure)) {
+                throw failure;
+            }
+            // Absence does not fence the original request. Every retry uses the
+            // same operation and payload, so the server serializes publication.
+            // Recovery gets one request-timeout budget, including waits and IO.
+            long recoveryStarted = System.nanoTime();
+            RuntimeException lastFailure = failure;
+            for (int attempt = 0; attempt < 3; attempt++) {
+                if (Thread.currentThread().isInterrupted()) {
+                    break;
+                }
+                try {
+                    long backoffMillis = 100L << attempt;
+                    Duration delay = Duration.ofMillis(backoffMillis + ThreadLocalRandom.current().nextLong(backoffMillis));
+                    if (lastFailure instanceof RetryAfterException retryAfter && retryAfter.delay.compareTo(delay) > 0) {
+                        delay = retryAfter.delay;
+                    }
+                    if (delay.compareTo(remainingRecoveryTime(recoveryStarted)) >= 0) {
+                        break;
+                    }
+                    Thread.sleep(delay);
+                    if (commitReceipt(request.operationId(), remainingRecoveryTime(recoveryStarted)).isPresent()) {
+                        return;
+                    }
+                    if (attempt < 2) {
+                        commitOnce(request, remainingRecoveryTime(recoveryStarted));
+                        return;
+                    }
+                }
+                catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    failure.addSuppressed(interrupted);
+                    break;
+                }
+                catch (RuntimeException recoveryFailure) {
+                    failure.addSuppressed(recoveryFailure);
+                    lastFailure = recoveryFailure;
+                }
+            }
+            throw new TrinoException(
+                    HOGLAKE_CATALOG_UNAVAILABLE,
+                    "Hoglake INSERT outcome is unknown; preserve files and inspect operation " + request.operationId(),
+                    failure);
+        }
+    }
+
+    public Optional<HoglakeDtos.CommitReceipt> commitReceipt(String operationId)
+    {
+        return commitReceipt(operationId, requestTimeout);
+    }
+
+    private Optional<HoglakeDtos.CommitReceipt> commitReceipt(String operationId, Duration timeout)
+    {
+        Optional<HoglakeDtos.CommitReceipt> receipt = get(catalogPath("/commit/receipts/" + encode(operationId)), new TypeReference<HoglakeDtos.CommitReceipt>() {}, timeout);
+        receipt.ifPresent(result -> {
+            if (!operationId.equals(result.operationId()) || result.snapshotId() <= 0) {
+                throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake INSERT receipt for operation " + operationId);
+            }
+        });
+        return receipt;
+    }
+
+    private Duration remainingRecoveryTime(long started)
+    {
+        Duration remaining = requestTimeout.minusNanos(System.nanoTime() - started);
+        if (remaining.isNegative() || remaining.isZero()) {
+            throw new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "Hoglake INSERT recovery deadline exceeded");
+        }
+        return remaining;
+    }
+
+    private static boolean isDefiniteCommitRejection(TrinoException failure)
+    {
+        return failure.getErrorCode().equals(StandardErrorCode.TRANSACTION_CONFLICT.toErrorCode()) ||
+                failure.getErrorCode().equals(StandardErrorCode.INVALID_ARGUMENTS.toErrorCode()) ||
+                failure.getErrorCode().equals(HOGLAKE_SNAPSHOT_EXPIRED.toErrorCode()) ||
+                failure.getErrorCode().equals(HOGLAKE_CATALOG_NOT_FOUND.toErrorCode());
+    }
+
+    private void commitOnce(HoglakeDtos.Commit request, Duration timeout)
+    {
+        // The required-key endpoint also protects against an older replica
+        // silently ignoring the ID after capability negotiation.
+        String path = "/commit";
+        if (request.operationId() != null) {
+            path = "/commit/prepared";
+        }
+        HoglakeDtos.CommitResult result = write("POST", catalogPath(path), request, new TypeReference<HoglakeDtos.CommitResult>() {}, timeout);
         if (result.snapshotId() <= 0) {
             throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Hoglake commit response is missing a valid snapshot; commit outcome may be unknown");
         }
@@ -228,17 +330,22 @@ public class HoglakeClient
 
     private <T> T write(String method, String path, Object body, TypeReference<T> type)
     {
+        return write(method, path, body, type, requestTimeout);
+    }
+
+    private <T> T write(String method, String path, Object body, TypeReference<T> type, Duration timeout)
+    {
         URI uri = URI.create(baseUri + path);
         try {
             HttpRequest request = HttpRequest.newBuilder(uri)
-                    .timeout(requestTimeout)
+                    .timeout(timeout)
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
                     .method(method, HttpRequest.BodyPublishers.ofByteArray(mapper.writeValueAsBytes(body)))
                     .build();
-            // Send once at the transport layer. Creation recovery uses its operation ID;
-            // the append API has no idempotency key.
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            // Send once at the transport layer. Recovery belongs to the caller
+            // and requires a durable operation ID.
+            HttpResponse<String> response = send(request);
             int status = response.statusCode();
             if (status == 409) {
                 throw new TrinoException(StandardErrorCode.TRANSACTION_CONFLICT, "Hoglake write conflict: " + response.body());
@@ -255,8 +362,8 @@ public class HoglakeClient
             if (status == 400 || status == 422) {
                 throw new TrinoException(StandardErrorCode.INVALID_ARGUMENTS, "Hoglake rejected write: " + response.body());
             }
-            if (status >= 500) {
-                throw new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "Hoglake write failed with HTTP " + status + "; commit outcome may be unknown");
+            if (status == 429 || status >= 500) {
+                throw new RetryAfterException("Hoglake write failed with HTTP " + status + "; commit outcome may be unknown", response);
             }
             if (status != 200 && status != 201) {
                 throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Unexpected Hoglake write status: " + status);
@@ -297,15 +404,20 @@ public class HoglakeClient
      */
     private <T> Optional<T> get(String path, TypeReference<T> type)
     {
+        return get(path, type, requestTimeout);
+    }
+
+    private <T> Optional<T> get(String path, TypeReference<T> type, Duration timeout)
+    {
         URI uri = URI.create(baseUri + path);
         HttpRequest request = HttpRequest.newBuilder(uri)
-                .timeout(requestTimeout)
+                .timeout(timeout)
                 .header("Accept", "application/json")
                 .GET()
                 .build();
         HttpResponse<String> response;
         try {
-            response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            response = send(request);
         }
         catch (IOException e) {
             // Connection refused, DNS, timeouts: the control plane (or the
@@ -331,10 +443,9 @@ public class HoglakeClient
                     "hoglake snapshot expired during query (history below the expiry floor): GET "
                             + uri + " -> HTTP 410: " + response.body());
         }
-        if (status >= 500) {
-            throw new TrinoException(
-                    HOGLAKE_CATALOG_UNAVAILABLE,
-                    "hoglake catalog service error: GET " + uri + " -> HTTP " + status + ": " + response.body());
+        if (status == 429 || status >= 500) {
+            throw new RetryAfterException(
+                    "hoglake catalog service error: GET " + uri + " -> HTTP " + status + ": " + response.body(), response);
         }
         if (status != 200) {
             throw new TrinoException(
@@ -342,13 +453,70 @@ public class HoglakeClient
                     "hoglake request failed: GET " + uri + " -> HTTP " + status + ": " + response.body());
         }
         try {
-            return Optional.of(mapper.readValue(response.body(), type));
+            T result = mapper.readValue(response.body(), type);
+            if (result == null) {
+                throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Null Hoglake response from GET " + uri);
+            }
+            return Optional.of(result);
         }
         catch (IOException e) {
             throw new TrinoException(
                     HOGLAKE_INVALID_RESPONSE,
                     "Malformed hoglake response from GET " + uri,
                     e);
+        }
+    }
+
+    private HttpResponse<String> send(HttpRequest request)
+            throws IOException, InterruptedException
+    {
+        // HttpRequest.timeout bounds receiving headers, not consuming the body.
+        // Bound the whole response so a stalled body cannot overrun recovery.
+        var response = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
+        try {
+            return response.get(request.timeout().orElseThrow().toNanos(), NANOSECONDS);
+        }
+        catch (TimeoutException e) {
+            throw new HttpTimeoutException("Hoglake response timed out");
+        }
+        catch (ExecutionException e) {
+            throw new IOException("Hoglake request failed", e.getCause());
+        }
+        finally {
+            response.cancel(true);
+        }
+    }
+
+    private static class RetryAfterException
+            extends TrinoException
+    {
+        private final Duration delay;
+
+        public RetryAfterException(String message, HttpResponse<?> response)
+        {
+            super(HOGLAKE_CATALOG_UNAVAILABLE, message);
+            delay = response.headers().firstValue("Retry-After")
+                    .map(RetryAfterException::parseDelay)
+                    .orElse(Duration.ZERO);
+        }
+
+        private static Duration parseDelay(String value)
+        {
+            try {
+                return Duration.ofSeconds(Math.max(0, Long.parseLong(value.trim())));
+            }
+            catch (NumberFormatException ignored) {
+                try {
+                    Duration delay = Duration.between(Instant.now(), ZonedDateTime.parse(value.trim(), RFC_1123_DATE_TIME).toInstant());
+                    if (!delay.isNegative()) {
+                        return delay;
+                    }
+                }
+                catch (DateTimeParseException ignoredDate) {
+                    // Invalid hints fall back to the normal recovery backoff.
+                }
+                return Duration.ZERO;
+            }
         }
     }
 
