@@ -15,6 +15,7 @@ package io.trino.plugin.hoglake.rest;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.trino.spi.StandardErrorCode;
 import io.trino.spi.TrinoException;
@@ -429,6 +430,9 @@ public class HoglakeClient
             HttpResponse<String> response = send(request);
             int status = response.statusCode();
             if (status == 409) {
+                if (method.equals("POST") && path.equals(catalogPath("/namespaces")) && isAlreadyExists(response.body())) {
+                    throw new TrinoException(StandardErrorCode.ALREADY_EXISTS, "Hoglake namespace already exists");
+                }
                 throw new TrinoException(StandardErrorCode.TRANSACTION_CONFLICT, "Hoglake write conflict: " + response.body());
             }
             if (status == 404 && ignoreMissing) {
@@ -466,6 +470,18 @@ public class HoglakeClient
         catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new TrinoException(GENERIC_INTERNAL_ERROR, "Hoglake write interrupted; write outcome may be unknown", e);
+        }
+    }
+
+    private boolean isAlreadyExists(String body)
+    {
+        try {
+            JsonNode error = mapper.readTree(body);
+            return error != null && "already_exists".equals(error.path("error").asText());
+        }
+        catch (IOException ignored) {
+            // An unrecognized conflict must not make IF NOT EXISTS report success.
+            return false;
         }
     }
 

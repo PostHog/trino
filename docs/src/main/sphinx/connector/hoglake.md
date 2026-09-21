@@ -318,7 +318,7 @@ Column positions, defaults, comments, properties, and nested-field changes are
 unsupported. Rename preserves the field ID. Drop retires the field ID; a later
 column with the same name receives a new ID. Existing Parquet files remain
 readable by field ID, with nulls for columns absent from the file. ADD and RENAME
-are refused while live files lack field IDs or await hydration; hydrate, rewrite,
+are refused while live files lack field IDs or have pending or failed hydration; hydrate, rewrite,
 or retire those files first. This prevents name binding from exposing a dropped
 column's old values as a newly added column. The last column and partition/sort
 source columns cannot be dropped.

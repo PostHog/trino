@@ -76,6 +76,8 @@ final class TestHoglakeWrites
     private volatile boolean idempotentAppend;
     private volatile boolean corruptCommitResponse;
     private volatile boolean lifecycleSupport = true;
+    private volatile boolean schemaCreationRace;
+    private int namespaceCreates;
     private volatile boolean replacementSupport = true;
     private final Map<String, HoglakeDtos.ReplacementTarget> replacementTargets = new ConcurrentHashMap<>();
     private volatile boolean corruptLifecycleResponse;
@@ -142,13 +144,22 @@ final class TestHoglakeWrites
                 if (lifecycleSupport) {
                     capabilities.add("guarded-table-lifecycle-v1");
                 }
+                if (schemaCreationRace) {
+                    capabilities.add("guarded-schema-evolution-v1");
+                }
                 if (idempotentAppend) {
                     capabilities.add("idempotent-append-v1");
                 }
                 respond(exchange, 200, new HoglakeDtos.Catalog("lake", "memory:///warehouse/", snapshot, 1, capabilities));
             }
             else if (path.equals("/v1/catalogs/lake/namespaces")) {
-                respond(exchange, 200, List.of(new HoglakeDtos.Namespace("test", 1L)));
+                if (exchange.getRequestMethod().equals("POST")) {
+                    namespaceCreates++;
+                    respond(exchange, 409, Map.of("error", "already_exists", "detail", "namespace already exists"));
+                }
+                else {
+                    respond(exchange, 200, List.of(new HoglakeDtos.Namespace("test", 1L)));
+                }
             }
             else if (path.equals(prefix) && exchange.getRequestMethod().equals("POST")) {
                 HoglakeDtos.CreateTable request = mapper.readValue(exchange.getRequestBody(), HoglakeDtos.CreateTable.class);
@@ -333,6 +344,23 @@ final class TestHoglakeWrites
         }
         if (server != null) {
             server.stop(0);
+        }
+    }
+
+    @Test
+    void testConcurrentSchemaCreation()
+    {
+        schemaCreationRace = true;
+        int before = namespaceCreates;
+        try {
+            // Listing reports absence, but another creator wins before POST.
+            runner.execute("CREATE SCHEMA IF NOT EXISTS raced_schema");
+            assertThatThrownBy(() -> runner.execute("CREATE SCHEMA raced_schema"))
+                    .hasMessageContaining("already exists");
+            assertThat(namespaceCreates).isEqualTo(before + 2);
+        }
+        finally {
+            schemaCreationRace = false;
         }
     }
 
