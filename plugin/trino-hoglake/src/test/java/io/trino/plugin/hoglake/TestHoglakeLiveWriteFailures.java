@@ -168,6 +168,29 @@ final class TestHoglakeLiveWriteFailures
             assertThatThrownBy(() -> metadata.finishInsert(session, handle, List.of(), fragments, List.of())).hasMessageContaining("conflict");
             assertThat(client.getTable("test", "stale").orElseThrow().recordCount()).isZero();
             assertThat(runner.execute("SELECT id FROM append_target").getOnlyValue()).isEqualTo(3L);
+
+            runner.execute("CREATE TABLE lifecycle AS SELECT BIGINT '11' AS id");
+            HoglakeDtos.Table original = client.getTable("test", "lifecycle").orElseThrow();
+            long originalSnapshot = client.getCatalog().headSnapshotId();
+            var lifecycleHandle = metadata.getTableHandle(session, new SchemaTableName("test", "lifecycle"), Optional.empty(), Optional.empty());
+            runner.execute("ALTER TABLE lifecycle RENAME TO lifecycle_renamed");
+            assertThat(client.getTable("test", "lifecycle_renamed").orElseThrow().tableUuid()).isEqualTo(original.tableUuid());
+            runner.execute("CREATE TABLE lifecycle AS SELECT BIGINT '99' AS id");
+            assertThatThrownBy(() -> metadata.dropTable(session, lifecycleHandle)).hasMessageContaining("conflict");
+            assertThatThrownBy(() -> metadata.truncateTable(session, lifecycleHandle)).hasMessageContaining("conflict");
+            assertThatThrownBy(() -> metadata.renameTable(session, lifecycleHandle, new SchemaTableName("test", "wrong"))).hasMessageContaining("conflict");
+            int failuresBeforeTruncate = proxy.failures();
+            proxy.failAfter("/truncate");
+            assertThatThrownBy(() -> runner.execute("TRUNCATE TABLE lifecycle_renamed")).hasMessageContaining("Malformed Hoglake write response");
+            assertThat(proxy.failures()).isEqualTo(failuresBeforeTruncate + 1);
+            assertThat(runner.execute("SELECT count(*) FROM lifecycle_renamed").getOnlyValue()).isEqualTo(0L);
+            assertThat(client.getTable("test", "lifecycle_renamed").orElseThrow().tableUuid()).isEqualTo(original.tableUuid());
+            assertThat(client.scan("test", "lifecycle", originalSnapshot)).hasSize(1);
+            runner.execute("INSERT INTO lifecycle_renamed VALUES 12");
+            assertThat(runner.execute("SELECT id FROM lifecycle_renamed").getOnlyValue()).isEqualTo(12L);
+            runner.execute("DROP TABLE lifecycle_renamed");
+            assertThat(client.scan("test", "lifecycle", originalSnapshot)).hasSize(1);
+            assertThat(runner.execute("SELECT id FROM lifecycle").getOnlyValue()).isEqualTo(99L);
         }
     }
 
@@ -263,7 +286,7 @@ final class TestHoglakeLiveWriteFailures
                         .method(exchange.getRequestMethod(), HttpRequest.BodyPublishers.ofByteArray(exchange.getRequestBody().readAllBytes()))
                         .build(), HttpResponse.BodyHandlers.ofByteArray());
                 byte[] body = response.body();
-                if (write && failedSuffix != null && (path.endsWith(failedSuffix) || (commit && failedSuffix.equals("/commit")) || (prepare && failedSuffix.equals("prepare")))) {
+                if (write && failedSuffix != null && (exchange.getRequestURI().getPath().endsWith(failedSuffix) || (commit && failedSuffix.equals("/commit")) || (prepare && failedSuffix.equals("prepare")))) {
                     assertThat(response.statusCode()).isIn(200, 201);
                     failedSuffix = null;
                     failures.incrementAndGet();
