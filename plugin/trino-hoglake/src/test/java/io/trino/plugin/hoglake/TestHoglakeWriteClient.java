@@ -25,6 +25,7 @@ import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -276,7 +277,7 @@ final class TestHoglakeWriteClient
                         String hint = "1";
                         retryAt.set(now.plusSeconds(1));
                         if (scenario.equals("write-date")) {
-                            Instant date = now.plusSeconds(2).truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+                            Instant date = now.plusSeconds(2).truncatedTo(ChronoUnit.SECONDS);
                             retryAt.set(date);
                             hint = RFC_1123_DATE_TIME.format(date.atZone(ZoneOffset.UTC));
                         }
