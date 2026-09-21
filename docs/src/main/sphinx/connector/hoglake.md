@@ -215,7 +215,12 @@ operation. The connector creates one operation ID in `beginInsert` and sends it 
 which requires the key and prevents older replicas from silently ignoring it.
 After a timeout, connection loss, or invalid success response, it checks `/commit/receipts/{operation}` and
 allows at most two identical commit retries, followed by a final receipt check.
-Each request uses `hoglake.client.request-timeout`. A missing receipt does not
+Recovery uses exponential backoff with jitter (100–200 ms, 200–400 ms, then
+400–800 ms) and honors `Retry-After` on HTTP 429 and 5xx responses. After the
+initial request, all recovery waits and requests share one
+`hoglake.client.request-timeout` budget (two minutes by default). A hint that
+exceeds the remaining budget ends recovery without sending another request.
+A missing receipt does not
 mean the original request stopped. If recovery remains unresolved, the error
 reports an unknown outcome and the operation ID. The receipt remains valid after
 later writes, rename, drop, or snapshot expiry; server receipts do not expire.

@@ -22,7 +22,13 @@ import io.trino.spi.TrinoException;
 import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -32,7 +38,10 @@ import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_SNAPSHOT_EXPIRED;
 import static io.trino.spi.StandardErrorCode.INVALID_ARGUMENTS;
 import static io.trino.spi.StandardErrorCode.TRANSACTION_CONFLICT;
+import static io.trino.testing.assertions.Assert.assertEventually;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -43,6 +52,7 @@ final class TestHoglakeWriteClient
             "values",
             "12345678-1234-5678-90ab-1234567890ab",
             List.of(new HoglakeDtos.FileRegistration("s3://test-bucket/data/file.parquet", 3, 1000, 200)))));
+    private static final HoglakeDtos.Commit IDENTIFIED_COMMIT = new HoglakeDtos.Commit(COMMIT.readSnapshot(), COMMIT.appends(), "12345678-1234-5678-90ab-1234567890ac");
 
     @Test
     void testCommitWireContract()
@@ -209,6 +219,220 @@ final class TestHoglakeWriteClient
             finally {
                 server.stop(0);
             }
+        }
+    }
+
+    @Test
+    void testRecoveryBackoffWithInvalidRetryAfter()
+            throws Exception
+    {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        List<Long> requests = new CopyOnWriteArrayList<>();
+        server.createContext("/", exchange -> {
+            try (exchange) {
+                requests.add(System.nanoTime());
+                exchange.getRequestBody().readAllBytes();
+                exchange.getResponseHeaders().add("Retry-After", "invalid");
+                int status = 404;
+                if (exchange.getRequestMethod().equals("POST")) {
+                    status = 503;
+                }
+                exchange.sendResponseHeaders(status, -1);
+            }
+        });
+        server.start();
+        try (HoglakeClient client = new HoglakeClient("http://127.0.0.1:" + server.getAddress().getPort(), "lake")) {
+            assertThatThrownBy(() -> client.commit(IDENTIFIED_COMMIT)).hasMessageContaining("outcome is unknown");
+            assertThat(requests).hasSize(6);
+            // Each receipt lookup follows a failed POST with exponential backoff.
+            for (int attempt = 0; attempt < 3; attempt++) {
+                assertThat(Duration.ofNanos(requests.get(2 * attempt + 1) - requests.get(2 * attempt)))
+                        .isGreaterThanOrEqualTo(Duration.ofMillis(100L << attempt));
+            }
+        }
+        finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void testRecoveryHonorsRetryAfter()
+            throws Exception
+    {
+        for (String scenario : List.of("write-seconds", "write-date", "receipt-seconds")) {
+            HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            AtomicInteger requests = new AtomicInteger();
+            AtomicReference<Instant> retryAt = new AtomicReference<>();
+            AtomicReference<Instant> recoveredAt = new AtomicReference<>();
+            server.createContext("/", exchange -> {
+                try (exchange) {
+                    int attempt = requests.incrementAndGet();
+                    exchange.getRequestBody().readAllBytes();
+                    if (scenario.equals("receipt-seconds") && attempt == 1) {
+                        exchange.sendResponseHeaders(503, -1);
+                    }
+                    else if (retryAt.get() == null) {
+                        Instant now = Instant.now();
+                        String hint = "1";
+                        retryAt.set(now.plusSeconds(1));
+                        if (scenario.equals("write-date")) {
+                            Instant date = now.plusSeconds(2).truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+                            retryAt.set(date);
+                            hint = RFC_1123_DATE_TIME.format(date.atZone(ZoneOffset.UTC));
+                        }
+                        exchange.getResponseHeaders().add("Retry-After", hint);
+                        exchange.sendResponseHeaders(429, -1);
+                    }
+                    else {
+                        recoveredAt.set(Instant.now());
+                        byte[] response = "{\"operation_id\":\"%s\",\"snapshot_id\":8}".formatted(IDENTIFIED_COMMIT.operationId()).getBytes(UTF_8);
+                        exchange.sendResponseHeaders(200, response.length);
+                        exchange.getResponseBody().write(response);
+                    }
+                }
+            });
+            server.start();
+            try (HoglakeClient client = new HoglakeClient("http://127.0.0.1:" + server.getAddress().getPort(), "lake")) {
+                client.commit(IDENTIFIED_COMMIT);
+                assertThat(recoveredAt.get()).isAfterOrEqualTo(retryAt.get());
+                int expectedRequests = 2;
+                if (scenario.equals("receipt-seconds")) {
+                    expectedRequests = 3;
+                }
+                assertThat(requests.get()).isEqualTo(expectedRequests);
+            }
+            finally {
+                server.stop(0);
+            }
+        }
+    }
+
+    @Test
+    void testRetryAfterBeyondRecoveryBudget()
+            throws Exception
+    {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        AtomicInteger requests = new AtomicInteger();
+        server.createContext("/", exchange -> {
+            try (exchange) {
+                requests.incrementAndGet();
+                exchange.getRequestBody().readAllBytes();
+                exchange.getResponseHeaders().add("Retry-After", "60");
+                exchange.sendResponseHeaders(503, -1);
+            }
+        });
+        server.start();
+        try (HoglakeClient client = new HoglakeClient("http://127.0.0.1:" + server.getAddress().getPort(), "lake", Duration.ofSeconds(2))) {
+            assertThatThrownBy(() -> client.commit(IDENTIFIED_COMMIT))
+                    .hasMessageContaining("outcome is unknown")
+                    .hasMessageContaining(IDENTIFIED_COMMIT.operationId());
+            assertThat(requests.get()).isEqualTo(1);
+        }
+        finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void testRecoveryRequestsShareDeadline()
+            throws Exception
+    {
+        assertRecoveryRequestsShareDeadline(false);
+        assertRecoveryRequestsShareDeadline(true);
+    }
+
+    private static void assertRecoveryRequestsShareDeadline(boolean stallBody)
+            throws Exception
+    {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        AtomicInteger requests = new AtomicInteger();
+        CountDownLatch releaseRequest = new CountDownLatch(1);
+        server.createContext("/", exchange -> {
+            try (exchange) {
+                int attempt = requests.incrementAndGet();
+                exchange.getRequestBody().readAllBytes();
+                if (attempt == 1) {
+                    exchange.sendResponseHeaders(503, -1);
+                }
+                else if (attempt == 2) {
+                    Thread.sleep(Duration.ofSeconds(1));
+                    exchange.sendResponseHeaders(404, -1);
+                }
+                else {
+                    if (stallBody) {
+                        exchange.sendResponseHeaders(200, 100);
+                        exchange.getResponseBody().write('{');
+                        exchange.getResponseBody().flush();
+                    }
+                    releaseRequest.await(10, SECONDS);
+                }
+            }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+        });
+        server.start();
+        try (HoglakeClient client = new HoglakeClient("http://127.0.0.1:" + server.getAddress().getPort(), "lake", Duration.ofSeconds(2))) {
+            long started = System.nanoTime();
+            assertThatThrownBy(() -> client.commit(IDENTIFIED_COMMIT))
+                    .hasMessageContaining("outcome is unknown")
+                    .hasMessageContaining(IDENTIFIED_COMMIT.operationId());
+            // The retry has less than one second left, not a fresh two-second timeout.
+            assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofMillis(2750));
+            assertThat(requests.get()).isEqualTo(3);
+        }
+        finally {
+            releaseRequest.countDown();
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void testInterruptedRecoveryPreservesUnknownOutcome()
+            throws Exception
+    {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        AtomicInteger requests = new AtomicInteger();
+        server.createContext("/", exchange -> {
+            try (exchange) {
+                requests.incrementAndGet();
+                exchange.getRequestBody().readAllBytes();
+                exchange.getResponseHeaders().add("Retry-After", "30");
+                exchange.sendResponseHeaders(503, -1);
+            }
+        });
+        server.start();
+        try (HoglakeClient client = new HoglakeClient("http://127.0.0.1:" + server.getAddress().getPort(), "lake")) {
+            AtomicReference<TrinoException> failure = new AtomicReference<>();
+            AtomicBoolean interrupted = new AtomicBoolean();
+            Thread worker = Thread.ofVirtual().start(() -> {
+                try {
+                    client.commit(IDENTIFIED_COMMIT);
+                }
+                catch (TrinoException e) {
+                    failure.set(e);
+                    interrupted.set(Thread.currentThread().isInterrupted());
+                }
+            });
+            try {
+                assertEventually(() -> {
+                    assertThat(requests.get()).isEqualTo(1);
+                    assertThat(worker.getState()).isEqualTo(Thread.State.TIMED_WAITING);
+                });
+                worker.interrupt();
+                assertThat(worker.join(Duration.ofSeconds(5))).isTrue();
+                assertThat(failure.get()).hasMessageContaining("outcome is unknown").hasMessageContaining(IDENTIFIED_COMMIT.operationId());
+                assertThat(interrupted.get()).isTrue();
+                assertThat(requests.get()).isEqualTo(1);
+            }
+            finally {
+                worker.interrupt();
+                worker.join(Duration.ofSeconds(5));
+            }
+        }
+        finally {
+            server.stop(0);
         }
     }
 
