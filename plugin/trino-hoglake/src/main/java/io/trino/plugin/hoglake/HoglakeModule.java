@@ -47,9 +47,9 @@ public class HoglakeModule
 
     @Provides
     @Singleton
-    public static HoglakeMetadata createMetadata(HoglakeClient client)
+    public static HoglakeMetadata createMetadata(HoglakeClient client, TrinoFileSystemFactory fileSystemFactory)
     {
-        return new HoglakeMetadata(client);
+        return new HoglakeMetadata(client, fileSystemFactory);
     }
 
     @Provides

@@ -17,8 +17,12 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
+import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 
+import java.util.List;
+
+import static io.trino.spi.type.BigintType.BIGINT;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -34,6 +38,12 @@ public record HoglakeColumnHandle(
         @JsonProperty("nullable") boolean nullable)
         implements ColumnHandle
 {
+    static final HoglakeColumnHandle ROW_ID = new HoglakeColumnHandle(
+            "$row_id",
+            -1,
+            RowType.anonymous(List.of(BIGINT, BIGINT)),
+            false);
+
     @JsonCreator
     public HoglakeColumnHandle
     {

@@ -388,6 +388,7 @@ import static io.trino.spi.StandardErrorCode.TYPE_MISMATCH;
 import static io.trino.spi.StandardErrorCode.UNSUPPORTED_SUBQUERY;
 import static io.trino.spi.StandardErrorCode.VIEW_IS_RECURSIVE;
 import static io.trino.spi.StandardErrorCode.VIEW_IS_STALE;
+import static io.trino.spi.connector.ConnectorCapabilities.ROW_LEVEL_DELETE_ONLY;
 import static io.trino.spi.connector.MaterializedViewFreshness.Freshness.FRESH;
 import static io.trino.spi.connector.MaterializedViewFreshness.Freshness.FRESH_WITHIN_GRACE_PERIOD;
 import static io.trino.spi.connector.StandardWarningCode.REDUNDANT_ORDER_BY;
@@ -2467,6 +2468,10 @@ class StatementAnalyzer
             boolean addRowIdColumn = updateKind.isPresent();
 
             if (addRowIdColumn) {
+                if (updateKind.orElseThrow() != UpdateKind.DELETE && metadata.getConnectorCapabilities(session, tableHandle.orElseThrow().catalogHandle())
+                        .contains(ROW_LEVEL_DELETE_ONLY)) {
+                    throw semanticException(NOT_SUPPORTED, table, "This connector does not support UPDATE or MERGE");
+                }
                 // Add the row id field
                 ColumnHandle rowIdColumnHandle = metadata.getMergeRowIdColumnHandle(session, tableHandle.get());
                 Type type = metadata.getColumnMetadata(session, tableHandle.get(), rowIdColumnHandle).getType();

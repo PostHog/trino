@@ -157,9 +157,7 @@ the Hoglake scan API exposes statistics state but no per-file column bounds.
 The connector does not support time-travel SQL or nested types.
 Only Hoglake's `puffin-dv` deletion-vector format is read; any other format
 fails the query. Equality deletes and any other row-level delete representation
-are not read. Deletion vectors are applied to reads only: `DELETE`, `UPDATE`, and
-`MERGE` are not supported, so a table's vectors can only come from another
-Hoglake client.
+are not read. SQL `DELETE` writes compatible vectors; `UPDATE` and `MERGE` are not supported.
 
 ## Writing tables
 
@@ -204,9 +202,10 @@ renames or drops. The server retains terminal receipts and expires unpublished
 operations after 24 hours, so longer-running creations must be retried as new queries.
 There is no fallback to the old staging-table protocol on older servers.
 
-Writes are limited to single-statement transactions and unpartitioned tables.
+Writes are limited to single-statement transactions. INSERT and table creation
+require unpartitioned tables; DELETE does not write or change partition values.
 Query/task retries, comments, custom table properties, `UPDATE`,
-`DELETE`, and `MERGE` are not supported. Sort specifications on existing tables are
+and `MERGE` are not supported. Sort specifications on existing tables are
 advisory and are not applied by this writer.
 
 Servers advertising `idempotent-append-v1` support recovery of one INSERT
@@ -341,3 +340,33 @@ files remains subject to the connector's existing type and Parquet reader suppor
 Schema mutations have no durable receipt and are sent once. A lost response may
 leave the outcome unknown; inspect the catalog before issuing another statement.
 INSERT receipt recovery does not make schema mutations safe to replay.
+
+### Row-level DELETE
+
+`DELETE FROM table WHERE predicate` evaluates the predicate in Trino. Selected rows
+carry the immutable catalog data-file ID and original Parquet file position, including
+row-group offsets after pruning. Existing deleted positions are preserved. Workers
+return compressed position sets, which the coordinator unions per file and publishes
+as one atomic snapshot. Counts report newly deleted rows, including zero for repeated
+or no-match deletes. Data files and prior deletion vectors remain available to retained
+snapshots; DELETE does not change the table UUID.
+
+Deploy the Hoglake server with `idempotent-delete-v1` to **all replicas first**.
+The connector requires that capability and uses `/commit/deletes/prepared`, which
+requires a read snapshot, table UUID and operation ID. An older replica cannot silently
+accept this contract. Publication rejects intervening schema/lifecycle changes, removed
+files (including compaction), and newer deletion vectors on a touched file. Concurrent
+INSERTs and deletes of other files may succeed; rows appended after the pinned snapshot
+are not selected. A conflict requires rerunning the SQL statement from a fresh snapshot.
+
+Publication recovery uses the same bounded receipt lookup and identical-request replay
+as INSERT, with a delete-specific server contract. A missing receipt is not proof that
+publication failed. After submission, the connector retains uploaded vectors even if
+recovery or cancellation leaves the outcome unknown; the error reports the operation ID.
+Before submission, an upload failure attempts to remove that statement's uploads and
+leaves the table unchanged. There is no orphan cleanup mechanism in this connector.
+
+DELETE currently limits compressed position sets and aggregate worker fragments to
+64 MiB per statement on the coordinator and per sink on workers. It fails before
+publication if the limit is exceeded. Final vector construction runs on the coordinator;
+query/task retries and multi-statement write transactions remain unsupported.

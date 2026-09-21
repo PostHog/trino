@@ -133,6 +133,14 @@ class TestHoglakePredicatePushdown
     }
 
     @Test
+    void testDeletePositionsAfterRowGroupPruning()
+            throws IOException
+    {
+        assertThat(read(timestampFile(), List.of(HoglakeColumnHandle.ROW_ID), TIMESTAMP, range(TIMESTAMP_MICROS, 10, 21)))
+                .containsExactly(List.of(List.of(0L, 2L)), List.of(List.of(0L, 3L)));
+    }
+
+    @Test
     void testRenamedAndNameFallbackColumns()
             throws IOException
     {

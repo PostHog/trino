@@ -19,6 +19,7 @@ import io.trino.parquet.reader.ParquetReader;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.RowBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.SourcePage;
@@ -29,6 +30,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.OptionalLong;
 
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
@@ -55,9 +57,14 @@ public class HoglakePageSource
      * Either "channel i of the reader page" or "all nulls of this type".
      */
     sealed interface ColumnAdaptation
-            permits SourceColumn, NullColumn {}
+            permits NullColumn,
+                    RowIdColumn,
+                    SourceColumn {}
 
     record SourceColumn(int sourceChannel)
+            implements ColumnAdaptation {}
+
+    record RowIdColumn(long fileId)
             implements ColumnAdaptation {}
 
     record NullColumn(Type type)
@@ -151,6 +158,7 @@ public class HoglakePageSource
             blocks[channel] = switch (columns.get(channel)) {
                 case SourceColumn(int sourceChannel) -> page.getBlock(sourceChannel).getPositions(retained, 0, survivors);
                 case NullColumn _ -> RunLengthEncodedBlock.create(nullBlocks.get(channel), survivors);
+                case RowIdColumn(long fileId) -> rowIds(fileId, page).getPositions(retained, 0, survivors);
             };
         }
         return new Page(survivors, blocks);
@@ -163,9 +171,19 @@ public class HoglakePageSource
             blocks[channel] = switch (columns.get(channel)) {
                 case SourceColumn(int sourceChannel) -> page.getBlock(sourceChannel);
                 case NullColumn _ -> RunLengthEncodedBlock.create(nullBlocks.get(channel), page.getPositionCount());
+                case RowIdColumn(long fileId) -> rowIds(fileId, page);
             };
         }
         return new Page(page.getPositionCount(), blocks);
+    }
+
+    private static Block rowIds(long fileId, SourcePage page)
+    {
+        var id = BIGINT.createFixedSizeBlockBuilder(1);
+        BIGINT.writeLong(id, fileId);
+        return RowBlock.fromNotNullSuppressedFieldBlocks(page.getPositionCount(), Optional.empty(), new Block[] {
+                RunLengthEncodedBlock.create(id.build(), page.getPositionCount()), page.getBlock(page.getChannelCount() - 1),
+        });
     }
 
     @Override

@@ -27,6 +27,7 @@ import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.SourcePage;
 import io.trino.spi.security.ConnectorIdentity;
+import io.trino.spi.type.RowType;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
@@ -241,6 +242,9 @@ public final class ConnectorTestFixtures
         }
         if (type.getJavaType() == boolean.class) {
             return type.getBoolean(block, position);
+        }
+        if (type instanceof RowType) {
+            return type.getObjectValue(block, position);
         }
         throw new IllegalArgumentException("Unsupported test read type: " + type);
     }

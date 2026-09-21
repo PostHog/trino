@@ -11,16 +11,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.trino.spi.connector;
+package io.trino.plugin.hoglake;
 
-public enum ConnectorCapabilities
+import io.trino.spi.connector.ConnectorMergeTableHandle;
+import io.trino.spi.connector.ConnectorTableHandle;
+
+public record HoglakeDeleteHandle(HoglakeTableHandle table, String dataPath, String operationId)
+        implements ConnectorMergeTableHandle
 {
-    /**
-     * Uses the mutation SPI for DELETE only; reject UPDATE and MERGE during analysis.
-     */
-    ROW_LEVEL_DELETE_ONLY,
-    DEFAULT_COLUMN_VALUE,
-    NOT_NULL_COLUMN_CONSTRAINT,
-    MATERIALIZED_VIEW_GRACE_PERIOD,
-    MATERIALIZED_VIEW_WHEN_STALE_BEHAVIOR,
+    @Override
+    public ConnectorTableHandle getTableHandle()
+    {
+        return table;
+    }
 }

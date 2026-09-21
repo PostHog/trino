@@ -234,6 +234,84 @@ final class TestHoglakeLiveWriteFailures
             runner.execute("CREATE OR REPLACE TABLE replacement (name varchar)");
             assertThat(client.getTable("test", "replacement").orElseThrow().columns()).extracting(HoglakeDtos.Column::name).containsExactly("name");
 
+            runner.execute("CREATE TABLE delete_fault (id bigint)");
+            runner.execute("INSERT INTO delete_fault VALUES 1, 2, 3, 4, 5");
+            proxy.dropAfterCommit = true;
+            proxy.failAfter("/commit");
+            assertThat(runner.execute("DELETE FROM delete_fault WHERE id = 1").getUpdateCount()).hasValue(1);
+            assertThat(runner.execute("SELECT count(*) FROM delete_fault").getOnlyValue()).isEqualTo(4L);
+            proxy.beforeCommit(() -> {
+                long head = client.getCatalog().headSnapshotId();
+                var vector = client.scan("test", "delete_fault", head).getFirst().deleteFile();
+                client.commit(new HoglakeDtos.Commit(head, List.of(), List.of(new HoglakeDtos.Deletes(
+                        "test",
+                        "delete_fault",
+                        client.getTable("test", "delete_fault").orElseThrow().tableUuid(),
+                        List.of(new HoglakeDtos.DeleteRegistration(
+                                vector.dataFileId(), vector.path(), vector.deleteCount(), vector.fileSizeBytes())))), UUID.randomUUID().toString()));
+            });
+            assertThatThrownBy(() -> runner.execute("DELETE FROM delete_fault WHERE id = 2")).hasMessageContaining("conflict");
+            assertThat(runner.execute("SELECT count(*) FROM delete_fault").getOnlyValue()).isEqualTo(4L);
+            proxy.failBeforeCommit = true;
+            assertThat(runner.execute("DELETE FROM delete_fault WHERE id = 2").getUpdateCount()).hasValue(1);
+            proxy.failStatus = true;
+            proxy.dropAfterCommit = true;
+            proxy.failAfter("/commit");
+            assertThatThrownBy(() -> runner.execute("DELETE FROM delete_fault WHERE id = 3")).hasMessageContaining("outcome is unknown");
+            proxy.failStatus = false;
+            assertThat(runner.execute("SELECT sum(id) FROM delete_fault").getOnlyValue()).isEqualTo(9L);
+            assertEventually(() -> assertThat(client.scan("test", "delete_fault", client.getCatalog().headSnapshotId()))
+                    .allMatch(entry -> entry.dataFile().statsState().equals("provided")));
+            proxy.beforeCommit(() -> proxy.post(
+                    base + "/namespaces/test/tables/delete_fault/alter",
+                    Map.of("ops", List.of(Map.of("op", "add_column", "column", Map.of("name", "extra", "type", "long", "nullable", true))))));
+            assertThatThrownBy(() -> runner.execute("DELETE FROM delete_fault")).hasMessageContaining("conflict");
+            assertThat(runner.execute("SELECT sum(id) FROM delete_fault").getOnlyValue()).isEqualTo(9L);
+            proxy.beforeCommit(() -> client.truncateTable("test", "delete_fault", client.getTable("test", "delete_fault").orElseThrow().tableUuid()));
+            assertThatThrownBy(() -> runner.execute("DELETE FROM delete_fault")).hasMessageContaining("conflict");
+            runner.execute("INSERT INTO delete_fault (id) VALUES 6");
+            proxy.beforeCommit(() -> {
+                client.dropTable("test", "delete_fault", client.getTable("test", "delete_fault").orElseThrow().tableUuid());
+                client.createTable("test", "delete_fault", List.of(new HoglakeDtos.ColumnDefinition("id", "long", Map.of(), true)));
+            });
+            assertThatThrownBy(() -> runner.execute("DELETE FROM delete_fault")).hasMessageContaining("conflict");
+            assertThat(runner.execute("SELECT count(*) FROM delete_fault").getOnlyValue()).isEqualTo(0L);
+
+            runner.execute("CREATE TABLE append_during_delete AS SELECT * FROM (VALUES BIGINT '10', BIGINT '20') t(id)");
+            proxy.beforeCommit(() -> {
+                long head = client.getCatalog().headSnapshotId();
+                var data = client.scan("test", "append_during_delete", head).getFirst().dataFile();
+                client.commit(new HoglakeDtos.Commit(head, List.of(new HoglakeDtos.Append(
+                        "test",
+                        "append_during_delete",
+                        client.getTable("test", "append_during_delete").orElseThrow().tableUuid(),
+                        List.of(new HoglakeDtos.FileRegistration(
+                                data.path(), data.recordCount(), data.fileSizeBytes(), data.footerSize())))), UUID.randomUUID().toString()));
+            });
+            assertThat(runner.execute("DELETE FROM append_during_delete WHERE id = 10").getUpdateCount()).hasValue(1);
+            assertThat(runner.execute("SELECT sum(id) FROM append_during_delete").getOnlyValue()).isEqualTo(50L);
+            String deleteReplacement = UUID.randomUUID().toString();
+            client.prepareTableCreation(
+                    deleteReplacement,
+                    "test",
+                    "append_during_delete",
+                    List.of(new HoglakeDtos.ColumnDefinition("id", "long", Map.of(), true)),
+                    new HoglakeDtos.ReplacementTarget(client.getTable("test", "append_during_delete").orElseThrow().tableUuid(), client.getCatalog().headSnapshotId()));
+            runner.execute("DELETE FROM append_during_delete WHERE id = 10");
+            assertThat(client.publishTableCreation(deleteReplacement, List.of()).reason()).isEqualTo("target_changed");
+            proxy.beforeCommit(() -> {
+                String operation = UUID.randomUUID().toString();
+                client.prepareTableCreation(
+                        operation,
+                        "test",
+                        "append_during_delete",
+                        List.of(new HoglakeDtos.ColumnDefinition("id", "long", Map.of(), true)),
+                        new HoglakeDtos.ReplacementTarget(client.getTable("test", "append_during_delete").orElseThrow().tableUuid(), client.getCatalog().headSnapshotId()));
+                assertThat(client.publishTableCreation(operation, List.of()).state()).isEqualTo("committed");
+            });
+            assertThatThrownBy(() -> runner.execute("DELETE FROM append_during_delete")).hasMessageContaining("conflict");
+            assertThat(runner.execute("SELECT count(*) FROM append_during_delete").getOnlyValue()).isEqualTo(0L);
+
             // Planning must fence name reuse even when it happens before preparation.
             HoglakeMetadata plannedReplacement = new HoglakeMetadata(client);
             SchemaTableName plannedName = new SchemaTableName("test", "replacement");
@@ -272,6 +350,20 @@ final class TestHoglakeLiveWriteFailures
             runner.execute("DROP TABLE lifecycle_renamed");
             assertThat(client.scan("test", "lifecycle", originalSnapshot)).hasSize(1);
             assertThat(runner.execute("SELECT id FROM lifecycle").getOnlyValue()).isEqualTo(99L);
+            runner.execute("CREATE TABLE compact_delete (id bigint)");
+            for (int value = 1; value <= 5; value++) {
+                runner.execute("INSERT INTO compact_delete VALUES " + value);
+            }
+            assertEventually(() -> assertThat(client.scan("test", "compact_delete", client.getCatalog().headSnapshotId()))
+                    .allMatch(entry -> entry.dataFile().statsState().equals("provided")));
+            runner.execute("DELETE FROM compact_delete WHERE id = 1");
+            long beforeCompaction = client.getCatalog().headSnapshotId();
+            proxy.beforeCommit(() -> proxy.post(base + "/maintenance/compact?batch=100", Map.of()));
+            assertThatThrownBy(() -> runner.execute("DELETE FROM compact_delete WHERE id = 2")).hasMessageContaining("no longer live");
+            assertThat(client.scan("test", "compact_delete", client.getCatalog().headSnapshotId())).hasSize(1);
+            assertThat(client.scan("test", "compact_delete", beforeCompaction)).hasSize(5);
+            assertThat(runner.execute("DELETE FROM compact_delete WHERE id = 2").getUpdateCount()).hasValue(1);
+            assertThat(runner.execute("SELECT sum(id) FROM compact_delete").getOnlyValue()).isEqualTo(12L);
         }
     }
 
@@ -347,7 +439,7 @@ final class TestHoglakeLiveWriteFailures
                 String path = exchange.getRequestURI().toString();
                 boolean prepare = exchange.getRequestMethod().equals("PUT");
                 boolean write = prepare || exchange.getRequestMethod().equals("POST");
-                boolean commit = path.endsWith("/commit") || path.endsWith("/commit/prepared");
+                boolean commit = path.endsWith("/commit") || path.endsWith("/commit/prepared") || path.endsWith("/commit/deletes/prepared");
                 if (prepare && path.contains("/table-creations/")) {
                     lastOperation = path.substring(path.lastIndexOf('/') + 1);
                 }

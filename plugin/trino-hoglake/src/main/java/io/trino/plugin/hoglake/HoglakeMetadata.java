@@ -15,6 +15,7 @@ package io.trino.plugin.hoglake;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.airlift.slice.Slice;
+import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.StandardErrorCode;
@@ -23,6 +24,7 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ColumnPosition;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
+import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorOutputMetadata;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
@@ -34,6 +36,7 @@ import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.RetryMode;
+import io.trino.spi.connector.RowChangeParadigm;
 import io.trino.spi.connector.SaveMode;
 import io.trino.spi.connector.SchemaNotFoundException;
 import io.trino.spi.connector.SchemaTableName;
@@ -82,17 +85,24 @@ public class HoglakeMetadata
         implements ConnectorMetadata
 {
     private final HoglakeClient client;
+    private final TrinoFileSystemFactory fileSystemFactory;
     private final Map<SchemaTableName, HoglakeDtos.ReplacementTarget> plannedTargets = new ConcurrentHashMap<>();
     private volatile Optional<String> creationOperation = Optional.empty();
 
     public HoglakeMetadata(HoglakeClient client)
     {
+        this(client, null);
+    }
+
+    public HoglakeMetadata(HoglakeClient client, TrinoFileSystemFactory fileSystemFactory)
+    {
         this.client = requireNonNull(client, "client is null");
+        this.fileSystemFactory = fileSystemFactory;
     }
 
     public HoglakeMetadata newTransaction()
     {
-        return new HoglakeMetadata(client);
+        return new HoglakeMetadata(client, fileSystemFactory);
     }
 
     public void rollback()
@@ -485,6 +495,49 @@ public class HoglakeMetadata
     public Optional<ConnectorOutputMetadata> finishInsert(ConnectorSession session, ConnectorInsertTableHandle handle, List<ConnectorTableHandle> sources, Collection<Slice> fragments, Collection<ComputedStatistics> statistics)
     {
         finishWrite((HoglakeWriteHandle) handle, fragments);
+        return Optional.empty();
+    }
+
+    @Override
+    public RowChangeParadigm getRowChangeParadigm(ConnectorSession session, ConnectorTableHandle handle)
+    {
+        return RowChangeParadigm.DELETE_ROW_AND_INSERT_ROW;
+    }
+
+    @Override
+    public ColumnHandle getMergeRowIdColumnHandle(ConnectorSession session, ConnectorTableHandle handle)
+    {
+        return HoglakeColumnHandle.ROW_ID;
+    }
+
+    @Override
+    public ConnectorMergeTableHandle beginMerge(
+            ConnectorSession session,
+            ConnectorTableHandle tableHandle,
+            Map<Integer, Collection<ColumnHandle>> updateCaseColumns,
+            RetryMode retryMode)
+    {
+        checkRetryMode(retryMode);
+        if (!updateCaseColumns.isEmpty()) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake supports DELETE only");
+        }
+        HoglakeDtos.Catalog catalog = client.getCatalog();
+        if (catalog.capabilities() == null || !catalog.capabilities().contains("idempotent-delete-v1")) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support idempotent-delete-v1 required for DELETE");
+        }
+        return new HoglakeDeleteHandle((HoglakeTableHandle) tableHandle, catalog.dataPath(), UUID.randomUUID().toString());
+    }
+
+    @Override
+    public Optional<ConnectorOutputMetadata> finishMerge(
+            ConnectorSession session,
+            ConnectorMergeTableHandle handle,
+            List<ConnectorTableHandle> sources,
+            Collection<Slice> fragments,
+            Collection<ComputedStatistics> statistics)
+    {
+        HoglakeDeleteHandle delete = (HoglakeDeleteHandle) handle;
+        new HoglakeDeletePublisher(client, fileSystemFactory.create(session)).publish(delete, fragments);
         return Optional.empty();
     }
 

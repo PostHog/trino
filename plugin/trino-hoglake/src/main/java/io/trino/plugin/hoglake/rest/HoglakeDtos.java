@@ -57,14 +57,24 @@ public final class HoglakeDtos
             @JsonProperty("operation_id") String operationId,
             @JsonProperty("snapshot_id") long snapshotId) {}
 
+    public record DeleteRegistration(@JsonProperty("data_file_id") long dataFileId, @JsonProperty("path") String path, @JsonProperty("delete_count") long deleteCount, @JsonProperty("file_size_bytes") long fileSizeBytes) {}
+
+    public record Deletes(@JsonProperty("namespace") String namespace, @JsonProperty("table") String table, @JsonProperty("expected_table_uuid") String expectedTableUuid, @JsonProperty("files") List<DeleteRegistration> files) {}
+
     public record Commit(
             @JsonProperty("read_snapshot") long readSnapshot,
             @JsonProperty("appends") List<Append> appends,
+            @JsonProperty("deletes") List<Deletes> deletes,
             @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("idempotency_key") String operationId)
     {
+        public Commit(long readSnapshot, List<Append> appends, String operationId)
+        {
+            this(readSnapshot, appends, List.of(), operationId);
+        }
+
         public Commit(long readSnapshot, List<Append> appends)
         {
-            this(readSnapshot, appends, null);
+            this(readSnapshot, appends, List.of(), null);
         }
     }
 
