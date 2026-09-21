@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.hoglake.rest;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.trino.plugin.hoglake.HoglakeDeletionVector;
 
@@ -52,9 +53,20 @@ public final class HoglakeDtos
     public record CommitResult(
             @JsonProperty("snapshot_id") long snapshotId) {}
 
+    public record CommitReceipt(
+            @JsonProperty("operation_id") String operationId,
+            @JsonProperty("snapshot_id") long snapshotId) {}
+
     public record Commit(
             @JsonProperty("read_snapshot") long readSnapshot,
-            @JsonProperty("appends") List<Append> appends) {}
+            @JsonProperty("appends") List<Append> appends,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("idempotency_key") String operationId)
+    {
+        public Commit(long readSnapshot, List<Append> appends)
+        {
+            this(readSnapshot, appends, null);
+        }
+    }
 
     public record Catalog(
             @JsonProperty("name") String name,

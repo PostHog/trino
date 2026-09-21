@@ -32,9 +32,15 @@ public record HoglakeWriteHandle(
         @JsonProperty("dataPath") String dataPath,
         @JsonProperty("columns") List<HoglakeColumnHandle> columns,
         @JsonProperty("inputColumns") List<HoglakeColumnHandle> inputColumns,
-        @JsonProperty("creationOperation") Optional<String> creationOperation)
+        @JsonProperty("creationOperation") Optional<String> creationOperation,
+        @JsonProperty("insertOperation") Optional<String> insertOperation)
         implements ConnectorInsertTableHandle, ConnectorOutputTableHandle
 {
+    public HoglakeWriteHandle(String namespace, String table, String tableUuid, long snapshot, String dataPath, List<HoglakeColumnHandle> columns, List<HoglakeColumnHandle> inputColumns, Optional<String> creationOperation)
+    {
+        this(namespace, table, tableUuid, snapshot, dataPath, columns, inputColumns, creationOperation, Optional.empty());
+    }
+
     @JsonCreator
     public HoglakeWriteHandle
     {
@@ -42,6 +48,7 @@ public record HoglakeWriteHandle(
         requireNonNull(table, "table is null");
         requireNonNull(tableUuid, "tableUuid is null");
         requireNonNull(dataPath, "dataPath is null");
+        requireNonNull(insertOperation, "insertOperation is null");
         requireNonNull(creationOperation, "creationOperation is null");
         columns = ImmutableList.copyOf(columns);
         inputColumns = ImmutableList.copyOf(inputColumns);

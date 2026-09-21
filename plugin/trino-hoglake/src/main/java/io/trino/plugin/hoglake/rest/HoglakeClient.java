@@ -215,7 +215,65 @@ public class HoglakeClient
 
     public void commit(HoglakeDtos.Commit request)
     {
-        HoglakeDtos.CommitResult result = post(catalogPath("/commit"), request, new TypeReference<HoglakeDtos.CommitResult>() {});
+        try {
+            commitOnce(request);
+            return;
+        }
+        catch (TrinoException failure) {
+            if (request.operationId() == null || isDefiniteCommitRejection(failure)) {
+                throw failure;
+            }
+            // Absence does not fence the original request. Every retry uses the
+            // same operation and payload, so the server serializes publication.
+            for (int attempt = 0; attempt < 3; attempt++) {
+                try {
+                    if (commitReceipt(request.operationId()).isPresent()) {
+                        return;
+                    }
+                    if (attempt < 2) {
+                        commitOnce(request);
+                        return;
+                    }
+                }
+                catch (RuntimeException recoveryFailure) {
+                    failure.addSuppressed(recoveryFailure);
+                }
+            }
+            throw new TrinoException(
+                    HOGLAKE_CATALOG_UNAVAILABLE,
+                    "Hoglake INSERT outcome is unknown; preserve files and inspect operation " + request.operationId(),
+                    failure);
+        }
+    }
+
+    public Optional<HoglakeDtos.CommitReceipt> commitReceipt(String operationId)
+    {
+        Optional<HoglakeDtos.CommitReceipt> receipt = get(catalogPath("/commit/receipts/" + encode(operationId)), new TypeReference<HoglakeDtos.CommitReceipt>() {});
+        receipt.ifPresent(result -> {
+            if (!operationId.equals(result.operationId()) || result.snapshotId() <= 0) {
+                throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake INSERT receipt for operation " + operationId);
+            }
+        });
+        return receipt;
+    }
+
+    private static boolean isDefiniteCommitRejection(TrinoException failure)
+    {
+        return failure.getErrorCode().equals(StandardErrorCode.TRANSACTION_CONFLICT.toErrorCode()) ||
+                failure.getErrorCode().equals(StandardErrorCode.INVALID_ARGUMENTS.toErrorCode()) ||
+                failure.getErrorCode().equals(HOGLAKE_SNAPSHOT_EXPIRED.toErrorCode()) ||
+                failure.getErrorCode().equals(HOGLAKE_CATALOG_NOT_FOUND.toErrorCode());
+    }
+
+    private void commitOnce(HoglakeDtos.Commit request)
+    {
+        // The required-key endpoint also protects against an older replica
+        // silently ignoring the ID after capability negotiation.
+        String path = "/commit";
+        if (request.operationId() != null) {
+            path = "/commit/prepared";
+        }
+        HoglakeDtos.CommitResult result = post(catalogPath(path), request, new TypeReference<HoglakeDtos.CommitResult>() {});
         if (result.snapshotId() <= 0) {
             throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Hoglake commit response is missing a valid snapshot; commit outcome may be unknown");
         }
@@ -236,8 +294,8 @@ public class HoglakeClient
                     .header("Accept", "application/json")
                     .method(method, HttpRequest.BodyPublishers.ofByteArray(mapper.writeValueAsBytes(body)))
                     .build();
-            // Send once at the transport layer. Creation recovery uses its operation ID;
-            // the append API has no idempotency key.
+            // Send once at the transport layer. Recovery belongs to the caller
+            // and requires a durable operation ID.
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             int status = response.statusCode();
             if (status == 409) {
@@ -342,7 +400,11 @@ public class HoglakeClient
                     "hoglake request failed: GET " + uri + " -> HTTP " + status + ": " + response.body());
         }
         try {
-            return Optional.of(mapper.readValue(response.body(), type));
+            T result = mapper.readValue(response.body(), type);
+            if (result == null) {
+                throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Null Hoglake response from GET " + uri);
+            }
+            return Optional.of(result);
         }
         catch (IOException e) {
             throw new TrinoException(

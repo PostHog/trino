@@ -61,6 +61,8 @@ final class TestHoglakePageSink
         assertThat(codec.fromJson(codec.toJson(HANDLE))).isEqualTo(HANDLE);
         HoglakeWriteHandle output = new HoglakeWriteHandle(HANDLE.namespace(), HANDLE.table(), HANDLE.tableUuid(), HANDLE.snapshot(), HANDLE.dataPath(), HANDLE.columns(), HANDLE.inputColumns(), Optional.of("target"));
         assertThat(codec.fromJson(codec.toJson(output))).isEqualTo(output);
+        HoglakeWriteHandle insert = new HoglakeWriteHandle(HANDLE.namespace(), HANDLE.table(), HANDLE.tableUuid(), HANDLE.snapshot(), HANDLE.dataPath(), HANDLE.columns(), HANDLE.inputColumns(), Optional.empty(), Optional.of(UUID.randomUUID().toString()));
+        assertThat(codec.fromJson(codec.toJson(insert))).isEqualTo(insert);
     }
 
     @Test

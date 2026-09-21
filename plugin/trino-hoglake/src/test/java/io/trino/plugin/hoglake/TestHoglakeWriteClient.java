@@ -116,5 +116,101 @@ final class TestHoglakeWriteClient
         }
     }
 
+    @Test
+    void testIdentifiedCommitRecovery()
+            throws Exception
+    {
+        String operation = "12345678-1234-5678-90ab-1234567890ac";
+        HoglakeDtos.Commit identified = new HoglakeDtos.Commit(COMMIT.readSnapshot(), COMMIT.appends(), operation);
+        for (String scenario : List.of("lost", "before", "unavailable", "mismatched", "null", "absent", "rejected")) {
+            HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            AtomicInteger writes = new AtomicInteger();
+            AtomicInteger lookups = new AtomicInteger();
+            AtomicReference<String> payload = new AtomicReference<>();
+            server.createContext("/", exchange -> {
+                try (exchange) {
+                    int status = 200;
+                    String response;
+                    if (exchange.getRequestMethod().equals("POST")) {
+                        assertThat(exchange.getRequestURI().getPath()).endsWith("/commit/prepared");
+                        String body = new String(exchange.getRequestBody().readAllBytes(), UTF_8);
+                        if (payload.get() == null) {
+                            payload.set(body);
+                        }
+                        assertThat(body).isEqualTo(payload.get());
+                        int attempt = writes.incrementAndGet();
+                        if (scenario.equals("rejected")) {
+                            status = 422;
+                            response = "{}";
+                        }
+                        else if (scenario.equals("before") && attempt > 1) {
+                            response = "{\"snapshot_id\":8}";
+                        }
+                        else {
+                            if (!scenario.equals("lost")) {
+                                status = 503;
+                            }
+                            response = "response unavailable";
+                        }
+                    }
+                    else {
+                        lookups.incrementAndGet();
+                        assertThat(exchange.getRequestURI().getPath()).endsWith("/commit/receipts/" + operation);
+                        if (scenario.equals("before") || scenario.equals("absent")) {
+                            status = 404;
+                            response = "{}";
+                        }
+                        else if (scenario.equals("unavailable")) {
+                            status = 503;
+                            response = "{}";
+                        }
+                        else if (scenario.equals("null")) {
+                            response = "null";
+                        }
+                        else {
+                            String receiptOperation = operation;
+                            if (scenario.equals("mismatched")) {
+                                receiptOperation = "another-operation";
+                            }
+                            response = "{\"operation_id\":\"%s\",\"snapshot_id\":8}".formatted(receiptOperation);
+                        }
+                    }
+                    byte[] bytes = response.getBytes(UTF_8);
+                    exchange.sendResponseHeaders(status, bytes.length);
+                    exchange.getResponseBody().write(bytes);
+                }
+            });
+            server.start();
+            try (HoglakeClient client = new HoglakeClient("http://127.0.0.1:" + server.getAddress().getPort(), "lake")) {
+                if (scenario.equals("lost") || scenario.equals("before")) {
+                    client.commit(identified);
+                    assertThat(lookups.get()).isEqualTo(1);
+                }
+                else if (scenario.equals("rejected")) {
+                    assertThatThrownBy(() -> client.commit(identified)).hasMessageContaining("rejected");
+                    assertThat(lookups.get()).isZero();
+                }
+                else {
+                    assertThatThrownBy(() -> client.commit(identified))
+                            .hasMessageContaining("outcome is unknown")
+                            .hasMessageContaining(operation);
+                    assertThat(lookups.get()).isEqualTo(3);
+                }
+                int expectedWrites = 1;
+                if (scenario.equals("before")) {
+                    expectedWrites = 2;
+                }
+                if (scenario.equals("absent")) {
+                    expectedWrites = 3;
+                }
+                assertThat(writes.get()).isEqualTo(expectedWrites);
+                assertThat(new ObjectMapper().readTree(payload.get()).path("idempotency_key").asText()).isEqualTo(operation);
+            }
+            finally {
+                server.stop(0);
+            }
+        }
+    }
+
     private record Failure(int status, String body, ErrorCodeSupplier code) {}
 }
