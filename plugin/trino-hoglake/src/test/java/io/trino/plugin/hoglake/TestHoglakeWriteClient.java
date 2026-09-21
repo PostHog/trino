@@ -27,6 +27,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -128,6 +129,18 @@ final class TestHoglakeWriteClient
                         TrinoException.class,
                         exception -> assertThat(exception.getErrorCode()).isEqualTo(failure.code().toErrorCode()));
                 assertThat(requests.get()).isEqualTo(3);
+                assertThatThrownBy(() -> client.alterColumns("test", "values", COMMIT.appends().getFirst().expectedTableUuid(), 7, Map.of("op", "drop_column", "name", "id"))).isInstanceOfSatisfying(
+                        TrinoException.class,
+                        exception -> assertThat(exception.getErrorCode()).isEqualTo(failure.code().toErrorCode()));
+                assertThat(requests.get()).isEqualTo(4);
+                assertThatThrownBy(() -> client.dropNamespace("test", 1)).isInstanceOfSatisfying(
+                        TrinoException.class,
+                        exception -> assertThat(exception.getErrorCode()).isEqualTo(failure.code().toErrorCode()));
+                assertThat(requests.get()).isEqualTo(5);
+                assertThatThrownBy(() -> client.createNamespace("test")).isInstanceOfSatisfying(
+                        TrinoException.class,
+                        exception -> assertThat(exception.getErrorCode()).isEqualTo(failure.code().toErrorCode()));
+                assertThat(requests.get()).isEqualTo(6);
             }
             finally {
                 server.stop(0);

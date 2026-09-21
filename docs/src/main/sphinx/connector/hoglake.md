@@ -205,7 +205,7 @@ operations after 24 hours, so longer-running creations must be retried as new qu
 There is no fallback to the old staging-table protocol on older servers.
 
 Writes are limited to single-statement transactions and unpartitioned tables.
-Query/task retries, table replacement, comments, custom table properties, `UPDATE`,
+Query/task retries, comments, custom table properties, `UPDATE`,
 `DELETE`, and `MERGE` are not supported. Sort specifications on existing tables are
 advisory and are not applied by this writer.
 
@@ -303,3 +303,41 @@ outcomes do not authorize deleting uploaded files.
 Existing retained snapshots remain readable through Hoglake's snapshot API;
 Trino time-travel syntax remains unsupported. Changefeed windows crossing a
 replacement require full-snapshot reconciliation against the new incarnation.
+
+## Schema evolution
+
+`CREATE SCHEMA`, empty `DROP SCHEMA`, and top-level `ALTER TABLE ... ADD COLUMN`,
+`RENAME COLUMN`, and `DROP COLUMN` require `guarded-schema-evolution-v1`.
+Deploy the supporting Hoglake server to all replicas before the connector.
+Schema properties, custom owners, and `DROP SCHEMA ... CASCADE` are unsupported.
+A namespace containing tables or views cannot be dropped. Deletion sends the
+namespace identity returned by the server, so concurrent name reuse conflicts.
+
+ADD COLUMN appends a nullable column using the existing writable scalar types.
+Column positions, defaults, comments, properties, and nested-field changes are
+unsupported. Rename preserves the field ID. Drop retires the field ID; a later
+column with the same name receives a new ID. Existing Parquet files remain
+readable by field ID, with nulls for columns absent from the file. ADD and RENAME
+are refused while live files lack field IDs or have pending or failed hydration; hydrate, rewrite,
+or retire those files first. This prevents name binding from exposing a dropped
+column's old values as a newly added column. The last column and partition/sort
+source columns cannot be dropped.
+
+Column changes carry the planned table UUID and read snapshot. Concurrent DDL,
+name reuse, or replacement causes a conflict; unrelated table changes and ordinary
+appends do not invalidate the DDL basis. Expired conflict history is rejected.
+INSERT plans made before evolution conflict at publication; plan a new statement
+against the evolved schema. A prepared replacement also conflicts if column
+alteration commits first; if replacement commits first, the old UUID rejects the
+alteration. These operations are serialized by the existing catalog commit lock.
+
+SQL column type changes (`ALTER COLUMN ... SET DATA TYPE`) are explicitly
+unsupported, including widening and same-type requests. The server's existing
+REST promotion policy remains unchanged: signed integer widening through `long`,
+unsigned widening through `uint32`, and `float` to `double`, preserving field IDs.
+This slice adds no type promotions or writable types. Reading externally promoted
+files remains subject to the connector's existing type and Parquet reader support.
+
+Schema mutations have no durable receipt and are sent once. A lost response may
+leave the outcome unknown; inspect the catalog before issuing another statement.
+INSERT receipt recovery does not make schema mutations safe to replay.

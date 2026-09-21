@@ -169,6 +169,42 @@ final class TestHoglakeLiveWriteFailures
             assertThat(client.getTable("test", "stale").orElseThrow().recordCount()).isZero();
             assertThat(runner.execute("SELECT id FROM append_target").getOnlyValue()).isEqualTo(3L);
 
+            for (String evolution : List.of("ADD COLUMN extra bigint", "RENAME COLUMN id TO renamed", "DROP COLUMN spare")) {
+                runner.execute("CREATE OR REPLACE TABLE evolving (id bigint, spare bigint)");
+                var evolvingTable = metadata.getTableHandle(session, new SchemaTableName("test", "evolving"), Optional.empty(), Optional.empty());
+                var idColumn = metadata.getColumnHandles(session, evolvingTable).get("id");
+                var evolvingInsert = metadata.beginInsert(session, evolvingTable, List.of(idColumn), RetryMode.NO_RETRIES);
+                runner.execute("ALTER TABLE evolving " + evolution);
+                assertThatThrownBy(() -> metadata.finishInsert(session, evolvingInsert, List.of(), fragments, List.of())).hasMessageContaining("conflict");
+                assertThatThrownBy(() -> metadata.renameColumn(session, evolvingTable, idColumn, "wrong")).hasMessageContaining("conflict");
+                assertThatThrownBy(() -> metadata.dropColumn(session, evolvingTable, idColumn)).hasMessageContaining("conflict");
+                assertThat(client.getTable("test", "evolving").orElseThrow().recordCount()).isZero();
+            }
+
+            // Either publication order must fence an alteration against replacement.
+            runner.execute("CREATE TABLE evolution_replacement (id bigint, spare bigint)");
+            var evolutionName = new SchemaTableName("test", "evolution_replacement");
+            var evolutionMetadata = new HoglakeMetadata(client);
+            var evolutionTable = evolutionMetadata.getTableHandle(session, evolutionName, Optional.empty(), Optional.empty());
+            var evolutionColumn = evolutionMetadata.getColumnHandles(session, evolutionTable).get("id");
+            var replacing = evolutionMetadata.beginCreateTable(
+                    session,
+                    new ConnectorTableMetadata(evolutionName, List.of(new ColumnMetadata("id", BIGINT))),
+                    Optional.empty(),
+                    RetryMode.NO_RETRIES,
+                    true);
+            runner.execute("ALTER TABLE evolution_replacement RENAME COLUMN spare TO changed");
+            assertThatThrownBy(() -> evolutionMetadata.finishCreateTable(session, replacing, List.of(), List.of())).hasMessageContaining("target_changed");
+            runner.execute("CREATE OR REPLACE TABLE evolution_replacement (id bigint, spare bigint)");
+            assertThatThrownBy(() -> evolutionMetadata.dropColumn(session, evolutionTable, evolutionColumn)).hasMessageContaining("conflict");
+
+            // A lost successful DDL response is not replayed.
+            proxy.failAfter("/alter");
+            assertThatThrownBy(() -> runner.execute("ALTER TABLE evolution_replacement ADD COLUMN added bigint"))
+                    .hasMessageContaining("Malformed Hoglake write response");
+            assertThat(client.getTable("test", "evolution_replacement").orElseThrow().columns())
+                    .extracting(HoglakeDtos.Column::name).containsExactly("id", "spare", "added");
+
             runner.execute("CREATE OR REPLACE TABLE replacement AS SELECT BIGINT '20' AS id");
             HoglakeDtos.Table oldReplacement = client.getTable("test", "replacement").orElseThrow();
             long replacementSnapshot = client.getCatalog().headSnapshotId();

@@ -76,6 +76,8 @@ final class TestHoglakeWrites
     private volatile boolean idempotentAppend;
     private volatile boolean corruptCommitResponse;
     private volatile boolean lifecycleSupport = true;
+    private volatile boolean schemaCreationRace;
+    private int namespaceCreates;
     private volatile boolean replacementSupport = true;
     private final Map<String, HoglakeDtos.ReplacementTarget> replacementTargets = new ConcurrentHashMap<>();
     private volatile boolean corruptLifecycleResponse;
@@ -142,13 +144,22 @@ final class TestHoglakeWrites
                 if (lifecycleSupport) {
                     capabilities.add("guarded-table-lifecycle-v1");
                 }
+                if (schemaCreationRace) {
+                    capabilities.add("guarded-schema-evolution-v1");
+                }
                 if (idempotentAppend) {
                     capabilities.add("idempotent-append-v1");
                 }
                 respond(exchange, 200, new HoglakeDtos.Catalog("lake", "memory:///warehouse/", snapshot, 1, capabilities));
             }
             else if (path.equals("/v1/catalogs/lake/namespaces")) {
-                respond(exchange, 200, List.of(new HoglakeDtos.Namespace("test")));
+                if (exchange.getRequestMethod().equals("POST")) {
+                    namespaceCreates++;
+                    respond(exchange, 409, Map.of("error", "already_exists", "detail", "namespace already exists"));
+                }
+                else {
+                    respond(exchange, 200, List.of(new HoglakeDtos.Namespace("test", 1L)));
+                }
             }
             else if (path.equals(prefix) && exchange.getRequestMethod().equals("POST")) {
                 HoglakeDtos.CreateTable request = mapper.readValue(exchange.getRequestBody(), HoglakeDtos.CreateTable.class);
@@ -334,6 +345,46 @@ final class TestHoglakeWrites
         if (server != null) {
             server.stop(0);
         }
+    }
+
+    @Test
+    void testConcurrentSchemaCreation()
+    {
+        schemaCreationRace = true;
+        int before = namespaceCreates;
+        try {
+            // Listing reports absence, but another creator wins before POST.
+            runner.execute("CREATE SCHEMA IF NOT EXISTS raced_schema");
+            assertThatThrownBy(() -> runner.execute("CREATE SCHEMA raced_schema"))
+                    .hasMessageContaining("already exists");
+            assertThat(namespaceCreates).isEqualTo(before + 2);
+        }
+        finally {
+            schemaCreationRace = false;
+        }
+    }
+
+    @Test
+    void testSchemaEvolutionRefusals()
+    {
+        runner.execute("CREATE TABLE evolution_refusals (id bigint, spare bigint)");
+        assertThatThrownBy(() -> new HoglakeMetadata(client).dropSchema(ConnectorTestFixtures.session(), "test", false))
+                .hasMessageContaining("guarded-schema-evolution-v1");
+        for (String statement : List.of(
+                "CREATE SCHEMA new_schema",
+                "ALTER TABLE evolution_refusals ADD COLUMN extra bigint",
+                "ALTER TABLE evolution_refusals RENAME COLUMN spare TO renamed",
+                "ALTER TABLE evolution_refusals DROP COLUMN spare")) {
+            assertThatThrownBy(() -> runner.execute(statement)).hasMessageContaining("guarded-schema-evolution-v1");
+        }
+        assertThatThrownBy(() -> runner.execute("ALTER TABLE evolution_refusals ALTER COLUMN id SET DATA TYPE double"))
+                .hasMessageContaining("SQL column type changes are not supported");
+        assertThatThrownBy(() -> runner.execute("ALTER TABLE evolution_refusals ADD COLUMN required bigint NOT NULL"))
+                .hasMessageContaining("nullable columns at the end");
+        assertThatThrownBy(() -> runner.execute("ALTER TABLE evolution_refusals ADD COLUMN nested array(bigint)"))
+                .hasMessageContaining("no hoglake equivalent");
+        assertThatThrownBy(() -> runner.execute("ALTER TABLE evolution_refusals ADD COLUMN first_column bigint FIRST"))
+                .hasMessageContaining("nullable columns at the end");
     }
 
     @Test

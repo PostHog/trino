@@ -21,6 +21,7 @@ import io.trino.spi.StandardErrorCode;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
+import io.trino.spi.connector.ColumnPosition;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorOutputMetadata;
@@ -40,6 +41,8 @@ import io.trino.spi.connector.SchemaTablePrefix;
 import io.trino.spi.connector.TableColumnsMetadata;
 import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.security.PrincipalType;
+import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.statistics.ComputedStatistics;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.TimeType;
@@ -104,6 +107,76 @@ public class HoglakeMetadata
         return client.listNamespaces().stream()
                 .map(HoglakeDtos.Namespace::name)
                 .toList();
+    }
+
+    @Override
+    public void createSchema(ConnectorSession session, String schemaName, Map<String, Object> properties, TrinoPrincipal owner)
+    {
+        if (!properties.isEmpty() || owner.getType() != PrincipalType.USER || !owner.getName().equals(session.getUser())) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake schema properties and custom owners are not supported");
+        }
+        checkSchemaEvolutionSupport();
+        client.createNamespace(schemaName);
+    }
+
+    @Override
+    public void dropSchema(ConnectorSession session, String schemaName, boolean cascade)
+    {
+        if (cascade) {
+            throw new TrinoException(NOT_SUPPORTED, "Dropping Hoglake schemas with CASCADE is not supported");
+        }
+        checkSchemaEvolutionSupport();
+        HoglakeDtos.Namespace namespace = client.getNamespace(schemaName);
+        if (namespace.namespaceId() == null) {
+            throw new TrinoException(HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE, "Hoglake namespace identity is missing");
+        }
+        client.dropNamespace(schemaName, namespace.namespaceId());
+    }
+
+    @Override
+    public void addColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnMetadata column, ColumnPosition position)
+    {
+        if (!(position instanceof ColumnPosition.Last) || !column.isNullable() || column.getComment().isPresent() || !column.getProperties().isEmpty()) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake ADD COLUMN supports nullable columns at the end, without comments or properties");
+        }
+        Map<String, Object> params = Map.of();
+        if (column.getType() instanceof DecimalType decimal) {
+            params = Map.of("precision", decimal.getPrecision(), "scale", decimal.getScale());
+        }
+        HoglakeDtos.ColumnDefinition definition = new HoglakeDtos.ColumnDefinition(column.getName(), HoglakeTypes.toHoglakeType(column.getType()), params, true);
+        alterColumns((HoglakeTableHandle) tableHandle, Map.of("op", "add_column", "column", definition));
+    }
+
+    @Override
+    public void renameColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle source, String target)
+    {
+        alterColumns((HoglakeTableHandle) tableHandle, Map.of("op", "rename_column", "from", ((HoglakeColumnHandle) source).name(), "to", target));
+    }
+
+    @Override
+    public void dropColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column)
+    {
+        alterColumns((HoglakeTableHandle) tableHandle, Map.of("op", "drop_column", "name", ((HoglakeColumnHandle) column).name()));
+    }
+
+    @Override
+    public void setColumnType(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column, Type type)
+    {
+        throw new TrinoException(NOT_SUPPORTED, "Hoglake SQL column type changes are not supported");
+    }
+
+    private void alterColumns(HoglakeTableHandle handle, Map<String, Object> operation)
+    {
+        checkSchemaEvolutionSupport();
+        client.alterColumns(handle.schemaName(), handle.tableName(), handle.tableUuid(), handle.snapshotId(), operation);
+    }
+
+    private void checkSchemaEvolutionSupport()
+    {
+        HoglakeDtos.Catalog catalog = client.getCatalog();
+        if (catalog.capabilities() == null || !catalog.capabilities().contains("guarded-schema-evolution-v1")) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support guarded-schema-evolution-v1");
+        }
     }
 
     @Override

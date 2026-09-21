@@ -15,6 +15,7 @@ package io.trino.plugin.hoglake.rest;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.trino.spi.StandardErrorCode;
 import io.trino.spi.TrinoException;
@@ -136,6 +137,36 @@ public class HoglakeClient
     {
         return get(catalogPath("/namespaces"), new TypeReference<List<HoglakeDtos.Namespace>>() {})
                 .orElseThrow(this::catalogNotFound);
+    }
+
+    public void createNamespace(String name)
+    {
+        HoglakeDtos.Namespace result = post(catalogPath("/namespaces"), Map.of("name", name), new TypeReference<HoglakeDtos.Namespace>() {});
+        if (!name.equals(result.name()) || result.namespaceId() == null) {
+            throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake namespace response; outcome may be unknown");
+        }
+    }
+
+    public HoglakeDtos.Namespace getNamespace(String name)
+    {
+        return get(namespacePath(name, ""), new TypeReference<HoglakeDtos.Namespace>() {})
+                .orElseThrow(() -> new SchemaNotFoundException(name));
+    }
+
+    public void dropNamespace(String name, long expectedNamespaceId)
+    {
+        validateLifecycleResult(write("DELETE", namespacePath(name, "?expected_namespace_id=" + expectedNamespaceId), Map.of(), new TypeReference<HoglakeDtos.CommitResult>() {}));
+    }
+
+    public void alterColumns(String namespace, String table, String expectedTableUuid, long readSnapshot, Map<String, Object> operation)
+    {
+        HoglakeDtos.Table result = post(
+                tablePath(namespace, table, "/alter?expected_table_uuid=" + encode(expectedTableUuid) + "&read_snapshot=" + readSnapshot),
+                Map.of("ops", List.of(operation)),
+                new TypeReference<HoglakeDtos.Table>() {});
+        if (!expectedTableUuid.equals(result.tableUuid())) {
+            throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake alteration response; outcome may be unknown");
+        }
     }
 
     public List<HoglakeDtos.TableSummary> listTables(String namespace)
@@ -399,6 +430,9 @@ public class HoglakeClient
             HttpResponse<String> response = send(request);
             int status = response.statusCode();
             if (status == 409) {
+                if (method.equals("POST") && path.equals(catalogPath("/namespaces")) && isAlreadyExists(response.body())) {
+                    throw new TrinoException(StandardErrorCode.ALREADY_EXISTS, "Hoglake namespace already exists");
+                }
                 throw new TrinoException(StandardErrorCode.TRANSACTION_CONFLICT, "Hoglake write conflict: " + response.body());
             }
             if (status == 404 && ignoreMissing) {
@@ -436,6 +470,18 @@ public class HoglakeClient
         catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new TrinoException(GENERIC_INTERNAL_ERROR, "Hoglake write interrupted; write outcome may be unknown", e);
+        }
+    }
+
+    private boolean isAlreadyExists(String body)
+    {
+        try {
+            JsonNode error = mapper.readTree(body);
+            return error != null && "already_exists".equals(error.path("error").asText());
+        }
+        catch (IOException ignored) {
+            // An unrecognized conflict must not make IF NOT EXISTS report success.
+            return false;
         }
     }
 
