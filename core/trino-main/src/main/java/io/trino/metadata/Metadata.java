@@ -45,6 +45,7 @@ import io.trino.spi.connector.JoinStatistics;
 import io.trino.spi.connector.JoinType;
 import io.trino.spi.connector.LimitApplicationResult;
 import io.trino.spi.connector.MaterializedViewFreshness;
+import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.connector.ProjectionApplicationResult;
 import io.trino.spi.connector.RelationCommentMetadata;
 import io.trino.spi.connector.RelationType;
@@ -499,7 +500,7 @@ public interface Metadata
     /**
      * Finish merge query
      */
-    Optional<ConnectorOutputMetadata> finishMerge(Session session, MergeHandle tableHandle, List<TableHandle> sourceTableHandles, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics);
+    Optional<ConnectorOutputMetadata> finishMerge(Session session, MergeHandle tableHandle, List<TableHandle> sourceTableHandles, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics, MemoryContext memoryContext);
 
     /**
      * Returns a catalog handle for the specified catalog name.

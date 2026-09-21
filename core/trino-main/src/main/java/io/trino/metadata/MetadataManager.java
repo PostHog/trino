@@ -75,6 +75,7 @@ import io.trino.spi.connector.JoinStatistics;
 import io.trino.spi.connector.JoinType;
 import io.trino.spi.connector.LimitApplicationResult;
 import io.trino.spi.connector.MaterializedViewFreshness;
+import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.connector.ProjectionApplicationResult;
 import io.trino.spi.connector.RelationColumnsMetadata;
 import io.trino.spi.connector.RelationCommentMetadata;
@@ -1453,7 +1454,7 @@ public final class MetadataManager
     }
 
     @Override
-    public Optional<ConnectorOutputMetadata> finishMerge(Session session, MergeHandle mergeHandle, List<TableHandle> sourceTableHandles, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
+    public Optional<ConnectorOutputMetadata> finishMerge(Session session, MergeHandle mergeHandle, List<TableHandle> sourceTableHandles, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics, MemoryContext memoryContext)
     {
         CatalogHandle catalogHandle = mergeHandle.tableHandle().catalogHandle();
         ConnectorMetadata metadata = getMetadata(session, catalogHandle);
@@ -1461,7 +1462,7 @@ public final class MetadataManager
                 .filter(handle -> handle.catalogHandle().equals(catalogHandle))
                 .map(TableHandle::connectorHandle)
                 .collect(toImmutableList());
-        return metadata.finishMerge(session.toConnectorSession(catalogHandle), mergeHandle.connectorMergeHandle(), sourceConnectorHandles, fragments, computedStatistics);
+        return metadata.finishMerge(session.toConnectorSession(catalogHandle), mergeHandle.connectorMergeHandle(), sourceConnectorHandles, fragments, computedStatistics, memoryContext);
     }
 
     @Override

@@ -66,20 +66,30 @@ final class HoglakeDeleteSink
     public CompletableFuture<Collection<Slice>> finish()
     {
         Collection<Slice> fragments = new ArrayList<>();
+        long fragmentBytes = 0;
+        long positionBytes = positions.values().stream().mapToLong(HoglakeDeleteBitmap::retainedBytes).sum();
         try {
-            for (var entry : positions.entrySet()) {
+            var entries = positions.entrySet().iterator();
+            while (entries.hasNext()) {
+                var entry = entries.next();
+                memoryContext.setBytes(positionBytes + fragmentBytes + entry.getValue().encodingWorkingBytes());
                 byte[] vector = entry.getValue().encode("");
                 Slice fragment = Slices.allocate(Long.BYTES + vector.length);
                 fragment.setLong(0, entry.getKey());
                 fragment.setBytes(Long.BYTES, vector);
                 fragments.add(fragment);
+                fragmentBytes += fragment.getRetainedSize() + 2L * Long.BYTES;
+                positionBytes -= entry.getValue().retainedBytes();
+                entries.remove();
+                memoryContext.setBytes(positionBytes + fragmentBytes);
             }
         }
         catch (IOException e) {
             throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to encode DELETE positions", e);
         }
-        positions.clear();
-        memoryContext.setBytes(0);
+        // MergeWriterOperator owns the reservation until its output has been
+        // consumed and the operator closes its memory context.
+        memoryContext.setBytes(fragmentBytes);
         return CompletableFuture.completedFuture(fragments);
     }
 

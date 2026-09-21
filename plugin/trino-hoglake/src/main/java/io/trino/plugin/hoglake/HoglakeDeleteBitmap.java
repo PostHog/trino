@@ -32,8 +32,7 @@ import static io.trino.spi.StandardErrorCode.EXCEEDED_LOCAL_MEMORY_LIMIT;
  */
 final class HoglakeDeleteBitmap
 {
-    // Coordinator finish hooks have no memory context. Workers also report usage.
-    // Bound their compressed working sets rather than allowing unbounded heap use.
+    // Bound position sets and publication working memory in addition to query accounting.
     static final long MAX_BYTES = 64L * 1024 * 1024;
     private final Map<Integer, RoaringBitmap> buckets = new TreeMap<>();
 
@@ -66,6 +65,15 @@ final class HoglakeDeleteBitmap
     long cardinality()
     {
         return buckets.values().stream().mapToLong(RoaringBitmap::getLongCardinality).sum();
+    }
+
+    long encodingWorkingBytes()
+    {
+        long serializedBytes = 12L + buckets.values().stream()
+                .mapToLong(bitmap -> Integer.BYTES + bitmap.serializedSizeInBytes()).sum();
+        // ByteArrayOutputStream growth, toByteArray copies, footer serialization,
+        // and the caller's fragment copy can coexist. Reserve before allocating.
+        return Math.multiplyExact(8, serializedBytes + HoglakeDeletionVector.MAX_FOOTER_BYTES);
     }
 
     byte[] encode(String dataPath)

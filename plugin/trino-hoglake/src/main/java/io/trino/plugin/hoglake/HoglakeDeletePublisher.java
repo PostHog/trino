@@ -16,9 +16,11 @@ package io.trino.plugin.hoglake;
 import io.airlift.slice.Slice;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
+import io.trino.memory.context.LocalMemoryContext;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.TrinoException;
+import io.trino.spi.connector.MemoryContext;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -56,6 +58,24 @@ final class HoglakeDeletePublisher
 
     void publish(HoglakeDeleteHandle handle, Collection<Slice> fragments)
     {
+        publish(handle, fragments, MemoryContext.NO_LIMIT);
+    }
+
+    void publish(HoglakeDeleteHandle handle, Collection<Slice> fragments, MemoryContext memoryContext)
+    {
+        try (HoglakeSplitResources resources = new HoglakeSplitResources(bytes -> {
+            HoglakeDeleteBitmap.checkSize(bytes);
+            memoryContext.setBytes(bytes);
+        })) {
+            publish(handle, fragments, resources);
+        }
+    }
+
+    private void publish(HoglakeDeleteHandle handle, Collection<Slice> fragments, HoglakeSplitResources workingMemory)
+    {
+        LocalMemoryContext decodeMemory = workingMemory.allocation().newLocalMemoryContext("delete_decode");
+        LocalMemoryContext bitmapMemory = workingMemory.allocation().newLocalMemoryContext("delete_bitmaps");
+        LocalMemoryContext temporaryMemory = workingMemory.allocation().newLocalMemoryContext("delete_encoding");
         HoglakeTableHandle table = handle.table();
         Map<Long, HoglakeDeleteBitmap> changes = new TreeMap<>();
         Map<Long, HoglakeDtos.ScanFile> files = client.scan(table.schemaName(), table.tableName(), table.snapshotId()).stream()
@@ -72,15 +92,19 @@ final class HoglakeDeletePublisher
             if (file == null) {
                 throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "DELETE fragment targets a file outside the pinned snapshot");
             }
-            try (HoglakeSplitResources resources = new HoglakeSplitResources(HoglakeDeleteBitmap::checkSize)) {
+            try (HoglakeSplitResources resources = new HoglakeSplitResources(decodeMemory::setBytes)) {
+                temporaryMemory.setBytes(fragment.length());
                 HoglakeDeletionVector vector = HoglakeDeletionVector.read(fragment.getBytes(Long.BYTES, fragment.length() - Long.BYTES), "DELETE fragment", resources.allocation());
                 if (vector.maximumDeletedPosition().orElse(-1) >= file.dataFile().recordCount()) {
                     throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "DELETE position exceeds file row count");
                 }
+                // Reserve the union destination and growth copies before mutating it.
+                bitmapMemory.setBytes(2 * (retainedBytes(changes) + vector.retainedSizeInBytes()));
                 vector.unionInto(changes.computeIfAbsent(fileId, _ -> new HoglakeDeleteBitmap()));
-                HoglakeDeleteBitmap.checkSize(changes.values().stream().mapToLong(HoglakeDeleteBitmap::retainedBytes).sum());
+                bitmapMemory.setBytes(retainedBytes(changes));
             }
         }
+        temporaryMemory.setBytes(0);
         List<Location> uploads = new ArrayList<>();
         List<HoglakeDtos.DeleteRegistration> registrations = new ArrayList<>();
         boolean publicationStarted = false;
@@ -90,17 +114,21 @@ final class HoglakeDeletePublisher
                 HoglakeSplit split = HoglakeSplitManager.toSplit(files.get(change.getKey()));
                 HoglakeDeleteBitmap bitmap = change.getValue();
                 if (split.deleteFilePath().isPresent()) {
-                    try (HoglakeSplitResources resources = new HoglakeSplitResources(HoglakeDeleteBitmap::checkSize)) {
-                        HoglakeDeletionVectorLoader.load(fileSystem, split, split.recordCount(), resources).unionInto(bitmap);
+                    try (HoglakeSplitResources resources = new HoglakeSplitResources(decodeMemory::setBytes)) {
+                        HoglakeDeletionVector previous = HoglakeDeletionVectorLoader.load(fileSystem, split, split.recordCount(), resources);
+                        bitmapMemory.setBytes(2 * (retainedBytes(changes) + previous.retainedSizeInBytes()));
+                        previous.unionInto(bitmap);
+                        bitmapMemory.setBytes(retainedBytes(changes));
                     }
                 }
-                HoglakeDeleteBitmap.checkSize(changes.values().stream().mapToLong(HoglakeDeleteBitmap::retainedBytes).sum());
+                temporaryMemory.setBytes(bitmap.encodingWorkingBytes());
                 byte[] bytes = bitmap.encode(split.path());
                 Location location = Location.of(handle.dataPath()).appendPath("trino-delete/" + UUID.randomUUID() + ".puffin");
                 uploads.add(location);
                 fileSystem.newOutputFile(location).createOrOverwrite(bytes);
                 registrations.add(new HoglakeDtos.DeleteRegistration(change.getKey(), location.toString(), bitmap.cardinality(), bytes.length));
             }
+            temporaryMemory.setBytes(0);
             // Even a zero-row DELETE validates identity and the DDL conflict window.
             // Once submitted, neither cancellation nor missing receipts authorizes cleanup.
             checkCancelled();
@@ -127,5 +155,10 @@ final class HoglakeDeletePublisher
             }
             throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to publish Hoglake DELETE", failure);
         }
+    }
+
+    private static long retainedBytes(Map<Long, HoglakeDeleteBitmap> changes)
+    {
+        return changes.values().stream().mapToLong(HoglakeDeleteBitmap::retainedBytes).sum();
     }
 }

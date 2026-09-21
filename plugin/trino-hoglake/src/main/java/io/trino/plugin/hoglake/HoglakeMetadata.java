@@ -35,6 +35,7 @@ import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
+import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.RowChangeParadigm;
 import io.trino.spi.connector.SaveMode;
@@ -536,8 +537,20 @@ public class HoglakeMetadata
             Collection<Slice> fragments,
             Collection<ComputedStatistics> statistics)
     {
+        return finishMerge(session, handle, sources, fragments, statistics, MemoryContext.NO_LIMIT);
+    }
+
+    @Override
+    public Optional<ConnectorOutputMetadata> finishMerge(
+            ConnectorSession session,
+            ConnectorMergeTableHandle handle,
+            List<ConnectorTableHandle> sources,
+            Collection<Slice> fragments,
+            Collection<ComputedStatistics> statistics,
+            MemoryContext memoryContext)
+    {
         HoglakeDeleteHandle delete = (HoglakeDeleteHandle) handle;
-        new HoglakeDeletePublisher(client, fileSystemFactory.create(session)).publish(delete, fragments);
+        new HoglakeDeletePublisher(client, fileSystemFactory.create(session)).publish(delete, fragments, memoryContext);
         return Optional.empty();
     }
 

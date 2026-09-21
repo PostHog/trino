@@ -28,8 +28,10 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_UNAVAILABLE;
+import static io.trino.spi.StandardErrorCode.EXCEEDED_LOCAL_MEMORY_LIMIT;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -131,6 +133,42 @@ class TestHoglakeDeletePublisher
             assertThat(client.committed).isNotNull();
             var registered = client.committed.deletes().getFirst().files().getFirst();
             assertThat(storage.newInputFile(Location.of(registered.path())).exists()).isTrue();
+        }
+    }
+
+    @Test
+    void testWorkingMemoryAccountedAndReleased()
+            throws IOException
+    {
+        AtomicLong current = new AtomicLong();
+        AtomicLong peak = new AtomicLong();
+        try (Catalog client = new Catalog()) {
+            new HoglakeDeletePublisher(client, new MemoryFileSystem()).publish(HANDLE, List.of(fragment(1, 2)), bytes -> {
+                current.set(bytes);
+                peak.accumulateAndGet(bytes, Math::max);
+            });
+            assertThat(client.committed).isNotNull();
+            assertThat(peak.get()).isGreaterThan(500_000);
+            assertThat(current.get()).isZero();
+        }
+    }
+
+    @Test
+    void testWorkingMemoryFailureCannotPublish()
+            throws IOException
+    {
+        MemoryFileSystem storage = new MemoryFileSystem();
+        AtomicLong current = new AtomicLong();
+        try (Catalog client = new Catalog()) {
+            assertThatThrownBy(() -> new HoglakeDeletePublisher(client, storage).publish(HANDLE, List.of(fragment(1, 2)), bytes -> {
+                current.set(bytes);
+                if (bytes > 1024) {
+                    throw new TrinoException(EXCEEDED_LOCAL_MEMORY_LIMIT, "synthetic memory limit");
+                }
+            })).isInstanceOf(TrinoException.class).hasMessageContaining("synthetic memory limit");
+            assertThat(client.committed).isNull();
+            assertThat(storage.isEmpty()).isTrue();
+            assertThat(current.get()).isZero();
         }
     }
 

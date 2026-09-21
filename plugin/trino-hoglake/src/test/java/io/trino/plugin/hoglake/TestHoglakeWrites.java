@@ -31,6 +31,8 @@ import io.trino.spi.connector.ConnectorContext;
 import io.trino.spi.connector.ConnectorFactory;
 import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.testing.DistributedQueryRunner;
+import io.trino.testing.QueryRunner;
 import io.trino.testing.StandaloneQueryRunner;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -97,7 +99,12 @@ final class TestHoglakeWrites
         server.start();
         client = new HoglakeClient("http://127.0.0.1:" + server.getAddress().getPort(), "lake");
         runner = new StandaloneQueryRunner(testSessionBuilder().setCatalog("hoglake").setSchema("test").build());
-        runner.installPlugin(new Plugin()
+        installConnector(runner);
+    }
+
+    private void installConnector(QueryRunner queryRunner)
+    {
+        queryRunner.installPlugin(new Plugin()
         {
             @Override
             public Iterable<ConnectorFactory> getConnectorFactories()
@@ -123,7 +130,7 @@ final class TestHoglakeWrites
                 });
             }
         });
-        runner.createCatalog("hoglake", "hoglake_write_test", Map.of());
+        queryRunner.createCatalog("hoglake", "hoglake_write_test", Map.of());
     }
 
     private synchronized void handle(HttpExchange exchange)
@@ -609,6 +616,36 @@ final class TestHoglakeWrites
             idempotentDelete = false;
             corruptCommitResponse = false;
             commitStatus = 200;
+        }
+    }
+
+    @Test
+    void testDistributedDeleteMemoryFailureDoesNotPublish()
+            throws Exception
+    {
+        idempotentDelete = true;
+        try (DistributedQueryRunner distributed = DistributedQueryRunner.builder(runner.getDefaultSession())
+                .setWorkerCount(2)
+                .setCoordinatorProperties(Map.of(
+                        "node-scheduler.include-coordinator", "false",
+                        "query.max-memory-per-node", "1MB"))
+                .build()) {
+            installConnector(distributed);
+            runner.execute("CREATE TABLE delete_memory (id bigint)");
+            runner.execute("INSERT INTO delete_memory VALUES 1, 2, 3");
+            runner.execute("INSERT INTO delete_memory VALUES 4, 5, 6");
+            int before = commits;
+            // Workers have the normal memory limit. Only coordinator publication
+            // is constrained, exercising the finishMerge memory-context forwarding.
+            assertThatThrownBy(() -> distributed.execute("DELETE FROM delete_memory WHERE id % 2 = 0"))
+                    .hasMessageContaining("Insufficient memory to finish table write");
+            assertThat(commits).isEqualTo(before);
+            assertQuery("SELECT sum(id) FROM delete_memory", "VALUES BIGINT '21'");
+            assertThat(runner.execute("DELETE FROM delete_memory WHERE id % 2 = 0").getUpdateCount()).hasValue(3);
+            assertQuery("SELECT sum(id) FROM delete_memory", "VALUES BIGINT '9'");
+        }
+        finally {
+            idempotentDelete = false;
         }
     }
 

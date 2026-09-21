@@ -17,6 +17,8 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
+import io.airlift.units.DataSize;
+import io.trino.ExceededMemoryLimitException;
 import io.trino.Session;
 import io.trino.execution.TableExecuteContext;
 import io.trino.execution.TableExecuteContextManager;
@@ -24,8 +26,11 @@ import io.trino.metadata.TestingFunctionResolution;
 import io.trino.operator.TableFinishOperator.TableFinishOperatorFactory;
 import io.trino.operator.TableFinishOperator.TableFinisher;
 import io.trino.operator.aggregation.TestingAggregationFunction;
+import io.trino.spi.Page;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.LongArrayBlockBuilder;
 import io.trino.spi.connector.ConnectorOutputMetadata;
+import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.statistics.ColumnStatisticMetadata;
 import io.trino.spi.statistics.ComputedStatistics;
 import io.trino.spi.type.Type;
@@ -42,6 +47,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.Iterables.getOnlyElement;
@@ -58,6 +64,7 @@ import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.TestingTaskContext.createTaskContext;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
@@ -164,6 +171,104 @@ public class TestTableFinishOperator
                 .isEqualTo(0);
     }
 
+    @Test
+    public void testFragmentsAccountedUntilPublication()
+            throws Exception
+    {
+        DriverContext driver = newDriver(4096);
+        AtomicBoolean published = new AtomicBoolean();
+        try (TableFinishOperator operator = newOperator(driver, (fragments, _, _, memory) -> {
+            assertThat(driver.getMemoryUsage()).isGreaterThan(2048);
+            assertThat(fragments).hasSize(1);
+            memory.setBytes(512);
+            published.set(true);
+            return Optional.empty();
+        })) {
+            operator.addInput(fragmentPage(2048));
+            assertThat(driver.getMemoryUsage()).isGreaterThan(2048);
+            operator.finish();
+            assertThat(operator.getOutput()).isNotNull();
+            assertThat(published).isTrue();
+            assertThat(driver.getMemoryUsage()).isZero();
+        }
+    }
+
+    @Test
+    public void testFragmentLimitPreventsPublication()
+            throws Exception
+    {
+        DriverContext driver = newDriver(4096);
+        AtomicBoolean published = new AtomicBoolean();
+        try (TableFinishOperator operator = newOperator(driver, (_, _, _, _) -> {
+            published.set(true);
+            return Optional.empty();
+        })) {
+            operator.addInput(fragmentPage(2048));
+            assertThatThrownBy(() -> operator.addInput(fragmentPage(2048)))
+                    .isInstanceOf(ExceededMemoryLimitException.class);
+            assertThat(published).isFalse();
+        }
+        assertThat(driver.getMemoryUsage()).isZero();
+    }
+
+    @Test
+    public void testFinishFailureReleasesMemory()
+            throws Exception
+    {
+        DriverContext driver = newDriver(4096);
+        try (TableFinishOperator operator = newOperator(driver, (_, _, _, memory) -> {
+            memory.setBytes(8192);
+            throw new AssertionError("reservation should fail before publication");
+        })) {
+            operator.addInput(fragmentPage(1024));
+            operator.finish();
+            assertThatThrownBy(operator::getOutput)
+                    .isInstanceOf(TrinoException.class)
+                    .hasMessageContaining("Insufficient memory to finish table write");
+            assertThat(driver.getMemoryUsage()).isZero();
+        }
+    }
+
+    @Test
+    public void testSmallFragmentDoesNotRetainInputPage()
+            throws Exception
+    {
+        DriverContext driver = newDriver(4096);
+        try (TableFinishOperator operator = newOperator(driver, (_, _, _, _) -> Optional.empty())) {
+            Page input = rowPagesBuilder(BIGINT, VARBINARY)
+                    .row(null, new byte[1024 * 1024])
+                    .row(null, new byte[] {1})
+                    .buildPage();
+            operator.addInput(input.getRegion(1, 1));
+            assertThat(driver.getMemoryUsage()).isBetween(1L, 1024L);
+        }
+        assertThat(driver.getMemoryUsage()).isZero();
+    }
+
+    private DriverContext newDriver(long memoryLimit)
+    {
+        return createTaskContext(scheduledExecutor, scheduledExecutor, testSessionBuilder().build(), DataSize.ofBytes(memoryLimit))
+                .addPipelineContext(0, true, true, false)
+                .addDriverContext();
+    }
+
+    private static TableFinishOperator newOperator(DriverContext driver, TableFinisher finisher)
+    {
+        return new TableFinishOperator(
+                driver.addOperatorContext(0, new PlanNodeId("finish"), "TableFinishOperator"),
+                finisher,
+                new DevNullOperator(driver.addOperatorContext(1, new PlanNodeId("statistics"), "DevNullOperator")),
+                new StatisticAggregationsDescriptor<>(ImmutableMap.of(), ImmutableMap.of(), ImmutableMap.of()),
+                false,
+                new TableExecuteContext(),
+                true);
+    }
+
+    private static Page fragmentPage(int size)
+    {
+        return rowPagesBuilder(BIGINT, VARBINARY).row(null, new byte[size]).buildPage();
+    }
+
     private static class TestTableFinisher
             implements TableFinisher
     {
@@ -173,7 +278,7 @@ public class TestTableFinishOperator
         private TableExecuteContext tableExecuteContext;
 
         @Override
-        public Optional<ConnectorOutputMetadata> finishTable(Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics, TableExecuteContext tableExecuteContext)
+        public Optional<ConnectorOutputMetadata> finishTable(Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics, TableExecuteContext tableExecuteContext, MemoryContext memoryContext)
         {
             checkState(!finished, "already finished");
             finished = true;

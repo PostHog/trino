@@ -961,6 +961,22 @@ public interface ConnectorMetadata
     }
 
     /**
+     * Finish a merge with a context for connector working memory. Input fragments
+     * are already accounted for by the engine. The context is valid only during
+     * this call; reservations are released by the engine when the call returns.
+     */
+    default Optional<ConnectorOutputMetadata> finishMerge(
+            ConnectorSession session,
+            ConnectorMergeTableHandle mergeTableHandle,
+            List<ConnectorTableHandle> sourceTableHandles,
+            Collection<Slice> fragments,
+            Collection<ComputedStatistics> computedStatistics,
+            MemoryContext memoryContext)
+    {
+        return finishMerge(session, mergeTableHandle, sourceTableHandles, fragments, computedStatistics);
+    }
+
+    /**
      * Create the specified view. The view definition is intended to
      * be serialized by the connector for permanent storage.
      */

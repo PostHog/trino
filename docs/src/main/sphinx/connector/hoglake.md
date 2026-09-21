@@ -366,7 +366,9 @@ recovery or cancellation leaves the outcome unknown; the error reports the opera
 Before submission, an upload failure attempts to remove that statement's uploads and
 leaves the table unchanged. There is no orphan cleanup mechanism in this connector.
 
-DELETE currently limits compressed position sets and aggregate worker fragments to
-64 MiB per statement on the coordinator and per sink on workers. It fails before
-publication if the limit is exceeded. Final vector construction runs on the coordinator;
+DELETE limits compressed position sets to 64 MiB per worker sink. The coordinator
+separately limits aggregate fragment payloads and vector-construction working memory
+to 64 MiB each. Retained fragments, decoded vectors, and encoding workspace are also
+charged to query memory; either limit can reject a statement before publication.
+Final vector construction runs on the coordinator;
 query/task retries and multi-statement write transactions remain unsupported.
