@@ -43,6 +43,7 @@ import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -75,6 +76,8 @@ final class TestHoglakeWrites
     private volatile boolean idempotentAppend;
     private volatile boolean corruptCommitResponse;
     private volatile boolean lifecycleSupport = true;
+    private volatile boolean replacementSupport = true;
+    private final Map<String, HoglakeDtos.ReplacementTarget> replacementTargets = new ConcurrentHashMap<>();
     private volatile boolean corruptLifecycleResponse;
     private int lifecycleRequests;
     private HttpServer server;
@@ -132,6 +135,9 @@ final class TestHoglakeWrites
                 List<String> capabilities = new ArrayList<>();
                 if (atomicCreation) {
                     capabilities.add("atomic-table-creation-v1");
+                }
+                if (replacementSupport) {
+                    capabilities.add("atomic-table-replacement-v1");
                 }
                 if (lifecycleSupport) {
                     capabilities.add("guarded-table-lifecycle-v1");
@@ -249,6 +255,9 @@ final class TestHoglakeWrites
         HoglakeDtos.TableCreation creation = creations.get(operation);
         if (exchange.getRequestMethod().equals("PUT")) {
             var request = mapper.readTree(exchange.getRequestBody());
+            if (request.has("replacement")) {
+                replacementTargets.put(operation, mapper.treeToValue(request.get("replacement"), HoglakeDtos.ReplacementTarget.class));
+            }
             List<HoglakeDtos.Column> columns = new ArrayList<>();
             for (var column : request.path("columns")) {
                 HoglakeDtos.ColumnDefinition definition = mapper.treeToValue(column, HoglakeDtos.ColumnDefinition.class);
@@ -269,7 +278,12 @@ final class TestHoglakeWrites
                 respond(exchange, commitStatus, Map.of("error", "synthetic_failure"));
                 return;
             }
-            if (tables.containsKey(creation.name())) {
+            HoglakeDtos.ReplacementTarget replacement = replacementTargets.get(operation);
+            String currentUuid = Optional.ofNullable(tables.get(creation.name())).map(HoglakeDtos.Table::tableUuid).orElse(null);
+            if (replacement != null && !Objects.equals(replacement.expectedTableUuid(), currentUuid)) {
+                creation = new HoglakeDtos.TableCreation(operation, creation.tableUuid(), "test", creation.name(), creation.columns(), creation.writePath(), "rejected", null, "target_changed");
+            }
+            else if (replacement == null && tables.containsKey(creation.name())) {
                 creation = new HoglakeDtos.TableCreation(operation, creation.tableUuid(), "test", creation.name(), creation.columns(), creation.writePath(), "rejected", null, "target_exists");
             }
             else {
@@ -320,6 +334,36 @@ final class TestHoglakeWrites
         if (server != null) {
             server.stop(0);
         }
+    }
+
+    @Test
+    void testReplacementSql()
+    {
+        runner.execute("CREATE OR REPLACE TABLE replacement AS SELECT BIGINT '7' AS id");
+        String original = tables.get("replacement").tableUuid();
+        runner.execute("CREATE OR REPLACE TABLE replacement AS SELECT id + 1 AS id FROM replacement");
+        assertQuery("SELECT * FROM replacement", "VALUES BIGINT '8'");
+        assertThat(tables.get("replacement").tableUuid()).isNotEqualTo(original);
+        corruptCommitResponse = true;
+        try {
+            runner.execute("CREATE OR REPLACE TABLE replacement AS SELECT BIGINT '9' AS id");
+        }
+        finally {
+            corruptCommitResponse = false;
+        }
+        assertQuery("SELECT * FROM replacement", "VALUES BIGINT '9'");
+        runner.execute("CREATE OR REPLACE TABLE replacement (name varchar)");
+        assertThat(tables.get("replacement").columns().getFirst().name()).isEqualTo("name");
+        assertThat(runner.execute("SELECT count(*) FROM replacement").getOnlyValue()).isEqualTo(0L);
+        replacementSupport = false;
+        try {
+            assertThatThrownBy(() -> runner.execute("CREATE OR REPLACE TABLE replacement (id bigint)"))
+                    .hasMessageContaining("atomic-table-replacement-v1");
+        }
+        finally {
+            replacementSupport = true;
+        }
+        assertThat(tables.get("replacement").columns().getFirst().name()).isEqualTo("name");
     }
 
     @Test

@@ -35,6 +35,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeParseException;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -179,10 +180,22 @@ public class HoglakeClient
 
     public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns)
     {
+        return prepareTableCreation(operationId, namespace, table, columns, null);
+    }
+
+    public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns, HoglakeDtos.ReplacementTarget replacement)
+    {
+        Map<String, Object> definition = new HashMap<>();
+        definition.put("namespace", namespace);
+        definition.put("name", table);
+        definition.put("columns", columns);
+        if (replacement != null) {
+            definition.put("replacement", replacement);
+        }
         return write(
                 "PUT",
                 catalogPath("/table-creations/" + encode(operationId)),
-                Map.of("namespace", namespace, "name", table, "columns", columns),
+                definition,
                 new TypeReference<HoglakeDtos.TableCreation>() {});
     }
 

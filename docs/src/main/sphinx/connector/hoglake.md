@@ -284,3 +284,22 @@ to also run the bucket-root regression. `TestHoglakeLiveWriteFailures` uses the
 same server settings to verify ambiguous responses and concurrent DDL against
 the real catalog through a fault-injecting local proxy.
 The normal test run uses synthetic HTTP fixtures and does not require Docker.
+
+### Atomic table replacement
+
+`CREATE OR REPLACE TABLE` and `CREATE OR REPLACE TABLE AS SELECT` require the
+server capability `atomic-table-replacement-v1`. Deploy the server first.
+Replacement supports the same definitions and types as ordinary creation,
+including CTAS reading the old target. The old table stays visible until one
+atomic publication replaces its definition and data with a new table UUID.
+
+The connector guards the target identity and snapshot observed during planning.
+Concurrent target changes, including INSERT, rename, drop, truncate, replacement,
+and compaction, reject publication. Absent targets use normal creation semantics.
+Failed preparation, writes, or publication do not remove the old table. Lost
+publication responses use the existing durable creation receipt; unresolved
+outcomes do not authorize deleting uploaded files.
+
+Existing retained snapshots remain readable through Hoglake's snapshot API;
+Trino time-travel syntax remains unsupported. Changefeed windows crossing a
+replacement require full-snapshot reconciliation against the new incarnation.

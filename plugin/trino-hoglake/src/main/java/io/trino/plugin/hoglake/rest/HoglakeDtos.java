@@ -81,6 +81,10 @@ public final class HoglakeDtos
         }
     }
 
+    public record ReplacementTarget(
+            @JsonProperty("expected_table_uuid") String expectedTableUuid,
+            @JsonProperty("read_snapshot") long readSnapshot) {}
+
     public record TableCreation(
             @JsonProperty("operation_id") String operationId,
             @JsonProperty("table_uuid") String tableUuid,
