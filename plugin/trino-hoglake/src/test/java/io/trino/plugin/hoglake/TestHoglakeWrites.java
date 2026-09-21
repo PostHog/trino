@@ -31,6 +31,8 @@ import io.trino.spi.connector.ConnectorContext;
 import io.trino.spi.connector.ConnectorFactory;
 import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.testing.DistributedQueryRunner;
+import io.trino.testing.QueryRunner;
 import io.trino.testing.StandaloneQueryRunner;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -74,6 +76,8 @@ final class TestHoglakeWrites
     private volatile int commits;
     private volatile boolean atomicCreation = true;
     private volatile boolean idempotentAppend;
+    private volatile boolean idempotentDelete;
+    private final Map<String, Long> deleteReceipts = new ConcurrentHashMap<>();
     private volatile boolean corruptCommitResponse;
     private volatile boolean lifecycleSupport = true;
     private volatile boolean schemaCreationRace;
@@ -95,7 +99,12 @@ final class TestHoglakeWrites
         server.start();
         client = new HoglakeClient("http://127.0.0.1:" + server.getAddress().getPort(), "lake");
         runner = new StandaloneQueryRunner(testSessionBuilder().setCatalog("hoglake").setSchema("test").build());
-        runner.installPlugin(new Plugin()
+        installConnector(runner);
+    }
+
+    private void installConnector(QueryRunner queryRunner)
+    {
+        queryRunner.installPlugin(new Plugin()
         {
             @Override
             public Iterable<ConnectorFactory> getConnectorFactories()
@@ -112,7 +121,7 @@ final class TestHoglakeWrites
                     public Connector create(String name, Map<String, String> config, ConnectorContext context)
                     {
                         return new HoglakeConnector(
-                                new HoglakeMetadata(client),
+                                new HoglakeMetadata(client, storage),
                                 new HoglakeSplitManager(client),
                                 new HoglakePageSourceProvider(storage),
                                 new HoglakePageSinkProvider(storage, "test"),
@@ -121,7 +130,7 @@ final class TestHoglakeWrites
                 });
             }
         });
-        runner.createCatalog("hoglake", "hoglake_write_test", Map.of());
+        queryRunner.createCatalog("hoglake", "hoglake_write_test", Map.of());
     }
 
     private synchronized void handle(HttpExchange exchange)
@@ -146,6 +155,9 @@ final class TestHoglakeWrites
                 }
                 if (schemaCreationRace) {
                     capabilities.add("guarded-schema-evolution-v1");
+                }
+                if (idempotentDelete) {
+                    capabilities.add("idempotent-delete-v1");
                 }
                 if (idempotentAppend) {
                     capabilities.add("idempotent-append-v1");
@@ -225,6 +237,39 @@ final class TestHoglakeWrites
                 else {
                     respond(exchange, 200, tables.get(name));
                 }
+            }
+            else if (path.contains("/commit/receipts/")) {
+                String operation = path.substring(path.lastIndexOf('/') + 1);
+                Long receipt = deleteReceipts.get(operation);
+                respond(exchange, receipt == null ? 404 : 200, receipt == null ? Map.of() : Map.of("operation_id", operation, "snapshot_id", receipt));
+            }
+            else if (path.equals("/v1/catalogs/lake/commit/deletes/prepared")) {
+                HoglakeDtos.Commit request = mapper.readValue(exchange.getRequestBody(), HoglakeDtos.Commit.class);
+                if (commitStatus != 200) {
+                    respond(exchange, commitStatus, Map.of("error", "synthetic_failure"));
+                    return;
+                }
+                commits++;
+                for (HoglakeDtos.Deletes deletes : request.deletes()) {
+                    List<HoglakeDtos.ScanFile> current = files.get(deletes.table());
+                    for (HoglakeDtos.DeleteRegistration registration : deletes.files()) {
+                        for (int i = 0; i < current.size(); i++) {
+                            HoglakeDtos.ScanFile file = current.get(i);
+                            if (file.dataFile().dataFileId() == registration.dataFileId()) {
+                                current.set(i, new HoglakeDtos.ScanFile(file.dataFile(), new HoglakeDtos.DeleteFile(
+                                        nextFileId++,
+                                        registration.dataFileId(),
+                                        registration.path(),
+                                        registration.deleteCount(),
+                                        registration.fileSizeBytes(),
+                                        snapshot + 1)));
+                            }
+                        }
+                    }
+                }
+                snapshot++;
+                deleteReceipts.put(request.operationId(), snapshot);
+                respond(exchange, corruptCommitResponse ? 503 : 200, Map.of("snapshot_id", snapshot));
             }
             else if (path.equals("/v1/catalogs/lake/commit")) {
                 commits++;
@@ -536,6 +581,72 @@ final class TestHoglakeWrites
         String lowPrecision = "SELECT TIME '12:34:56.123' AS tm, TIMESTAMP '1960-01-02 03:04:05' AS ts, TIMESTAMP '2024-01-02 03:04:05 UTC' AS tz";
         runner.execute("CREATE TABLE temporal_ctas AS " + lowPrecision);
         assertQuery("SELECT * FROM temporal_ctas", "SELECT CAST(tm AS time(6)), CAST(ts AS timestamp(6)), CAST(tz AS timestamp(6) with time zone) FROM (" + lowPrecision + ")");
+    }
+
+    @Test
+    void testRowDeletesAndLostResponse()
+    {
+        idempotentDelete = true;
+        try {
+            runner.execute("CREATE TABLE row_deletes (id bigint, label varchar)");
+            runner.execute("INSERT INTO row_deletes VALUES (1, 'a'), (2, 'b'), (3, NULL)");
+            runner.execute("INSERT INTO row_deletes VALUES (4, 'a'), (5, 'b'), (6, NULL)");
+            assertThat(runner.execute("DELETE FROM row_deletes WHERE id % 2 = 0 OR label IS NULL").getUpdateCount()).hasValue(4);
+            assertQuery("SELECT * FROM row_deletes", "VALUES (BIGINT '1', 'a'), (BIGINT '5', 'b')");
+            assertQuery("SELECT count(*) FROM row_deletes", "VALUES BIGINT '2'");
+            assertThat(runner.execute("DELETE FROM row_deletes WHERE id % 2 = 0 OR label IS NULL").getUpdateCount()).hasValue(0);
+            assertThat(runner.execute("DELETE FROM row_deletes WHERE false").getUpdateCount()).hasValue(0);
+            corruptCommitResponse = true;
+            int before = commits;
+            assertThat(runner.execute("DELETE FROM row_deletes WHERE label = 'a'").getUpdateCount()).hasValue(1);
+            assertThat(commits).isEqualTo(before + 1);
+            corruptCommitResponse = false;
+            assertQuery("SELECT * FROM row_deletes", "VALUES (BIGINT '5', 'b')");
+            commitStatus = 409;
+            assertThatThrownBy(() -> runner.execute("DELETE FROM row_deletes")).hasMessageContaining("conflict");
+            commitStatus = 200;
+            assertQuery("SELECT count(*) FROM row_deletes", "VALUES BIGINT '1'");
+            assertThat(runner.execute("DELETE FROM row_deletes").getUpdateCount()).hasValue(1);
+            assertThat(runner.execute("DELETE FROM row_deletes").getUpdateCount()).hasValue(0);
+            assertQuery("SELECT count(*) FROM row_deletes", "VALUES BIGINT '0'");
+            assertThatThrownBy(() -> runner.execute("MERGE INTO row_deletes t USING (VALUES 1) s(id) ON t.id=s.id WHEN MATCHED THEN DELETE"))
+                    .hasMessageContaining("does not support UPDATE or MERGE");
+        }
+        finally {
+            idempotentDelete = false;
+            corruptCommitResponse = false;
+            commitStatus = 200;
+        }
+    }
+
+    @Test
+    void testDistributedDeleteMemoryFailureDoesNotPublish()
+            throws Exception
+    {
+        idempotentDelete = true;
+        try (DistributedQueryRunner distributed = DistributedQueryRunner.builder(runner.getDefaultSession())
+                .setWorkerCount(2)
+                .setCoordinatorProperties(Map.of(
+                        "node-scheduler.include-coordinator", "false",
+                        "query.max-memory-per-node", "1MB"))
+                .build()) {
+            installConnector(distributed);
+            runner.execute("CREATE TABLE delete_memory (id bigint)");
+            runner.execute("INSERT INTO delete_memory VALUES 1, 2, 3");
+            runner.execute("INSERT INTO delete_memory VALUES 4, 5, 6");
+            int before = commits;
+            // Workers have the normal memory limit. Only coordinator publication
+            // is constrained, exercising the finishMerge memory-context forwarding.
+            assertThatThrownBy(() -> distributed.execute("DELETE FROM delete_memory WHERE id % 2 = 0"))
+                    .hasMessageContaining("Insufficient memory to finish table write");
+            assertThat(commits).isEqualTo(before);
+            assertQuery("SELECT sum(id) FROM delete_memory", "VALUES BIGINT '21'");
+            assertThat(runner.execute("DELETE FROM delete_memory WHERE id % 2 = 0").getUpdateCount()).hasValue(3);
+            assertQuery("SELECT sum(id) FROM delete_memory", "VALUES BIGINT '9'");
+        }
+        finally {
+            idempotentDelete = false;
+        }
     }
 
     @Test

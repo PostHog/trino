@@ -20,14 +20,17 @@ import io.airlift.units.Duration;
 import io.trino.Session;
 import io.trino.execution.TableExecuteContext;
 import io.trino.execution.TableExecuteContextManager;
+import io.trino.memory.context.LocalMemoryContext;
 import io.trino.operator.OperationTimer.OperationTiming;
 import io.trino.plugin.base.util.AutoCloseableCloser;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.QueryId;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.connector.ConnectorOutputMetadata;
+import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.statistics.ComputedStatistics;
 import io.trino.spi.type.Type;
 import io.trino.sql.planner.plan.PlanNodeId;
@@ -43,9 +46,12 @@ import java.util.function.Supplier;
 
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
+import static io.airlift.slice.SizeOf.instanceSize;
+import static io.airlift.slice.SizeOf.sizeOfByteArray;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.operator.TableWriterOperator.FRAGMENT_CHANNEL;
 import static io.trino.operator.TableWriterOperator.ROW_COUNT_CHANNEL;
+import static io.trino.spi.StandardErrorCode.EXCEEDED_LOCAL_MEMORY_LIMIT;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -127,8 +133,11 @@ public class TableFinishOperator
 
     private State state = State.RUNNING;
     private long rowCount;
+    private long fragmentBytes;
+    private final LocalMemoryContext fragmentMemory;
+    private final LocalMemoryContext finishMemory;
     private final AtomicReference<Optional<ConnectorOutputMetadata>> outputMetadata = new AtomicReference<>(Optional.empty());
-    private final ImmutableList.Builder<Slice> fragmentBuilder = ImmutableList.builder();
+    private ImmutableList.Builder<Slice> fragmentBuilder = ImmutableList.builder();
     private final ImmutableList.Builder<ComputedStatistics> computedStatisticsBuilder = ImmutableList.builder();
 
     private final OperationTiming statisticsTiming = new OperationTiming();
@@ -147,6 +156,8 @@ public class TableFinishOperator
             boolean outputRowCount)
     {
         this.operatorContext = requireNonNull(operatorContext, "operatorContext is null");
+        this.fragmentMemory = operatorContext.newLocalUserMemoryContext("table_finish_fragments");
+        this.finishMemory = operatorContext.newLocalUserMemoryContext("table_finish_connector");
         this.tableFinisher = requireNonNull(tableFinisher, "tableFinisher is null");
         this.statisticsAggregationOperator = requireNonNull(statisticsAggregationOperator, "statisticsAggregationOperator is null");
         this.descriptor = requireNonNull(descriptor, "descriptor is null");
@@ -212,7 +223,15 @@ public class TableFinishOperator
                 rowCount += BIGINT.getLong(rowCountBlock, position);
             }
             if (!fragmentBlock.isNull(position)) {
-                fragmentBuilder.add(VARBINARY.getSlice(fragmentBlock, position));
+                Slice fragment = VARBINARY.getSlice(fragmentBlock, position);
+                // Copy each fragment so a small slice cannot retain an entire input page.
+                // Include the slice object and builder/list reference arrays in the reservation.
+                long retainedBytes = sizeOfByteArray(fragment.length()) +
+                        instanceSize(Slice.class) + 2L * Long.BYTES;
+                long newFragmentBytes = Math.addExact(fragmentBytes, retainedBytes);
+                fragmentMemory.setBytes(newFragmentBytes);
+                fragmentBuilder.add(fragment.copy());
+                fragmentBytes = newFragmentBytes;
             }
         }
 
@@ -317,7 +336,18 @@ public class TableFinishOperator
         }
         state = State.FINISHED;
 
-        this.outputMetadata.set(tableFinisher.finishTable(fragmentBuilder.build(), computedStatisticsBuilder.build(), tableExecuteContext));
+        try {
+            this.outputMetadata.set(tableFinisher.finishTable(fragmentBuilder.build(), computedStatisticsBuilder.build(), tableExecuteContext, bytes -> {
+                // Completion is synchronous and cannot suspend for pool capacity.
+                if (!finishMemory.trySetBytes(bytes)) {
+                    throw new TrinoException(EXCEEDED_LOCAL_MEMORY_LIMIT, "Insufficient memory to finish table write");
+                }
+            }));
+        }
+        finally {
+            releaseFragments();
+            finishMemory.setBytes(0);
+        }
 
         // Check if table execute context has metrics to output
         Optional<Map<String, Long>> metricsOptional = tableExecuteContext.getMetrics();
@@ -377,10 +407,20 @@ public class TableFinishOperator
     public void close()
             throws Exception
     {
+        releaseFragments();
         AutoCloseableCloser closer = AutoCloseableCloser.create();
+        closer.register(fragmentMemory::close);
+        closer.register(finishMemory::close);
         closer.register(() -> statisticsAggregationOperator.getOperatorContext().destroy());
         closer.register(statisticsAggregationOperator);
         closer.close();
+    }
+
+    private void releaseFragments()
+    {
+        fragmentBuilder = ImmutableList.builder();
+        fragmentBytes = 0;
+        fragmentMemory.setBytes(0);
     }
 
     public interface TableFinisher
@@ -388,6 +428,7 @@ public class TableFinishOperator
         Optional<ConnectorOutputMetadata> finishTable(
                 Collection<Slice> fragments,
                 Collection<ComputedStatistics> computedStatistics,
-                TableExecuteContext tableExecuteContext);
+                TableExecuteContext tableExecuteContext,
+                MemoryContext memoryContext);
     }
 }

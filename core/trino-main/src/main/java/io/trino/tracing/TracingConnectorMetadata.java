@@ -52,6 +52,7 @@ import io.trino.spi.connector.JoinStatistics;
 import io.trino.spi.connector.JoinType;
 import io.trino.spi.connector.LimitApplicationResult;
 import io.trino.spi.connector.MaterializedViewFreshness;
+import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.connector.ProjectionApplicationResult;
 import io.trino.spi.connector.RelationColumnsMetadata;
 import io.trino.spi.connector.RelationCommentMetadata;
@@ -807,6 +808,15 @@ public class TracingConnectorMetadata
         Span span = startSpan("finishMerge", tableHandle.getTableHandle());
         try (var ignored = scopedSpan(span)) {
             return delegate.finishMerge(session, tableHandle, sourceTableHandles, fragments, computedStatistics);
+        }
+    }
+
+    @Override
+    public Optional<ConnectorOutputMetadata> finishMerge(ConnectorSession session, ConnectorMergeTableHandle tableHandle, List<ConnectorTableHandle> sourceTableHandles, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics, MemoryContext memoryContext)
+    {
+        Span span = startSpan("finishMerge", tableHandle.getTableHandle());
+        try (var ignored = scopedSpan(span)) {
+            return delegate.finishMerge(session, tableHandle, sourceTableHandles, fragments, computedStatistics, memoryContext);
         }
     }
 

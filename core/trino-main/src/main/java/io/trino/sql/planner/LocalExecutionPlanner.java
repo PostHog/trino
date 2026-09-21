@@ -4184,7 +4184,7 @@ public class LocalExecutionPlanner
     private static TableFinisher createTableFinisher(Session session, TableFinishNode node, Metadata metadata)
     {
         WriterTarget target = node.getTarget();
-        return (fragments, statistics, tableExecuteContext) -> {
+        return (fragments, statistics, tableExecuteContext, memoryContext) -> {
             if (target instanceof CreateTarget createTarget) {
                 return metadata.finishCreateTable(session, createTarget.getHandle(), fragments, statistics);
             }
@@ -4210,7 +4210,7 @@ public class LocalExecutionPlanner
             }
             if (target instanceof MergeTarget mergeTarget) {
                 MergeHandle mergeHandle = mergeTarget.getMergeHandle().orElseThrow(() -> new IllegalArgumentException("mergeHandle not present"));
-                return metadata.finishMerge(session, mergeHandle, mergeTarget.getSourceTableHandles(), fragments, statistics);
+                return metadata.finishMerge(session, mergeHandle, mergeTarget.getSourceTableHandles(), fragments, statistics, memoryContext);
             }
             throw new AssertionError("Unhandled target type: " + target.getClass().getName());
         };

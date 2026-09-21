@@ -15,6 +15,8 @@ package io.trino.plugin.hoglake;
 
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
+import io.trino.spi.connector.ConnectorMergeSink;
+import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.connector.ConnectorPageSinkId;
@@ -22,6 +24,7 @@ import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableCredentials;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.MemoryContext;
 
 import java.util.Optional;
 
@@ -37,6 +40,18 @@ public class HoglakePageSinkProvider
     {
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.trinoVersion = requireNonNull(trinoVersion, "trinoVersion is null");
+    }
+
+    @Override
+    public ConnectorMergeSink createMergeSink(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
+            ConnectorMergeTableHandle handle,
+            Optional<ConnectorTableCredentials> credentials,
+            ConnectorPageSinkId sinkId,
+            MemoryContext memoryContext)
+    {
+        return new HoglakeDeleteSink(memoryContext);
     }
 
     @Override

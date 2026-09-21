@@ -94,6 +94,31 @@ final class TestHoglakeLiveWrites
                     "s3.path-style-access", "true",
                     "s3.aws-access-key", "synthetic-test",
                     "s3.aws-secret-key", "synthetic-test-password"));
+            runner.execute("CREATE TABLE deletions (id bigint, label varchar)");
+            runner.execute("INSERT INTO deletions SELECT id, IF(id % 3 = 0, NULL, 'keep') FROM UNNEST(sequence(1, 10000)) t(id)");
+            runner.execute("INSERT INTO deletions SELECT id, IF(id % 3 = 0, NULL, 'keep') FROM UNNEST(sequence(10001, 20000)) t(id)");
+            long beforeDelete = client.getCatalog().headSnapshotId();
+            String deleteUuid = client.getTable("test", "deletions").orElseThrow().tableUuid();
+            assertThat(runner.execute("DELETE FROM deletions WHERE id > 10000 AND (id % 2 = 0 OR label IS NULL)").getUpdateCount()).hasValue(6666);
+            assertThat(runner.execute("SELECT count(*) FROM deletions").getOnlyValue()).isEqualTo(13334L);
+            assertThat(runner.execute("SELECT count(*) FROM deletions WHERE id > 10000 AND (id % 2 = 0 OR label IS NULL)").getOnlyValue()).isEqualTo(0L);
+            long firstDelete = client.getCatalog().headSnapshotId();
+            assertThat(client.getTable("test", "deletions", beforeDelete).orElseThrow().recordCount()).isEqualTo(20000);
+            assertThat(client.scan("test", "deletions", beforeDelete)).allMatch(file -> file.deleteFile() == null);
+            assertThat(runner.execute("DELETE FROM deletions WHERE id > 10000 AND (id % 2 = 0 OR label IS NULL)").getUpdateCount()).hasValue(0);
+            assertThat(runner.execute("DELETE FROM deletions WHERE id % 2 = 1").getUpdateCount()).hasValue(8334);
+            assertThat(runner.execute("SELECT count(*) FROM deletions").getOnlyValue()).isEqualTo(5000L);
+            assertThat(runner.execute("SELECT sum(id) FROM deletions").getOnlyValue()).isEqualTo(25005000L);
+            assertThat(client.scan("test", "deletions", firstDelete).stream()
+                    .mapToLong(file -> file.dataFile().recordCount() - (file.deleteFile() == null ? 0 : file.deleteFile().deleteCount())).sum()).isEqualTo(13334);
+            assertThat(client.getTable("test", "deletions").orElseThrow().tableUuid()).isEqualTo(deleteUuid);
+            assertThat(runner.execute("DELETE FROM deletions WHERE false").getUpdateCount()).hasValue(0);
+            assertThat(runner.execute("DELETE FROM deletions").getUpdateCount()).hasValue(5000);
+            assertThat(runner.execute("DELETE FROM deletions").getUpdateCount()).hasValue(0);
+            assertThat(runner.execute("SELECT count(*) FROM deletions").getOnlyValue()).isEqualTo(0L);
+            assertThatThrownBy(() -> runner.execute("UPDATE deletions SET id = 0")).hasMessageContaining("does not support UPDATE or MERGE");
+            assertThatThrownBy(() -> runner.execute("MERGE INTO deletions t USING (VALUES 1) s(id) ON t.id=s.id WHEN MATCHED THEN DELETE"))
+                    .hasMessageContaining("does not support UPDATE or MERGE");
             runner.execute("CREATE SCHEMA evolved");
             runner.execute("CREATE TABLE evolved.records (id bigint, label varchar, discarded bigint)");
             runner.execute("INSERT INTO evolved.records VALUES (1, 'old', 100)");

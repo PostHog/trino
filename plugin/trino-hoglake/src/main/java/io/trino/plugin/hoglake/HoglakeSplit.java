@@ -39,6 +39,7 @@ import static java.util.Objects.requireNonNull;
  * query instead of returning a wrong row set.
  */
 public record HoglakeSplit(
+        @JsonProperty("dataFileId") long dataFileId,
         @JsonProperty("path") String path,
         @JsonProperty("fileSizeBytes") long fileSizeBytes,
         @JsonProperty("recordCount") long recordCount,
@@ -63,7 +64,12 @@ public record HoglakeSplit(
      */
     public HoglakeSplit(String path, long fileSizeBytes, long recordCount, Optional<String> deleteFilePath, long deleteCount)
     {
-        this(path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, Optional.empty());
+        this(0, path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, Optional.empty());
+    }
+
+    public HoglakeSplit(String path, long fileSizeBytes, long recordCount, Optional<String> deleteFilePath, long deleteCount, Optional<String> deleteFileFormat)
+    {
+        this(0, path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat);
     }
 
     /**

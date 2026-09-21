@@ -134,6 +134,13 @@ public final class HoglakeDeletionVector
         this.retainedSizeInBytes = retainedSizeInBytes;
     }
 
+    void unionInto(HoglakeDeleteBitmap target)
+    {
+        for (int i = 0; i < bucketKeys.length; i++) {
+            target.union(bucketKeys[i], buckets[i]);
+        }
+    }
+
     public boolean isRowDeleted(long filePosition)
     {
         if (filePosition < 0) {

@@ -139,6 +139,7 @@ public class HoglakePageSourceProvider
                     dataSource,
                     parquetMetadata,
                     deletionVector,
+                    hoglakeSplit.dataFileId(),
                     hoglakeColumns,
                     predicate.simplify(DOMAIN_COMPACTION_THRESHOLD),
                     resources,
@@ -255,6 +256,7 @@ public class HoglakePageSourceProvider
             ParquetDataSource dataSource,
             ParquetMetadata parquetMetadata,
             HoglakeDeletionVector deletionVector,
+            long fileId,
             List<HoglakeColumnHandle> columns,
             TupleDomain<HoglakeColumnHandle> predicate,
             HoglakeSplitResources resources,
@@ -281,6 +283,10 @@ public class HoglakePageSourceProvider
         List<HoglakePageSource.ColumnAdaptation> adaptations = new ArrayList<>();
         for (int i = 0; i < columns.size(); i++) {
             HoglakeColumnHandle column = columns.get(i);
+            if (column.equals(HoglakeColumnHandle.ROW_ID)) {
+                adaptations.add(new HoglakePageSource.RowIdColumn(fileId));
+                continue;
+            }
             Optional<Field> field = bindings.get(i).flatMap(parquetField ->
                     constructField(column.type(), lookupColumnByName(messageColumn, parquetField.getName())));
             if (field.isPresent()) {
@@ -323,7 +329,7 @@ public class HoglakePageSourceProvider
         ParquetReader parquetReader = new ParquetReader(
                 Optional.ofNullable(fileMetadata.getCreatedBy()),
                 parquetColumns,
-                deletionVector != null,
+                deletionVector != null || columns.contains(HoglakeColumnHandle.ROW_ID),
                 rowGroups,
                 dataSource,
                 DateTimeZone.UTC,
@@ -398,6 +404,9 @@ public class HoglakePageSourceProvider
      */
     static Optional<org.apache.parquet.schema.Type> bindColumn(MessageType fileSchema, HoglakeColumnHandle column)
     {
+        if (column.equals(HoglakeColumnHandle.ROW_ID)) {
+            return Optional.empty();
+        }
         for (org.apache.parquet.schema.Type field : fileSchema.getFields()) {
             if (field.getId() != null && field.getId().intValue() == column.fieldId()) {
                 return Optional.of(field);

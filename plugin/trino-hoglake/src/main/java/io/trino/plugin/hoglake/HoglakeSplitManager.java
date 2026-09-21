@@ -83,7 +83,7 @@ public class HoglakeSplitManager
                 .toList();
     }
 
-    private static HoglakeSplit toSplit(HoglakeDtos.ScanFile file)
+    static HoglakeSplit toSplit(HoglakeDtos.ScanFile file)
     {
         HoglakeDtos.DataFile dataFile = file.dataFile();
         if (dataFile == null) {
@@ -92,11 +92,13 @@ public class HoglakeSplitManager
         HoglakeDtos.DeleteFile deleteFile = file.deleteFile();
         if (deleteFile == null) {
             return new HoglakeSplit(
+                    dataFile.dataFileId(),
                     dataFile.path(),
                     dataFile.fileSizeBytes(),
                     dataFile.recordCount(),
                     Optional.empty(),
-                    0);
+                    0,
+                    Optional.empty());
         }
         if (deleteFile.path() == null) {
             throw new TrinoException(
@@ -113,6 +115,7 @@ public class HoglakeSplitManager
                             .formatted(deleteFile.path(), deleteFile.dataFileId(), dataFile.path(), dataFile.dataFileId()));
         }
         return new HoglakeSplit(
+                dataFile.dataFileId(),
                 dataFile.path(),
                 dataFile.fileSizeBytes(),
                 dataFile.recordCount(),

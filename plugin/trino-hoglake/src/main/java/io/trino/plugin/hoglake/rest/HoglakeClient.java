@@ -343,7 +343,7 @@ public class HoglakeClient
             }
             throw new TrinoException(
                     HOGLAKE_CATALOG_UNAVAILABLE,
-                    "Hoglake INSERT outcome is unknown; preserve files and inspect operation " + request.operationId(),
+                    "Hoglake write outcome is unknown; preserve files and inspect operation " + request.operationId(),
                     failure);
         }
     }
@@ -358,7 +358,7 @@ public class HoglakeClient
         Optional<HoglakeDtos.CommitReceipt> receipt = get(catalogPath("/commit/receipts/" + encode(operationId)), new TypeReference<HoglakeDtos.CommitReceipt>() {}, timeout);
         receipt.ifPresent(result -> {
             if (!operationId.equals(result.operationId()) || result.snapshotId() <= 0) {
-                throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake INSERT receipt for operation " + operationId);
+                throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake write receipt for operation " + operationId);
             }
         });
         return receipt;
@@ -368,7 +368,7 @@ public class HoglakeClient
     {
         Duration remaining = requestTimeout.minusNanos(System.nanoTime() - started);
         if (remaining.isNegative() || remaining.isZero()) {
-            throw new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "Hoglake INSERT recovery deadline exceeded");
+            throw new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "Hoglake write recovery deadline exceeded");
         }
         return remaining;
     }
@@ -387,7 +387,7 @@ public class HoglakeClient
         // silently ignoring the ID after capability negotiation.
         String path = "/commit";
         if (request.operationId() != null) {
-            path = "/commit/prepared";
+            path = request.deletes().isEmpty() ? "/commit/prepared" : "/commit/deletes/prepared";
         }
         HoglakeDtos.CommitResult result = write("POST", catalogPath(path), request, new TypeReference<HoglakeDtos.CommitResult>() {}, timeout);
         if (result.snapshotId() <= 0) {
