@@ -234,6 +234,31 @@ retries remain unsupported. Files handed to the coordinator are not
 deleted on an ambiguous commit failure, to avoid removing committed data. Failed
 writes can therefore leave unregistered objects for operator cleanup.
 
+## Table lifecycle
+
+`DROP TABLE`, same-schema `ALTER TABLE ... RENAME TO ...`, and `TRUNCATE TABLE`
+require the server capability `guarded-table-lifecycle-v1`. Deploy the supporting
+Hoglake server before the connector. Cross-schema moves are unsupported.
+
+These operations send the table UUID captured during planning. A reused name
+cannot redirect a stale statement to a replacement table. Rename preserves the
+UUID, schema, files and retained history. Truncate atomically clears live data
+files and deletion vectors while preserving the UUID, schema, partition/sort
+specifications, properties and row-id allocation. DROP and TRUNCATE do not
+physically remove storage objects; normal retention and cleanup still apply.
+
+INSERT and TRUNCATE serialize at catalog publication. Inserts committed before
+truncate are cleared; inserts planned before truncate and committed afterward
+conflict. Fresh inserts can proceed. Truncate does not use drop/recreate.
+
+Lifecycle requests have no durable operation receipt and are not automatically
+retried by the connector. A timeout, malformed response or server failure may
+leave the outcome unknown. Inspect table identity and snapshot history before
+issuing a new statement: retrying TRUNCATE can erase intervening inserts.
+Append receipt recovery, when supported by the connector, does not make
+lifecycle requests idempotent. A server replay of an already committed INSERT
+returns its original receipt after rename, truncate or drop, without adding data.
+
 ## Development
 
 The connector builds and ships with this Trino fork, using the same SPI, Parquet,

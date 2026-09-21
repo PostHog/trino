@@ -74,6 +74,9 @@ final class TestHoglakeWrites
     private volatile boolean atomicCreation = true;
     private volatile boolean idempotentAppend;
     private volatile boolean corruptCommitResponse;
+    private volatile boolean lifecycleSupport = true;
+    private volatile boolean corruptLifecycleResponse;
+    private int lifecycleRequests;
     private HttpServer server;
     private HoglakeClient client;
     private StandaloneQueryRunner runner;
@@ -130,6 +133,9 @@ final class TestHoglakeWrites
                 if (atomicCreation) {
                     capabilities.add("atomic-table-creation-v1");
                 }
+                if (lifecycleSupport) {
+                    capabilities.add("guarded-table-lifecycle-v1");
+                }
                 if (idempotentAppend) {
                     capabilities.add("idempotent-append-v1");
                 }
@@ -163,7 +169,21 @@ final class TestHoglakeWrites
                     respond(exchange, 404, Map.of());
                     return;
                 }
-                if (path.endsWith("/alter")) {
+                if (!exchange.getRequestMethod().equals("GET")) {
+                    lifecycleRequests++;
+                    if (!("expected_table_uuid=" + tables.get(name).tableUuid()).equals(exchange.getRequestURI().getQuery())) {
+                        respond(exchange, 409, Map.of("error", "incarnation_changed"));
+                        return;
+                    }
+                }
+                if (path.endsWith("/truncate")) {
+                    HoglakeDtos.Table table = tables.get(name);
+                    tables.put(name, new HoglakeDtos.Table(name, table.namespace(), table.tableUuid(), table.columns(), 0, 0, 0));
+                    files.put(name, new ArrayList<>());
+                    snapshot++;
+                    respond(exchange, corruptLifecycleResponse ? 503 : 200, Map.of("snapshot_id", snapshot));
+                }
+                else if (path.endsWith("/alter")) {
                     String newName = mapper.readTree(exchange.getRequestBody()).path("ops").get(0).path("new_name").asText();
                     if (tables.containsKey(newName)) {
                         respond(exchange, 409, Map.of("error", "already_exists"));
@@ -300,6 +320,63 @@ final class TestHoglakeWrites
         if (server != null) {
             server.stop(0);
         }
+    }
+
+    @Test
+    void testTableLifecycleSql()
+    {
+        runner.execute("CREATE TABLE lifecycle AS SELECT BIGINT '7' AS id");
+        HoglakeDtos.Table original = tables.get("lifecycle");
+        runner.execute("ALTER TABLE lifecycle RENAME TO renamed_lifecycle");
+        assertThat(tables).doesNotContainKey("lifecycle");
+        assertThat(tables.get("renamed_lifecycle").tableUuid()).isEqualTo(original.tableUuid());
+        assertQuery("SELECT * FROM renamed_lifecycle", "VALUES BIGINT '7'");
+        runner.execute("TRUNCATE TABLE renamed_lifecycle");
+        assertThat(runner.execute("SELECT count(*) FROM renamed_lifecycle").getOnlyValue()).isEqualTo(0L);
+        assertThat(tables.get("renamed_lifecycle").tableUuid()).isEqualTo(original.tableUuid());
+        assertThat(tables.get("renamed_lifecycle").columns()).isEqualTo(original.columns());
+        runner.execute("INSERT INTO renamed_lifecycle VALUES 9");
+        assertQuery("SELECT * FROM renamed_lifecycle", "VALUES BIGINT '9'");
+        runner.execute("DROP TABLE renamed_lifecycle");
+        assertThat(tables).doesNotContainKey("renamed_lifecycle");
+    }
+
+    @Test
+    void testLifecycleGuardsAndAmbiguousTruncate()
+    {
+        runner.execute("CREATE TABLE lifecycle_guards (id bigint)");
+        HoglakeMetadata metadata = new HoglakeMetadata(client);
+        var session = ConnectorTestFixtures.session();
+        var handle = metadata.getTableHandle(session, new SchemaTableName("test", "lifecycle_guards"), Optional.empty(), Optional.empty());
+        int before = lifecycleRequests;
+        assertThatThrownBy(() -> metadata.renameTable(session, handle, new SchemaTableName("other", "moved"))).hasMessageContaining("between schemas");
+        lifecycleSupport = false;
+        try {
+            assertThatThrownBy(() -> metadata.dropTable(session, handle)).hasMessageContaining("guarded-table-lifecycle-v1");
+            assertThatThrownBy(() -> metadata.truncateTable(session, handle)).hasMessageContaining("guarded-table-lifecycle-v1");
+            assertThatThrownBy(() -> metadata.renameTable(session, handle, new SchemaTableName("test", "moved"))).hasMessageContaining("guarded-table-lifecycle-v1");
+        }
+        finally {
+            lifecycleSupport = true;
+        }
+        assertThat(lifecycleRequests).isEqualTo(before);
+        runner.execute("DROP TABLE lifecycle_guards");
+        runner.execute("CREATE TABLE lifecycle_guards AS SELECT BIGINT '1' AS id");
+        assertThatThrownBy(() -> metadata.dropTable(session, handle)).hasMessageContaining("write conflict");
+        assertThatThrownBy(() -> metadata.truncateTable(session, handle)).hasMessageContaining("write conflict");
+        assertThatThrownBy(() -> metadata.renameTable(session, handle, new SchemaTableName("test", "moved"))).hasMessageContaining("write conflict");
+        assertQuery("SELECT * FROM lifecycle_guards", "VALUES BIGINT '1'");
+        before = lifecycleRequests;
+        corruptLifecycleResponse = true;
+        try {
+            assertThatThrownBy(() -> runner.execute("TRUNCATE TABLE lifecycle_guards")).hasMessageContaining("outcome may be unknown");
+        }
+        finally {
+            corruptLifecycleResponse = false;
+        }
+        assertThat(lifecycleRequests).isEqualTo(before + 1);
+        runner.execute("INSERT INTO lifecycle_guards VALUES 2");
+        assertQuery("SELECT * FROM lifecycle_guards", "VALUES BIGINT '2'");
     }
 
     @Test

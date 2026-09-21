@@ -120,6 +120,14 @@ final class TestHoglakeWriteClient
                         TrinoException.class,
                         exception -> assertThat(exception.getErrorCode()).isEqualTo(failure.code().toErrorCode()));
                 assertThat(requests.get()).isEqualTo(1);
+                assertThatThrownBy(() -> client.truncateTable("test", "values", COMMIT.appends().getFirst().expectedTableUuid())).isInstanceOfSatisfying(
+                        TrinoException.class,
+                        exception -> assertThat(exception.getErrorCode()).isEqualTo(failure.code().toErrorCode()));
+                assertThat(requests.get()).isEqualTo(2);
+                assertThatThrownBy(() -> client.renameTable("test", "values", "renamed", COMMIT.appends().getFirst().expectedTableUuid())).isInstanceOfSatisfying(
+                        TrinoException.class,
+                        exception -> assertThat(exception.getErrorCode()).isEqualTo(failure.code().toErrorCode()));
+                assertThat(requests.get()).isEqualTo(3);
             }
             finally {
                 server.stop(0);
@@ -431,6 +439,29 @@ final class TestHoglakeWriteClient
                 worker.interrupt();
                 worker.join(Duration.ofSeconds(5));
             }
+        }
+        finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void testDropRejectsMissingTargetButStagingCleanupToleratesIt()
+            throws Exception
+    {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            try (exchange) {
+                exchange.getRequestBody().readAllBytes();
+                exchange.sendResponseHeaders(404, -1);
+            }
+        });
+        server.start();
+        try (HoglakeClient client = new HoglakeClient("http://127.0.0.1:" + server.getAddress().getPort(), "lake")) {
+            assertThatThrownBy(() -> client.dropTable("ns", "old_name", "12345678-1234-5678-90ab-1234567890ab"))
+                    .isInstanceOfSatisfying(TrinoException.class,
+                            exception -> assertThat(exception.getErrorCode()).isEqualTo(HOGLAKE_CATALOG_NOT_FOUND.toErrorCode()));
+            client.dropStagingTable("ns", "old_name");
         }
         finally {
             server.stop(0);

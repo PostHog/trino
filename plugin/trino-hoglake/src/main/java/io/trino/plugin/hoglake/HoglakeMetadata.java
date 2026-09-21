@@ -297,6 +297,41 @@ public class HoglakeMetadata
     }
 
     @Override
+    public void dropTable(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        checkLifecycleSupport();
+        HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
+        client.dropTable(handle.schemaName(), handle.tableName(), handle.tableUuid());
+    }
+
+    @Override
+    public void renameTable(ConnectorSession session, ConnectorTableHandle tableHandle, SchemaTableName newTableName)
+    {
+        HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
+        if (!handle.schemaName().equals(newTableName.getSchemaName())) {
+            throw new TrinoException(NOT_SUPPORTED, "Moving Hoglake tables between schemas is not supported");
+        }
+        checkLifecycleSupport();
+        client.renameTable(handle.schemaName(), handle.tableName(), newTableName.getTableName(), handle.tableUuid());
+    }
+
+    @Override
+    public void truncateTable(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        checkLifecycleSupport();
+        HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
+        client.truncateTable(handle.schemaName(), handle.tableName(), handle.tableUuid());
+    }
+
+    private void checkLifecycleSupport()
+    {
+        HoglakeDtos.Catalog catalog = client.getCatalog();
+        if (catalog.capabilities() == null || !catalog.capabilities().contains("guarded-table-lifecycle-v1")) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support guarded-table-lifecycle-v1");
+        }
+    }
+
+    @Override
     public ConnectorInsertTableHandle beginInsert(ConnectorSession session, ConnectorTableHandle tableHandle, List<ColumnHandle> columns, RetryMode retryMode)
     {
         checkRetryMode(retryMode);

@@ -217,9 +217,37 @@ public class HoglakeClient
         post(tablePath(namespace, table, "/alter"), Map.of("ops", List.of(Map.of("op", "rename_table", "new_name", newName))), new TypeReference<HoglakeDtos.Table>() {});
     }
 
+    public void renameTable(String namespace, String table, String newName, String expectedTableUuid)
+    {
+        HoglakeDtos.Table result = post(
+                tablePath(namespace, table, "/alter?expected_table_uuid=" + encode(expectedTableUuid)),
+                Map.of("ops", List.of(Map.of("op", "rename_table", "new_name", newName))),
+                new TypeReference<HoglakeDtos.Table>() {});
+        if (!expectedTableUuid.equals(result.tableUuid()) || !newName.equals(result.name())) {
+            throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake rename response; outcome may be unknown");
+        }
+    }
+
+    public void dropTable(String namespace, String table, String expectedTableUuid)
+    {
+        validateLifecycleResult(write("DELETE", tablePath(namespace, table, "?expected_table_uuid=" + encode(expectedTableUuid)), Map.of(), new TypeReference<HoglakeDtos.CommitResult>() {}));
+    }
+
+    public void truncateTable(String namespace, String table, String expectedTableUuid)
+    {
+        validateLifecycleResult(post(tablePath(namespace, table, "/truncate?expected_table_uuid=" + encode(expectedTableUuid)), Map.of(), new TypeReference<HoglakeDtos.CommitResult>() {}));
+    }
+
+    private static void validateLifecycleResult(HoglakeDtos.CommitResult result)
+    {
+        if (result.snapshotId() <= 0) {
+            throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake lifecycle response; outcome may be unknown");
+        }
+    }
+
     public void dropStagingTable(String namespace, String table)
     {
-        write("DELETE", tablePath(namespace, table, ""), Map.of(), new TypeReference<Object>() {});
+        write("DELETE", tablePath(namespace, table, ""), Map.of(), new TypeReference<Object>() {}, true);
     }
 
     public void commit(HoglakeDtos.Commit request)
@@ -333,7 +361,17 @@ public class HoglakeClient
         return write(method, path, body, type, requestTimeout);
     }
 
+    private <T> T write(String method, String path, Object body, TypeReference<T> type, boolean ignoreMissing)
+    {
+        return write(method, path, body, type, requestTimeout, ignoreMissing);
+    }
+
     private <T> T write(String method, String path, Object body, TypeReference<T> type, Duration timeout)
+    {
+        return write(method, path, body, type, timeout, false);
+    }
+
+    private <T> T write(String method, String path, Object body, TypeReference<T> type, Duration timeout, boolean ignoreMissing)
     {
         URI uri = URI.create(baseUri + path);
         try {
@@ -350,7 +388,7 @@ public class HoglakeClient
             if (status == 409) {
                 throw new TrinoException(StandardErrorCode.TRANSACTION_CONFLICT, "Hoglake write conflict: " + response.body());
             }
-            if (status == 404 && method.equals("DELETE")) {
+            if (status == 404 && ignoreMissing) {
                 return null;
             }
             if (status == 410) {
