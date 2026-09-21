@@ -29,6 +29,7 @@ import java.io.OutputStream;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.LongStream;
 
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_UNAVAILABLE;
 import static io.trino.spi.StandardErrorCode.EXCEEDED_LOCAL_MEMORY_LIMIT;
@@ -169,6 +170,52 @@ class TestHoglakeDeletePublisher
             assertThat(client.committed).isNull();
             assertThat(storage.isEmpty()).isTrue();
             assertThat(current.get()).isZero();
+        }
+    }
+
+    @Test
+    void testEncodingReservationReleasedBeforeLoadingNextVector()
+            throws IOException
+    {
+        MemoryFileSystem storage = new MemoryFileSystem();
+        HoglakeDeleteBitmap previous = new HoglakeDeleteBitmap();
+        previous.add(0);
+        byte[] prior = previous.encode("memory:///data2");
+        storage.newOutputFile(Location.of("memory:///prior")).createOrOverwrite(prior);
+        AtomicLong current = new AtomicLong();
+        try (Catalog client = new Catalog()
+        {
+            @Override
+            public List<HoglakeDtos.ScanFile> scan(String namespace, String table, long snapshot)
+            {
+                return List.of(
+                        super.scan(namespace, table, snapshot).getFirst(),
+                        new HoglakeDtos.ScanFile(
+                                new HoglakeDtos.DataFile(2, "memory:///data2", "parquet", 10, 100, 10L, 0, "ready", 1),
+                                new HoglakeDtos.DeleteFile(3, 2, "memory:///prior", 1, prior.length, 6)));
+            }
+        }) {
+            // Each phase fits within 3 MiB, but retaining the first file's encoding
+            // workspace while decoding the second file's old vector exceeds it.
+            new HoglakeDeletePublisher(client, storage).publish(
+                    HANDLE,
+                    List.of(fragment(1, LongStream.range(0, 500_000).map(position -> position * 2).toArray()), fragment(2, 1)),
+                    bytes -> {
+                        if (bytes > 3L * 1024 * 1024) {
+                            throw new TrinoException(EXCEEDED_LOCAL_MEMORY_LIMIT, "synthetic 3 MiB publication limit");
+                        }
+                        current.set(bytes);
+                    });
+            assertThat(current.get()).isZero();
+            var registrations = client.committed.deletes().getFirst().files();
+            assertThat(registrations).extracting(HoglakeDtos.DeleteRegistration::deleteCount).containsExactly(500_000L, 2L);
+            for (var registration : registrations) {
+                try (var input = storage.newInputFile(Location.of(registration.path())).newStream()) {
+                    assertThat(HoglakeDeletionVector.read(input.readAllBytes(), registration.path()).cardinality())
+                            .isEqualTo(registration.deleteCount());
+                }
+            }
+            assertThat(storage.newInputFile(Location.of("memory:///prior")).exists()).isTrue();
         }
     }
 

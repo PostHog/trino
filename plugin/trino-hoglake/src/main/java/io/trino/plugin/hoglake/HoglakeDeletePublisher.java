@@ -127,8 +127,8 @@ final class HoglakeDeletePublisher
                 uploads.add(location);
                 fileSystem.newOutputFile(location).createOrOverwrite(bytes);
                 registrations.add(new HoglakeDtos.DeleteRegistration(change.getKey(), location.toString(), bitmap.cardinality(), bytes.length));
+                temporaryMemory.setBytes(0);
             }
-            temporaryMemory.setBytes(0);
             // Even a zero-row DELETE validates identity and the DDL conflict window.
             // Once submitted, neither cancellation nor missing receipts authorizes cleanup.
             checkCancelled();
