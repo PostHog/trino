@@ -258,9 +258,38 @@ public class HoglakeClient
                 new TypeReference<HoglakeDtos.TableCreation>() {});
     }
 
+    public String claimUpload(String owner, String prefix, String kind)
+    {
+        String id = java.util.UUID.randomUUID().toString();
+        HoglakeDtos.UploadClaim claim = write("PUT", catalogPath("/uploads/" + id), Map.of("owner", owner, "prefix", prefix, "file_kind", kind), new TypeReference<HoglakeDtos.UploadClaim>() {});
+        String normalized = prefix.endsWith("/") ? prefix : prefix + "/";
+        if (!id.equals(claim.uploadId()) || !owner.equals(claim.owner()) || !"active".equals(claim.state()) || claim.path() == null || !claim.path().startsWith(normalized + "trino-upload/")) {
+            throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Invalid upload claim response");
+        }
+        return claim.path();
+    }
+
+    public void renewUploads(String owner)
+    {
+        post(catalogPath("/uploads/renew"), Map.of("owner", owner), new TypeReference<Map<String, Integer>>() {});
+    }
+
+    public void abandonUploads(String owner, List<String> paths)
+    {
+        post(catalogPath("/uploads/abandon"), Map.of("owner", owner, "paths", paths), new TypeReference<Map<String, Integer>>() {});
+    }
+
     public HoglakeDtos.TableCreation publishTableCreation(String operationId, List<HoglakeDtos.FileRegistration> files)
     {
         return validateCreationReceipt(operationId, post(catalogPath("/table-creations/" + encode(operationId) + "/commit"), Map.of("files", files), new TypeReference<HoglakeDtos.TableCreation>() {}));
+    }
+
+    public HoglakeDtos.TableCreation publishTableCreation(String operationId, List<HoglakeDtos.FileRegistration> files, boolean claimedUploads)
+    {
+        if (!claimedUploads) {
+            return publishTableCreation(operationId, files);
+        }
+        return validateCreationReceipt(operationId, post(catalogPath("/table-creations/" + encode(operationId) + "/commit/uploads"), Map.of("files", files), new TypeReference<HoglakeDtos.TableCreation>() {}));
     }
 
     public HoglakeDtos.TableCreation getTableCreation(String operationId)
@@ -324,18 +353,23 @@ public class HoglakeClient
 
     public void commit(HoglakeDtos.Commit request)
     {
-        commit(request, false);
+        commit(request, false, false);
     }
 
     public void commitMutation(HoglakeDtos.Commit request)
     {
-        commit(request, true);
+        commit(request, true, false);
     }
 
-    private void commit(HoglakeDtos.Commit request, boolean mutation)
+    public void commitClaimed(HoglakeDtos.Commit request, boolean mutation)
+    {
+        commit(request, mutation, true);
+    }
+
+    private void commit(HoglakeDtos.Commit request, boolean mutation, boolean claimedUploads)
     {
         try {
-            commitOnce(request, requestTimeout, mutation);
+            commitOnce(request, requestTimeout, mutation, claimedUploads);
             return;
         }
         catch (TrinoException failure) {
@@ -365,7 +399,7 @@ public class HoglakeClient
                         return;
                     }
                     if (attempt < 2) {
-                        commitOnce(request, remainingRecoveryTime(recoveryStarted), mutation);
+                        commitOnce(request, remainingRecoveryTime(recoveryStarted), mutation, claimedUploads);
                         return;
                     }
                 }
@@ -419,7 +453,7 @@ public class HoglakeClient
                 failure.getErrorCode().equals(HOGLAKE_CATALOG_NOT_FOUND.toErrorCode());
     }
 
-    private void commitOnce(HoglakeDtos.Commit request, Duration timeout, boolean mutation)
+    private void commitOnce(HoglakeDtos.Commit request, Duration timeout, boolean mutation, boolean claimedUploads)
     {
         // The required-key endpoint also protects against an older replica
         // silently ignoring the ID after capability negotiation.
@@ -429,6 +463,9 @@ public class HoglakeClient
         }
         if (mutation) {
             path = "/commit/mutations/prepared";
+        }
+        if (claimedUploads) {
+            path = "/commit/uploads";
         }
         HoglakeDtos.CommitResult result = write("POST", catalogPath(path), request, new TypeReference<HoglakeDtos.CommitResult>() {}, timeout);
         if (result.snapshotId() <= 0) {

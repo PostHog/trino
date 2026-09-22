@@ -35,7 +35,8 @@ public record HoglakeWriteHandle(
         @JsonProperty("creationOperation") Optional<String> creationOperation,
         @JsonProperty("insertOperation") Optional<String> insertOperation,
         @JsonProperty("partitionFields") List<io.trino.plugin.hoglake.rest.HoglakeDtos.PartitionField> partitionFields,
-        @JsonProperty("sortFields") List<io.trino.plugin.hoglake.rest.HoglakeDtos.SortField> sortFields)
+        @JsonProperty("sortFields") List<io.trino.plugin.hoglake.rest.HoglakeDtos.SortField> sortFields,
+        @JsonProperty("claimUploads") boolean claimUploads)
         implements ConnectorInsertTableHandle, ConnectorOutputTableHandle
 {
     public HoglakeWriteHandle(String namespace, String table, String tableUuid, long snapshot, String dataPath, List<HoglakeColumnHandle> columns, List<HoglakeColumnHandle> inputColumns, Optional<String> creationOperation)
@@ -51,6 +52,11 @@ public record HoglakeWriteHandle(
     public HoglakeWriteHandle(String namespace, String table, String tableUuid, long snapshot, String dataPath, List<HoglakeColumnHandle> columns, List<HoglakeColumnHandle> inputColumns, Optional<String> creationOperation, Optional<String> insertOperation, List<io.trino.plugin.hoglake.rest.HoglakeDtos.PartitionField> partitionFields)
     {
         this(namespace, table, tableUuid, snapshot, dataPath, columns, inputColumns, creationOperation, insertOperation, partitionFields, List.of());
+    }
+
+    public HoglakeWriteHandle(String namespace, String table, String tableUuid, long snapshot, String dataPath, List<HoglakeColumnHandle> columns, List<HoglakeColumnHandle> inputColumns, Optional<String> creationOperation, Optional<String> insertOperation, List<io.trino.plugin.hoglake.rest.HoglakeDtos.PartitionField> partitionFields, List<io.trino.plugin.hoglake.rest.HoglakeDtos.SortField> sortFields)
+    {
+        this(namespace, table, tableUuid, snapshot, dataPath, columns, inputColumns, creationOperation, insertOperation, partitionFields, sortFields, false);
     }
 
     @JsonCreator

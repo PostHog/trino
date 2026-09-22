@@ -68,8 +68,8 @@ public class HoglakeModule
 
     @Provides
     @Singleton
-    public static ConnectorPageSinkProvider createPageSinkProvider(TrinoFileSystemFactory fileSystemFactory, NodeVersion nodeVersion, io.trino.spi.PageSorter pageSorter)
+    public static ConnectorPageSinkProvider createPageSinkProvider(TrinoFileSystemFactory fileSystemFactory, NodeVersion nodeVersion, io.trino.spi.PageSorter pageSorter, HoglakeClient client)
     {
-        return new HoglakePageSinkProvider(fileSystemFactory, nodeVersion.toString(), pageSorter);
+        return new HoglakePageSinkProvider(fileSystemFactory, nodeVersion.toString(), pageSorter, client);
     }
 }

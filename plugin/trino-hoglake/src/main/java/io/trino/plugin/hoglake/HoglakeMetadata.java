@@ -466,7 +466,7 @@ public class HoglakeMetadata
             throw new TrinoException(HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake preparation response for operation " + operation);
         }
         List<HoglakeColumnHandle> columns = prepared.columns().stream().map(HoglakeMetadata::toColumnHandle).toList();
-        return new HoglakeWriteHandle(metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), prepared.tableUuid(), catalog.headSnapshotId(), prepared.writePath(), columns, columns, Optional.of(operation), Optional.empty(), partitionFields, sortFields);
+        return new HoglakeWriteHandle(metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), prepared.tableUuid(), catalog.headSnapshotId(), prepared.writePath(), columns, columns, Optional.of(operation), Optional.empty(), partitionFields, sortFields, catalog.capabilities().contains("claimed-uploads-v1"));
     }
 
     @Override
@@ -527,7 +527,7 @@ public class HoglakeMetadata
         if (catalog.capabilities() != null && catalog.capabilities().contains("idempotent-append-v1")) {
             operation = Optional.of(UUID.randomUUID().toString());
         }
-        return new HoglakeWriteHandle(handle.schemaName(), handle.tableName(), handle.tableUuid(), handle.snapshotId(), catalog.dataPath(), handle.columns(), inputs, Optional.empty(), operation, partitionFields, sortFields);
+        return new HoglakeWriteHandle(handle.schemaName(), handle.tableName(), handle.tableUuid(), handle.snapshotId(), catalog.dataPath(), handle.columns(), inputs, Optional.empty(), operation, partitionFields, sortFields, catalog.capabilities() != null && catalog.capabilities().contains("claimed-uploads-v1"));
     }
 
     @Override
@@ -538,7 +538,7 @@ public class HoglakeMetadata
         List<HoglakeDtos.FileRegistration> files = decodeFragments(fragments);
         HoglakeDtos.TableCreation result;
         try {
-            result = client.publishTableCreation(operation, files);
+            result = client.publishTableCreation(operation, files, writeHandle.claimUploads());
         }
         catch (TrinoException failure) {
             if (isDefiniteRejection(failure)) {
@@ -549,7 +549,7 @@ public class HoglakeMetadata
             try {
                 result = client.getTableCreation(operation);
                 if ("prepared".equals(result.state())) {
-                    result = client.publishTableCreation(operation, files);
+                    result = client.publishTableCreation(operation, files, writeHandle.claimUploads());
                 }
             }
             catch (RuntimeException recoveryFailure) {
@@ -627,7 +627,7 @@ public class HoglakeMetadata
         if (catalog.capabilities() == null || !catalog.capabilities().contains("idempotent-mutation-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support idempotent-mutation-v1 required for DELETE, UPDATE and MERGE");
         }
-        return new HoglakeDeleteHandle(handle, catalog.dataPath(), UUID.randomUUID().toString(), insertFailure, insertFailure.isPresent() ? List.of() : partitionFields, insertFailure.isPresent() ? List.of() : sortFields);
+        return new HoglakeDeleteHandle(handle, catalog.dataPath(), UUID.randomUUID().toString(), insertFailure, insertFailure.isPresent() ? List.of() : partitionFields, insertFailure.isPresent() ? List.of() : sortFields, catalog.capabilities().contains("claimed-uploads-v1"));
     }
 
     @Override
@@ -664,7 +664,13 @@ public class HoglakeMetadata
                         .thenComparingLong(HoglakeDtos.FileRegistration::footerSize))
                 .toList();
         if (!files.isEmpty()) {
-            client.commit(new HoglakeDtos.Commit(handle.snapshot(), List.of(new HoglakeDtos.Append(handle.namespace(), handle.table(), handle.tableUuid(), files)), handle.insertOperation().orElse(null)));
+            HoglakeDtos.Commit request = new HoglakeDtos.Commit(handle.snapshot(), List.of(new HoglakeDtos.Append(handle.namespace(), handle.table(), handle.tableUuid(), files)), handle.insertOperation().orElse(null));
+            if (handle.claimUploads()) {
+                client.commitClaimed(request, false);
+            }
+            else {
+                client.commit(request);
+            }
         }
     }
 

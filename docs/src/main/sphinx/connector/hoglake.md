@@ -497,3 +497,19 @@ NUL is rejected. These annotations do not configure storage. Requires the server
 `versioned-table-metadata-v1` capability and additive V11 migration. Upgrade all server replicas before metadata
 use: old DDL writers cannot preserve new versioned metadata. Old replicas
 refuse metadata operations, and existing metadata-free operations remain compatible.
+
+
+### Abandoned upload cleanup
+
+Servers advertising `claimed-uploads-v1` provide durable ownership before each
+Parquet or deletion-vector upload. Trino renews 24-hour leases during writes and
+settles ownership atomically with publication. Unknown commit responses never
+permit worker deletion. An operator can explicitly schedule expired claims with
+`POST /v1/catalogs/{catalog}/uploads/schedule-expired`; the existing cleanup drain
+checks retained references before deletion. No new background job is enabled.
+Unclaimed older or foreign files are outside this cleanup mechanism. Permanent
+fences prevent late commits and allow later sweeps to reclaim late-finishing PUTs.
+This costs a claim request and durable row per file. Upgrade all server replicas
+and apply V12 before use; old servers continue legacy writes without claim cleanup.
+Writers idle past 24 hours can be fenced by an explicit reclamation and must retry
+with new paths.

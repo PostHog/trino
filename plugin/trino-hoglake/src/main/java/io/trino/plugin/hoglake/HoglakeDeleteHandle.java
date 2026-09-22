@@ -18,7 +18,7 @@ import io.trino.spi.connector.ConnectorTableHandle;
 
 import java.util.Optional;
 
-public record HoglakeDeleteHandle(HoglakeTableHandle table, String dataPath, String operationId, Optional<String> insertFailure, java.util.List<io.trino.plugin.hoglake.rest.HoglakeDtos.PartitionField> partitionFields, java.util.List<io.trino.plugin.hoglake.rest.HoglakeDtos.SortField> sortFields)
+public record HoglakeDeleteHandle(HoglakeTableHandle table, String dataPath, String operationId, Optional<String> insertFailure, java.util.List<io.trino.plugin.hoglake.rest.HoglakeDtos.PartitionField> partitionFields, java.util.List<io.trino.plugin.hoglake.rest.HoglakeDtos.SortField> sortFields, boolean claimUploads)
         implements ConnectorMergeTableHandle
 {
     public HoglakeDeleteHandle(HoglakeTableHandle table, String dataPath, String operationId)
@@ -34,6 +34,11 @@ public record HoglakeDeleteHandle(HoglakeTableHandle table, String dataPath, Str
     public HoglakeDeleteHandle(HoglakeTableHandle table, String dataPath, String operationId, Optional<String> insertFailure, java.util.List<io.trino.plugin.hoglake.rest.HoglakeDtos.PartitionField> partitionFields)
     {
         this(table, dataPath, operationId, insertFailure, partitionFields, java.util.List.of());
+    }
+
+    public HoglakeDeleteHandle(HoglakeTableHandle table, String dataPath, String operationId, Optional<String> insertFailure, java.util.List<io.trino.plugin.hoglake.rest.HoglakeDtos.PartitionField> partitionFields, java.util.List<io.trino.plugin.hoglake.rest.HoglakeDtos.SortField> sortFields)
+    {
+        this(table, dataPath, operationId, insertFailure, partitionFields, sortFields, false);
     }
 
     @Override

@@ -474,9 +474,9 @@ final class TestHoglakeLiveWriteFailures
         {
             try (exchange) {
                 String path = exchange.getRequestURI().toString();
-                boolean prepare = exchange.getRequestMethod().equals("PUT");
+                boolean prepare = exchange.getRequestMethod().equals("PUT") && path.contains("/table-creations/");
                 boolean write = prepare || exchange.getRequestMethod().equals("POST");
-                boolean commit = path.endsWith("/commit") || path.endsWith("/commit/prepared") || path.endsWith("/commit/deletes/prepared") || path.endsWith("/commit/mutations/prepared");
+                boolean commit = path.endsWith("/commit") || path.endsWith("/commit/prepared") || path.endsWith("/commit/deletes/prepared") || path.endsWith("/commit/mutations/prepared") || path.endsWith("/commit/uploads");
                 if (prepare && path.contains("/table-creations/")) {
                     lastOperation = path.substring(path.lastIndexOf('/') + 1);
                 }

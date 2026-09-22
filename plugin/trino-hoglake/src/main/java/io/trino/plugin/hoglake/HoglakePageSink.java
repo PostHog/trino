@@ -78,6 +78,8 @@ public class HoglakePageSink
     private long completedBytes;
     private boolean finished;
     private boolean aborted;
+    private final io.trino.plugin.hoglake.rest.HoglakeClient uploadClient;
+    private long lastRenewal = System.nanoTime();
 
     public HoglakePageSink(TrinoFileSystem fileSystem, HoglakeWriteHandle handle, String trinoVersion)
     {
@@ -86,6 +88,12 @@ public class HoglakePageSink
 
     public HoglakePageSink(TrinoFileSystem fileSystem, HoglakeWriteHandle handle, String trinoVersion, io.trino.spi.PageSorter pageSorter)
     {
+        this(fileSystem, handle, trinoVersion, pageSorter, null);
+    }
+
+    public HoglakePageSink(TrinoFileSystem fileSystem, HoglakeWriteHandle handle, String trinoVersion, io.trino.spi.PageSorter pageSorter, io.trino.plugin.hoglake.rest.HoglakeClient client)
+    {
+        this.uploadClient = handle.claimUploads() ? requireNonNull(client, "client required for upload claims") : null;
         this.pageSorter = handle.sortFields().isEmpty() ? pageSorter : requireNonNull(pageSorter, "pageSorter is required for sorted writes");
         HoglakeSorting.validate(handle.sortFields(), handle.columns());
         this.fileSystem = requireNonNull(fileSystem, "fileSystem is null");
@@ -111,6 +119,7 @@ public class HoglakePageSink
     @Override
     public CompletableFuture<?> appendPage(Page page)
     {
+        renewUploads(false);
         if (finished || aborted) {
             throw new IllegalStateException("Sink is finished");
         }
@@ -205,6 +214,9 @@ public class HoglakePageSink
             // Location requires a slash after the authority, even for a bucket root.
             location = Location.of(dataPath.endsWith("/") ? dataPath : dataPath + "/")
                     .appendPath("data/" + UUID.randomUUID() + ".parquet");
+            if (uploadClient != null) {
+                location = Location.of(uploadClient.claimUpload(uploadOwner(), handle.dataPath(), "data"));
+            }
             locations.add(location);
             writer = new ParquetWriter(
                     fileSystem.newOutputFile(location).create(memoryContext),
@@ -312,6 +324,7 @@ public class HoglakePageSink
             throw new IllegalStateException("Sink is aborted");
         }
         try {
+            renewUploads(true);
             flushSorted();
             closeFile();
             finished = true;
@@ -322,6 +335,19 @@ public class HoglakePageSink
         }
         catch (IOException e) {
             throw new TrinoException(HOGLAKE_WRITE_ERROR, "Failed to finish Hoglake Parquet file", e);
+        }
+    }
+
+    private String uploadOwner()
+    {
+        return handle.creationOperation().or(() -> handle.insertOperation()).orElseThrow();
+    }
+
+    private void renewUploads(boolean force)
+    {
+        if (uploadClient != null && (force || System.nanoTime() - lastRenewal > java.util.concurrent.TimeUnit.MINUTES.toNanos(5))) {
+            uploadClient.renewUploads(uploadOwner());
+            lastRenewal = System.nanoTime();
         }
     }
 
@@ -351,7 +377,12 @@ public class HoglakePageSink
             memoryContext.close();
         }
         try {
-            fileSystem.deleteFiles(locations);
+            if (uploadClient != null) {
+                uploadClient.abandonUploads(uploadOwner(), locations.stream().map(Location::toString).toList());
+            }
+            else {
+                fileSystem.deleteFiles(locations);
+            }
         }
         catch (IOException e) {
             throw new TrinoException(HOGLAKE_WRITE_ERROR, "Failed to clean up aborted Hoglake write", e);

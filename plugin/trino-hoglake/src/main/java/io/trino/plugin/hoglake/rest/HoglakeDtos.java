@@ -156,6 +156,12 @@ public final class HoglakeDtos
             @JsonProperty("snapshot_id") Long snapshotId,
             @JsonProperty("reason") String reason) {}
 
+    public record UploadClaim(
+            @JsonProperty("upload_id") String uploadId,
+            @JsonProperty("owner") String owner,
+            @JsonProperty("path") String path,
+            @JsonProperty("state") String state) {}
+
     public record Namespace(
             @JsonProperty("name") String name,
             @JsonProperty("namespace_id") Long namespaceId) {}

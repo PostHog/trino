@@ -53,6 +53,66 @@ final class TestHoglakePageSink
     private static final HoglakeWriteHandle HANDLE = new HoglakeWriteHandle("test", "table", UUID.randomUUID().toString(), 3, "memory:///warehouse/", List.of(FIRST, SECOND), List.of(SECOND), Optional.empty());
 
     @Test
+    void testClaimsPrecedeUploadAndAbortNeverDeletesHandedOffFiles()
+            throws Exception
+    {
+        MemoryFileSystem storage = new MemoryFileSystem();
+        java.util.List<String> abandoned = new java.util.ArrayList<>();
+        String owner = UUID.randomUUID().toString();
+        try (var client = new io.trino.plugin.hoglake.rest.HoglakeClient("http://localhost:1", "test")
+        {
+            @Override
+            public String claimUpload(String claimedOwner, String prefix, String kind)
+            {
+                assertThat(claimedOwner).isEqualTo(owner);
+                assertThat(kind).isEqualTo("data");
+                return prefix + "trino-upload/" + UUID.randomUUID() + ".parquet";
+            }
+
+            @Override
+            public void renewUploads(String claimedOwner)
+            {
+                assertThat(claimedOwner).isEqualTo(owner);
+            }
+
+            @Override
+            public void abandonUploads(String claimedOwner, List<String> paths)
+            {
+                assertThat(claimedOwner).isEqualTo(owner);
+                abandoned.addAll(paths);
+            }
+        }) {
+            HoglakeWriteHandle handle = new HoglakeWriteHandle(
+                    "test",
+                    "table",
+                    HANDLE.tableUuid(),
+                    3,
+                    "memory:///warehouse/",
+                    List.of(FIRST),
+                    List.of(FIRST),
+                    Optional.empty(),
+                    Optional.of(owner),
+                    List.of(),
+                    List.of(),
+                    true);
+            HoglakePageSink sink = new HoglakePageSink(storage, handle, "test", null, client);
+            sink.appendPage(new Page(block(1L)));
+            var fragment = sink.finish().get().iterator().next();
+            var file = new ObjectMapper().readValue(fragment.getBytes(), HoglakeDtos.FileRegistration.class);
+            assertThat(file.path()).contains("/trino-upload/");
+            sink.abort();
+            assertThat(abandoned).isEmpty();
+            assertThat(storage.newInputFile(Location.of(file.path())).exists()).isTrue();
+            HoglakePageSink unfinished = new HoglakePageSink(storage, handle, "test", null, client);
+            unfinished.appendPage(new Page(block(2L)));
+            unfinished.abort();
+            assertThat(abandoned).hasSize(1);
+            // The catalog drain owns deletion after fencing; workers do not delete claimed objects.
+            assertThat(storage.newInputFile(Location.of(abandoned.getFirst())).exists()).isTrue();
+        }
+    }
+
+    @Test
     void testSortedFilesIncludeNullOrderingAcrossInputPages()
             throws Exception
     {
