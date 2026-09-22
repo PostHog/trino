@@ -34,7 +34,8 @@ public record HoglakeWriteHandle(
         @JsonProperty("inputColumns") List<HoglakeColumnHandle> inputColumns,
         @JsonProperty("creationOperation") Optional<String> creationOperation,
         @JsonProperty("insertOperation") Optional<String> insertOperation,
-        @JsonProperty("partitionFields") List<io.trino.plugin.hoglake.rest.HoglakeDtos.PartitionField> partitionFields)
+        @JsonProperty("partitionFields") List<io.trino.plugin.hoglake.rest.HoglakeDtos.PartitionField> partitionFields,
+        @JsonProperty("sortFields") List<io.trino.plugin.hoglake.rest.HoglakeDtos.SortField> sortFields)
         implements ConnectorInsertTableHandle, ConnectorOutputTableHandle
 {
     public HoglakeWriteHandle(String namespace, String table, String tableUuid, long snapshot, String dataPath, List<HoglakeColumnHandle> columns, List<HoglakeColumnHandle> inputColumns, Optional<String> creationOperation)
@@ -47,6 +48,11 @@ public record HoglakeWriteHandle(
         this(namespace, table, tableUuid, snapshot, dataPath, columns, inputColumns, creationOperation, insertOperation, List.of());
     }
 
+    public HoglakeWriteHandle(String namespace, String table, String tableUuid, long snapshot, String dataPath, List<HoglakeColumnHandle> columns, List<HoglakeColumnHandle> inputColumns, Optional<String> creationOperation, Optional<String> insertOperation, List<io.trino.plugin.hoglake.rest.HoglakeDtos.PartitionField> partitionFields)
+    {
+        this(namespace, table, tableUuid, snapshot, dataPath, columns, inputColumns, creationOperation, insertOperation, partitionFields, List.of());
+    }
+
     @JsonCreator
     public HoglakeWriteHandle
     {
@@ -57,6 +63,7 @@ public record HoglakeWriteHandle(
         requireNonNull(insertOperation, "insertOperation is null");
         requireNonNull(creationOperation, "creationOperation is null");
         partitionFields = ImmutableList.copyOf(partitionFields);
+        sortFields = ImmutableList.copyOf(sortFields);
         columns = ImmutableList.copyOf(columns);
         inputColumns = ImmutableList.copyOf(inputColumns);
     }

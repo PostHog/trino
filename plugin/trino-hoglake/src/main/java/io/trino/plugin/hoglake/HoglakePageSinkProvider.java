@@ -35,9 +35,16 @@ public class HoglakePageSinkProvider
 {
     private final TrinoFileSystemFactory fileSystemFactory;
     private final String trinoVersion;
+    private final io.trino.spi.PageSorter pageSorter;
 
     public HoglakePageSinkProvider(TrinoFileSystemFactory fileSystemFactory, String trinoVersion)
     {
+        this(fileSystemFactory, trinoVersion, null);
+    }
+
+    public HoglakePageSinkProvider(TrinoFileSystemFactory fileSystemFactory, String trinoVersion, io.trino.spi.PageSorter pageSorter)
+    {
+        this.pageSorter = pageSorter;
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.trinoVersion = requireNonNull(trinoVersion, "trinoVersion is null");
     }
@@ -53,19 +60,19 @@ public class HoglakePageSinkProvider
     {
         HoglakeDeleteHandle merge = (HoglakeDeleteHandle) handle;
         HoglakeTableHandle table = merge.table();
-        HoglakeWriteHandle write = new HoglakeWriteHandle(table.schemaName(), table.tableName(), table.tableUuid(), table.snapshotId(), merge.dataPath(), table.columns(), table.columns(), Optional.empty(), Optional.empty(), merge.partitionFields());
-        return new HoglakeMergeSink(new HoglakePageSink(fileSystemFactory.create(session), write, trinoVersion), memoryContext, merge.insertFailure());
+        HoglakeWriteHandle write = new HoglakeWriteHandle(table.schemaName(), table.tableName(), table.tableUuid(), table.snapshotId(), merge.dataPath(), table.columns(), table.columns(), Optional.empty(), Optional.empty(), merge.partitionFields(), merge.sortFields());
+        return new HoglakeMergeSink(new HoglakePageSink(fileSystemFactory.create(session), write, trinoVersion, pageSorter), memoryContext, merge.insertFailure());
     }
 
     @Override
     public ConnectorPageSink createPageSink(ConnectorTransactionHandle transaction, ConnectorSession session, ConnectorOutputTableHandle handle, Optional<ConnectorTableCredentials> credentials, ConnectorPageSinkId sinkId)
     {
-        return new HoglakePageSink(fileSystemFactory.create(session), (HoglakeWriteHandle) handle, trinoVersion);
+        return new HoglakePageSink(fileSystemFactory.create(session), (HoglakeWriteHandle) handle, trinoVersion, pageSorter);
     }
 
     @Override
     public ConnectorPageSink createPageSink(ConnectorTransactionHandle transaction, ConnectorSession session, ConnectorInsertTableHandle handle, Optional<ConnectorTableCredentials> credentials, ConnectorPageSinkId sinkId)
     {
-        return new HoglakePageSink(fileSystemFactory.create(session), (HoglakeWriteHandle) handle, trinoVersion);
+        return new HoglakePageSink(fileSystemFactory.create(session), (HoglakeWriteHandle) handle, trinoVersion, pageSorter);
     }
 }

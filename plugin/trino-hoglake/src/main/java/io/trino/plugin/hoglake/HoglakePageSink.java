@@ -63,6 +63,11 @@ public class HoglakePageSink
     private final HoglakeWriteHandle handle;
     private final HoglakeParquetSchema schema;
     private final String trinoVersion;
+    private final io.trino.spi.PageSorter pageSorter;
+    private final List<Page> sortBuffer = new ArrayList<>();
+    private long sortBytes;
+    private long sortPositions;
+    private static final long SORT_BUFFER_BYTES = 32L * 1024 * 1024;
     private final AggregatedMemoryContext memoryContext = AggregatedMemoryContext.newSimpleAggregatedMemoryContext();
     private final List<Location> locations = new ArrayList<>();
     private final List<Slice> fragments = new ArrayList<>();
@@ -76,6 +81,13 @@ public class HoglakePageSink
 
     public HoglakePageSink(TrinoFileSystem fileSystem, HoglakeWriteHandle handle, String trinoVersion)
     {
+        this(fileSystem, handle, trinoVersion, null);
+    }
+
+    public HoglakePageSink(TrinoFileSystem fileSystem, HoglakeWriteHandle handle, String trinoVersion, io.trino.spi.PageSorter pageSorter)
+    {
+        this.pageSorter = handle.sortFields().isEmpty() ? pageSorter : requireNonNull(pageSorter, "pageSorter is required for sorted writes");
+        HoglakeSorting.validate(handle.sortFields(), handle.columns());
         this.fileSystem = requireNonNull(fileSystem, "fileSystem is null");
         this.handle = requireNonNull(handle, "handle is null");
         HoglakePartitioning.validate(handle.partitionFields(), handle.columns());
@@ -92,7 +104,7 @@ public class HoglakePageSink
     @Override
     public long getMemoryUsage()
     {
-        return memoryContext.getBytes() + (writer == null ? 0 : writer.getRetainedBytes()) +
+        return 3 * sortBytes + 16 * sortPositions + memoryContext.getBytes() + (writer == null ? 0 : writer.getRetainedBytes()) +
                 fragments.stream().mapToLong(fragment -> fragment.getRetainedSize() + 2L * Long.BYTES).sum();
     }
 
@@ -118,7 +130,7 @@ public class HoglakePageSink
         Page logical = new Page(page.getPositionCount(), blocks);
         try {
             if (handle.partitionFields().isEmpty()) {
-                writePage(logical, List.of());
+                acceptPage(logical, List.of());
             }
             else {
                 // Group only this input page and keep one writer open. Memory does not
@@ -130,7 +142,7 @@ public class HoglakePageSink
                 }
                 for (var group : groups.entrySet()) {
                     int[] positions = group.getValue().stream().mapToInt(Integer::intValue).toArray();
-                    writePage(logical.getPositions(positions, 0, positions.length), group.getKey());
+                    acceptPage(logical.getPositions(positions, 0, positions.length), group.getKey());
                 }
             }
             return NOT_BLOCKED;
@@ -138,6 +150,47 @@ public class HoglakePageSink
         catch (IOException e) {
             throw new TrinoException(HOGLAKE_WRITE_ERROR, "Failed to write Hoglake Parquet file", e);
         }
+    }
+
+    private void acceptPage(Page page, List<String> values)
+            throws IOException
+    {
+        if (handle.sortFields().isEmpty()) {
+            writePage(page, values);
+            return;
+        }
+        if (!partitionValues.equals(values)) {
+            flushSorted();
+            partitionValues = values;
+        }
+        // Copy a routed page so a tiny partition does not retain unrelated input rows.
+        Page retained = page.getRegion(0, page.getPositionCount());
+        retained.compact();
+        sortBuffer.add(retained);
+        sortBytes += retained.getRetainedSizeInBytes();
+        sortPositions += retained.getPositionCount();
+        if (3 * sortBytes + 16 * sortPositions >= SORT_BUFFER_BYTES) {
+            flushSorted();
+        }
+    }
+
+    private void flushSorted()
+            throws IOException
+    {
+        if (sortBuffer.isEmpty()) {
+            return;
+        }
+        var sorted = HoglakeSorting.sort(pageSorter, sortBuffer, handle.columns(), handle.sortFields());
+        int[] channels = java.util.stream.IntStream.range(0, handle.columns().size()).toArray();
+        while (sorted.hasNext()) {
+            writePage(sorted.next().getColumns(channels), partitionValues);
+        }
+        // Each run owns complete files. Appending the next sorted run to this
+        // file would destroy the declared ordering between the two runs.
+        closeFile();
+        sortBuffer.clear();
+        sortBytes = 0;
+        sortPositions = 0;
     }
 
     private void writePage(Page page, List<String> values)
@@ -259,6 +312,7 @@ public class HoglakePageSink
             throw new IllegalStateException("Sink is aborted");
         }
         try {
+            flushSorted();
             closeFile();
             finished = true;
             memoryContext.close();
@@ -280,6 +334,9 @@ public class HoglakePageSink
             return;
         }
         aborted = true;
+        sortBuffer.clear();
+        sortBytes = 0;
+        sortPositions = 0;
         try {
             if (writer != null) {
                 writer.close();

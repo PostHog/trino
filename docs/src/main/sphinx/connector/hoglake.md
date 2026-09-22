@@ -235,10 +235,8 @@ operations after 24 hours, so longer-running creations must be retried as new qu
 There is no fallback to the old staging-table protocol on older servers.
 
 Writes are limited to single-statement transactions. INSERT, UPDATE and MERGE
-support partitioned tables. UPDATE and MERGE actions that insert rows still reject
-sorted tables. DELETE and delete-only MERGE support both layouts. Query/task retries, comments
-and custom table properties are not supported. INSERT's existing writer treats
-sort specifications as advisory and does not apply them.
+support partitioned and sorted tables. DELETE and delete-only MERGE support both layouts. Query/task retries, comments
+and custom table properties are not supported. The writer applies the live sort specification to each new file.
 
 Servers advertising `idempotent-append-v1` support recovery of one INSERT
 operation. The connector creates one operation ID in `beginInsert` and sends it as
@@ -414,7 +412,7 @@ groups guard insert-only and zero-row statements. An older replica cannot silent
 accept this contract. Any intervening target-table change conflicts, including
 INSERT, DELETE, compaction, schema changes, truncate, drop/name reuse and replacement.
 Unrelated tables may change. Rerun conflicting SQL from a fresh snapshot.
-Writing replacement rows to sorted tables remains unsupported.
+Replacement rows honor the live partition and sort specifications.
 
 Publication recovery uses the same bounded receipt lookup and identical-request replay
 as INSERT, with a full-payload mixed-mutation server contract. A missing receipt is not proof that
@@ -463,3 +461,24 @@ The writer groups each incoming page by partition and keeps one file open. This
 bounds writer memory independently of partition cardinality. Interleaved
 partitions can create smaller files; grouping input by partition keys improves
 file sizes. Partitioning does not add scan pruning in this change.
+
+### Sorted writes
+
+Use `WITH (sorted_by = ARRAY['event_time DESC NULLS LAST', 'id ASC NULLS FIRST'])`
+on CREATE TABLE or CTAS. The default is `ASC NULLS LAST`. Scalar columns and
+struct-leaf paths use the same simple, case-sensitive names as partitioning.
+Sort fields must be distinct, orderable scalar sources; repeated children and
+VARIANT are refused. Combine `sorted_by` and `partitioning` on the same table.
+
+Sorted creation requires server capability `atomic-sorted-table-creation-v1` and
+uses a dedicated preparation endpoint that older replicas refuse. Sort and
+partition specs publish atomically with initial data, including replacement.
+INSERT, UPDATE and MERGE apply existing native sort specs without a new server
+capability. Comparison uses Trino SQL ordering on logical values, including
+unsigned values exposed as wider signed or decimal types.
+
+Sorting applies within each output file, not across files or existing data.
+The writer buffers one partition at a time, flushing at an estimated 32 MiB
+including auxiliary keys and sort-position overhead (plus an incoming page).
+Each sorted batch closes its files so later batches cannot break file ordering.
+This costs CPU and memory and may produce smaller files than unsorted writes.

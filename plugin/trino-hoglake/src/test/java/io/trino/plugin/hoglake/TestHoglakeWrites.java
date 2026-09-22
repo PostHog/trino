@@ -723,14 +723,14 @@ final class TestHoglakeWrites
                 runner.execute("CREATE TABLE " + name + " (id bigint)");
                 runner.execute("INSERT INTO " + name + " VALUES 1, 2");
                 HoglakeDtos.Table table = tables.get(name);
-                Map<String, Object> spec = Map.of("fields", List.of(Map.of("source_field_id", 1, "transform", "truncate")));
+                Map<String, Object> spec = Map.of("fields", List.of(sorted ? Map.of("source_field_id", 1, "direction", "invalid", "null_order", "nulls_last") : Map.of("source_field_id", 1, "transform", "truncate")));
                 tables.put(name, new HoglakeDtos.Table(table.name(), table.namespace(), table.tableUuid(), table.columns(), 0, 0, 0, sorted ? null : spec, sorted ? spec : null));
                 int before = commits;
                 assertThatThrownBy(() -> runner.execute("UPDATE " + name + " SET id=1"))
-                        .hasMessageContaining(sorted ? "Writing sorted" : "Unsupported partition transform");
+                        .hasMessageContaining(sorted ? "Invalid Hoglake sort direction" : "Unsupported partition transform");
                 assertThat(commits).isEqualTo(before);
                 assertThatThrownBy(() -> runner.execute("MERGE INTO " + name + " t USING (VALUES 3) s(id) ON t.id=s.id WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)"))
-                        .hasMessageContaining(sorted ? "Writing sorted" : "Unsupported partition transform");
+                        .hasMessageContaining(sorted ? "Invalid Hoglake sort direction" : "Unsupported partition transform");
                 assertThat(commits).isEqualTo(before);
                 assertThat(runner.execute("DELETE FROM " + name + " WHERE id=1").getUpdateCount()).hasValue(1);
                 assertThat(runner.execute("SELECT id FROM " + name).getOnlyValue()).isEqualTo(2L);
@@ -932,6 +932,9 @@ final class TestHoglakeWrites
         assertThatThrownBy(() -> runner.execute("CREATE TABLE partition_unsupported (id bigint) WITH (partitioning = ARRAY['id'])"))
                 .hasMessageContaining("atomic-partitioned-table-creation-v1");
         assertThat(tables).doesNotContainKey("partition_unsupported");
+        assertThatThrownBy(() -> runner.execute("CREATE TABLE sort_unsupported (id bigint) WITH (sorted_by = ARRAY['id'])"))
+                .hasMessageContaining("atomic-sorted-table-creation-v1");
+        assertThat(tables).doesNotContainKey("sort_unsupported");
     }
 
     @Test

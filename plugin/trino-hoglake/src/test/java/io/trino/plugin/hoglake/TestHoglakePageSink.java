@@ -53,6 +53,47 @@ final class TestHoglakePageSink
     private static final HoglakeWriteHandle HANDLE = new HoglakeWriteHandle("test", "table", UUID.randomUUID().toString(), 3, "memory:///warehouse/", List.of(FIRST, SECOND), List.of(SECOND), Optional.empty());
 
     @Test
+    void testSortedFilesIncludeNullOrderingAcrossInputPages()
+            throws Exception
+    {
+        MemoryFileSystem storage = new MemoryFileSystem();
+        HoglakeWriteHandle handle = new HoglakeWriteHandle(
+                "test",
+                "sorted",
+                UUID.randomUUID().toString(),
+                3,
+                "memory:///warehouse/",
+                List.of(FIRST),
+                List.of(FIRST),
+                Optional.empty(),
+                Optional.empty(),
+                List.of(),
+                List.of(new HoglakeDtos.SortField(FIRST.fieldId(), "desc", "nulls_first")));
+        var sorter = new io.trino.operator.PagesIndexPageSorter(new io.trino.operator.PagesIndex.TestingFactory(false));
+        HoglakePageSink sink = new HoglakePageSink(storage, handle, "test", sorter);
+        sink.appendPage(new Page(block(1L)));
+        sink.appendPage(new Page(block(null)));
+        sink.appendPage(new Page(block(9L)));
+        assertThat(sink.getMemoryUsage()).isPositive();
+        var fragments = sink.finish().get();
+        assertThat(fragments).hasSize(1);
+        var file = new ObjectMapper().readValue(fragments.iterator().next().getBytes(), HoglakeDtos.FileRegistration.class);
+        try (var source = new HoglakePageSourceProvider(_ -> storage).createPageSource(
+                HoglakeTransactionHandle.INSTANCE,
+                ConnectorTestFixtures.session(),
+                new HoglakeSplit(file.path(), file.fileSizeBytes(), file.recordCount(), Optional.empty(), 0),
+                new HoglakeTableHandle("test", "sorted", 3, handle.tableUuid(), handle.columns()),
+                Optional.empty(),
+                List.of(FIRST),
+                DynamicFilter.EMPTY,
+                MemoryContext.NO_LIMIT)) {
+            assertThat(ConnectorTestFixtures.readAll(source, List.of(BIGINT)))
+                    .containsExactly(Arrays.asList((Object) null), List.of(9L), List.of(1L));
+        }
+        assertThat(sink.getMemoryUsage()).isZero();
+    }
+
+    @Test
     void testPartitionFilesContainOnlyTheirRegisteredValues()
             throws Exception
     {

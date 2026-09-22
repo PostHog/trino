@@ -112,14 +112,23 @@ public class HoglakeConnector
     public java.util.List<io.trino.spi.session.PropertyMetadata<?>> getTableProperties()
     {
         return java.util.List.of(new io.trino.spi.session.PropertyMetadata<>(
-                "partitioning",
-                "Partition transforms",
-                new io.trino.spi.type.ArrayType(io.trino.spi.type.VarcharType.VARCHAR),
-                java.util.List.class,
-                java.util.List.of(),
-                false,
-                value -> (java.util.List<?>) value,
-                value -> value));
+                        "partitioning",
+                        "Partition transforms",
+                        new io.trino.spi.type.ArrayType(io.trino.spi.type.VarcharType.VARCHAR),
+                        java.util.List.class,
+                        java.util.List.of(),
+                        false,
+                        value -> (java.util.List<?>) value,
+                        value -> value),
+                new io.trino.spi.session.PropertyMetadata<>(
+                        "sorted_by",
+                        "Per-file sort fields",
+                        new io.trino.spi.type.ArrayType(io.trino.spi.type.VarcharType.VARCHAR),
+                        java.util.List.class,
+                        java.util.List.of(),
+                        false,
+                        value -> (java.util.List<?>) value,
+                        value -> value));
     }
 
     @Override

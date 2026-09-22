@@ -73,6 +73,11 @@ public final class HoglakeDtos
             @JsonProperty("transform") String transform,
             @JsonProperty("transform_param") Integer transformParam) {}
 
+    public record SortField(
+            @JsonProperty("source_field_id") long sourceFieldId,
+            @JsonProperty("direction") String direction,
+            @JsonProperty("null_order") String nullOrder) {}
+
     public record Append(
             @JsonProperty("namespace") String namespace,
             @JsonProperty("table") String table,

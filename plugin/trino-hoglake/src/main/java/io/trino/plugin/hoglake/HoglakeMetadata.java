@@ -231,7 +231,9 @@ public class HoglakeMetadata
         return new ConnectorTableMetadata(
                 handle.schemaTableName(),
                 handle.columns().stream().map(HoglakeColumnHandle::columnMetadata).toList(),
-                Map.of("partitioning", HoglakePartitioning.expressions(HoglakePartitioning.read(definition.partitionSpec()), handle.columns())));
+                Map.of(
+                        "partitioning", HoglakePartitioning.expressions(HoglakePartitioning.read(definition.partitionSpec()), handle.columns()),
+                        "sorted_by", HoglakeSorting.expressions(HoglakeSorting.read(definition.sortSpec()), handle.columns())));
     }
 
     @Override
@@ -365,7 +367,7 @@ public class HoglakeMetadata
 
     private static List<HoglakeDtos.ColumnDefinition> columnDefinitions(ConnectorTableMetadata metadata)
     {
-        if (metadata.getComment().isPresent() || metadata.getProperties().keySet().stream().anyMatch(key -> !key.equals("partitioning")) || metadata.getColumns().stream().anyMatch(column -> column.getComment().isPresent())) {
+        if (metadata.getComment().isPresent() || metadata.getProperties().keySet().stream().anyMatch(key -> !key.equals("partitioning") && !key.equals("sorted_by")) || metadata.getColumns().stream().anyMatch(column -> column.getComment().isPresent())) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake table properties and comments are not supported");
         }
         return metadata.getColumns().stream()
@@ -401,15 +403,21 @@ public class HoglakeMetadata
         if (!partitionFields.isEmpty() && !catalog.capabilities().contains("atomic-partitioned-table-creation-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support atomic-partitioned-table-creation-v1");
         }
+        @SuppressWarnings("unchecked")
+        List<String> sorting = (List<String>) metadata.getProperties().getOrDefault("sorted_by", List.of());
+        List<HoglakeDtos.SortField> sortFields = HoglakeSorting.parse(sorting, HoglakePartitioning.initialColumns(definitions));
+        if (!sortFields.isEmpty() && !catalog.capabilities().contains("atomic-sorted-table-creation-v1")) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support atomic-sorted-table-creation-v1");
+        }
         String operation = UUID.randomUUID().toString();
         // Record before sending: a lost preparation response may still have created the operation.
         creationOperation = Optional.of(operation);
-        HoglakeDtos.TableCreation prepared = client.prepareTableCreation(operation, metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), definitions, replacement, partitionFields);
+        HoglakeDtos.TableCreation prepared = client.prepareTableCreation(operation, metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), definitions, replacement, partitionFields, sortFields);
         if (!"prepared".equals(prepared.state()) || !operation.equals(prepared.operationId()) || prepared.tableUuid() == null || prepared.columns() == null || prepared.writePath() == null) {
             throw new TrinoException(HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake preparation response for operation " + operation);
         }
         List<HoglakeColumnHandle> columns = prepared.columns().stream().map(HoglakeMetadata::toColumnHandle).toList();
-        return new HoglakeWriteHandle(metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), prepared.tableUuid(), catalog.headSnapshotId(), prepared.writePath(), columns, columns, Optional.of(operation), Optional.empty(), partitionFields);
+        return new HoglakeWriteHandle(metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), prepared.tableUuid(), catalog.headSnapshotId(), prepared.writePath(), columns, columns, Optional.of(operation), Optional.empty(), partitionFields, sortFields);
     }
 
     @Override
@@ -455,6 +463,8 @@ public class HoglakeMetadata
         HoglakeDtos.Table table = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId()).orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
         List<HoglakeDtos.PartitionField> partitionFields = HoglakePartitioning.read(table.partitionSpec());
         HoglakePartitioning.validate(partitionFields, handle.columns());
+        List<HoglakeDtos.SortField> sortFields = HoglakeSorting.read(table.sortSpec());
+        HoglakeSorting.validate(sortFields, handle.columns());
         handle.columns().forEach(column -> HoglakeTypes.toHoglakeType(column.type()));
         List<HoglakeColumnHandle> inputs = columns.stream().map(HoglakeColumnHandle.class::cast).toList();
         for (HoglakeColumnHandle column : handle.columns()) {
@@ -468,7 +478,7 @@ public class HoglakeMetadata
         if (catalog.capabilities() != null && catalog.capabilities().contains("idempotent-append-v1")) {
             operation = Optional.of(UUID.randomUUID().toString());
         }
-        return new HoglakeWriteHandle(handle.schemaName(), handle.tableName(), handle.tableUuid(), handle.snapshotId(), catalog.dataPath(), handle.columns(), inputs, Optional.empty(), operation, partitionFields);
+        return new HoglakeWriteHandle(handle.schemaName(), handle.tableName(), handle.tableUuid(), handle.snapshotId(), catalog.dataPath(), handle.columns(), inputs, Optional.empty(), operation, partitionFields, sortFields);
     }
 
     @Override
@@ -551,8 +561,12 @@ public class HoglakeMetadata
         catch (TrinoException e) {
             insertFailure = Optional.of(e.getMessage());
         }
-        if (table.sortSpec() != null && table.sortSpec().get("fields") instanceof List<?> fields && !fields.isEmpty()) {
-            insertFailure = Optional.of("Writing sorted Hoglake tables is not supported");
+        List<HoglakeDtos.SortField> sortFields = HoglakeSorting.read(table.sortSpec());
+        try {
+            HoglakeSorting.validate(sortFields, handle.columns());
+        }
+        catch (TrinoException e) {
+            insertFailure = Optional.of(e.getMessage());
         }
         // INSERT-only MERGE has no update cases, so also enforce this in the worker sink.
         if (!updateCaseColumns.isEmpty() && insertFailure.isPresent()) {
@@ -564,7 +578,7 @@ public class HoglakeMetadata
         if (catalog.capabilities() == null || !catalog.capabilities().contains("idempotent-mutation-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support idempotent-mutation-v1 required for DELETE, UPDATE and MERGE");
         }
-        return new HoglakeDeleteHandle(handle, catalog.dataPath(), UUID.randomUUID().toString(), insertFailure, insertFailure.isPresent() ? List.of() : partitionFields);
+        return new HoglakeDeleteHandle(handle, catalog.dataPath(), UUID.randomUUID().toString(), insertFailure, insertFailure.isPresent() ? List.of() : partitionFields, insertFailure.isPresent() ? List.of() : sortFields);
     }
 
     @Override

@@ -96,6 +96,14 @@ final class TestHoglakeLiveWrites
                     "s3.path-style-access", "true",
                     "s3.aws-access-key", "synthetic-test",
                     "s3.aws-secret-key", "synthetic-test-password"));
+            runner.execute("CREATE TABLE sorted_partitioned (p bigint, r row(k bigint), v bigint) WITH (partitioning = ARRAY['p'], sorted_by = ARRAY['r.k DESC NULLS FIRST', 'v ASC NULLS LAST'])");
+            runner.execute("INSERT INTO sorted_partitioned VALUES (1, ROW(2), 2), (1, ROW(9), 9), (1, NULL, 4), (2, ROW(5), 5)");
+            assertThat(client.getTable("test", "sorted_partitioned").orElseThrow().sortSpec().get("fields")).asList().hasSize(2);
+            runner.execute("UPDATE sorted_partitioned SET p=3, r=ROW(1) WHERE v=2");
+            runner.execute("MERGE INTO sorted_partitioned t USING (VALUES (9, 7), (10, 10)) s(old_v,new_v) ON t.v=s.old_v WHEN MATCHED THEN UPDATE SET v=s.new_v WHEN NOT MATCHED THEN INSERT (p,r,v) VALUES (3,ROW(8),s.new_v)");
+            assertThat(runner.execute("SELECT count(*), sum(v) FROM sorted_partitioned").getMaterializedRows()).isEqualTo(runner.execute("VALUES (BIGINT '5', BIGINT '28')").getMaterializedRows());
+            runner.execute("CREATE TABLE sorted_ctas WITH (sorted_by = ARRAY['v DESC']) AS SELECT v FROM sorted_partitioned");
+            assertThat(runner.execute("SHOW CREATE TABLE sorted_ctas").getOnlyValue().toString()).contains("v DESC NULLS LAST");
             runner.execute("CREATE TABLE partitioned (id bigint, ts timestamp(6), r row(k bigint)) WITH (partitioning = ARRAY['bucket(id, 16)', 'day(ts)', 'r.k'])");
             runner.execute("INSERT INTO partitioned VALUES (34, TIMESTAMP '1969-12-31 23:59:59.999999', ROW(7)), (35, TIMESTAMP '1970-01-01 00:00:00', ROW(8)), (NULL, NULL, NULL)");
             assertThat(runner.execute("SELECT count(*) FROM partitioned").getOnlyValue()).isEqualTo(3L);

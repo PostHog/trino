@@ -177,7 +177,7 @@ final class HoglakePartitioning
         }).toList();
     }
 
-    private static List<HoglakeColumnHandle> find(List<HoglakeColumnHandle> columns, long id)
+    static List<HoglakeColumnHandle> find(List<HoglakeColumnHandle> columns, long id)
     {
         for (var column : columns) {
             if (column.fieldId() == id) {
