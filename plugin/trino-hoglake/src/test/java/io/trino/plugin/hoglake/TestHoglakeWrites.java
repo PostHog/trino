@@ -75,6 +75,7 @@ final class TestHoglakeWrites
     private volatile int commitStatus = 200;
     private volatile int commits;
     private volatile boolean atomicCreation = true;
+    private volatile boolean recursiveWriteSchema = true;
     private volatile boolean idempotentAppend;
     private volatile boolean idempotentMutation;
     private final Map<String, Long> deleteReceipts = new ConcurrentHashMap<>();
@@ -147,6 +148,9 @@ final class TestHoglakeWrites
                 List<String> capabilities = new ArrayList<>();
                 if (atomicCreation) {
                     capabilities.add("atomic-table-creation-v1");
+                }
+                if (recursiveWriteSchema) {
+                    capabilities.add("recursive-write-schema-v1");
                 }
                 if (replacementSupport) {
                     capabilities.add("atomic-table-replacement-v1");
@@ -337,6 +341,16 @@ final class TestHoglakeWrites
         }
     }
 
+    private static HoglakeDtos.Column materialize(HoglakeDtos.ColumnDefinition definition, int ordinal, java.util.concurrent.atomic.AtomicLong nextId)
+    {
+        long id = nextId.getAndIncrement();
+        List<HoglakeDtos.Column> children = new ArrayList<>();
+        for (var child : definition.children()) {
+            children.add(materialize(child, children.size(), nextId));
+        }
+        return new HoglakeDtos.Column(id, ordinal, definition.name(), definition.type(), definition.typeParams(), definition.nullable(), children);
+    }
+
     private void handleCreation(HttpExchange exchange, String suffix)
             throws IOException
     {
@@ -348,9 +362,10 @@ final class TestHoglakeWrites
                 replacementTargets.put(operation, mapper.treeToValue(request.get("replacement"), HoglakeDtos.ReplacementTarget.class));
             }
             List<HoglakeDtos.Column> columns = new ArrayList<>();
+            java.util.concurrent.atomic.AtomicLong nextFieldId = new java.util.concurrent.atomic.AtomicLong(1);
             for (var column : request.path("columns")) {
                 HoglakeDtos.ColumnDefinition definition = mapper.treeToValue(column, HoglakeDtos.ColumnDefinition.class);
-                columns.add(new HoglakeDtos.Column(columns.size() + 1, columns.size(), definition.name(), definition.type(), definition.typeParams(), definition.nullable()));
+                columns.add(materialize(definition, columns.size(), nextFieldId));
             }
             creation = new HoglakeDtos.TableCreation(operation, UUID.randomUUID().toString(), "test", request.path("name").asText(), columns, "memory:///warehouse/" + operation + "/", "prepared", null, null);
         }
@@ -443,6 +458,29 @@ final class TestHoglakeWrites
     }
 
     @Test
+    void testRecursiveWrites()
+    {
+        runner.execute("CREATE TABLE nested_values (a array(bigint), m map(varchar, array(integer)), r row(x tinyint, y smallint), ts timestamp(9))");
+        runner.execute("INSERT INTO nested_values VALUES (ARRAY[1, NULL, 3], MAP(ARRAY['k'], ARRAY[ARRAY[4, NULL]]), ROW(TINYINT '-128', SMALLINT '32767'), TIMESTAMP '1969-12-31 23:59:59.999999999'), (ARRAY[], MAP(), NULL, NULL), (NULL, NULL, ROW(NULL, NULL), NULL)");
+        assertThat(runner.execute("SELECT a, m, r, ts FROM nested_values").getMaterializedRows())
+                .containsExactlyInAnyOrderElementsOf(runner.execute("VALUES (ARRAY[BIGINT '1', NULL, BIGINT '3'], MAP(ARRAY['k'], ARRAY[ARRAY[4, NULL]]), CAST(ROW(TINYINT '-128', SMALLINT '32767') AS row(x tinyint, y smallint)), TIMESTAMP '1969-12-31 23:59:59.999999999'), (CAST(ARRAY[] AS array(bigint)), CAST(MAP() AS map(varchar,array(integer))), NULL, NULL), (NULL, NULL, CAST(ROW(NULL, NULL) AS row(x tinyint, y smallint)), NULL)").getMaterializedRows());
+        assertThatThrownBy(() -> runner.execute("INSERT INTO nested_values (ts) VALUES TIMESTAMP '3000-01-01 00:00:00.000000001'"))
+                .hasMessageContaining("cannot be represented losslessly");
+        runner.execute("CREATE TABLE variants AS SELECT CAST(42 AS variant) AS v");
+        assertThat(runner.execute("SELECT CAST(v AS integer) FROM variants").getOnlyValue()).isEqualTo(42);
+        runner.execute("CREATE TABLE nested_temporal AS SELECT ARRAY[TIMESTAMP '2020-01-01 01:02:03.123'] AS a");
+        assertThat(runner.execute("SELECT CAST(a[1] AS varchar) FROM nested_temporal").getOnlyValue()).isEqualTo("2020-01-01 01:02:03.123000");
+        recursiveWriteSchema = false;
+        try {
+            assertThatThrownBy(() -> runner.execute("CREATE TABLE old_server_nested (a array(bigint))"))
+                    .hasMessageContaining("recursive-write-schema-v1");
+        }
+        finally {
+            recursiveWriteSchema = true;
+        }
+    }
+
+    @Test
     void testTypePromotionReadsHistoricalFiles()
     {
         schemaEvolution = true;
@@ -484,7 +522,7 @@ final class TestHoglakeWrites
         assertThatThrownBy(() -> runner.execute("ALTER TABLE evolution_refusals ADD COLUMN required bigint NOT NULL"))
                 .hasMessageContaining("nullable columns at the end");
         assertThatThrownBy(() -> runner.execute("ALTER TABLE evolution_refusals ADD COLUMN nested array(bigint)"))
-                .hasMessageContaining("no hoglake equivalent");
+                .hasMessageContaining("guarded-schema-evolution-v1");
         assertThatThrownBy(() -> runner.execute("ALTER TABLE evolution_refusals ADD COLUMN first_column bigint FIRST"))
                 .hasMessageContaining("nullable columns at the end");
     }
@@ -773,7 +811,7 @@ final class TestHoglakeWrites
     @Test
     void testWriteRejection()
     {
-        assertThatThrownBy(() -> runner.execute("CREATE TABLE unsupported (a array(bigint))")).hasMessageContaining("no hoglake equivalent");
+        assertThatThrownBy(() -> runner.execute("CREATE TABLE unsupported (a time(9))")).hasMessageContaining("no hoglake equivalent");
         assertThat(tables).doesNotContainKey("unsupported");
         runner.execute("CREATE TABLE required (id bigint NOT NULL, label varchar)");
         assertThatThrownBy(() -> runner.execute("INSERT INTO required VALUES (NULL, 'x')")).hasMessageContaining("NULL");

@@ -154,7 +154,7 @@ differs from Parquet's binary ordering.
 
 The connector creates one split per file. Catalog file pruning is not available:
 the Hoglake scan API exposes statistics state but no per-file column bounds.
-The connector does not support time-travel SQL or nested types.
+The connector does not support time-travel SQL.
 Only Hoglake's `puffin-dv` deletion-vector format is read; any other format
 fails the query. Equality deletes and any other row-level delete representation
 are not read. SQL `DELETE`, `UPDATE` and `MERGE` write compatible vectors.
@@ -179,10 +179,42 @@ No separate write configuration is required. Files use Snappy-compressed Parquet
 with catalog field IDs, a target size of 128 MiB, and deferred catalog statistics.
 The Hoglake hydrator can populate these statistics later; rows are readable immediately.
 
-The scalar types listed above are writable. Bounded `VARCHAR` becomes unbounded
-`VARCHAR`, and temporal precisions below six become precision six. Higher temporal
-precisions, `CHAR`, `SMALLINT`, `TINYINT`, and nested types are rejected on creation.
-Omitted nullable columns receive nulls. `NOT NULL` constraints are enforced.
+The scalar types listed above, `TINYINT`, `SMALLINT`, `TIMESTAMP(9)`, native
+`VARIANT`, and recursive `ARRAY`, `MAP`, and named `ROW` types are writable.
+New type support requires `recursive-write-schema-v1`: deploy the server to all
+replicas before updating the connector. Bounded `VARCHAR` becomes unbounded;
+`TIME` and zoned timestamps normalize to precision six, and unzoned timestamps
+normalize to six or nine without rounding. Precision above nine for unzoned
+timestamps, precision above six for time/zoned timestamps, and `CHAR` are rejected.
+Nanosecond timestamps must fit signed int64 nanoseconds (approximately 1677–2262);
+out-of-range values fail before file registration.
+
+Every nested catalog node retains its field ID and nullability. Map keys are
+required. Omitted nullable columns receive nulls; required nested values are
+checked only when their parent exists. Reads bind nested row fields by ID after
+external renames, and missing fields produce nulls. A historical row with none
+of its fields remaining is refused because its null-versus-present state cannot
+be recovered by this reader. SQL nested field evolution remains separate from
+whole-column type changes.
+
+Existing Hoglake columns also support these lossless SQL mappings:
+
+| Hoglake type | SQL type | Write constraint |
+| --- | --- | --- |
+| `uint8` | `SMALLINT` | 0 through 255 |
+| `uint16` | `INTEGER` | 0 through 65535 |
+| `uint32` | `BIGINT` | 0 through 4294967295 |
+| `uint64` | `DECIMAL(20,0)` | 0 through 18446744073709551615 |
+| `json` | `VARCHAR` | Valid JSON text, preserved without reserialization |
+| `timestamp_s` | `TIMESTAMP(6)` | Whole seconds |
+| `timestamp_ms` | `TIMESTAMP(6)` | Whole milliseconds |
+
+SQL creation uses the canonical signed/string/microsecond mappings; it does not
+infer unsigned or JSON catalog types from values. Unsigned 64-bit data requires
+block conversion between decimal values and physical unsigned INT64, including
+inside containers; this adds CPU and allocation cost. Unsigned predicates remain
+residuals. Statistics remain field-ID keyed and are populated by the existing
+server hydrator. Native VARIANT writes are unshredded.
 
 An insert registers all its files in one catalog commit. Its table UUID and read
 snapshot guard against concurrent table replacement or schema changes. Concurrent
@@ -336,6 +368,8 @@ UUID, snapshot, and capability guards. The supported compatibility matrix is:
 
 | Existing SQL type | Target SQL type |
 | --- | --- |
+| `TINYINT` | `SMALLINT`, `INTEGER`, `BIGINT` |
+| `SMALLINT` | `INTEGER`, `BIGINT` |
 | `INTEGER` | `BIGINT` |
 | `REAL` | `DOUBLE` |
 
@@ -347,6 +381,7 @@ the promoted type. Predicates on widened historical physical columns remain
 residuals to avoid interpreting Bloom filters with the wrong physical width;
 these files can require more scanning. The server re-encodes statistics in the
 same transaction.
+Unsigned catalog types are not promoted through their signed SQL aliases.
 Nested field evolution is a separate operation and is not enabled by this matrix.
 
 Schema mutations have no durable receipt and are sent once. A lost response may
@@ -380,7 +415,7 @@ groups guard insert-only and zero-row statements. An older replica cannot silent
 accept this contract. Any intervening target-table change conflicts, including
 INSERT, DELETE, compaction, schema changes, truncate, drop/name reuse and replacement.
 Unrelated tables may change. Rerun conflicting SQL from a fresh snapshot.
-Writing replacement rows to partitioned or sorted tables and additional writable types remain unsupported.
+Writing replacement rows to partitioned or sorted tables remains unsupported.
 
 Publication recovery uses the same bounded receipt lookup and identical-request replay
 as INSERT, with a full-payload mixed-mutation server contract. A missing receipt is not proof that

@@ -51,6 +51,18 @@ class TestHoglakeParquetBinding
 {
     private static final String PATH = "memory:///binding-test.parquet";
 
+    @Test
+    void testNativeUnsignedInt32ReadsLosslessly()
+    {
+        byte[] file = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(
+                Types.optional(PrimitiveTypeName.INT32).as(org.apache.parquet.schema.LogicalTypeAnnotation.intType(32, false)).id(1).named("u"),
+                INTEGER,
+                Arrays.asList(0L, (long) Integer.MAX_VALUE, (long) Integer.MIN_VALUE, -1L))));
+        HoglakeColumnHandle column = new HoglakeColumnHandle("u", 1, BIGINT, true, List.of(), "uint32");
+        assertThat(read(file, List.of(column), 4))
+                .containsExactly(List.of(0L), List.of(2147483647L), List.of(2147483648L), List.of(4294967295L));
+    }
+
     // ---- rename matrix -----------------------------------------------------
 
     @Test

@@ -32,7 +32,19 @@ public final class HoglakeDtos
             @JsonProperty("name") String name,
             @JsonProperty("type") String type,
             @JsonProperty("type_params") Map<String, Object> typeParams,
-            @JsonProperty("nullable") boolean nullable) {}
+            @JsonProperty("nullable") boolean nullable,
+            @JsonInclude(JsonInclude.Include.NON_EMPTY) @JsonProperty("children") List<ColumnDefinition> children)
+    {
+        public ColumnDefinition
+        {
+            children = children == null ? List.of() : List.copyOf(children);
+        }
+
+        public ColumnDefinition(String name, String type, Map<String, Object> typeParams, boolean nullable)
+        {
+            this(name, type, typeParams, nullable, List.of());
+        }
+    }
 
     public record CreateTable(
             @JsonProperty("name") String name,
@@ -120,8 +132,19 @@ public final class HoglakeDtos
             @JsonProperty("name") String name,
             @JsonProperty("type") String type,
             @JsonProperty("type_params") Map<String, Object> typeParams,
-            @JsonProperty("nullable") Boolean nullable)
+            @JsonProperty("nullable") Boolean nullable,
+            @JsonProperty("children") List<Column> children)
     {
+        public Column(long fieldId, int ordinal, String name, String type, Map<String, Object> typeParams, Boolean nullable)
+        {
+            this(fieldId, ordinal, name, type, typeParams, nullable, List.of());
+        }
+
+        public Column
+        {
+            children = children == null ? List.of() : List.copyOf(children);
+        }
+
         public boolean isNullable()
         {
             return nullable == null || nullable;

@@ -48,11 +48,14 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.PrincipalType;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.statistics.ComputedStatistics;
-import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.MapType;
+import io.trino.spi.type.RowType;
 import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeOperators;
 import io.trino.spi.type.VarcharType;
 
 import java.io.IOException;
@@ -150,11 +153,8 @@ public class HoglakeMetadata
         if (!(position instanceof ColumnPosition.Last) || !column.isNullable() || column.getComment().isPresent() || !column.getProperties().isEmpty()) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake ADD COLUMN supports nullable columns at the end, without comments or properties");
         }
-        Map<String, Object> params = Map.of();
-        if (column.getType() instanceof DecimalType decimal) {
-            params = Map.of("precision", decimal.getPrecision(), "scale", decimal.getScale());
-        }
-        HoglakeDtos.ColumnDefinition definition = new HoglakeDtos.ColumnDefinition(column.getName(), HoglakeTypes.toHoglakeType(column.getType()), params, true);
+        checkWriteSchemaSupport(client.getCatalog(), List.of(column.getType()));
+        HoglakeDtos.ColumnDefinition definition = HoglakeTypes.columnDefinition(column.getName(), column.getType(), true);
         alterColumns((HoglakeTableHandle) tableHandle, Map.of("op", "add_column", "column", definition));
     }
 
@@ -174,7 +174,7 @@ public class HoglakeMetadata
     public void setColumnType(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column, Type type)
     {
         HoglakeColumnHandle source = (HoglakeColumnHandle) column;
-        if (!HoglakeTypes.canPromote(source.type(), type)) {
+        if (!source.hoglakeType().equals(HoglakeTypes.toHoglakeType(source.type())) || !HoglakeTypes.canPromote(source.type(), type)) {
             throw new TrinoException(NOT_SUPPORTED, "Unsupported Hoglake column type change: %s to %s".formatted(source.type(), type));
         }
         alterColumns((HoglakeTableHandle) tableHandle, Map.of("op", "promote_column", "name", source.name(), "to", HoglakeTypes.toHoglakeType(type)));
@@ -309,14 +309,28 @@ public class HoglakeMetadata
     @Override
     public Optional<Type> getSupportedType(ConnectorSession session, Map<String, Object> properties, Type type)
     {
+        if (type instanceof ArrayType array) {
+            return Optional.of(new ArrayType(getSupportedType(session, properties, array.getElementType()).orElse(array.getElementType())));
+        }
+        if (type instanceof MapType map) {
+            return Optional.of(new MapType(
+                    getSupportedType(session, properties, map.getKeyType()).orElse(map.getKeyType()),
+                    getSupportedType(session, properties, map.getValueType()).orElse(map.getValueType()),
+                    new TypeOperators()));
+        }
+        if (type instanceof RowType row) {
+            return Optional.of(RowType.from(row.getFields().stream()
+                    .map(field -> new RowType.Field(field.getName(), getSupportedType(session, properties, field.getType()).orElse(field.getType())))
+                    .toList()));
+        }
         if (type instanceof VarcharType) {
             return Optional.of(VarcharType.VARCHAR);
         }
         if (type instanceof TimeType time && time.getPrecision() <= 6) {
             return Optional.of(TimeType.TIME_MICROS);
         }
-        if (type instanceof TimestampType timestamp && timestamp.getPrecision() <= 6) {
-            return Optional.of(TimestampType.TIMESTAMP_MICROS);
+        if (type instanceof TimestampType timestamp && timestamp.getPrecision() <= 9) {
+            return Optional.of(timestamp.getPrecision() <= 6 ? TimestampType.TIMESTAMP_MICROS : TimestampType.TIMESTAMP_NANOS);
         }
         if (type instanceof TimestampWithTimeZoneType timestamp && timestamp.getPrecision() <= 6) {
             return Optional.of(TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS);
@@ -352,13 +366,7 @@ public class HoglakeMetadata
             throw new TrinoException(NOT_SUPPORTED, "Hoglake table properties and comments are not supported");
         }
         return metadata.getColumns().stream()
-                .map(column -> {
-                    Map<String, Object> params = Map.of();
-                    if (column.getType() instanceof DecimalType decimal) {
-                        params = Map.of("precision", decimal.getPrecision(), "scale", decimal.getScale());
-                    }
-                    return new HoglakeDtos.ColumnDefinition(column.getName(), HoglakeTypes.toHoglakeType(column.getType()), params, column.isNullable());
-                })
+                .map(column -> HoglakeTypes.columnDefinition(column.getName(), column.getType(), column.isNullable()))
                 .toList();
     }
 
@@ -371,6 +379,7 @@ public class HoglakeMetadata
         }
         List<HoglakeDtos.ColumnDefinition> definitions = columnDefinitions(metadata);
         HoglakeDtos.Catalog catalog = client.getCatalog();
+        checkWriteSchemaSupport(catalog, metadata.getColumns().stream().map(ColumnMetadata::getType).toList());
         if (catalog.capabilities() == null || !catalog.capabilities().contains("atomic-table-creation-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support atomic-table-creation-v1");
         }
@@ -446,6 +455,7 @@ public class HoglakeMetadata
             }
         }
         HoglakeDtos.Catalog catalog = client.getCatalog();
+        checkWriteSchemaSupport(catalog, handle.columns().stream().map(HoglakeColumnHandle::type).toList());
         Optional<String> operation = Optional.empty();
         if (catalog.capabilities() != null && catalog.capabilities().contains("idempotent-append-v1")) {
             operation = Optional.of(UUID.randomUUID().toString());
@@ -538,6 +548,7 @@ public class HoglakeMetadata
         }
         handle.columns().forEach(column -> HoglakeTypes.toHoglakeType(column.type()));
         HoglakeDtos.Catalog catalog = client.getCatalog();
+        checkWriteSchemaSupport(catalog, handle.columns().stream().map(HoglakeColumnHandle::type).toList());
         if (catalog.capabilities() == null || !catalog.capabilities().contains("idempotent-mutation-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support idempotent-mutation-v1 required for DELETE, UPDATE and MERGE");
         }
@@ -605,6 +616,14 @@ public class HoglakeMetadata
                 failure.getErrorCode().equals(HoglakeErrorCode.HOGLAKE_CATALOG_NOT_FOUND.toErrorCode());
     }
 
+    private static void checkWriteSchemaSupport(HoglakeDtos.Catalog catalog, List<Type> types)
+    {
+        if (types.stream().anyMatch(HoglakeTypes::requiresRecursiveWriteSchema) &&
+                (catalog.capabilities() == null || !catalog.capabilities().contains("recursive-write-schema-v1"))) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support recursive-write-schema-v1");
+        }
+    }
+
     private static void checkRetryMode(RetryMode retryMode)
     {
         if (retryMode != RetryMode.NO_RETRIES) {
@@ -619,8 +638,10 @@ public class HoglakeMetadata
         return new HoglakeColumnHandle(
                 column.name(),
                 column.fieldId(),
-                HoglakeTypes.toTrinoType(column.type(), column.typeParams()),
-                column.isNullable());
+                HoglakeTypes.toTrinoType(column),
+                column.isNullable(),
+                column.children().stream().map(HoglakeMetadata::toColumnHandle).toList(),
+                column.type());
     }
 
     private static List<ColumnMetadata> columnMetadata(HoglakeDtos.Table table)

@@ -21,6 +21,7 @@ import org.apache.parquet.schema.PrimitiveType;
 
 import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_MICROSECOND;
 import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_NANOSECOND;
+import static java.lang.Math.addExact;
 import static java.lang.Math.multiplyExact;
 import static java.math.RoundingMode.UNNECESSARY;
 
@@ -79,7 +80,13 @@ public class TimestampNanosValueWriter
 
     private static long toEpochNanos(Fixed12Block block, int position)
     {
-        return multiplyExact(block.getFixed12First(position), NANOSECONDS_PER_MICROSECOND) +
-                LongMath.divide(block.getFixed12Second(position), PICOSECONDS_PER_NANOSECOND, UNNECESSARY);
+        long micros = block.getFixed12First(position);
+        long nanosOfMicro = LongMath.divide(block.getFixed12Second(position), PICOSECONDS_PER_NANOSECOND, UNNECESSARY);
+        // The smallest int64 nanosecond value has a microsecond component whose
+        // product alone underflows. Combine the negative remainder after scaling.
+        if (micros < 0) {
+            return addExact(multiplyExact(micros + 1, NANOSECONDS_PER_MICROSECOND), nanosOfMicro - NANOSECONDS_PER_MICROSECOND);
+        }
+        return addExact(multiplyExact(micros, NANOSECONDS_PER_MICROSECOND), nanosOfMicro);
     }
 }

@@ -57,7 +57,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Stream;
 
-import static io.trino.parquet.ParquetTypeUtils.constructField;
 import static io.trino.parquet.ParquetTypeUtils.getColumnIO;
 import static io.trino.parquet.ParquetTypeUtils.getDescriptors;
 import static io.trino.parquet.ParquetTypeUtils.lookupColumnByName;
@@ -292,9 +291,11 @@ public class HoglakePageSourceProvider
                 continue;
             }
             Optional<Field> field = bindings.get(i).flatMap(parquetField ->
-                    constructField(column.type(), lookupColumnByName(messageColumn, parquetField.getName())));
+                    HoglakeParquetFields.construct(column, lookupColumnByName(messageColumn, parquetField.getName())));
             if (field.isPresent()) {
-                adaptations.add(new HoglakePageSource.SourceColumn(parquetColumns.size()));
+                adaptations.add(HoglakeUnsigned.needsConversion(column)
+                        ? new HoglakePageSource.UnsignedColumn(parquetColumns.size(), column)
+                        : new HoglakePageSource.SourceColumn(parquetColumns.size()));
                 parquetColumns.add(new Column(column.name(), field.get()));
             }
             else {
@@ -390,7 +391,7 @@ public class HoglakePageSourceProvider
             }
             // UUID ordering differs from Parquet's binary ordering. Nested fields have no
             // statistics for the whole value. Unsupported statistics types remain residuals.
-            if (!binding.get().isPrimitive() || column.type().equals(UUID)) {
+            if (!binding.get().isPrimitive() || column.type().equals(UUID) || column.hoglakeType().startsWith("uint")) {
                 continue;
             }
             // Bloom filters hash the physical value width. A widened SQL domain would

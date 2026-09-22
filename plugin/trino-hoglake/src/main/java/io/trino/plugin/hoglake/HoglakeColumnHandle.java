@@ -15,6 +15,7 @@ package io.trino.plugin.hoglake;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.collect.ImmutableList;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.type.RowType;
@@ -35,7 +36,9 @@ public record HoglakeColumnHandle(
         @JsonProperty("name") String name,
         @JsonProperty("fieldId") long fieldId,
         @JsonProperty("type") Type type,
-        @JsonProperty("nullable") boolean nullable)
+        @JsonProperty("nullable") boolean nullable,
+        @JsonProperty("children") List<HoglakeColumnHandle> children,
+        @JsonProperty("hoglakeType") String hoglakeType)
         implements ColumnHandle
 {
     static final HoglakeColumnHandle ROW_ID = new HoglakeColumnHandle(
@@ -44,11 +47,18 @@ public record HoglakeColumnHandle(
             RowType.anonymous(List.of(BIGINT, BIGINT)),
             false);
 
+    public HoglakeColumnHandle(String name, long fieldId, Type type, boolean nullable)
+    {
+        this(name, fieldId, type, nullable, List.of(), null);
+    }
+
     @JsonCreator
     public HoglakeColumnHandle
     {
         requireNonNull(name, "name is null");
         requireNonNull(type, "type is null");
+        hoglakeType = hoglakeType == null ? HoglakeTypes.toHoglakeType(type) : hoglakeType;
+        children = children == null ? List.of() : ImmutableList.copyOf(children);
     }
 
     public ColumnMetadata columnMetadata()

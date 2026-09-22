@@ -13,22 +13,31 @@
  */
 package io.trino.plugin.hoglake;
 
+import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.TrinoException;
+import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.DateType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.IntegerType;
+import io.trino.spi.type.MapType;
 import io.trino.spi.type.RealType;
+import io.trino.spi.type.RowType;
+import io.trino.spi.type.SmallintType;
 import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
+import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeOperators;
 import io.trino.spi.type.UuidType;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
+import io.trino.spi.type.VariantType;
 
+import java.util.List;
 import java.util.Map;
 
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -60,6 +69,16 @@ public final class HoglakeTypes
     {
         return switch (hoglakeType) {
             case "boolean" -> BooleanType.BOOLEAN;
+            case "uint8" -> SmallintType.SMALLINT;
+            case "uint16" -> IntegerType.INTEGER;
+            case "uint32" -> BigintType.BIGINT;
+            case "uint64" -> DecimalType.createDecimalType(20, 0);
+            case "json" -> VarcharType.VARCHAR;
+            case "timestamp_s", "timestamp_ms" -> TimestampType.TIMESTAMP_MICROS;
+            case "int8" -> TinyintType.TINYINT;
+            case "int16" -> SmallintType.SMALLINT;
+            case "timestamp_ns" -> TimestampType.TIMESTAMP_NANOS;
+            case "variant" -> VariantType.VARIANT;
             case "int" -> IntegerType.INTEGER;
             case "long" -> BigintType.BIGINT;
             case "float" -> RealType.REAL;
@@ -78,9 +97,48 @@ public final class HoglakeTypes
         };
     }
 
+    public static Type toTrinoType(HoglakeDtos.Column column)
+    {
+        return switch (column.type()) {
+            case "list" -> new ArrayType(toTrinoType(column.children().getFirst()));
+            case "map" -> new MapType(toTrinoType(column.children().get(0)), toTrinoType(column.children().get(1)), new TypeOperators());
+            case "struct" -> RowType.from(column.children().stream().map(child -> RowType.field(child.name(), toTrinoType(child))).toList());
+            default -> toTrinoType(column.type(), column.typeParams());
+        };
+    }
+
+    public static HoglakeDtos.ColumnDefinition columnDefinition(String name, Type type, boolean nullable)
+    {
+        Map<String, Object> params = null;
+        List<HoglakeDtos.ColumnDefinition> children = List.of();
+        if (type instanceof DecimalType decimal) {
+            params = Map.of("precision", decimal.getPrecision(), "scale", decimal.getScale());
+        }
+        if (type instanceof ArrayType array) {
+            children = List.of(columnDefinition("element", array.getElementType(), true));
+        }
+        if (type instanceof MapType map) {
+            children = List.of(columnDefinition("key", map.getKeyType(), false), columnDefinition("value", map.getValueType(), true));
+        }
+        if (type instanceof RowType row) {
+            children = row.getFields().stream().map(field -> columnDefinition(
+                    field.getName().orElseThrow(() -> new TrinoException(NOT_SUPPORTED, "Hoglake ROW fields must be named")), field.getType(), true)).toList();
+        }
+        return new HoglakeDtos.ColumnDefinition(name, toHoglakeType(type), params, nullable, children);
+    }
+
+    public static boolean requiresRecursiveWriteSchema(Type type)
+    {
+        return type instanceof ArrayType || type instanceof MapType || type instanceof RowType ||
+                type.equals(TinyintType.TINYINT) || type.equals(SmallintType.SMALLINT) ||
+                type.equals(TimestampType.TIMESTAMP_NANOS) || type.equals(VariantType.VARIANT);
+    }
+
     public static boolean canPromote(Type source, Type target)
     {
-        return (source.equals(IntegerType.INTEGER) && target.equals(BigintType.BIGINT)) ||
+        return (source.equals(TinyintType.TINYINT) && (target.equals(SmallintType.SMALLINT) || target.equals(IntegerType.INTEGER) || target.equals(BigintType.BIGINT))) ||
+                (source.equals(SmallintType.SMALLINT) && (target.equals(IntegerType.INTEGER) || target.equals(BigintType.BIGINT))) ||
+                (source.equals(IntegerType.INTEGER) && target.equals(BigintType.BIGINT)) ||
                 (source.equals(RealType.REAL) && target.equals(DoubleType.DOUBLE));
     }
 
@@ -117,6 +175,27 @@ public final class HoglakeTypes
      */
     public static String toHoglakeType(Type type)
     {
+        if (type instanceof ArrayType) {
+            return "list";
+        }
+        if (type instanceof MapType) {
+            return "map";
+        }
+        if (type instanceof RowType) {
+            return "struct";
+        }
+        if (type.equals(VariantType.VARIANT)) {
+            return "variant";
+        }
+        if (type.equals(TinyintType.TINYINT)) {
+            return "int8";
+        }
+        if (type.equals(SmallintType.SMALLINT)) {
+            return "int16";
+        }
+        if (type.equals(TimestampType.TIMESTAMP_NANOS)) {
+            return "timestamp_ns";
+        }
         if (type.equals(BooleanType.BOOLEAN)) {
             return "boolean";
         }

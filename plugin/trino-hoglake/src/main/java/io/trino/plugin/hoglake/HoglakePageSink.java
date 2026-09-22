@@ -26,8 +26,14 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.connector.ConnectorPageSink;
+import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.LongTimestamp;
+import io.trino.spi.type.MapType;
+import io.trino.spi.type.RowType;
+import io.trino.spi.type.TimestampType;
 
 import java.io.IOException;
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -48,6 +54,8 @@ import static org.apache.parquet.format.CompressionCodec.SNAPPY;
 public class HoglakePageSink
         implements ConnectorPageSink
 {
+    private static final com.fasterxml.jackson.databind.ObjectReader JSON_READER = new ObjectMapper().reader()
+            .with(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     private static final long TARGET_FILE_SIZE = 128L * 1024 * 1024;
 
     private final TrinoFileSystem fileSystem;
@@ -99,14 +107,10 @@ public class HoglakePageSink
             HoglakeColumnHandle column = handle.columns().get(index);
             int channel = handle.inputColumns().indexOf(column);
             Block block = channel < 0 ? RunLengthEncodedBlock.create(column.type(), null, page.getPositionCount()) : page.getBlock(channel);
-            if (!column.nullable() && block.mayHaveNull()) {
-                for (int position = 0; position < page.getPositionCount(); position++) {
-                    if (block.isNull(position)) {
-                        throw new TrinoException(CONSTRAINT_VIOLATION, "NULL value for required column: " + column.name());
-                    }
-                }
+            for (int position = 0; position < page.getPositionCount(); position++) {
+                validateValue(column, block, position);
             }
-            blocks[index] = block;
+            blocks[index] = HoglakeUnsigned.convert(column, block, true);
         }
         try {
             if (writer == null) {
@@ -134,6 +138,69 @@ public class HoglakePageSink
         }
         catch (IOException e) {
             throw new TrinoException(HOGLAKE_WRITE_ERROR, "Failed to write Hoglake Parquet file", e);
+        }
+    }
+
+    private static void validateValue(HoglakeColumnHandle column, Block block, int position)
+    {
+        if (block.isNull(position)) {
+            if (!column.nullable()) {
+                throw new TrinoException(CONSTRAINT_VIOLATION, "NULL value for required column: " + column.name());
+            }
+            return;
+        }
+        if (column.hoglakeType().startsWith("uint")) {
+            BigInteger value = column.hoglakeType().equals("uint64")
+                    ? ((io.trino.spi.type.Int128) column.type().getObject(block, position)).toBigInteger()
+                    : BigInteger.valueOf(column.type().getLong(block, position));
+            int bits = Integer.parseInt(column.hoglakeType().substring(4));
+            if (value.signum() < 0 || value.bitLength() > bits) {
+                throw new TrinoException(CONSTRAINT_VIOLATION, "Value outside " + column.hoglakeType() + " range: " + column.name());
+            }
+        }
+        if (column.hoglakeType().equals("json")) {
+            try {
+                var json = JSON_READER.readTree(column.type().getSlice(block, position).toStringUtf8());
+                if (json == null || json.isMissingNode()) {
+                    throw new TrinoException(CONSTRAINT_VIOLATION, "Invalid JSON value: " + column.name());
+                }
+            }
+            catch (IOException e) {
+                throw new TrinoException(CONSTRAINT_VIOLATION, "Invalid JSON value: " + column.name(), e);
+            }
+        }
+        if (column.hoglakeType().equals("timestamp_s") || column.hoglakeType().equals("timestamp_ms")) {
+            long unit = column.hoglakeType().equals("timestamp_s") ? 1_000_000 : 1_000;
+            if (column.type().getLong(block, position) % unit != 0) {
+                throw new TrinoException(CONSTRAINT_VIOLATION, "Timestamp precision exceeds " + column.hoglakeType() + ": " + column.name());
+            }
+        }
+        if (column.type() instanceof ArrayType array) {
+            Block elements = array.getObject(block, position);
+            for (int index = 0; index < elements.getPositionCount(); index++) {
+                validateValue(column.children().getFirst(), elements, index);
+            }
+        }
+        else if (column.type() instanceof MapType map) {
+            var value = map.getObject(block, position);
+            for (int index = 0; index < value.getSize(); index++) {
+                validateValue(column.children().get(0), value.getRawKeyBlock(), value.getRawOffset() + index);
+                validateValue(column.children().get(1), value.getRawValueBlock(), value.getRawOffset() + index);
+            }
+        }
+        else if (column.type() instanceof RowType row) {
+            var value = row.getObject(block, position);
+            for (int index = 0; index < column.children().size(); index++) {
+                validateValue(column.children().get(index), value.getRawFieldBlock(index), value.getRawIndex());
+            }
+        }
+        else if (column.type().equals(TimestampType.TIMESTAMP_NANOS)) {
+            LongTimestamp value = (LongTimestamp) column.type().getObject(block, position);
+            BigInteger nanos = BigInteger.valueOf(value.getEpochMicros()).multiply(BigInteger.valueOf(1000))
+                    .add(BigInteger.valueOf(value.getPicosOfMicro() / 1000));
+            if (nanos.bitLength() > 63 || value.getPicosOfMicro() % 1000 != 0) {
+                throw new TrinoException(CONSTRAINT_VIOLATION, "Timestamp cannot be represented losslessly as int64 nanoseconds: " + column.name());
+            }
         }
     }
 

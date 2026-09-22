@@ -16,6 +16,7 @@ package io.trino.plugin.hoglake;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
+import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.StandaloneQueryRunner;
@@ -26,6 +27,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -147,6 +149,57 @@ final class TestHoglakeLiveWrites
             assertThat(runner.execute("UPDATE mutations SET label = 'no' WHERE false").getUpdateCount()).hasValue(0);
             assertThat(runner.execute("MERGE INTO mutations t USING (VALUES 40001) s(id) ON t.id=s.id WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)").getUpdateCount()).hasValue(1);
             assertThat(runner.execute("MERGE INTO mutations t USING (VALUES 40001) s(id) ON t.id=s.id WHEN MATCHED THEN DELETE").getUpdateCount()).hasValue(1);
+            client.createTable("test", "external_scalars", List.of(
+                    new HoglakeDtos.ColumnDefinition("u8", "uint8", null, true),
+                    new HoglakeDtos.ColumnDefinition("u16", "uint16", null, true),
+                    new HoglakeDtos.ColumnDefinition("u32", "uint32", null, true),
+                    new HoglakeDtos.ColumnDefinition("u64", "uint64", null, true),
+                    new HoglakeDtos.ColumnDefinition("j", "json", null, true),
+                    new HoglakeDtos.ColumnDefinition("s", "timestamp_s", null, true),
+                    new HoglakeDtos.ColumnDefinition("ms", "timestamp_ms", null, true),
+                    new HoglakeDtos.ColumnDefinition("nested", "list", null, true, List.of(new HoglakeDtos.ColumnDefinition("element", "uint64", null, true)))));
+            runner.execute("INSERT INTO external_scalars VALUES (255, 65535, 4294967295, DECIMAL '18446744073709551615', '{\"k\":1}', TIMESTAMP '1969-12-31 23:59:59', TIMESTAMP '1969-12-31 23:59:59.999', ARRAY[DECIMAL '18446744073709551615', NULL])");
+            assertThat(runner.execute("SELECT CAST(u8 AS varchar), CAST(u16 AS varchar), CAST(u32 AS varchar), CAST(u64 AS varchar), j, CAST(s AS varchar), CAST(ms AS varchar), CAST(nested[1] AS varchar) FROM external_scalars").getMaterializedRows())
+                    .containsExactlyElementsOf(runner.execute("VALUES ('255', '65535', '4294967295', '18446744073709551615', '{\"k\":1}', '1969-12-31 23:59:59.000000', '1969-12-31 23:59:59.999000', '18446744073709551615')").getMaterializedRows());
+            assertThatThrownBy(() -> runner.execute("INSERT INTO external_scalars (u64) VALUES DECIMAL '18446744073709551616'"))
+                    .hasMessageContaining("outside uint64 range");
+            assertThatThrownBy(() -> runner.execute("INSERT INTO external_scalars (u8) VALUES -1"))
+                    .hasMessageContaining("outside uint8 range");
+            assertThatThrownBy(() -> runner.execute("INSERT INTO external_scalars (j) VALUES 'invalid'"))
+                    .hasMessageContaining("Invalid JSON");
+            assertThatThrownBy(() -> runner.execute("INSERT INTO external_scalars (s) VALUES TIMESTAMP '2020-01-01 00:00:00.001'"))
+                    .hasMessageContaining("precision exceeds");
+            assertEventually(() -> assertThat(client.scan("test", "external_scalars", client.getCatalog().headSnapshotId()))
+                    .allMatch(file -> file.dataFile().statsState().equals("provided")));
+            client.createTable("test", "nested_unsigned", List.of(new HoglakeDtos.ColumnDefinition("r", "struct", null, true, List.of(
+                    new HoglakeDtos.ColumnDefinition("required", "uint64", null, false),
+                    new HoglakeDtos.ColumnDefinition("m", "map", null, true, List.of(
+                            new HoglakeDtos.ColumnDefinition("key", "uint64", null, false),
+                            new HoglakeDtos.ColumnDefinition("value", "uint64", null, true)))))));
+            runner.execute("INSERT INTO nested_unsigned SELECT ROW(DECIMAL '18446744073709551615', MAP(ARRAY[DECIMAL '18446744073709551615'], ARRAY[DECIMAL '9223372036854775808']))");
+            assertThat(runner.execute("SELECT CAST(r.required AS varchar), CAST(r.m[DECIMAL '18446744073709551615'] AS varchar) FROM nested_unsigned").getMaterializedRows())
+                    .containsExactlyElementsOf(runner.execute("VALUES ('18446744073709551615', '9223372036854775808')").getMaterializedRows());
+            assertThatThrownBy(() -> runner.execute("INSERT INTO nested_unsigned SELECT CAST(ROW(NULL, NULL) AS row(required decimal(20,0), m map(decimal(20,0),decimal(20,0))))"))
+                    .hasMessageContaining("NULL value for required column");
+            runner.execute("INSERT INTO nested_unsigned VALUES NULL");
+            assertThat(runner.execute("SELECT count(*) FROM nested_unsigned WHERE r IS NULL").getOnlyValue()).isEqualTo(1L);
+            runner.execute("CREATE TABLE native_variant AS SELECT CAST(42 AS variant) AS v");
+            assertThat(runner.execute("SELECT CAST(v AS integer) FROM native_variant").getOnlyValue()).isEqualTo(42);
+            runner.execute("CREATE TABLE nested_values (id bigint, a array(row(x integer, y varchar)), m map(varchar, array(integer)), r row(x tinyint, y smallint), ts timestamp(9))");
+            runner.execute("INSERT INTO nested_values VALUES (1, ARRAY[ROW(7, 'old'), NULL], MAP(ARRAY['k'], ARRAY[ARRAY[4, NULL]]), ROW(TINYINT '-128', SMALLINT '32767'), TIMESTAMP '1969-12-31 23:59:59.999999999'), (2, ARRAY[], MAP(), NULL, NULL), (3, NULL, NULL, ROW(NULL, NULL), NULL)");
+            assertEventually(() -> assertThat(client.scan("test", "nested_values", client.getCatalog().headSnapshotId()))
+                    .allMatch(file -> file.dataFile().statsState().equals("provided")));
+            var nestedColumns = client.getTable("test", "nested_values").orElseThrow().columns();
+            long nestedFieldId = nestedColumns.get(3).children().getFirst().fieldId();
+            client.alterColumns("test", "nested_values", client.getTable("test", "nested_values").orElseThrow().tableUuid(), client.getCatalog().headSnapshotId(), Map.of("op", "rename_column", "from", "r.x", "to", "renamed"));
+            assertThat(client.getTable("test", "nested_values").orElseThrow().columns().get(3).children().getFirst().fieldId()).isEqualTo(nestedFieldId);
+            assertThat(runner.execute("SELECT r.renamed FROM nested_values WHERE id=1").getOnlyValue()).isEqualTo((byte) -128);
+            runner.execute("UPDATE nested_values SET a = ARRAY[ROW(8, 'new')] WHERE id=1");
+            runner.execute("MERGE INTO nested_values t USING (VALUES 2) s(id) ON t.id=s.id WHEN MATCHED THEN UPDATE SET ts=TIMESTAMP '2020-01-01 00:00:00.123456789'");
+            assertThat(runner.execute("SELECT a[1].x FROM nested_values WHERE id=1").getOnlyValue()).isEqualTo(8);
+            assertThat(runner.execute("SELECT CAST(ts AS varchar) FROM nested_values WHERE id=2").getOnlyValue()).isEqualTo("2020-01-01 00:00:00.123456789");
+            assertThat(runner.execute("SELECT count(*) FROM nested_values WHERE r IS NULL").getOnlyValue()).isEqualTo(1L);
+            assertThat(runner.execute("SELECT count(*) FROM nested_values WHERE r IS NOT NULL AND r.renamed IS NULL").getOnlyValue()).isEqualTo(1L);
             runner.execute("CREATE TABLE promotions AS SELECT INTEGER '-2147483648' AS i, REAL '1.5' AS r");
             long beforePromotion = client.getCatalog().headSnapshotId();
             var originalColumns = client.getTable("test", "promotions").orElseThrow().columns();
