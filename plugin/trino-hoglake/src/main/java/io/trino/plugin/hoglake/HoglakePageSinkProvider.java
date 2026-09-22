@@ -51,7 +51,10 @@ public class HoglakePageSinkProvider
             ConnectorPageSinkId sinkId,
             MemoryContext memoryContext)
     {
-        return new HoglakeDeleteSink(memoryContext);
+        HoglakeDeleteHandle merge = (HoglakeDeleteHandle) handle;
+        HoglakeTableHandle table = merge.table();
+        HoglakeWriteHandle write = new HoglakeWriteHandle(table.schemaName(), table.tableName(), table.tableUuid(), table.snapshotId(), merge.dataPath(), table.columns(), table.columns(), Optional.empty());
+        return new HoglakeMergeSink(new HoglakePageSink(fileSystemFactory.create(session), write, trinoVersion), memoryContext);
     }
 
     @Override

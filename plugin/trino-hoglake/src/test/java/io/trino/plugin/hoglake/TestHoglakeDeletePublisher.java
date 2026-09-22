@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.hoglake;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.trino.filesystem.Location;
@@ -63,6 +64,24 @@ class TestHoglakeDeletePublisher
             }
             assertThat(vector.referencedDataFile()).contains("memory:///data");
             assertThat(storage.newInputFile(Location.of("memory:///prior")).exists()).isTrue();
+        }
+    }
+
+    @Test
+    void testDuplicateMixedFragmentsPublishOnlyOnce()
+            throws IOException
+    {
+        var registration = new HoglakeDtos.FileRegistration("memory:///warehouse/replacement.parquet", 2, 100, 10);
+        byte[] encoded = new ObjectMapper().writeValueAsBytes(registration);
+        Slice append = Slices.allocate(Long.BYTES + encoded.length);
+        append.setLong(0, HoglakeMergeSink.APPEND_FRAGMENT);
+        append.setBytes(Long.BYTES, encoded);
+        Slice deleted = fragment(1, 2, 7);
+        try (Catalog client = new Catalog()) {
+            new HoglakeDeletePublisher(client, new MemoryFileSystem()).publish(HANDLE, List.of(append, deleted, append, deleted));
+            assertThat(client.committed.appends()).hasSize(1);
+            assertThat(client.committed.appends().getFirst().files()).containsExactly(registration);
+            assertThat(client.committed.deletes().getFirst().files().getFirst().deleteCount()).isEqualTo(2);
         }
     }
 
@@ -253,7 +272,7 @@ class TestHoglakeDeletePublisher
         }
 
         @Override
-        public void commit(HoglakeDtos.Commit request)
+        public void commitMutation(HoglakeDtos.Commit request)
         {
             committed = request;
             if (loseResponse) {

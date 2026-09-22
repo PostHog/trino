@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.hoglake;
 
+import io.trino.filesystem.memory.MemoryFileSystem;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
@@ -21,11 +22,14 @@ import io.trino.spi.block.RowBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static io.trino.spi.StandardErrorCode.EXCEEDED_LOCAL_MEMORY_LIMIT;
 import static io.trino.spi.connector.ConnectorMergeSink.DELETE_OPERATION_NUMBER;
+import static io.trino.spi.connector.ConnectorMergeSink.INSERT_OPERATION_NUMBER;
+import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -63,6 +67,29 @@ class TestHoglakeDeleteSink
         });
         sink.storeMergedRows(deletePage());
         assertThatThrownBy(sink::finish).isInstanceOf(TrinoException.class).hasMessageContaining("synthetic encoding limit");
+        sink.abort();
+        assertThat(current.get()).isZero();
+    }
+
+    @Test
+    void testMergeAccountsWriterAndBothFragmentKinds()
+            throws Exception
+    {
+        AtomicLong current = new AtomicLong();
+        var columns = List.of(new HoglakeColumnHandle("id", 1, BIGINT, true));
+        var write = new HoglakeWriteHandle("ns", "target", "synthetic", 1, "memory:///warehouse/", columns, columns, Optional.empty());
+        var sink = new HoglakeMergeSink(new HoglakePageSink(new MemoryFileSystem(), write, "test"), current::set);
+        var insert = new Page(
+                RunLengthEncodedBlock.create(BIGINT, 42L, 2),
+                RunLengthEncodedBlock.create(TINYINT, (long) INSERT_OPERATION_NUMBER, 2),
+                RunLengthEncodedBlock.create(BIGINT, 0L, 2),
+                RunLengthEncodedBlock.create(HoglakeColumnHandle.ROW_ID.type(), null, 2));
+        sink.storeMergedRows(insert);
+        assertThat(current.get()).isPositive();
+        sink.storeMergedRows(deletePage());
+        var fragments = sink.finish().get();
+        assertThat(fragments).hasSize(2);
+        assertThat(current.get()).isGreaterThanOrEqualTo(fragments.stream().mapToLong(fragment -> fragment.getRetainedSize()).sum());
         sink.abort();
         assertThat(current.get()).isZero();
     }

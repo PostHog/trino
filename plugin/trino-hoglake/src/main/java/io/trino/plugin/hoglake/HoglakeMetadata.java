@@ -519,12 +519,18 @@ public class HoglakeMetadata
             RetryMode retryMode)
     {
         checkRetryMode(retryMode);
-        if (!updateCaseColumns.isEmpty()) {
-            throw new TrinoException(NOT_SUPPORTED, "Hoglake supports DELETE only");
+        HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
+        HoglakeDtos.Table table = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId()).orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
+        if (table.partitionSpec() != null && table.partitionSpec().get("fields") instanceof List<?> fields && !fields.isEmpty()) {
+            throw new TrinoException(NOT_SUPPORTED, "Writing partitioned Hoglake tables is not supported");
         }
+        if (table.sortSpec() != null && table.sortSpec().get("fields") instanceof List<?> fields && !fields.isEmpty()) {
+            throw new TrinoException(NOT_SUPPORTED, "Writing sorted Hoglake tables is not supported");
+        }
+        handle.columns().forEach(column -> HoglakeTypes.toHoglakeType(column.type()));
         HoglakeDtos.Catalog catalog = client.getCatalog();
-        if (catalog.capabilities() == null || !catalog.capabilities().contains("idempotent-delete-v1")) {
-            throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support idempotent-delete-v1 required for DELETE");
+        if (catalog.capabilities() == null || !catalog.capabilities().contains("idempotent-mutation-v1")) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support idempotent-mutation-v1 required for DELETE, UPDATE and MERGE");
         }
         return new HoglakeDeleteHandle((HoglakeTableHandle) tableHandle, catalog.dataPath(), UUID.randomUUID().toString());
     }

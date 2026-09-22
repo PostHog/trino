@@ -76,7 +76,7 @@ final class TestHoglakeWrites
     private volatile int commits;
     private volatile boolean atomicCreation = true;
     private volatile boolean idempotentAppend;
-    private volatile boolean idempotentDelete;
+    private volatile boolean idempotentMutation;
     private final Map<String, Long> deleteReceipts = new ConcurrentHashMap<>();
     private volatile boolean corruptCommitResponse;
     private volatile boolean lifecycleSupport = true;
@@ -156,8 +156,8 @@ final class TestHoglakeWrites
                 if (schemaCreationRace) {
                     capabilities.add("guarded-schema-evolution-v1");
                 }
-                if (idempotentDelete) {
-                    capabilities.add("idempotent-delete-v1");
+                if (idempotentMutation) {
+                    capabilities.add("idempotent-mutation-v1");
                 }
                 if (idempotentAppend) {
                     capabilities.add("idempotent-append-v1");
@@ -243,13 +243,30 @@ final class TestHoglakeWrites
                 Long receipt = deleteReceipts.get(operation);
                 respond(exchange, receipt == null ? 404 : 200, receipt == null ? Map.of() : Map.of("operation_id", operation, "snapshot_id", receipt));
             }
-            else if (path.equals("/v1/catalogs/lake/commit/deletes/prepared")) {
+            else if (path.equals("/v1/catalogs/lake/commit/mutations/prepared")) {
                 HoglakeDtos.Commit request = mapper.readValue(exchange.getRequestBody(), HoglakeDtos.Commit.class);
                 if (commitStatus != 200) {
                     respond(exchange, commitStatus, Map.of("error", "synthetic_failure"));
                     return;
                 }
                 commits++;
+                for (HoglakeDtos.Append append : request.appends()) {
+                    HoglakeDtos.Table table = tables.get(append.table());
+                    if (!table.tableUuid().equals(append.expectedTableUuid())) {
+                        respond(exchange, 409, Map.of("error", "incarnation_changed"));
+                        return;
+                    }
+                    long count = table.recordCount();
+                    long bytes = table.fileSizeBytes();
+                    for (HoglakeDtos.FileRegistration file : append.files()) {
+                        assertThat(file.recordCount()).isPositive();
+                        assertThat(file.footerSize()).isPositive();
+                        files.get(append.table()).add(new HoglakeDtos.ScanFile(new HoglakeDtos.DataFile(nextFileId++, file.path(), "parquet", file.recordCount(), file.fileSizeBytes(), file.footerSize(), count, "pending", snapshot + 1), null));
+                        count += file.recordCount();
+                        bytes += file.fileSizeBytes();
+                    }
+                    tables.put(append.table(), new HoglakeDtos.Table(table.name(), table.namespace(), table.tableUuid(), table.columns(), count, files.get(append.table()).size(), bytes));
+                }
                 for (HoglakeDtos.Deletes deletes : request.deletes()) {
                     List<HoglakeDtos.ScanFile> current = files.get(deletes.table());
                     for (HoglakeDtos.DeleteRegistration registration : deletes.files()) {
@@ -584,9 +601,66 @@ final class TestHoglakeWrites
     }
 
     @Test
+    void testUpdateAndMerge()
+    {
+        idempotentMutation = true;
+        try {
+            runner.execute("CREATE TABLE mutations (id bigint, label varchar, untouched bigint)");
+            runner.execute("INSERT INTO mutations VALUES (1, 'a', 10), (2, 'b', 20), (3, NULL, 30)");
+            runner.execute("INSERT INTO mutations VALUES (4, 'd', 40), (5, 'e', 50)");
+            assertThat(runner.execute("DELETE FROM mutations WHERE id = 2").getUpdateCount()).hasValue(1);
+            assertThat(runner.execute("UPDATE mutations SET label = NULL, id = id + 10 WHERE id IN (1, 4)").getUpdateCount()).hasValue(2);
+            assertQuery("SELECT * FROM mutations", "VALUES (BIGINT '11', CAST(NULL AS varchar), BIGINT '10'), (BIGINT '3', NULL, BIGINT '30'), (BIGINT '14', NULL, BIGINT '40'), (BIGINT '5', 'e', BIGINT '50')");
+            String merge = "MERGE INTO mutations t USING (VALUES (3, 'updated'), (5, 'deleted'), (20, 'inserted')) s(id, label) ON t.id=s.id " +
+                    "WHEN MATCHED AND s.id = 5 THEN DELETE WHEN MATCHED THEN UPDATE SET label=s.label " +
+                    "WHEN NOT MATCHED THEN INSERT (id, label, untouched) VALUES (s.id, s.label, 100)";
+            corruptCommitResponse = true;
+            int before = commits;
+            assertThat(runner.execute(merge).getUpdateCount()).hasValue(3);
+            assertThat(commits).isEqualTo(before + 1);
+            corruptCommitResponse = false;
+            assertQuery("SELECT * FROM mutations", "VALUES (BIGINT '11', CAST(NULL AS varchar), BIGINT '10'), (BIGINT '3', 'updated', BIGINT '30'), (BIGINT '14', NULL, BIGINT '40'), (BIGINT '20', 'inserted', BIGINT '100')");
+            assertThat(runner.execute("UPDATE mutations SET label = 'none' WHERE false").getUpdateCount()).hasValue(0);
+            before = commits;
+            assertThatThrownBy(() -> runner.execute("MERGE INTO mutations t USING (VALUES 3, 3) s(id) ON t.id=s.id WHEN MATCHED THEN UPDATE SET label='duplicate'"))
+                    .hasMessageContaining("matched more than one source row");
+            assertThat(commits).isEqualTo(before);
+            assertQuery("SELECT count(*) FROM mutations", "VALUES BIGINT '4'");
+            assertThat(runner.execute("MERGE INTO mutations t USING (VALUES 30) s(id) ON t.id=s.id WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)").getUpdateCount()).hasValue(1);
+            assertQuery("SELECT count(*) FROM mutations", "VALUES BIGINT '5'");
+        }
+        finally {
+            idempotentMutation = false;
+            corruptCommitResponse = false;
+        }
+    }
+
+    @Test
+    void testMutationRejectsUnsupportedLayouts()
+    {
+        idempotentMutation = true;
+        try {
+            for (boolean sorted : List.of(false, true)) {
+                String name = sorted ? "sorted_mutation" : "partitioned_mutation";
+                runner.execute("CREATE TABLE " + name + " (id bigint)");
+                HoglakeDtos.Table table = tables.get(name);
+                Map<String, Object> spec = Map.of("fields", List.of(Map.of("source_field_id", 1)));
+                tables.put(name, new HoglakeDtos.Table(table.name(), table.namespace(), table.tableUuid(), table.columns(), 0, 0, 0, sorted ? null : spec, sorted ? spec : null));
+                int before = commits;
+                assertThatThrownBy(() -> runner.execute("UPDATE " + name + " SET id=1"))
+                        .hasMessageContaining(sorted ? "Writing sorted" : "Writing partitioned");
+                assertThat(commits).isEqualTo(before);
+            }
+        }
+        finally {
+            idempotentMutation = false;
+        }
+    }
+
+    @Test
     void testRowDeletesAndLostResponse()
     {
-        idempotentDelete = true;
+        idempotentMutation = true;
         try {
             runner.execute("CREATE TABLE row_deletes (id bigint, label varchar)");
             runner.execute("INSERT INTO row_deletes VALUES (1, 'a'), (2, 'b'), (3, NULL)");
@@ -609,11 +683,10 @@ final class TestHoglakeWrites
             assertThat(runner.execute("DELETE FROM row_deletes").getUpdateCount()).hasValue(1);
             assertThat(runner.execute("DELETE FROM row_deletes").getUpdateCount()).hasValue(0);
             assertQuery("SELECT count(*) FROM row_deletes", "VALUES BIGINT '0'");
-            assertThatThrownBy(() -> runner.execute("MERGE INTO row_deletes t USING (VALUES 1) s(id) ON t.id=s.id WHEN MATCHED THEN DELETE"))
-                    .hasMessageContaining("does not support UPDATE or MERGE");
+            assertThat(runner.execute("MERGE INTO row_deletes t USING (VALUES 1) s(id) ON t.id=s.id WHEN MATCHED THEN DELETE").getUpdateCount()).hasValue(0);
         }
         finally {
-            idempotentDelete = false;
+            idempotentMutation = false;
             corruptCommitResponse = false;
             commitStatus = 200;
         }
@@ -623,7 +696,7 @@ final class TestHoglakeWrites
     void testDistributedDeleteMemoryFailureDoesNotPublish()
             throws Exception
     {
-        idempotentDelete = true;
+        idempotentMutation = true;
         try (DistributedQueryRunner distributed = DistributedQueryRunner.builder(runner.getDefaultSession())
                 .setWorkerCount(2)
                 .setCoordinatorProperties(Map.of(
@@ -645,7 +718,7 @@ final class TestHoglakeWrites
             assertQuery("SELECT sum(id) FROM delete_memory", "VALUES BIGINT '9'");
         }
         finally {
-            idempotentDelete = false;
+            idempotentMutation = false;
         }
     }
 

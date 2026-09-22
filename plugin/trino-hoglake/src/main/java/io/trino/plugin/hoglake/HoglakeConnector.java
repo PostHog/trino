@@ -105,7 +105,7 @@ public class HoglakeConnector
     @Override
     public Set<ConnectorCapabilities> getCapabilities()
     {
-        return Set.of(ConnectorCapabilities.NOT_NULL_COLUMN_CONSTRAINT, ConnectorCapabilities.ROW_LEVEL_DELETE_ONLY);
+        return Set.of(ConnectorCapabilities.NOT_NULL_COLUMN_CONSTRAINT);
     }
 
     @Override

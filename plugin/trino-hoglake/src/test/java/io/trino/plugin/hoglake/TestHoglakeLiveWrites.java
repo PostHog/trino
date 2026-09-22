@@ -116,9 +116,37 @@ final class TestHoglakeLiveWrites
             assertThat(runner.execute("DELETE FROM deletions").getUpdateCount()).hasValue(5000);
             assertThat(runner.execute("DELETE FROM deletions").getUpdateCount()).hasValue(0);
             assertThat(runner.execute("SELECT count(*) FROM deletions").getOnlyValue()).isEqualTo(0L);
-            assertThatThrownBy(() -> runner.execute("UPDATE deletions SET id = 0")).hasMessageContaining("does not support UPDATE or MERGE");
-            assertThatThrownBy(() -> runner.execute("MERGE INTO deletions t USING (VALUES 1) s(id) ON t.id=s.id WHEN MATCHED THEN DELETE"))
-                    .hasMessageContaining("does not support UPDATE or MERGE");
+            assertThat(runner.execute("UPDATE deletions SET id = 0").getUpdateCount()).hasValue(0);
+            assertThat(runner.execute("MERGE INTO deletions t USING (VALUES 1) s(id) ON t.id=s.id WHEN MATCHED THEN DELETE").getUpdateCount()).hasValue(0);
+            runner.execute("CREATE TABLE mutations (id bigint, label varchar, untouched bigint)");
+            runner.execute("INSERT INTO mutations SELECT id, 'old', id * 10 FROM UNNEST(sequence(1, 10000)) t(id)");
+            runner.execute("INSERT INTO mutations VALUES (10001, 'extra', 100010)");
+            runner.execute("DELETE FROM mutations WHERE id = 2");
+            long beforeUpdate = client.getCatalog().headSnapshotId();
+            var beforeUpdateFiles = client.scan("test", "mutations", beforeUpdate);
+            assertThat(runner.execute("UPDATE mutations SET label = NULL, id = id + 20000 WHERE id > 5000").getUpdateCount()).hasValue(5001);
+            assertThat(runner.execute("SELECT count(*) FROM mutations").getOnlyValue()).isEqualTo(10000L);
+            assertThat(runner.execute("SELECT count(*) FROM mutations WHERE id > 20000 AND label IS NULL AND untouched = (id - 20000) * 10").getOnlyValue()).isEqualTo(5001L);
+            assertThat(client.scan("test", "mutations", beforeUpdate)).usingRecursiveComparison().ignoringFieldsMatchingRegexes(".*statsState").isEqualTo(beforeUpdateFiles);
+            assertThat(beforeUpdateFiles.stream().mapToLong(file -> file.dataFile().recordCount() - (file.deleteFile() == null ? 0 : file.deleteFile().deleteCount())).sum()).isEqualTo(10000L);
+            long beforeMerge = client.getCatalog().headSnapshotId();
+            var beforeMergeFiles = client.scan("test", "mutations", beforeMerge);
+            String merge = "MERGE INTO mutations t USING (VALUES (1, 'updated'), (3, 'deleted'), (40000, 'inserted')) s(id, label) ON t.id=s.id " +
+                    "WHEN MATCHED AND s.id = 3 THEN DELETE WHEN MATCHED THEN UPDATE SET label=s.label " +
+                    "WHEN NOT MATCHED THEN INSERT (id, label, untouched) VALUES (s.id, s.label, 42)";
+            assertThat(runner.execute(merge).getUpdateCount()).hasValue(3);
+            assertThat(client.getCatalog().headSnapshotId()).isEqualTo(beforeMerge + 1);
+            assertThat(runner.execute("SELECT count(*) FROM mutations").getOnlyValue()).isEqualTo(10000L);
+            assertThat(runner.execute("SELECT id, label, untouched FROM mutations WHERE id IN (1, 2, 3, 40000)").getMaterializedRows())
+                    .containsExactlyInAnyOrderElementsOf(runner.execute("VALUES (BIGINT '1', 'updated', BIGINT '10'), (BIGINT '40000', 'inserted', BIGINT '42')").getMaterializedRows());
+            assertThat(client.scan("test", "mutations", beforeMerge)).usingRecursiveComparison().ignoringFieldsMatchingRegexes(".*statsState").isEqualTo(beforeMergeFiles);
+            long beforeAmbiguous = client.getCatalog().headSnapshotId();
+            assertThatThrownBy(() -> runner.execute("MERGE INTO mutations t USING (VALUES 1, 1) s(id) ON t.id=s.id WHEN MATCHED THEN UPDATE SET label='ambiguous'"))
+                    .hasMessageContaining("matched more than one source row");
+            assertThat(client.getCatalog().headSnapshotId()).isEqualTo(beforeAmbiguous);
+            assertThat(runner.execute("UPDATE mutations SET label = 'no' WHERE false").getUpdateCount()).hasValue(0);
+            assertThat(runner.execute("MERGE INTO mutations t USING (VALUES 40001) s(id) ON t.id=s.id WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)").getUpdateCount()).hasValue(1);
+            assertThat(runner.execute("MERGE INTO mutations t USING (VALUES 40001) s(id) ON t.id=s.id WHEN MATCHED THEN DELETE").getUpdateCount()).hasValue(1);
             runner.execute("CREATE SCHEMA evolved");
             runner.execute("CREATE TABLE evolved.records (id bigint, label varchar, discarded bigint)");
             runner.execute("INSERT INTO evolved.records VALUES (1, 'old', 100)");
