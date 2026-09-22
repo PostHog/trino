@@ -54,7 +54,24 @@ public final class HoglakeDtos
             @JsonProperty("path") String path,
             @JsonProperty("record_count") long recordCount,
             @JsonProperty("file_size_bytes") long fileSizeBytes,
-            @JsonProperty("footer_size") long footerSize) {}
+            @JsonProperty("footer_size") long footerSize,
+            @JsonInclude(JsonInclude.Include.NON_EMPTY) @JsonProperty("partition_values") List<String> partitionValues)
+    {
+        public FileRegistration
+        {
+            partitionValues = partitionValues == null ? List.of() : java.util.Collections.unmodifiableList(new java.util.ArrayList<>(partitionValues));
+        }
+
+        public FileRegistration(String path, long recordCount, long fileSizeBytes, long footerSize)
+        {
+            this(path, recordCount, fileSizeBytes, footerSize, List.of());
+        }
+    }
+
+    public record PartitionField(
+            @JsonProperty("source_field_id") long sourceFieldId,
+            @JsonProperty("transform") String transform,
+            @JsonProperty("transform_param") Integer transformParam) {}
 
     public record Append(
             @JsonProperty("namespace") String namespace,

@@ -37,6 +37,7 @@ import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -66,6 +67,7 @@ public class HoglakePageSink
     private final List<Location> locations = new ArrayList<>();
     private final List<Slice> fragments = new ArrayList<>();
     private ParquetWriter writer;
+    private List<String> partitionValues = List.of();
     private Location location;
     private long rows;
     private long completedBytes;
@@ -76,6 +78,7 @@ public class HoglakePageSink
     {
         this.fileSystem = requireNonNull(fileSystem, "fileSystem is null");
         this.handle = requireNonNull(handle, "handle is null");
+        HoglakePartitioning.validate(handle.partitionFields(), handle.columns());
         this.schema = HoglakeParquetSchema.create(handle.columns());
         this.trinoVersion = requireNonNull(trinoVersion, "trinoVersion is null");
     }
@@ -110,34 +113,64 @@ public class HoglakePageSink
             for (int position = 0; position < page.getPositionCount(); position++) {
                 validateValue(column, block, position);
             }
-            blocks[index] = HoglakeUnsigned.convert(column, block, true);
+            blocks[index] = block;
         }
+        Page logical = new Page(page.getPositionCount(), blocks);
         try {
-            if (writer == null) {
-                String dataPath = handle.dataPath();
-                // Location requires a slash after the authority, even for a bucket root.
-                location = Location.of(dataPath.endsWith("/") ? dataPath : dataPath + "/")
-                        .appendPath("data/" + UUID.randomUUID() + ".parquet");
-                locations.add(location);
-                writer = new ParquetWriter(
-                        fileSystem.newOutputFile(location).create(memoryContext),
-                        schema.messageType(),
-                        schema.primitiveTypes(),
-                        ParquetWriterOptions.builder().build(),
-                        SNAPPY,
-                        trinoVersion,
-                        Optional.empty(),
-                        Optional.empty());
+            if (handle.partitionFields().isEmpty()) {
+                writePage(logical, List.of());
             }
-            writer.write(new Page(page.getPositionCount(), blocks));
-            rows += page.getPositionCount();
-            if (writer.getEstimatedWrittenBytes() >= TARGET_FILE_SIZE) {
-                closeFile();
+            else {
+                // Group only this input page and keep one writer open. Memory does not
+                // grow with table partition cardinality; interleaved keys may make small files.
+                Map<List<String>, List<Integer>> groups = new java.util.LinkedHashMap<>();
+                for (int position = 0; position < logical.getPositionCount(); position++) {
+                    var values = HoglakePartitioning.values(handle.partitionFields(), handle.columns(), logical, position);
+                    groups.computeIfAbsent(values, _ -> new ArrayList<>()).add(position);
+                }
+                for (var group : groups.entrySet()) {
+                    int[] positions = group.getValue().stream().mapToInt(Integer::intValue).toArray();
+                    writePage(logical.getPositions(positions, 0, positions.length), group.getKey());
+                }
             }
             return NOT_BLOCKED;
         }
         catch (IOException e) {
             throw new TrinoException(HOGLAKE_WRITE_ERROR, "Failed to write Hoglake Parquet file", e);
+        }
+    }
+
+    private void writePage(Page page, List<String> values)
+            throws IOException
+    {
+        if (!partitionValues.equals(values)) {
+            closeFile();
+            partitionValues = values;
+        }
+        if (writer == null) {
+            String dataPath = handle.dataPath();
+            // Location requires a slash after the authority, even for a bucket root.
+            location = Location.of(dataPath.endsWith("/") ? dataPath : dataPath + "/")
+                    .appendPath("data/" + UUID.randomUUID() + ".parquet");
+            locations.add(location);
+            writer = new ParquetWriter(
+                    fileSystem.newOutputFile(location).create(memoryContext),
+                    schema.messageType(),
+                    schema.primitiveTypes(),
+                    ParquetWriterOptions.builder().build(),
+                    SNAPPY,
+                    trinoVersion,
+                    Optional.empty(),
+                    Optional.empty());
+        }
+        Block[] physical = new Block[handle.columns().size()];
+        for (int index = 0; index < physical.length; index++) {
+            physical[index] = HoglakeUnsigned.convert(handle.columns().get(index), page.getBlock(index), true);
+        }
+        writer.write(new Page(page.getPositionCount(), physical));
+        rows += page.getPositionCount();
+        if (writer.getEstimatedWrittenBytes() >= TARGET_FILE_SIZE) {
+            closeFile();
         }
     }
 
@@ -212,7 +245,7 @@ public class HoglakePageSink
         }
         writer.close();
         long size = fileSystem.newInputFile(location).length();
-        HoglakeDtos.FileRegistration file = new HoglakeDtos.FileRegistration(location.toString(), rows, size, writer.getFooterSize());
+        HoglakeDtos.FileRegistration file = new HoglakeDtos.FileRegistration(location.toString(), rows, size, writer.getFooterSize(), partitionValues);
         fragments.add(wrappedBuffer(new ObjectMapper().writeValueAsBytes(file)));
         completedBytes += size;
         writer = null;

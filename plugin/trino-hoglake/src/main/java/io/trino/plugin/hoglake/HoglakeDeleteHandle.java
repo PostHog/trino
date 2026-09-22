@@ -18,12 +18,17 @@ import io.trino.spi.connector.ConnectorTableHandle;
 
 import java.util.Optional;
 
-public record HoglakeDeleteHandle(HoglakeTableHandle table, String dataPath, String operationId, Optional<String> insertFailure)
+public record HoglakeDeleteHandle(HoglakeTableHandle table, String dataPath, String operationId, Optional<String> insertFailure, java.util.List<io.trino.plugin.hoglake.rest.HoglakeDtos.PartitionField> partitionFields)
         implements ConnectorMergeTableHandle
 {
     public HoglakeDeleteHandle(HoglakeTableHandle table, String dataPath, String operationId)
     {
         this(table, dataPath, operationId, Optional.empty());
+    }
+
+    public HoglakeDeleteHandle(HoglakeTableHandle table, String dataPath, String operationId, Optional<String> insertFailure)
+    {
+        this(table, dataPath, operationId, insertFailure, java.util.List.of());
     }
 
     @Override

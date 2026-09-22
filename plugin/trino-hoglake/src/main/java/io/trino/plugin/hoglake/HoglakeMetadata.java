@@ -226,9 +226,12 @@ public class HoglakeMetadata
     public ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle table)
     {
         HoglakeTableHandle handle = (HoglakeTableHandle) table;
+        HoglakeDtos.Table definition = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId())
+                .orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
         return new ConnectorTableMetadata(
                 handle.schemaTableName(),
-                handle.columns().stream().map(HoglakeColumnHandle::columnMetadata).toList());
+                handle.columns().stream().map(HoglakeColumnHandle::columnMetadata).toList(),
+                Map.of("partitioning", HoglakePartitioning.expressions(HoglakePartitioning.read(definition.partitionSpec()), handle.columns())));
     }
 
     @Override
@@ -362,7 +365,7 @@ public class HoglakeMetadata
 
     private static List<HoglakeDtos.ColumnDefinition> columnDefinitions(ConnectorTableMetadata metadata)
     {
-        if (metadata.getComment().isPresent() || !metadata.getProperties().isEmpty() || metadata.getColumns().stream().anyMatch(column -> column.getComment().isPresent())) {
+        if (metadata.getComment().isPresent() || metadata.getProperties().keySet().stream().anyMatch(key -> !key.equals("partitioning")) || metadata.getColumns().stream().anyMatch(column -> column.getComment().isPresent())) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake table properties and comments are not supported");
         }
         return metadata.getColumns().stream()
@@ -392,15 +395,21 @@ public class HoglakeMetadata
                     client.getTable(name.getSchemaName(), name.getTableName(), catalog.headSnapshotId()).map(HoglakeDtos.Table::tableUuid).orElse(null),
                     catalog.headSnapshotId()));
         }
+        @SuppressWarnings("unchecked")
+        List<String> partitioning = (List<String>) metadata.getProperties().getOrDefault("partitioning", List.of());
+        List<HoglakeDtos.PartitionField> partitionFields = HoglakePartitioning.parse(partitioning, HoglakePartitioning.initialColumns(definitions));
+        if (!partitionFields.isEmpty() && !catalog.capabilities().contains("atomic-partitioned-table-creation-v1")) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support atomic-partitioned-table-creation-v1");
+        }
         String operation = UUID.randomUUID().toString();
         // Record before sending: a lost preparation response may still have created the operation.
         creationOperation = Optional.of(operation);
-        HoglakeDtos.TableCreation prepared = client.prepareTableCreation(operation, metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), definitions, replacement);
+        HoglakeDtos.TableCreation prepared = client.prepareTableCreation(operation, metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), definitions, replacement, partitionFields);
         if (!"prepared".equals(prepared.state()) || !operation.equals(prepared.operationId()) || prepared.tableUuid() == null || prepared.columns() == null || prepared.writePath() == null) {
             throw new TrinoException(HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake preparation response for operation " + operation);
         }
         List<HoglakeColumnHandle> columns = prepared.columns().stream().map(HoglakeMetadata::toColumnHandle).toList();
-        return new HoglakeWriteHandle(metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), prepared.tableUuid(), catalog.headSnapshotId(), prepared.writePath(), columns, columns, Optional.of(operation));
+        return new HoglakeWriteHandle(metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), prepared.tableUuid(), catalog.headSnapshotId(), prepared.writePath(), columns, columns, Optional.of(operation), Optional.empty(), partitionFields);
     }
 
     @Override
@@ -444,9 +453,8 @@ public class HoglakeMetadata
         checkRetryMode(retryMode);
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
         HoglakeDtos.Table table = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId()).orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
-        if (table.partitionSpec() != null && table.partitionSpec().get("fields") instanceof List<?> fields && !fields.isEmpty()) {
-            throw new TrinoException(NOT_SUPPORTED, "Writing partitioned Hoglake tables is not supported");
-        }
+        List<HoglakeDtos.PartitionField> partitionFields = HoglakePartitioning.read(table.partitionSpec());
+        HoglakePartitioning.validate(partitionFields, handle.columns());
         handle.columns().forEach(column -> HoglakeTypes.toHoglakeType(column.type()));
         List<HoglakeColumnHandle> inputs = columns.stream().map(HoglakeColumnHandle.class::cast).toList();
         for (HoglakeColumnHandle column : handle.columns()) {
@@ -460,7 +468,7 @@ public class HoglakeMetadata
         if (catalog.capabilities() != null && catalog.capabilities().contains("idempotent-append-v1")) {
             operation = Optional.of(UUID.randomUUID().toString());
         }
-        return new HoglakeWriteHandle(handle.schemaName(), handle.tableName(), handle.tableUuid(), handle.snapshotId(), catalog.dataPath(), handle.columns(), inputs, Optional.empty(), operation);
+        return new HoglakeWriteHandle(handle.schemaName(), handle.tableName(), handle.tableUuid(), handle.snapshotId(), catalog.dataPath(), handle.columns(), inputs, Optional.empty(), operation, partitionFields);
     }
 
     @Override
@@ -536,8 +544,12 @@ public class HoglakeMetadata
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
         HoglakeDtos.Table table = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId()).orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
         Optional<String> insertFailure = Optional.empty();
-        if (table.partitionSpec() != null && table.partitionSpec().get("fields") instanceof List<?> fields && !fields.isEmpty()) {
-            insertFailure = Optional.of("Writing partitioned Hoglake tables is not supported");
+        List<HoglakeDtos.PartitionField> partitionFields = HoglakePartitioning.read(table.partitionSpec());
+        try {
+            HoglakePartitioning.validate(partitionFields, handle.columns());
+        }
+        catch (TrinoException e) {
+            insertFailure = Optional.of(e.getMessage());
         }
         if (table.sortSpec() != null && table.sortSpec().get("fields") instanceof List<?> fields && !fields.isEmpty()) {
             insertFailure = Optional.of("Writing sorted Hoglake tables is not supported");
@@ -552,7 +564,7 @@ public class HoglakeMetadata
         if (catalog.capabilities() == null || !catalog.capabilities().contains("idempotent-mutation-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support idempotent-mutation-v1 required for DELETE, UPDATE and MERGE");
         }
-        return new HoglakeDeleteHandle(handle, catalog.dataPath(), UUID.randomUUID().toString(), insertFailure);
+        return new HoglakeDeleteHandle(handle, catalog.dataPath(), UUID.randomUUID().toString(), insertFailure, insertFailure.isPresent() ? List.of() : partitionFields);
     }
 
     @Override

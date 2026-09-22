@@ -234,10 +234,9 @@ renames or drops. The server retains terminal receipts and expires unpublished
 operations after 24 hours, so longer-running creations must be retried as new queries.
 There is no fallback to the old staging-table protocol on older servers.
 
-Writes are limited to single-statement transactions. INSERT and UPDATE require
-unpartitioned tables; UPDATE also rejects sorted tables. MERGE actions that insert
-rows reject partitioned and sorted tables. DELETE and delete-only MERGE support
-both layouts. Query/task retries, comments
+Writes are limited to single-statement transactions. INSERT, UPDATE and MERGE
+support partitioned tables. UPDATE and MERGE actions that insert rows still reject
+sorted tables. DELETE and delete-only MERGE support both layouts. Query/task retries, comments
 and custom table properties are not supported. INSERT's existing writer treats
 sort specifications as advisory and does not apply them.
 
@@ -415,7 +414,7 @@ groups guard insert-only and zero-row statements. An older replica cannot silent
 accept this contract. Any intervening target-table change conflicts, including
 INSERT, DELETE, compaction, schema changes, truncate, drop/name reuse and replacement.
 Unrelated tables may change. Rerun conflicting SQL from a fresh snapshot.
-Writing replacement rows to partitioned or sorted tables remains unsupported.
+Writing replacement rows to sorted tables remains unsupported.
 
 Publication recovery uses the same bounded receipt lookup and identical-request replay
 as INSERT, with a full-payload mixed-mutation server contract. A missing receipt is not proof that
@@ -432,3 +431,35 @@ to 64 MiB each. Retained fragments, decoded vectors, and encoding workspace are 
 charged to query memory; either limit can reject a statement before publication.
 Final vector construction runs on the coordinator;
 query/task retries and multi-statement write transactions remain unsupported.
+
+### Partitioned writes
+
+Use `WITH (partitioning = ARRAY['region', 'bucket(id, 16)', 'day(created_at)'])`
+on CREATE TABLE or CTAS. Identity may also be written `identity(region)`.
+Supported transforms are identity, bucket, year, month, day and hour. Sources may
+be scalar columns or struct leaves using dotted paths; arrays, maps and VARIANT
+cannot be sources. Truncate and hour on DATE are refused because the server's
+cross-client transform contract does not define them. Bucket accepts the server's
+explicit allowlist; unsigned 32/64-bit, alternate timestamp precisions, booleans,
+floating-point and JSON sources are not bucketable.
+
+Partitioned CREATE/CTAS and CREATE OR REPLACE require server capability
+`atomic-partitioned-table-creation-v1`. Preparation uses a dedicated endpoint so an
+old replica cannot silently ignore the spec. Publish installs the spec and all
+initial files in one snapshot. Existing partitioned tables need no new server
+contract for INSERT, UPDATE or MERGE. Updated rows route to their new partitions
+and publish atomically with deletion of their old positions. Concurrent target
+DDL conflicts with the write's pinned snapshot.
+
+Partition strings match the Python writer: null remains JSON null, temporal
+transforms floor before the epoch, timestamp identity retains six fractional
+digits when nonzero, and nanosecond timestamp identity uses epoch nanoseconds.
+Identity DATE and microsecond timestamps require years 1–9999 for cross-client
+string compatibility. Timestamps with time zone use UTC. Partition expressions
+use simple, case-sensitive column paths; quoted or punctuation-bearing names are
+not supported in these expressions.
+
+The writer groups each incoming page by partition and keeps one file open. This
+bounds writer memory independently of partition cardinality. Interleaved
+partitions can create smaller files; grouping input by partition keys improves
+file sizes. Partitioning does not add scan pruning in this change.

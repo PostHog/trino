@@ -216,7 +216,15 @@ public class HoglakeClient
 
     public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns, HoglakeDtos.ReplacementTarget replacement)
     {
+        return prepareTableCreation(operationId, namespace, table, columns, replacement, List.of());
+    }
+
+    public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns, HoglakeDtos.ReplacementTarget replacement, List<HoglakeDtos.PartitionField> partitionFields)
+    {
         Map<String, Object> definition = new HashMap<>();
+        if (!partitionFields.isEmpty()) {
+            definition.put("partition_fields", partitionFields);
+        }
         definition.put("namespace", namespace);
         definition.put("name", table);
         definition.put("columns", columns);
@@ -225,7 +233,7 @@ public class HoglakeClient
         }
         return write(
                 "PUT",
-                catalogPath("/table-creations/" + encode(operationId)),
+                catalogPath("/table-creations/" + encode(operationId) + (partitionFields.isEmpty() ? "" : "/partitioned")),
                 definition,
                 new TypeReference<HoglakeDtos.TableCreation>() {});
     }

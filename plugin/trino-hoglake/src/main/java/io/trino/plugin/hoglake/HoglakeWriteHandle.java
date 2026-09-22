@@ -33,12 +33,18 @@ public record HoglakeWriteHandle(
         @JsonProperty("columns") List<HoglakeColumnHandle> columns,
         @JsonProperty("inputColumns") List<HoglakeColumnHandle> inputColumns,
         @JsonProperty("creationOperation") Optional<String> creationOperation,
-        @JsonProperty("insertOperation") Optional<String> insertOperation)
+        @JsonProperty("insertOperation") Optional<String> insertOperation,
+        @JsonProperty("partitionFields") List<io.trino.plugin.hoglake.rest.HoglakeDtos.PartitionField> partitionFields)
         implements ConnectorInsertTableHandle, ConnectorOutputTableHandle
 {
     public HoglakeWriteHandle(String namespace, String table, String tableUuid, long snapshot, String dataPath, List<HoglakeColumnHandle> columns, List<HoglakeColumnHandle> inputColumns, Optional<String> creationOperation)
     {
         this(namespace, table, tableUuid, snapshot, dataPath, columns, inputColumns, creationOperation, Optional.empty());
+    }
+
+    public HoglakeWriteHandle(String namespace, String table, String tableUuid, long snapshot, String dataPath, List<HoglakeColumnHandle> columns, List<HoglakeColumnHandle> inputColumns, Optional<String> creationOperation, Optional<String> insertOperation)
+    {
+        this(namespace, table, tableUuid, snapshot, dataPath, columns, inputColumns, creationOperation, insertOperation, List.of());
     }
 
     @JsonCreator
@@ -50,6 +56,7 @@ public record HoglakeWriteHandle(
         requireNonNull(dataPath, "dataPath is null");
         requireNonNull(insertOperation, "insertOperation is null");
         requireNonNull(creationOperation, "creationOperation is null");
+        partitionFields = ImmutableList.copyOf(partitionFields);
         columns = ImmutableList.copyOf(columns);
         inputColumns = ImmutableList.copyOf(inputColumns);
     }

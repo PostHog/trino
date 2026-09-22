@@ -96,6 +96,18 @@ final class TestHoglakeLiveWrites
                     "s3.path-style-access", "true",
                     "s3.aws-access-key", "synthetic-test",
                     "s3.aws-secret-key", "synthetic-test-password"));
+            runner.execute("CREATE TABLE partitioned (id bigint, ts timestamp(6), r row(k bigint)) WITH (partitioning = ARRAY['bucket(id, 16)', 'day(ts)', 'r.k'])");
+            runner.execute("INSERT INTO partitioned VALUES (34, TIMESTAMP '1969-12-31 23:59:59.999999', ROW(7)), (35, TIMESTAMP '1970-01-01 00:00:00', ROW(8)), (NULL, NULL, NULL)");
+            assertThat(runner.execute("SELECT count(*) FROM partitioned").getOnlyValue()).isEqualTo(3L);
+            assertThat(client.getTable("test", "partitioned").orElseThrow().partitionSpec().get("fields")).asList().hasSize(3);
+            runner.execute("UPDATE partitioned SET id=36, ts=TIMESTAMP '1970-01-02 00:00:00', r=ROW(9) WHERE id=34");
+            runner.execute("MERGE INTO partitioned t USING (VALUES (35, 37), (40, 40)) s(old_id,new_id) ON t.id=s.old_id WHEN MATCHED THEN UPDATE SET id=s.new_id WHEN NOT MATCHED THEN INSERT (id) VALUES (s.new_id)");
+            assertThat(runner.execute("SELECT id FROM partitioned WHERE id IS NOT NULL ORDER BY id").getMaterializedRows()).isEqualTo(runner.execute("VALUES BIGINT '36', BIGINT '37', BIGINT '40'").getMaterializedRows());
+            runner.execute("CREATE TABLE partition_ctas WITH (partitioning = ARRAY['id']) AS SELECT id FROM partitioned");
+            assertThat(runner.execute("SELECT count(*) FROM partition_ctas").getOnlyValue()).isEqualTo(4L);
+            assertThat(runner.execute("SHOW CREATE TABLE partition_ctas").getOnlyValue().toString()).contains("partitioning = ARRAY['id']");
+            runner.execute("CREATE OR REPLACE TABLE partition_ctas WITH (partitioning = ARRAY['bucket(id, 8)']) AS SELECT BIGINT '34' id");
+            assertThat(runner.execute("SELECT id FROM partition_ctas").getOnlyValue()).isEqualTo(34L);
             runner.execute("CREATE TABLE deletions (id bigint, label varchar)");
             runner.execute("INSERT INTO deletions SELECT id, IF(id % 3 = 0, NULL, 'keep') FROM UNNEST(sequence(1, 10000)) t(id)");
             runner.execute("INSERT INTO deletions SELECT id, IF(id % 3 = 0, NULL, 'keep') FROM UNNEST(sequence(10001, 20000)) t(id)");

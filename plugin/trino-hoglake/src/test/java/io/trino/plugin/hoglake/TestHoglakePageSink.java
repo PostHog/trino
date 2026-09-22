@@ -53,6 +53,56 @@ final class TestHoglakePageSink
     private static final HoglakeWriteHandle HANDLE = new HoglakeWriteHandle("test", "table", UUID.randomUUID().toString(), 3, "memory:///warehouse/", List.of(FIRST, SECOND), List.of(SECOND), Optional.empty());
 
     @Test
+    void testPartitionFilesContainOnlyTheirRegisteredValues()
+            throws Exception
+    {
+        MemoryFileSystem storage = new MemoryFileSystem();
+        HoglakeWriteHandle handle = new HoglakeWriteHandle(
+                "test",
+                "partitioned",
+                UUID.randomUUID().toString(),
+                3,
+                "memory:///warehouse/",
+                List.of(FIRST),
+                List.of(FIRST),
+                Optional.empty(),
+                Optional.empty(),
+                List.of(new HoglakeDtos.PartitionField(FIRST.fieldId(), "identity", null)));
+        HoglakePageSink sink = new HoglakePageSink(storage, handle, "test");
+        var values = BIGINT.createBlockBuilder(null, 5);
+        BIGINT.writeLong(values, 7);
+        values.appendNull();
+        BIGINT.writeLong(values, 9);
+        BIGINT.writeLong(values, 7);
+        values.appendNull();
+        sink.appendPage(new Page(values.build()));
+        var fragments = sink.finish().get();
+        assertThat(fragments).hasSize(3);
+        long total = 0;
+        for (var fragment : fragments) {
+            var file = new ObjectMapper().readValue(fragment.getBytes(), HoglakeDtos.FileRegistration.class);
+            var split = new HoglakeSplit(file.path(), file.fileSizeBytes(), file.recordCount(), Optional.empty(), 0);
+            try (var source = new HoglakePageSourceProvider(_ -> storage).createPageSource(
+                    HoglakeTransactionHandle.INSTANCE,
+                    ConnectorTestFixtures.session(),
+                    split,
+                    new HoglakeTableHandle("test", "partitioned", 3, handle.tableUuid(), handle.columns()),
+                    Optional.empty(),
+                    List.of(FIRST),
+                    DynamicFilter.EMPTY,
+                    MemoryContext.NO_LIMIT)) {
+                var rows = ConnectorTestFixtures.readAll(source, List.of(BIGINT));
+                assertThat(rows).hasSize((int) file.recordCount());
+                for (var row : rows) {
+                    assertThat(row.getFirst() == null ? null : row.getFirst().toString()).isEqualTo(file.partitionValues().getFirst());
+                }
+                total += rows.size();
+            }
+        }
+        assertThat(total).isEqualTo(5);
+    }
+
+    @Test
     void testHandleSerialization()
     {
         JsonCodec<HoglakeWriteHandle> codec = new JsonCodecFactory(new JsonMapperProvider()
