@@ -79,10 +79,11 @@ public class HoglakeConnector
     @Override
     public void commit(ConnectorTransactionHandle handle)
     {
-        HoglakeMetadata transaction = transactions.get(handle);
+        // Trino marks the catalog transaction finished before invoking commit,
+        // so an exception will not be followed by connector rollback.
+        HoglakeMetadata transaction = transactions.remove(handle);
         if (transaction != null) {
             transaction.commit();
-            transactions.remove(handle);
         }
     }
 
