@@ -343,7 +343,10 @@ All other changes, including narrowing, decimal precision or scale changes,
 temporal precision changes, same-type requests, and container changes, are
 rejected. Promotions preserve field IDs and nullability. Historical Parquet
 files retain their physical types and are widened by the reader; new files use
-the promoted type. The server re-encodes statistics in the same transaction.
+the promoted type. Predicates on widened historical physical columns remain
+residuals to avoid interpreting Bloom filters with the wrong physical width;
+these files can require more scanning. The server re-encodes statistics in the
+same transaction.
 Nested field evolution is a separate operation and is not enabled by this matrix.
 
 Schema mutations have no durable receipt and are sent once. A lost response may

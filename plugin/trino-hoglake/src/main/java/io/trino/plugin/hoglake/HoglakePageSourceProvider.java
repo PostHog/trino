@@ -64,8 +64,12 @@ import static io.trino.parquet.ParquetTypeUtils.lookupColumnByName;
 import static io.trino.parquet.predicate.PredicateUtils.buildPredicate;
 import static io.trino.parquet.predicate.PredicateUtils.getFilteredRowGroups;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.UuidType.UUID;
 import static java.util.Objects.requireNonNull;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.FLOAT;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT32;
 
 /**
  * Reads a split's parquet file from object storage through Trino's own
@@ -387,6 +391,13 @@ public class HoglakePageSourceProvider
             // UUID ordering differs from Parquet's binary ordering. Nested fields have no
             // statistics for the whole value. Unsupported statistics types remain residuals.
             if (!binding.get().isPrimitive() || column.type().equals(UUID)) {
+                continue;
+            }
+            // Bloom filters hash the physical value width. A widened SQL domain would
+            // probe INT32 as a long (or FLOAT as a double) and can lose matching rows.
+            var physicalType = binding.get().asPrimitiveType().getPrimitiveTypeName();
+            if ((column.type().equals(BIGINT) && physicalType == INT32) ||
+                    (column.type().equals(DOUBLE) && physicalType == FLOAT)) {
                 continue;
             }
             ColumnDescriptor descriptor = descriptorsByPath.get(List.of(binding.get().getName()));
