@@ -52,6 +52,24 @@ class TestHoglakeParquetBinding
     private static final String PATH = "memory:///binding-test.parquet";
 
     @Test
+    void nestedIdlessFieldsPreferExactName()
+    {
+        var schema = Types.buildMessage()
+                .optionalGroup()
+                .optional(PrimitiveTypeName.INT64).named("A")
+                .optional(PrimitiveTypeName.INT64).named("a")
+                .named("r")
+                .named("test");
+        var child = new HoglakeColumnHandle("a", 2, BIGINT, true);
+        var rowType = io.trino.spi.type.RowType.from(List.of(io.trino.spi.type.RowType.field("a", BIGINT)));
+        var column = new HoglakeColumnHandle("r", 1, rowType, true, List.of(child), "struct");
+        var physical = new org.apache.parquet.io.ColumnIOFactory().getColumnIO(schema).getChild("r");
+        var field = (io.trino.parquet.GroupField) HoglakeParquetFields.construct(column, physical).orElseThrow();
+        var leaf = (io.trino.parquet.PrimitiveField) field.getChildren().getFirst().orElseThrow();
+        assertThat(leaf.getDescriptor().getPath()).containsExactly("r", "a");
+    }
+
+    @Test
     void testNativeUnsignedInt32ReadsLosslessly()
     {
         byte[] file = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(

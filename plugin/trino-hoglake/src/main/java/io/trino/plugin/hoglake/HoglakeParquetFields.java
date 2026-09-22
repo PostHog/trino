@@ -106,6 +106,12 @@ final class HoglakeParquetFields
         }
         for (int index = 0; index < group.getChildrenCount(); index++) {
             ColumnIO child = group.getChild(index);
+            if (child.getType().getId() == null && child.getName().equals(column.name())) {
+                return child;
+            }
+        }
+        for (int index = 0; index < group.getChildrenCount(); index++) {
+            ColumnIO child = group.getChild(index);
             if (child.getType().getId() == null && child.getName().equalsIgnoreCase(column.name())) {
                 return child;
             }
