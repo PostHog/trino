@@ -235,7 +235,7 @@ operations after 24 hours, so longer-running creations must be retried as new qu
 There is no fallback to the old staging-table protocol on older servers.
 
 Writes are limited to single-statement transactions. INSERT, UPDATE and MERGE
-support partitioned and sorted tables. DELETE and delete-only MERGE support both layouts. Query/task retries are not supported. The writer applies the live sort specification to each new file.
+support partitioned and sorted tables. DELETE and delete-only MERGE support both layouts. TASK and QUERY execution retries require `claimed-uploads-v1`, `idempotent-append-v1`, and `atomic-table-creation-v1`. The writer applies the live sort specification to each new file.
 
 Servers advertising `idempotent-append-v1` support recovery of one INSERT
 operation. The connector creates one operation ID in `beginInsert` and sends it as
@@ -419,15 +419,15 @@ publication failed. After submission, the connector retains appended files and u
 recovery or cancellation leaves the outcome unknown; the error reports the operation ID.
 Before submission, failures leave the table unchanged. Worker abort cleans files
 until fragment handoff; coordinator failure cleans newly uploaded vectors. Files
-already handed off can remain orphaned. There is no orphan cleanup mechanism in
-this connector.
+already handed off are preserved until publication or explicit upload reclamation
+(see upload cleanup below). Legacy servers do not track these orphaned files.
 
 Mutation sinks limit compressed position sets to 64 MiB per worker sink. The coordinator
 separately limits aggregate fragment payloads and vector-construction working memory
 to 64 MiB each. Retained fragments, decoded vectors, and encoding workspace are also
 charged to query memory; either limit can reject a statement before publication.
 Final vector construction runs on the coordinator;
-query/task retries and multi-statement write transactions remain unsupported.
+multi-statement write transactions remain unsupported.
 
 ### Partitioned writes
 
@@ -513,3 +513,21 @@ This costs a claim request and durable row per file. Upgrade all server replicas
 and apply V12 before use; old servers continue legacy writes without claim cleanup.
 Writers idle past 24 hours can be fenced by an explicit reclamation and must retry
 with new paths.
+
+### Execution retries
+
+With the required capabilities above, both `retry_policy = 'TASK'` and
+`retry_policy = 'QUERY'` support CTAS, replacement, INSERT, UPDATE, DELETE and
+MERGE. Trino retains the planned statement handle and operation ID while retrying
+execution. Each worker attempt writes fresh claimed object paths, and Trino
+selects the successful fragments. Only those fragments enter the atomic commit;
+losing attempts remain invisible and can be reclaimed through the upload ledger.
+Commit response recovery continues to use the same durable receipt.
+
+Retries retain the original snapshot and table identity. They do not rebase a
+conflicting mutation or revive an expired snapshot. Trino's retry policy still
+determines which failures are recoverable: a coordinator process loss is not a
+QUERY execution retry. Resubmitting SQL creates a new operation and can apply the
+write again. Inspect the durable receipt when publication has an unknown outcome.
+All server replicas must support claimed uploads before enabling write retries;
+there is no fallback to unclaimed publication.

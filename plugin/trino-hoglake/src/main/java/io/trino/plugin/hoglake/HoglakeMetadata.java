@@ -705,11 +705,19 @@ public class HoglakeMetadata
         }
     }
 
-    private static void checkRetryMode(RetryMode retryMode)
+    private void checkRetryMode(RetryMode retryMode)
     {
-        if (retryMode != RetryMode.NO_RETRIES) {
-            throw new TrinoException(NOT_SUPPORTED, "Hoglake writes do not support query retries");
+        if (retryMode == RetryMode.NO_RETRIES) {
+            return;
         }
+        List<String> capabilities = client.getCatalog().capabilities();
+        if (capabilities == null || !capabilities.containsAll(List.of("claimed-uploads-v1", "idempotent-append-v1", "atomic-table-creation-v1"))) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake write retries require claimed-uploads-v1, idempotent-append-v1 and atomic-table-creation-v1");
+        }
+        // Trino retains the planned write handle across TASK and QUERY execution retries.
+        // Each attempt uploads fresh objects; only the engine's winning fragments are
+        // published using that handle's stable operation ID. Losing uploads are fenced
+        // and reclaimed through the server's upload ledger.
     }
 
     // ---- helpers -----------------------------------------------------------

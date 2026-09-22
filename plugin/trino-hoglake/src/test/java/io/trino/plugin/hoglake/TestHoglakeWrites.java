@@ -967,7 +967,7 @@ final class TestHoglakeWrites
         var session = ConnectorTestFixtures.session();
         HoglakeMetadata metadata = new HoglakeMetadata(client);
         var table = metadata.getTableHandle(session, new SchemaTableName("test", "partitioned"), Optional.empty(), Optional.empty());
-        assertThatThrownBy(() -> metadata.beginInsert(session, table, List.of(), RetryMode.RETRIES_ENABLED)).hasMessageContaining("do not support query retries");
+        assertThatThrownBy(() -> metadata.beginInsert(session, table, List.of(), RetryMode.RETRIES_ENABLED)).hasMessageContaining("write retries require claimed-uploads-v1");
     }
 
     private void assertQuery(String actual, String expected)
