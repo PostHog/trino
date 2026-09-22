@@ -422,12 +422,12 @@ public class HoglakeMetadata
     @Override
     public ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata metadata, Optional<ConnectorTableLayout> layout, RetryMode retryMode, boolean replace)
     {
-        checkRetryMode(retryMode);
         if (layout.isPresent()) {
             throw new TrinoException(NOT_SUPPORTED, "Custom layouts are not supported");
         }
         List<HoglakeDtos.ColumnDefinition> definitions = columnDefinitions(metadata);
         HoglakeDtos.Catalog catalog = client.getCatalog();
+        checkRetryMode(retryMode, catalog);
         checkWriteSchemaSupport(catalog, metadata.getColumns().stream().map(ColumnMetadata::getType).toList());
         if (catalog.capabilities() == null || !catalog.capabilities().contains("atomic-table-creation-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support atomic-table-creation-v1");
@@ -507,7 +507,6 @@ public class HoglakeMetadata
     @Override
     public ConnectorInsertTableHandle beginInsert(ConnectorSession session, ConnectorTableHandle tableHandle, List<ColumnHandle> columns, RetryMode retryMode)
     {
-        checkRetryMode(retryMode);
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
         HoglakeDtos.Table table = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId()).orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
         List<HoglakeDtos.PartitionField> partitionFields = HoglakePartitioning.read(table.partitionSpec());
@@ -522,6 +521,7 @@ public class HoglakeMetadata
             }
         }
         HoglakeDtos.Catalog catalog = client.getCatalog();
+        checkRetryMode(retryMode, catalog);
         checkWriteSchemaSupport(catalog, handle.columns().stream().map(HoglakeColumnHandle::type).toList());
         Optional<String> operation = Optional.empty();
         if (catalog.capabilities() != null && catalog.capabilities().contains("idempotent-append-v1")) {
@@ -599,7 +599,6 @@ public class HoglakeMetadata
             Map<Integer, Collection<ColumnHandle>> updateCaseColumns,
             RetryMode retryMode)
     {
-        checkRetryMode(retryMode);
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
         HoglakeDtos.Table table = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId()).orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
         Optional<String> insertFailure = Optional.empty();
@@ -623,6 +622,7 @@ public class HoglakeMetadata
         }
         handle.columns().forEach(column -> HoglakeTypes.toHoglakeType(column.type()));
         HoglakeDtos.Catalog catalog = client.getCatalog();
+        checkRetryMode(retryMode, catalog);
         checkWriteSchemaSupport(catalog, handle.columns().stream().map(HoglakeColumnHandle::type).toList());
         if (catalog.capabilities() == null || !catalog.capabilities().contains("idempotent-mutation-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support idempotent-mutation-v1 required for DELETE, UPDATE and MERGE");
@@ -705,12 +705,12 @@ public class HoglakeMetadata
         }
     }
 
-    private void checkRetryMode(RetryMode retryMode)
+    private static void checkRetryMode(RetryMode retryMode, HoglakeDtos.Catalog catalog)
     {
         if (retryMode == RetryMode.NO_RETRIES) {
             return;
         }
-        List<String> capabilities = client.getCatalog().capabilities();
+        List<String> capabilities = catalog.capabilities();
         if (capabilities == null || !capabilities.containsAll(List.of("claimed-uploads-v1", "idempotent-append-v1", "atomic-table-creation-v1"))) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake write retries require claimed-uploads-v1, idempotent-append-v1 and atomic-table-creation-v1");
         }
