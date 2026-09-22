@@ -32,6 +32,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static io.trino.testing.TestingSession.testSessionBuilder;
+import static io.trino.testing.TransactionBuilder.transaction;
 import static io.trino.testing.assertions.Assert.assertEventually;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -96,6 +97,51 @@ final class TestHoglakeLiveWrites
                     "s3.path-style-access", "true",
                     "s3.aws-access-key", "synthetic-test",
                     "s3.aws-secret-key", "synthetic-test-password"));
+            runner.execute("CREATE TABLE tx_a (id bigint, r row(k bigint)) WITH (partitioning=ARRAY['bucket(id, 4)'], sorted_by=ARRAY['id'])");
+            runner.execute("CREATE TABLE tx_b (id bigint)");
+            runner.execute("INSERT INTO tx_a VALUES (1, ROW(1))");
+            long transactionBase = client.getCatalog().headSnapshotId();
+            transaction(runner.getTransactionManager(), runner.getPlannerContext().getMetadata(), runner.getAccessControl())
+                    .repeatableRead().execute(runner.getDefaultSession(), tx -> {
+                        runner.execute(tx, "INSERT INTO tx_a VALUES (2, ROW(2)), (3, NULL)");
+                        assertThat(runner.execute(tx, "SELECT count(*) FROM tx_a").getOnlyValue()).isEqualTo(3L);
+                        assertThat(runner.execute("SELECT count(*) FROM tx_a").getOnlyValue()).isEqualTo(1L);
+                        runner.execute(tx, "UPDATE tx_a SET id=id+10 WHERE id<=2");
+                        runner.execute(tx, "DELETE FROM tx_a WHERE id=3");
+                        runner.execute(tx, "MERGE INTO tx_a t USING (VALUES BIGINT '12', BIGINT '20') s(id) ON t.id=s.id WHEN MATCHED THEN UPDATE SET id=t.id+1 WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)");
+                        runner.execute(tx, "INSERT INTO tx_b SELECT id FROM tx_a");
+                        assertThat(runner.execute(tx, "SELECT id FROM tx_a ORDER BY id").getMaterializedRows())
+                                .isEqualTo(runner.execute("VALUES BIGINT '11', BIGINT '13', BIGINT '20'").getMaterializedRows());
+                        assertThat(runner.execute(tx, "SELECT count(*) FROM tx_b").getOnlyValue()).isEqualTo(3L);
+                        assertThat(client.getCatalog().headSnapshotId()).isEqualTo(transactionBase);
+                    });
+            assertThat(client.getCatalog().headSnapshotId()).isEqualTo(transactionBase + 1);
+            assertThat(runner.execute("SELECT count(*), sum(id) FROM tx_b").getMaterializedRows())
+                    .isEqualTo(runner.execute("VALUES (BIGINT '3', BIGINT '44')").getMaterializedRows());
+            assertThatThrownBy(() -> transaction(runner.getTransactionManager(), runner.getPlannerContext().getMetadata(), runner.getAccessControl())
+                    .repeatableRead().execute(runner.getDefaultSession(), (java.util.function.Consumer<io.trino.Session>) tx -> {
+                        runner.execute(tx, "DELETE FROM tx_a");
+                        runner.execute(tx, "INSERT INTO tx_b VALUES 99");
+                        assertThat(runner.execute(tx, "SELECT count(*) FROM tx_a").getOnlyValue()).isEqualTo(0L);
+                        throw new IllegalStateException("rollback test");
+                    })).hasMessageContaining("rollback test");
+            assertThat(runner.execute("SELECT count(*) FROM tx_a").getOnlyValue()).isEqualTo(3L);
+            assertThat(runner.execute("SELECT count(*) FROM tx_b").getOnlyValue()).isEqualTo(3L);
+            assertThatThrownBy(() -> transaction(runner.getTransactionManager(), runner.getPlannerContext().getMetadata(), runner.getAccessControl())
+                    .repeatableRead().execute(runner.getDefaultSession(), tx -> {
+                        runner.execute(tx, "INSERT INTO tx_a VALUES (40, NULL)");
+                        runner.execute(tx, "INSERT INTO tx_b VALUES 40");
+                        runner.execute("INSERT INTO tx_a VALUES (50, NULL)");
+                        // A different head cannot enter the transaction's pinned view.
+                        assertThat(runner.execute(tx, "SELECT count(*) FROM tx_a WHERE id=50").getOnlyValue()).isEqualTo(0L);
+                    })).hasMessageContaining("conflict");
+            assertThat(runner.execute("SELECT count(*) FROM tx_b").getOnlyValue()).isEqualTo(3L);
+            assertThat(runner.execute("SELECT count(*) FROM tx_a WHERE id=40").getOnlyValue()).isEqualTo(0L);
+            assertThatThrownBy(() -> transaction(runner.getTransactionManager(), runner.getPlannerContext().getMetadata(), runner.getAccessControl())
+                    .repeatableRead().execute(runner.getDefaultSession(), tx -> {
+                        runner.execute(tx, "CREATE TABLE tx_forbidden (id bigint)");
+                    })).hasMessageContaining("DDL is not supported in explicit transactions");
+            assertThat(client.getTable("test", "tx_forbidden")).isEmpty();
             runner.execute("CREATE TABLE described (id integer COMMENT 'identifier', v varchar) COMMENT 'table note' WITH (extra_properties = MAP(ARRAY['owner.team'], ARRAY['data']), partitioning = ARRAY['id'], sorted_by = ARRAY['id'])");
             long describedSnapshot = client.getCatalog().headSnapshotId();
             assertThat(client.getTable("test", "described").orElseThrow().properties()).containsEntry("owner.team", "data");

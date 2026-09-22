@@ -64,8 +64,9 @@ public class HoglakeConnector
             boolean readOnly,
             boolean autoCommit)
     {
+        IsolationLevel.checkConnectorSupports(IsolationLevel.REPEATABLE_READ, isolationLevel);
         HoglakeTransactionHandle handle = new HoglakeTransactionHandle(UUID.randomUUID());
-        transactions.put(handle, metadata.newTransaction());
+        transactions.put(handle, metadata.newTransaction(autoCommit));
         return handle;
     }
 
@@ -78,7 +79,11 @@ public class HoglakeConnector
     @Override
     public void commit(ConnectorTransactionHandle handle)
     {
-        transactions.remove(handle);
+        HoglakeMetadata transaction = transactions.get(handle);
+        if (transaction != null) {
+            transaction.commit();
+            transactions.remove(handle);
+        }
     }
 
     @Override
@@ -149,7 +154,7 @@ public class HoglakeConnector
     @Override
     public boolean isSingleStatementWritesOnly()
     {
-        return true;
+        return false;
     }
 
     @Override

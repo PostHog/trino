@@ -68,9 +68,19 @@ public class HoglakeSplitManager
         if (handle.constraint().isNone() || constraint.getSummary().isNone()) {
             return new FixedSplitSource(List.of());
         }
-        List<HoglakeDtos.ScanFile> scan =
-                client.scan(handle.schemaName(), handle.tableName(), handle.snapshotId());
+        List<HoglakeDtos.ScanFile> scan = scan(client, handle);
         return new FixedSplitSource(toSplits(scan));
+    }
+
+    static List<HoglakeDtos.ScanFile> scan(HoglakeClient client, HoglakeTableHandle handle)
+    {
+        java.util.Map<Long, HoglakeDtos.DeleteFile> deletes = handle.stagedDeletes().stream()
+                .collect(java.util.stream.Collectors.toMap(HoglakeDtos.DeleteFile::dataFileId, file -> file));
+        return java.util.stream.Stream.concat(
+                        client.scan(handle.schemaName(), handle.tableName(), handle.snapshotId()).stream(),
+                        handle.stagedFiles().stream())
+                .map(file -> new HoglakeDtos.ScanFile(file.dataFile(), deletes.getOrDefault(file.dataFile().dataFileId(), file.deleteFile())))
+                .toList();
     }
 
     /**

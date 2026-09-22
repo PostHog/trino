@@ -92,6 +92,7 @@ public class HoglakeMetadata
     private final TrinoFileSystemFactory fileSystemFactory;
     private final Map<SchemaTableName, HoglakeDtos.ReplacementTarget> plannedTargets = new ConcurrentHashMap<>();
     private volatile Optional<String> creationOperation = Optional.empty();
+    private HoglakeTransactionState transaction;
 
     public HoglakeMetadata(HoglakeClient client)
     {
@@ -109,8 +110,34 @@ public class HoglakeMetadata
         return new HoglakeMetadata(client, fileSystemFactory);
     }
 
+    public HoglakeMetadata newTransaction(boolean autoCommit)
+    {
+        HoglakeMetadata metadata = newTransaction();
+        if (!autoCommit) {
+            metadata.transaction = new HoglakeTransactionState(client);
+        }
+        return metadata;
+    }
+
+    public void commit()
+    {
+        if (transaction != null) {
+            transaction.commit();
+        }
+    }
+
+    private void checkAutocommitDdl()
+    {
+        if (transaction != null) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake DDL is not supported in explicit transactions; use an autocommit statement");
+        }
+    }
+
     public void rollback()
     {
+        if (transaction != null) {
+            transaction.rollback();
+        }
         creationOperation.ifPresent(client::abortTableCreation);
         creationOperation = Optional.empty();
     }
@@ -230,6 +257,7 @@ public class HoglakeMetadata
 
     private void checkSchemaEvolutionSupport()
     {
+        checkAutocommitDdl();
         HoglakeDtos.Catalog catalog = client.getCatalog();
         if (catalog.capabilities() == null || !catalog.capabilities().contains("guarded-schema-evolution-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support guarded-schema-evolution-v1");
@@ -251,16 +279,17 @@ public class HoglakeMetadata
         // Pin the query's snapshot: resolve head once, then fetch the
         // table AT that snapshot (not at whatever head is by the time the
         // second request lands) so the handle is consistent-at-N.
-        long snapshot = client.getCatalog().headSnapshotId();
+        long snapshot = transaction == null ? client.getCatalog().headSnapshotId() : transaction.snapshot();
         Optional<HoglakeDtos.Table> plannedTable = client.getTable(tableName.getSchemaName(), tableName.getTableName(), snapshot);
         plannedTargets.putIfAbsent(tableName, new HoglakeDtos.ReplacementTarget(plannedTable.map(HoglakeDtos.Table::tableUuid).orElse(null), snapshot));
         return plannedTable
-                .map(table -> (ConnectorTableHandle) new HoglakeTableHandle(
+                .map(table -> new HoglakeTableHandle(
                         tableName.getSchemaName(),
                         tableName.getTableName(),
                         snapshot,
                         table.tableUuid(),
                         table.columns().stream().map(HoglakeMetadata::toColumnHandle).toList()))
+                .map(handle -> (ConnectorTableHandle) (transaction == null ? handle : transaction.overlay(handle)))
                 .orElse(null);
     }
 
@@ -390,6 +419,7 @@ public class HoglakeMetadata
     @Override
     public void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, SaveMode saveMode)
     {
+        checkAutocommitDdl();
         SchemaTableName name = tableMetadata.getTable();
         if (saveMode != SaveMode.REPLACE && client.getTable(name.getSchemaName(), name.getTableName()).isPresent()) {
             if (saveMode == SaveMode.IGNORE) {
@@ -422,6 +452,7 @@ public class HoglakeMetadata
     @Override
     public ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata metadata, Optional<ConnectorTableLayout> layout, RetryMode retryMode, boolean replace)
     {
+        checkAutocommitDdl();
         if (layout.isPresent()) {
             throw new TrinoException(NOT_SUPPORTED, "Custom layouts are not supported");
         }
@@ -498,6 +529,7 @@ public class HoglakeMetadata
 
     private void checkLifecycleSupport()
     {
+        checkAutocommitDdl();
         HoglakeDtos.Catalog catalog = client.getCatalog();
         if (catalog.capabilities() == null || !catalog.capabilities().contains("guarded-table-lifecycle-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support guarded-table-lifecycle-v1");
@@ -522,10 +554,13 @@ public class HoglakeMetadata
         }
         HoglakeDtos.Catalog catalog = client.getCatalog();
         checkRetryMode(retryMode, catalog);
+        if (transaction != null) {
+            transaction.checkWriteSupport(catalog);
+        }
         checkWriteSchemaSupport(catalog, handle.columns().stream().map(HoglakeColumnHandle::type).toList());
         Optional<String> operation = Optional.empty();
         if (catalog.capabilities() != null && catalog.capabilities().contains("idempotent-append-v1")) {
-            operation = Optional.of(UUID.randomUUID().toString());
+            operation = Optional.of(transaction == null ? UUID.randomUUID().toString() : transaction.operation());
         }
         return new HoglakeWriteHandle(handle.schemaName(), handle.tableName(), handle.tableUuid(), handle.snapshotId(), catalog.dataPath(), handle.columns(), inputs, Optional.empty(), operation, partitionFields, sortFields, catalog.capabilities() != null && catalog.capabilities().contains("claimed-uploads-v1"));
     }
@@ -623,11 +658,14 @@ public class HoglakeMetadata
         handle.columns().forEach(column -> HoglakeTypes.toHoglakeType(column.type()));
         HoglakeDtos.Catalog catalog = client.getCatalog();
         checkRetryMode(retryMode, catalog);
+        if (transaction != null) {
+            transaction.checkWriteSupport(catalog);
+        }
         checkWriteSchemaSupport(catalog, handle.columns().stream().map(HoglakeColumnHandle::type).toList());
         if (catalog.capabilities() == null || !catalog.capabilities().contains("idempotent-mutation-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support idempotent-mutation-v1 required for DELETE, UPDATE and MERGE");
         }
-        return new HoglakeDeleteHandle(handle, catalog.dataPath(), UUID.randomUUID().toString(), insertFailure, insertFailure.isPresent() ? List.of() : partitionFields, insertFailure.isPresent() ? List.of() : sortFields, catalog.capabilities().contains("claimed-uploads-v1"));
+        return new HoglakeDeleteHandle(handle, catalog.dataPath(), transaction == null ? UUID.randomUUID().toString() : transaction.operation(), insertFailure, insertFailure.isPresent() ? List.of() : partitionFields, insertFailure.isPresent() ? List.of() : sortFields, catalog.capabilities().contains("claimed-uploads-v1"));
     }
 
     @Override
@@ -651,7 +689,13 @@ public class HoglakeMetadata
             MemoryContext memoryContext)
     {
         HoglakeDeleteHandle delete = (HoglakeDeleteHandle) handle;
-        new HoglakeDeletePublisher(client, fileSystemFactory.create(session)).publish(delete, fragments, memoryContext);
+        HoglakeDeletePublisher publisher = new HoglakeDeletePublisher(client, fileSystemFactory.create(session));
+        if (transaction == null) {
+            publisher.publish(delete, fragments, memoryContext);
+        }
+        else {
+            publisher.publish(delete, fragments, memoryContext, transaction::stage);
+        }
         return Optional.empty();
     }
 
@@ -665,7 +709,10 @@ public class HoglakeMetadata
                 .toList();
         if (!files.isEmpty()) {
             HoglakeDtos.Commit request = new HoglakeDtos.Commit(handle.snapshot(), List.of(new HoglakeDtos.Append(handle.namespace(), handle.table(), handle.tableUuid(), files)), handle.insertOperation().orElse(null));
-            if (handle.claimUploads()) {
+            if (transaction != null) {
+                transaction.stage(request);
+            }
+            else if (handle.claimUploads()) {
                 client.commitClaimed(request, false);
             }
             else {

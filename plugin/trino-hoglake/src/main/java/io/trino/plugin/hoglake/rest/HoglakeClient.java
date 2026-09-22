@@ -353,23 +353,28 @@ public class HoglakeClient
 
     public void commit(HoglakeDtos.Commit request)
     {
-        commit(request, false, false);
+        commit(request, false, false, false);
     }
 
     public void commitMutation(HoglakeDtos.Commit request)
     {
-        commit(request, true, false);
+        commit(request, true, false, false);
     }
 
     public void commitClaimed(HoglakeDtos.Commit request, boolean mutation)
     {
-        commit(request, mutation, true);
+        commit(request, mutation, true, false);
     }
 
-    private void commit(HoglakeDtos.Commit request, boolean mutation, boolean claimedUploads)
+    public void commitTransaction(HoglakeDtos.Commit request)
+    {
+        commit(request, true, true, true);
+    }
+
+    private void commit(HoglakeDtos.Commit request, boolean mutation, boolean claimedUploads, boolean transaction)
     {
         try {
-            commitOnce(request, requestTimeout, mutation, claimedUploads);
+            commitOnce(request, requestTimeout, mutation, claimedUploads, transaction);
             return;
         }
         catch (TrinoException failure) {
@@ -399,7 +404,7 @@ public class HoglakeClient
                         return;
                     }
                     if (attempt < 2) {
-                        commitOnce(request, remainingRecoveryTime(recoveryStarted), mutation, claimedUploads);
+                        commitOnce(request, remainingRecoveryTime(recoveryStarted), mutation, claimedUploads, transaction);
                         return;
                     }
                 }
@@ -453,7 +458,7 @@ public class HoglakeClient
                 failure.getErrorCode().equals(HOGLAKE_CATALOG_NOT_FOUND.toErrorCode());
     }
 
-    private void commitOnce(HoglakeDtos.Commit request, Duration timeout, boolean mutation, boolean claimedUploads)
+    private void commitOnce(HoglakeDtos.Commit request, Duration timeout, boolean mutation, boolean claimedUploads, boolean transaction)
     {
         // The required-key endpoint also protects against an older replica
         // silently ignoring the ID after capability negotiation.
@@ -466,6 +471,9 @@ public class HoglakeClient
         }
         if (claimedUploads) {
             path = "/commit/uploads";
+        }
+        if (transaction) {
+            path = "/commit/transaction";
         }
         HoglakeDtos.CommitResult result = write("POST", catalogPath(path), request, new TypeReference<HoglakeDtos.CommitResult>() {}, timeout);
         if (result.snapshotId() <= 0) {

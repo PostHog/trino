@@ -107,7 +107,18 @@ public final class HoglakeDtos
             @JsonProperty("operation_id") String operationId,
             @JsonProperty("snapshot_id") long snapshotId) {}
 
-    public record DeleteRegistration(@JsonProperty("data_file_id") long dataFileId, @JsonProperty("path") String path, @JsonProperty("delete_count") long deleteCount, @JsonProperty("file_size_bytes") long fileSizeBytes) {}
+    public record DeleteRegistration(
+            @JsonProperty("data_file_id") long dataFileId,
+            @JsonProperty("path") String path,
+            @JsonProperty("delete_count") long deleteCount,
+            @JsonProperty("file_size_bytes") long fileSizeBytes,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("data_file_path") String dataFilePath)
+    {
+        public DeleteRegistration(long dataFileId, String path, long deleteCount, long fileSizeBytes)
+        {
+            this(dataFileId, path, deleteCount, fileSizeBytes, null);
+        }
+    }
 
     public record Deletes(@JsonProperty("namespace") String namespace, @JsonProperty("table") String table, @JsonProperty("expected_table_uuid") String expectedTableUuid, @JsonProperty("files") List<DeleteRegistration> files) {}
 

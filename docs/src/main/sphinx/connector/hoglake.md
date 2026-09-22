@@ -234,7 +234,7 @@ renames or drops. The server retains terminal receipts and expires unpublished
 operations after 24 hours, so longer-running creations must be retried as new queries.
 There is no fallback to the old staging-table protocol on older servers.
 
-Writes are limited to single-statement transactions. INSERT, UPDATE and MERGE
+INSERT, UPDATE and MERGE
 support partitioned and sorted tables. DELETE and delete-only MERGE support both layouts. TASK and QUERY execution retries require `claimed-uploads-v1`, `idempotent-append-v1`, and `atomic-table-creation-v1`. The writer applies the live sort specification to each new file.
 
 Servers advertising `idempotent-append-v1` support recovery of one INSERT
@@ -427,7 +427,7 @@ separately limits aggregate fragment payloads and vector-construction working me
 to 64 MiB each. Retained fragments, decoded vectors, and encoding workspace are also
 charged to query memory; either limit can reject a statement before publication.
 Final vector construction runs on the coordinator;
-multi-statement write transactions remain unsupported.
+explicit DML transactions stage the resulting vectors until commit.
 
 ### Partitioned writes
 
@@ -531,3 +531,43 @@ QUERY execution retry. Resubmitting SQL creates a new operation and can apply th
 write again. Inspect the durable receipt when publication has an unknown outcome.
 All server replicas must support claimed uploads before enabling write retries;
 there is no fallback to unclaimed publication.
+
+### Multi-statement DML transactions
+
+Servers advertising `atomic-dml-transactions-v1` and `claimed-uploads-v1` support
+explicit transactions containing INSERT, UPDATE, DELETE and MERGE on existing
+tables. The first table lookup pins one catalog snapshot for the transaction.
+Subsequent statements read that snapshot plus their own staged inserts and
+vectors, including updates or deletes of rows inserted earlier in the transaction.
+Other sessions see none of those changes until commit. Commit publishes all
+written tables in one catalog snapshot; rollback publishes nothing.
+
+The connector provides repeatable reads with snapshot isolation. Concurrent data,
+schema, compaction or identity changes to any written table reject the entire
+commit. Read-only tables are not validated at commit, so write skew is possible;
+SERIALIZABLE is rejected. READ COMMITTED and READ UNCOMMITTED receive the stronger
+repeatable-read behavior. Metadata listing surfaces still list the current head.
+Trino enforces the single write-catalog boundary; there is no distributed commit
+across catalogs. CREATE/CTAS/replacement, ALTER, COMMENT, DROP, RENAME, TRUNCATE and
+schema DDL require autocommit and are rejected inside explicit transactions before
+catalog mutation.
+
+Staging metadata is held on the coordinator, bounded to 64 MiB and 10000 staged
+uploads per transaction (including superseded vectors). Files remain in object
+storage under leased upload claims. Staged files have private negative IDs only
+inside the connector; permanent positive file and row IDs are allocated at commit.
+The transaction endpoint resolves vectors for staged files by the path of exactly
+one same-table append in that commit. No physical rewrite is required to delete
+newly inserted rows, and ordinary numeric file references retain their snapshot
+checks. All other consumers read the usual committed files and vectors.
+
+Commit uses one stable operation ID and durable receipt for the complete payload.
+A lost response is recovered with that receipt; an unresolved outcome reports the
+operation ID and preserves every object. A coordinator loss before publication
+leaves no partial catalog changes, but its in-memory transaction cannot be resumed.
+A loss during publication requires checking the receipt; SQL resubmission is a
+new transaction. Rollback abandons known staged objects only before publication.
+Losing attempts and superseded vectors remain eligible for explicit upload cleanup.
+No permanent snapshot pin is created: retention can expire the read snapshot and
+cause the transaction to fail. Long idle transactions are also subject to upload
+lease expiry. Upgrade every server replica before enabling these writes.

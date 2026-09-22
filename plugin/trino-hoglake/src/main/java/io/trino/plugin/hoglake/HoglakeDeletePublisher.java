@@ -64,15 +64,27 @@ final class HoglakeDeletePublisher
 
     void publish(HoglakeDeleteHandle handle, Collection<Slice> fragments, MemoryContext memoryContext)
     {
+        publish(handle, fragments, memoryContext, request -> {
+            if (handle.claimUploads()) {
+                client.commitClaimed(request, true);
+            }
+            else {
+                client.commitMutation(request);
+            }
+        });
+    }
+
+    void publish(HoglakeDeleteHandle handle, Collection<Slice> fragments, MemoryContext memoryContext, java.util.function.Consumer<HoglakeDtos.Commit> publication)
+    {
         try (HoglakeSplitResources resources = new HoglakeSplitResources(bytes -> {
             HoglakeDeleteBitmap.checkSize(bytes);
             memoryContext.setBytes(bytes);
         })) {
-            publish(handle, fragments, resources);
+            publish(handle, fragments, resources, publication);
         }
     }
 
-    private void publish(HoglakeDeleteHandle handle, Collection<Slice> fragments, HoglakeSplitResources workingMemory)
+    private void publish(HoglakeDeleteHandle handle, Collection<Slice> fragments, HoglakeSplitResources workingMemory, java.util.function.Consumer<HoglakeDtos.Commit> publication)
     {
         LocalMemoryContext decodeMemory = workingMemory.allocation().newLocalMemoryContext("delete_decode");
         LocalMemoryContext appendMemory = workingMemory.allocation().newLocalMemoryContext("merge_appends");
@@ -82,7 +94,7 @@ final class HoglakeDeletePublisher
         HoglakeTableHandle table = handle.table();
         Map<Long, HoglakeDeleteBitmap> changes = new TreeMap<>();
         Map<String, HoglakeDtos.FileRegistration> appends = new TreeMap<>();
-        Map<Long, HoglakeDtos.ScanFile> files = client.scan(table.schemaName(), table.tableName(), table.snapshotId()).stream()
+        Map<Long, HoglakeDtos.ScanFile> files = HoglakeSplitManager.scan(client, table).stream()
                 .collect(toMap(file -> file.dataFile().dataFileId(), file -> file));
         long lastRenewal = System.nanoTime();
         long fragmentBytes = 0;
@@ -170,12 +182,7 @@ final class HoglakeDeletePublisher
                     appends.isEmpty() ? List.of() : List.of(new HoglakeDtos.Append(table.schemaName(), table.tableName(), table.tableUuid(), List.copyOf(appends.values()))),
                     List.of(new HoglakeDtos.Deletes(table.schemaName(), table.tableName(), table.tableUuid(), registrations)),
                     handle.operationId());
-            if (handle.claimUploads()) {
-                client.commitClaimed(request, true);
-            }
-            else {
-                client.commitMutation(request);
-            }
+            publication.accept(request);
         }
         catch (IOException | RuntimeException failure) {
             if (!publicationStarted && handle.claimUploads()) {
