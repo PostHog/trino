@@ -5,7 +5,7 @@
     <parent>
         <groupId>io.airlift</groupId>
         <artifactId>airbase</artifactId>
-        <version>412</version>
+        <version>413</version>
     </parent>
 
     <groupId>io.trino</groupId>
@@ -608,7 +608,7 @@
             <dependency>
                 <groupId>io.airlift</groupId>
                 <artifactId>aircompressor-v3</artifactId>
-                <version>3.7</version>
+                <version>3.8</version>
             </dependency>
 
             <dependency>
@@ -2431,7 +2431,7 @@
                 <plugin>
                     <groupId>org.codehaus.mojo</groupId>
                     <artifactId>exec-maven-plugin</artifactId>
-                    <version>3.6.3</version>
+                    <version>3.6.4</version>
                 </plugin>
 
                 <plugin>
@@ -2770,7 +2770,7 @@
             <plugin>
                 <groupId>io.trino</groupId>
                 <artifactId>trino-maven-plugin</artifactId>
-                <version>24</version>
+                <version>25</version>
                 <extensions>true</extensions>
             </plugin>
 

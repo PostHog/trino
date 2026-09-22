@@ -55,8 +55,9 @@ import static io.trino.spi.function.InvocationConvention.InvocationReturnConvent
 import static io.trino.spi.function.InvocationConvention.simpleConvention;
 import static io.trino.spi.function.OperatorType.EQUAL;
 import static io.trino.spi.function.OperatorType.HASH_CODE;
+import static io.trino.sql.gen.BytecodeUtils.generateToString;
 import static io.trino.sql.gen.SqlTypeBytecodeExpression.constantType;
-import static io.trino.sql.gen.columnar.ColumnarFilterCompiler.createClassInstance;
+import static io.trino.sql.gen.columnar.ColumnarFilterCompiler.createClassInstanceDirect;
 import static io.trino.sql.gen.columnar.ColumnarFilterCompiler.generateGetInputChannels;
 import static io.trino.sql.gen.columnar.InColumnarFilterGenerator.generateInFilterListMethod;
 import static io.trino.sql.gen.columnar.InColumnarFilterGenerator.generateInFilterRangeMethod;
@@ -159,7 +160,13 @@ public final class InSetDynamicFilterGenerator
                 layout,
                 (scope, position, result) -> generateSetContainsCall(callSiteBinder, valueSetField, scope, position, result));
 
-        return createClassInstance(callSiteBinder, classDefinition);
+        // like every other columnar filter class, describe itself in debuggers and logs; the
+        // bound value set is not included, since it can be arbitrarily large and this class is
+        // shared across dynamic filters that each bind their own set as a constructor argument
+        String description = ColumnarFilter.class.getSimpleName() + "{IN dynamic filter, valueType=" + valueType + "}";
+        generateToString(classDefinition, callSiteBinder.bind(description, Object.class));
+
+        return createClassInstanceDirect(callSiteBinder, classDefinition);
     }
 
     private static void generateConstructor(ClassDefinition classDefinition, FieldDefinition inputChannelsField, FieldDefinition valueSetField, Class<? extends LongSet> setClass)
