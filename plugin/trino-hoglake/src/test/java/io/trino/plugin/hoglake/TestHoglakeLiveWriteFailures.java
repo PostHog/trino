@@ -199,8 +199,8 @@ final class TestHoglakeLiveWriteFailures
             assertThat(client.getTable("test", "stale").orElseThrow().recordCount()).isZero();
             assertThat(runner.execute("SELECT id FROM append_target").getOnlyValue()).isEqualTo(3L);
 
-            for (String evolution : List.of("ADD COLUMN extra bigint", "RENAME COLUMN id TO renamed", "DROP COLUMN spare")) {
-                runner.execute("CREATE OR REPLACE TABLE evolving (id bigint, spare bigint)");
+            for (String evolution : List.of("ADD COLUMN extra bigint", "RENAME COLUMN id TO renamed", "DROP COLUMN spare", "ALTER COLUMN promotable SET DATA TYPE bigint")) {
+                runner.execute("CREATE OR REPLACE TABLE evolving (id bigint, spare bigint, promotable integer)");
                 var evolvingTable = metadata.getTableHandle(session, new SchemaTableName("test", "evolving"), Optional.empty(), Optional.empty());
                 var idColumn = metadata.getColumnHandles(session, evolvingTable).get("id");
                 var evolvingInsert = metadata.beginInsert(session, evolvingTable, List.of(idColumn), RetryMode.NO_RETRIES);
@@ -234,6 +234,13 @@ final class TestHoglakeLiveWriteFailures
                     .hasMessageContaining("Malformed Hoglake write response");
             assertThat(client.getTable("test", "evolution_replacement").orElseThrow().columns())
                     .extracting(HoglakeDtos.Column::name).containsExactly("id", "spare", "added");
+
+            runner.execute("CREATE TABLE promotion_response AS SELECT INTEGER '17' AS id");
+            proxy.failAfter("/alter");
+            assertThatThrownBy(() -> runner.execute("ALTER TABLE promotion_response ALTER COLUMN id SET DATA TYPE bigint"))
+                    .hasMessageContaining("Malformed Hoglake write response");
+            assertThat(client.getTable("test", "promotion_response").orElseThrow().columns().getFirst().type()).isEqualTo("long");
+            assertThat(runner.execute("SELECT id FROM promotion_response").getOnlyValue()).isEqualTo(17L);
 
             runner.execute("CREATE OR REPLACE TABLE replacement AS SELECT BIGINT '20' AS id");
             HoglakeDtos.Table oldReplacement = client.getTable("test", "replacement").orElseThrow();

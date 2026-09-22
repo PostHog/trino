@@ -468,14 +468,15 @@ final class TestHoglakeWrites
     @Test
     void testSchemaEvolutionRefusals()
     {
-        runner.execute("CREATE TABLE evolution_refusals (id bigint, spare bigint)");
+        runner.execute("CREATE TABLE evolution_refusals (id bigint, spare bigint, promotable integer)");
         assertThatThrownBy(() -> new HoglakeMetadata(client).dropSchema(ConnectorTestFixtures.session(), "test", false))
                 .hasMessageContaining("guarded-schema-evolution-v1");
         for (String statement : List.of(
                 "CREATE SCHEMA new_schema",
                 "ALTER TABLE evolution_refusals ADD COLUMN extra bigint",
                 "ALTER TABLE evolution_refusals RENAME COLUMN spare TO renamed",
-                "ALTER TABLE evolution_refusals DROP COLUMN spare")) {
+                "ALTER TABLE evolution_refusals DROP COLUMN spare",
+                "ALTER TABLE evolution_refusals ALTER COLUMN promotable SET DATA TYPE bigint")) {
             assertThatThrownBy(() -> runner.execute(statement)).hasMessageContaining("guarded-schema-evolution-v1");
         }
         assertThatThrownBy(() -> runner.execute("ALTER TABLE evolution_refusals ALTER COLUMN id SET DATA TYPE double"))
