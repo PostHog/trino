@@ -643,6 +643,7 @@ final class TestHoglakeWrites
             for (boolean sorted : List.of(false, true)) {
                 String name = sorted ? "sorted_mutation" : "partitioned_mutation";
                 runner.execute("CREATE TABLE " + name + " (id bigint)");
+                runner.execute("INSERT INTO " + name + " VALUES 1, 2");
                 HoglakeDtos.Table table = tables.get(name);
                 Map<String, Object> spec = Map.of("fields", List.of(Map.of("source_field_id", 1)));
                 tables.put(name, new HoglakeDtos.Table(table.name(), table.namespace(), table.tableUuid(), table.columns(), 0, 0, 0, sorted ? null : spec, sorted ? spec : null));
@@ -650,6 +651,13 @@ final class TestHoglakeWrites
                 assertThatThrownBy(() -> runner.execute("UPDATE " + name + " SET id=1"))
                         .hasMessageContaining(sorted ? "Writing sorted" : "Writing partitioned");
                 assertThat(commits).isEqualTo(before);
+                assertThatThrownBy(() -> runner.execute("MERGE INTO " + name + " t USING (VALUES 3) s(id) ON t.id=s.id WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)"))
+                        .hasMessageContaining(sorted ? "Writing sorted" : "Writing partitioned");
+                assertThat(commits).isEqualTo(before);
+                assertThat(runner.execute("DELETE FROM " + name + " WHERE id=1").getUpdateCount()).hasValue(1);
+                assertThat(runner.execute("SELECT id FROM " + name).getOnlyValue()).isEqualTo(2L);
+                assertThat(runner.execute("MERGE INTO " + name + " t USING (VALUES 2) s(id) ON t.id=s.id WHEN MATCHED THEN DELETE").getUpdateCount()).hasValue(1);
+                assertThat(runner.execute("SELECT id FROM " + name).getRowCount()).isZero();
             }
         }
         finally {

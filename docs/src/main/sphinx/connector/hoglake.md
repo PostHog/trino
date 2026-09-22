@@ -202,8 +202,10 @@ renames or drops. The server retains terminal receipts and expires unpublished
 operations after 24 hours, so longer-running creations must be retried as new queries.
 There is no fallback to the old staging-table protocol on older servers.
 
-Writes are limited to single-statement transactions and unpartitioned tables.
-DELETE, UPDATE and MERGE also reject sorted tables. Query/task retries, comments
+Writes are limited to single-statement transactions. INSERT and UPDATE require
+unpartitioned tables; UPDATE also rejects sorted tables. MERGE actions that insert
+rows reject partitioned and sorted tables. DELETE and delete-only MERGE support
+both layouts. Query/task retries, comments
 and custom table properties are not supported. INSERT's existing writer treats
 sort specifications as advisory and does not apply them.
 
@@ -367,7 +369,7 @@ groups guard insert-only and zero-row statements. An older replica cannot silent
 accept this contract. Any intervening target-table change conflicts, including
 INSERT, DELETE, compaction, schema changes, truncate, drop/name reuse and replacement.
 Unrelated tables may change. Rerun conflicting SQL from a fresh snapshot.
-Partitioned and sorted mutations and additional writable types remain unsupported.
+Writing replacement rows to partitioned or sorted tables and additional writable types remain unsupported.
 
 Publication recovery uses the same bounded receipt lookup and identical-request replay
 as INSERT, with a full-payload mixed-mutation server contract. A missing receipt is not proof that

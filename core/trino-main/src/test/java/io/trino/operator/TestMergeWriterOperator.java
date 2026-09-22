@@ -44,6 +44,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Collection;
 import java.util.Optional;
@@ -65,6 +67,7 @@ import static java.util.concurrent.CompletableFuture.completedFuture;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @Execution(ExecutionMode.CONCURRENT)
@@ -124,13 +127,18 @@ public class TestMergeWriterOperator
         assertThat(operator.getOutput()).isNotNull();
         assertThat(operator.isFinished()).isTrue();
 
+        // Successful fragment handoff must not abort the sink.
+        assertThat(mergeSinkProvider.sink().abortCount).isZero();
+
         // closing the operator releases the memory
         operator.close();
+        assertThat(mergeSinkProvider.sink().abortCount).isZero();
         assertThat(operatorContext.getOperatorMemoryContext().getUserMemory()).isEqualTo(0);
     }
 
-    @Test
-    public void testMergeSinkMemoryUsageIsReleasedOnAbort()
+    @ParameterizedTest
+    @ValueSource(strings = {"running", "finishing", "failed", "abort-failed"})
+    public void testMergeSinkMemoryUsageIsReleasedOnAbort(String stage)
             throws Exception
     {
         MemoryReportingMergeSinkProvider mergeSinkProvider = new MemoryReportingMergeSinkProvider();
@@ -155,8 +163,26 @@ public class TestMergeWriterOperator
         assertThat(mergeSinkProvider.sink().reportedMemory()).isGreaterThan(0);
         assertThat(operatorContext.getOperatorMemoryContext().getUserMemory()).isGreaterThan(0);
 
-        operator.close();
+        MemoryReportingMergeSink sink = mergeSinkProvider.sink();
+        if (stage.equals("finishing") || stage.equals("failed")) {
+            sink.finishResult = new CompletableFuture<>();
+            operator.finish();
+            if (stage.equals("failed")) {
+                sink.finishResult.completeExceptionally(new IllegalStateException("finish failed"));
+                assertThatThrownBy(operator::getOutput).hasMessage("finish failed");
+            }
+        }
+        sink.failAbort = stage.equals("abort-failed");
+        if (sink.failAbort) {
+            assertThatThrownBy(operator::close).hasMessage("abort failed");
+        }
+        else {
+            operator.close();
+        }
+        assertThat(sink.abortCount).isEqualTo(1);
         assertThat(operatorContext.getOperatorMemoryContext().getUserMemory()).isEqualTo(0);
+        operator.close();
+        assertThat(sink.abortCount).isEqualTo(1);
     }
 
     private static MergeTarget mergeTarget()
@@ -238,6 +264,9 @@ public class TestMergeWriterOperator
     {
         private final MemoryContext memoryContext;
         private long reportedMemory;
+        private int abortCount;
+        private boolean failAbort;
+        private CompletableFuture<Collection<Slice>> finishResult = completedFuture(ImmutableList.of());
 
         public MemoryReportingMergeSink(MemoryContext memoryContext)
         {
@@ -261,7 +290,17 @@ public class TestMergeWriterOperator
         {
             // simulates memory used while producing the merge result, e.g. by a file reader
             memoryContext.setBytes(FINISH_MEMORY_USAGE);
-            return completedFuture(ImmutableList.of());
+            return finishResult;
+        }
+
+        @Override
+        public void abort()
+        {
+            abortCount++;
+            memoryContext.setBytes(0);
+            if (failAbort) {
+                throw new IllegalStateException("abort failed");
+            }
         }
     }
 }

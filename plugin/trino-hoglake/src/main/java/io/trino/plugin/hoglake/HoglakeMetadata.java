@@ -521,18 +521,23 @@ public class HoglakeMetadata
         checkRetryMode(retryMode);
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
         HoglakeDtos.Table table = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId()).orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
+        Optional<String> insertFailure = Optional.empty();
         if (table.partitionSpec() != null && table.partitionSpec().get("fields") instanceof List<?> fields && !fields.isEmpty()) {
-            throw new TrinoException(NOT_SUPPORTED, "Writing partitioned Hoglake tables is not supported");
+            insertFailure = Optional.of("Writing partitioned Hoglake tables is not supported");
         }
         if (table.sortSpec() != null && table.sortSpec().get("fields") instanceof List<?> fields && !fields.isEmpty()) {
-            throw new TrinoException(NOT_SUPPORTED, "Writing sorted Hoglake tables is not supported");
+            insertFailure = Optional.of("Writing sorted Hoglake tables is not supported");
+        }
+        // INSERT-only MERGE has no update cases, so also enforce this in the worker sink.
+        if (!updateCaseColumns.isEmpty() && insertFailure.isPresent()) {
+            throw new TrinoException(NOT_SUPPORTED, insertFailure.orElseThrow());
         }
         handle.columns().forEach(column -> HoglakeTypes.toHoglakeType(column.type()));
         HoglakeDtos.Catalog catalog = client.getCatalog();
         if (catalog.capabilities() == null || !catalog.capabilities().contains("idempotent-mutation-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support idempotent-mutation-v1 required for DELETE, UPDATE and MERGE");
         }
-        return new HoglakeDeleteHandle((HoglakeTableHandle) tableHandle, catalog.dataPath(), UUID.randomUUID().toString());
+        return new HoglakeDeleteHandle(handle, catalog.dataPath(), UUID.randomUUID().toString(), insertFailure);
     }
 
     @Override

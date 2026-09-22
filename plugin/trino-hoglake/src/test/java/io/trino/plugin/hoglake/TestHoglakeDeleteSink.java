@@ -13,29 +13,68 @@
  */
 package io.trino.plugin.hoglake;
 
+import io.trino.filesystem.Location;
 import io.trino.filesystem.memory.MemoryFileSystem;
+import io.trino.operator.MergeWriterOperator;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.LongArrayBlock;
 import io.trino.spi.block.RowBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
+import io.trino.sql.planner.plan.PlanNodeId;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 
 import static io.trino.spi.StandardErrorCode.EXCEEDED_LOCAL_MEMORY_LIMIT;
 import static io.trino.spi.connector.ConnectorMergeSink.DELETE_OPERATION_NUMBER;
 import static io.trino.spi.connector.ConnectorMergeSink.INSERT_OPERATION_NUMBER;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.TinyintType.TINYINT;
+import static io.trino.testing.TestingSession.testSessionBuilder;
+import static io.trino.testing.TestingTaskContext.createTaskContext;
+import static java.util.concurrent.Executors.newCachedThreadPool;
+import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TestHoglakeDeleteSink
 {
+    @Test
+    void testOperatorCancellationAbortsParquetWriter()
+            throws Exception
+    {
+        try (var executor = newCachedThreadPool();
+                var scheduledExecutor = newScheduledThreadPool(1)) {
+            var context = createTaskContext(executor, scheduledExecutor, testSessionBuilder().build())
+                    .addPipelineContext(0, true, true, false)
+                    .addDriverContext()
+                    .addOperatorContext(0, new PlanNodeId("test"), "test");
+            var memory = context.newLocalUserMemoryContext("test");
+            var columns = List.of(new HoglakeColumnHandle("id", 1, BIGINT, true));
+            var write = new HoglakeWriteHandle("ns", "target", "synthetic", 1, "memory:///warehouse/", columns, columns, Optional.empty());
+            var fileSystem = new MemoryFileSystem();
+            var writer = new HoglakePageSink(fileSystem, write, "test");
+            var sink = new HoglakeMergeSink(writer, memory::setBytes);
+            var operator = new MergeWriterOperator(context, sink, Function.identity(), memory);
+            operator.addInput(new Page(
+                    RunLengthEncodedBlock.create(BIGINT, 42L, 1),
+                    RunLengthEncodedBlock.create(TINYINT, (long) INSERT_OPERATION_NUMBER, 1),
+                    RunLengthEncodedBlock.create(BIGINT, 0L, 1),
+                    RunLengthEncodedBlock.create(HoglakeColumnHandle.ROW_ID.type(), null, 1),
+                    RunLengthEncodedBlock.create(TINYINT, 0L, 1)));
+            assertThat(writer.getMemoryUsage()).isPositive();
+            operator.close();
+            assertThatThrownBy(writer::finish).hasMessage("Sink is aborted");
+            assertThat(fileSystem.listFiles(Location.of("memory:///warehouse/")).hasNext()).isFalse();
+            assertThat(context.getOperatorMemoryContext().getUserMemory()).isZero();
+        }
+    }
+
     @Test
     void testEncodedFragmentsRemainAccountedUntilCleanup()
             throws Exception

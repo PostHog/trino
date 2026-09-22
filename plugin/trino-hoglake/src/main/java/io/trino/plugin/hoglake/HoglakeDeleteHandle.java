@@ -16,9 +16,16 @@ package io.trino.plugin.hoglake;
 import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 
-public record HoglakeDeleteHandle(HoglakeTableHandle table, String dataPath, String operationId)
+import java.util.Optional;
+
+public record HoglakeDeleteHandle(HoglakeTableHandle table, String dataPath, String operationId, Optional<String> insertFailure)
         implements ConnectorMergeTableHandle
 {
+    public HoglakeDeleteHandle(HoglakeTableHandle table, String dataPath, String operationId)
+    {
+        this(table, dataPath, operationId, Optional.empty());
+    }
+
     @Override
     public ConnectorTableHandle getTableHandle()
     {

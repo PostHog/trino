@@ -22,6 +22,7 @@ import io.trino.spi.connector.MemoryContext;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -37,6 +38,7 @@ final class HoglakeMergeSink
     static final long APPEND_FRAGMENT = -1;
 
     private final HoglakePageSink inserts;
+    private final Optional<String> insertFailure;
     private final HoglakeDeleteSink deletes;
     private final MemoryContext memoryContext;
     private long deleteBytes;
@@ -44,7 +46,13 @@ final class HoglakeMergeSink
 
     HoglakeMergeSink(HoglakePageSink inserts, MemoryContext memoryContext)
     {
+        this(inserts, memoryContext, Optional.empty());
+    }
+
+    HoglakeMergeSink(HoglakePageSink inserts, MemoryContext memoryContext, Optional<String> insertFailure)
+    {
         this.inserts = inserts;
+        this.insertFailure = insertFailure;
         this.memoryContext = memoryContext;
         this.deletes = new HoglakeDeleteSink(bytes -> {
             deleteBytes = bytes;
@@ -72,6 +80,9 @@ final class HoglakeMergeSink
                 case DELETE_OPERATION_NUMBER, UPDATE_DELETE_OPERATION_NUMBER -> deletePositions[deleteCount++] = position;
                 default -> throw new TrinoException(NOT_SUPPORTED, "Unsupported Hoglake merge operation");
             }
+        }
+        if (insertCount > 0 && insertFailure.isPresent()) {
+            throw new TrinoException(NOT_SUPPORTED, insertFailure.orElseThrow());
         }
         deletes.storeMergedRows(page.getPositions(deletePositions, 0, deleteCount));
         inserts.appendPage(page.getPositions(insertPositions, 0, insertCount));
