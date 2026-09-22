@@ -19,8 +19,10 @@ import io.trino.spi.Page;
 import io.trino.spi.PageSorter;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.DictionaryBlock;
+import io.trino.spi.block.RowBlock;
+import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.connector.SortOrder;
-import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 
 import java.util.ArrayList;
@@ -33,6 +35,9 @@ import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.spi.type.RealType.REAL;
 
 final class HoglakeSorting
 {
@@ -110,7 +115,7 @@ final class HoglakeSorting
     {
         List<List<HoglakeColumnHandle>> chains = fields.stream().map(field -> HoglakePartitioning.find(columns, field.sourceFieldId())).toList();
         List<Type> types = new ArrayList<>(columns.stream().map(HoglakeColumnHandle::type).toList());
-        chains.forEach(chain -> types.add(chain.getLast().type()));
+        chains.forEach(chain -> types.add(floating(chain.getLast().type()) ? BIGINT : chain.getLast().type()));
         List<Page> augmented = new ArrayList<>();
         int positions = 0;
         for (Page page : pages) {
@@ -121,24 +126,14 @@ final class HoglakeSorting
             for (int key = 0; key < chains.size(); key++) {
                 var chain = chains.get(key);
                 Type type = chain.getLast().type();
-                var values = type.createBlockBuilder(null, page.getPositionCount());
-                for (int position = 0; position < page.getPositionCount(); position++) {
-                    Block block = page.getBlock(columns.indexOf(chain.getFirst()));
-                    int offset = position;
-                    for (int depth = 1; depth < chain.size() && !block.isNull(offset); depth++) {
-                        var parent = chain.get(depth - 1);
-                        var row = ((RowType) parent.type()).getObject(block, offset);
-                        block = row.getRawFieldBlock(parent.children().indexOf(chain.get(depth)));
-                        offset = row.getRawIndex();
-                    }
-                    if (block.isNull(offset)) {
-                        values.appendNull();
-                    }
-                    else {
-                        values.appendBlockRange(block, offset, 1);
-                    }
+                Block block = page.getBlock(columns.indexOf(chain.getFirst()));
+                for (int depth = 1; depth < chain.size(); depth++) {
+                    var parent = chain.get(depth - 1);
+                    block = RowBlock.getRowFieldsFromBlock(block).get(parent.children().indexOf(chain.get(depth)));
                 }
-                blocks[columns.size() + key] = values.build();
+                // RowBlock's fields preserve parent nulls and dictionary/RLE encoding.
+                // Expanding a repeated large string here can defeat the buffer budget.
+                blocks[columns.size() + key] = floating(type) ? floatingKeys(type, block) : block;
             }
             augmented.add(new Page(page.getPositionCount(), blocks));
             positions = Math.addExact(positions, page.getPositionCount());
@@ -149,5 +144,37 @@ final class HoglakeSorting
                 IntStream.range(columns.size(), types.size()).boxed().toList(),
                 fields.stream().map(HoglakeSorting::order).toList(),
                 positions);
+    }
+
+    private static boolean floating(Type type)
+    {
+        return type.equals(REAL) || type.equals(DOUBLE);
+    }
+
+    private static Block floatingKeys(Type type, Block block)
+    {
+        if (block instanceof RunLengthEncodedBlock repeated) {
+            return RunLengthEncodedBlock.create(floatingKeys(type, repeated.getValue()), block.getPositionCount());
+        }
+        if (block instanceof DictionaryBlock dictionary) {
+            return dictionary.createProjection(floatingKeys(type, dictionary.getDictionary()));
+        }
+        var keys = BIGINT.createBlockBuilder(null, block.getPositionCount());
+        for (int position = 0; position < block.getPositionCount(); position++) {
+            if (block.isNull(position)) {
+                keys.appendNull();
+            }
+            else if (type.equals(REAL)) {
+                int bits = Float.floatToIntBits(Float.intBitsToFloat((int) REAL.getLong(block, position)));
+                BIGINT.writeLong(keys, bits < 0 ? bits ^ Integer.MAX_VALUE : bits);
+            }
+            else {
+                long bits = Double.doubleToLongBits(DOUBLE.getDouble(block, position));
+                BIGINT.writeLong(keys, bits < 0 ? bits ^ Long.MAX_VALUE : bits);
+            }
+        }
+        // Monotone signed keys match Java Float/Double.compare, including -0 < +0
+        // and canonical NaNs after infinity. The actual values remain untouched.
+        return keys.build();
     }
 }

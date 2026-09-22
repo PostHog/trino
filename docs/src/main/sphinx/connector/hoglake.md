@@ -474,8 +474,10 @@ Sorted creation requires server capability `atomic-sorted-table-creation-v1` and
 uses a dedicated preparation endpoint that older replicas refuse. Sort and
 partition specs publish atomically with initial data, including replacement.
 INSERT, UPDATE and MERGE apply existing native sort specs without a new server
-capability. Comparison uses Trino SQL ordering on logical values, including
-unsigned values exposed as wider signed or decimal types.
+capability. Comparison follows Hoglake ordering on logical values, including
+unsigned values exposed as wider signed or decimal types. Floating-point sort keys
+order negative zero before positive zero and NaN after positive infinity, matching
+Hoglake compaction; original floating-point values remain unchanged.
 
 Sorting applies within each output file, not across files or existing data.
 The writer buffers one partition at a time, flushing at an estimated 32 MiB
