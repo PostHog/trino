@@ -78,6 +78,12 @@ public final class HoglakeTypes
         };
     }
 
+    public static boolean canPromote(Type source, Type target)
+    {
+        return (source.equals(IntegerType.INTEGER) && target.equals(BigintType.BIGINT)) ||
+                (source.equals(RealType.REAL) && target.equals(DoubleType.DOUBLE));
+    }
+
     private static Type decimalType(Map<String, Object> typeParams)
     {
         int precision = intParam(typeParams, "precision");

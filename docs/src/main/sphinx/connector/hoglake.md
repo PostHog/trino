@@ -331,12 +331,20 @@ against the evolved schema. A prepared replacement also conflicts if column
 alteration commits first; if replacement commits first, the old UUID rejects the
 alteration. These operations are serialized by the existing catalog commit lock.
 
-SQL column type changes (`ALTER COLUMN ... SET DATA TYPE`) are explicitly
-unsupported, including widening and same-type requests. The server's existing
-REST promotion policy remains unchanged: signed integer widening through `long`,
-unsigned widening through `uint32`, and `float` to `double`, preserving field IDs.
-This slice adds no type promotions or writable types. Reading externally promoted
-files remains subject to the connector's existing type and Parquet reader support.
+SQL column type changes (`ALTER COLUMN ... SET DATA TYPE`) use the same
+UUID, snapshot, and capability guards. The supported compatibility matrix is:
+
+| Existing SQL type | Target SQL type |
+| --- | --- |
+| `INTEGER` | `BIGINT` |
+| `REAL` | `DOUBLE` |
+
+All other changes, including narrowing, decimal precision or scale changes,
+temporal precision changes, same-type requests, and container changes, are
+rejected. Promotions preserve field IDs and nullability. Historical Parquet
+files retain their physical types and are widened by the reader; new files use
+the promoted type. The server re-encodes statistics in the same transaction.
+Nested field evolution is a separate operation and is not enabled by this matrix.
 
 Schema mutations have no durable receipt and are sent once. A lost response may
 leave the outcome unknown; inspect the catalog before issuing another statement.

@@ -24,6 +24,7 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -43,6 +44,33 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TestHoglakeTypes
 {
+    @Test
+    void testPromotionMatrix()
+    {
+        List<Type> types = List.of(
+                INTEGER,
+                BIGINT,
+                REAL,
+                DOUBLE,
+                BOOLEAN,
+                VARCHAR,
+                VARBINARY,
+                DATE,
+                TIME_MICROS,
+                TIMESTAMP_MICROS,
+                TIMESTAMP_TZ_MICROS,
+                UUID,
+                DecimalType.createDecimalType(10, 2),
+                new ArrayType(BIGINT));
+        for (Type source : types) {
+            for (Type target : types) {
+                assertThat(HoglakeTypes.canPromote(source, target))
+                        .as("%s to %s", source, target)
+                        .isEqualTo((source.equals(INTEGER) && target.equals(BIGINT)) || (source.equals(REAL) && target.equals(DOUBLE)));
+            }
+        }
+    }
+
     // ---- hoglake -> Trino --------------------------------------------------
 
     @Test

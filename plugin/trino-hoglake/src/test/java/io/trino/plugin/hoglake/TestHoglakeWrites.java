@@ -81,6 +81,7 @@ final class TestHoglakeWrites
     private volatile boolean corruptCommitResponse;
     private volatile boolean lifecycleSupport = true;
     private volatile boolean schemaCreationRace;
+    private volatile boolean schemaEvolution;
     private int namespaceCreates;
     private volatile boolean replacementSupport = true;
     private final Map<String, HoglakeDtos.ReplacementTarget> replacementTargets = new ConcurrentHashMap<>();
@@ -153,7 +154,7 @@ final class TestHoglakeWrites
                 if (lifecycleSupport) {
                     capabilities.add("guarded-table-lifecycle-v1");
                 }
-                if (schemaCreationRace) {
+                if (schemaCreationRace || schemaEvolution) {
                     capabilities.add("guarded-schema-evolution-v1");
                 }
                 if (idempotentMutation) {
@@ -200,7 +201,8 @@ final class TestHoglakeWrites
                 }
                 if (!exchange.getRequestMethod().equals("GET")) {
                     lifecycleRequests++;
-                    if (!("expected_table_uuid=" + tables.get(name).tableUuid()).equals(exchange.getRequestURI().getQuery())) {
+                    if (!("expected_table_uuid=" + tables.get(name).tableUuid()).equals(exchange.getRequestURI().getQuery()) &&
+                            !("expected_table_uuid=" + tables.get(name).tableUuid() + "&read_snapshot=" + snapshot).equals(exchange.getRequestURI().getQuery())) {
                         respond(exchange, 409, Map.of("error", "incarnation_changed"));
                         return;
                     }
@@ -213,7 +215,21 @@ final class TestHoglakeWrites
                     respond(exchange, corruptLifecycleResponse ? 503 : 200, Map.of("snapshot_id", snapshot));
                 }
                 else if (path.endsWith("/alter")) {
-                    String newName = mapper.readTree(exchange.getRequestBody()).path("ops").get(0).path("new_name").asText();
+                    var operation = mapper.readTree(exchange.getRequestBody()).path("ops").get(0);
+                    if (operation.path("op").asText().equals("promote_column")) {
+                        HoglakeDtos.Table table = tables.get(name);
+                        List<HoglakeDtos.Column> columns = table.columns().stream()
+                                .map(column -> column.name().equals(operation.path("name").asText())
+                                        ? new HoglakeDtos.Column(column.fieldId(), column.ordinal(), column.name(), operation.path("to").asText(), column.typeParams(), column.nullable())
+                                        : column)
+                                .toList();
+                        HoglakeDtos.Table promoted = new HoglakeDtos.Table(name, table.namespace(), table.tableUuid(), columns, table.recordCount(), table.fileCount(), table.fileSizeBytes());
+                        tables.put(name, promoted);
+                        snapshot++;
+                        respond(exchange, 200, promoted);
+                        return;
+                    }
+                    String newName = operation.path("new_name").asText();
                     if (tables.containsKey(newName)) {
                         respond(exchange, 409, Map.of("error", "already_exists"));
                         return;
@@ -427,6 +443,29 @@ final class TestHoglakeWrites
     }
 
     @Test
+    void testTypePromotionReadsHistoricalFiles()
+    {
+        schemaEvolution = true;
+        try {
+            runner.execute("CREATE TABLE promotions AS SELECT INTEGER '-2147483648' AS i, REAL '1.5' AS r");
+            String uuid = tables.get("promotions").tableUuid();
+            List<Long> fieldIds = tables.get("promotions").columns().stream().map(HoglakeDtos.Column::fieldId).toList();
+            runner.execute("ALTER TABLE promotions ALTER COLUMN i SET DATA TYPE bigint");
+            runner.execute("ALTER TABLE promotions ALTER COLUMN r SET DATA TYPE double");
+            runner.execute("INSERT INTO promotions VALUES (BIGINT '2147483648', DOUBLE '2.25')");
+            assertThat(runner.execute("SELECT i, r FROM promotions ORDER BY i").getMaterializedRows())
+                    .containsExactlyElementsOf(runner.execute("VALUES (BIGINT '-2147483648', DOUBLE '1.5'), (BIGINT '2147483648', DOUBLE '2.25')").getMaterializedRows());
+            assertThat(tables.get("promotions").tableUuid()).isEqualTo(uuid);
+            assertThat(tables.get("promotions").columns().stream().map(HoglakeDtos.Column::fieldId).toList()).isEqualTo(fieldIds);
+            assertThatThrownBy(() -> runner.execute("ALTER TABLE promotions ALTER COLUMN i SET DATA TYPE integer"))
+                    .hasMessageContaining("Unsupported Hoglake column type change");
+        }
+        finally {
+            schemaEvolution = false;
+        }
+    }
+
+    @Test
     void testSchemaEvolutionRefusals()
     {
         runner.execute("CREATE TABLE evolution_refusals (id bigint, spare bigint)");
@@ -440,7 +479,7 @@ final class TestHoglakeWrites
             assertThatThrownBy(() -> runner.execute(statement)).hasMessageContaining("guarded-schema-evolution-v1");
         }
         assertThatThrownBy(() -> runner.execute("ALTER TABLE evolution_refusals ALTER COLUMN id SET DATA TYPE double"))
-                .hasMessageContaining("SQL column type changes are not supported");
+                .hasMessageContaining("Unsupported Hoglake column type change");
         assertThatThrownBy(() -> runner.execute("ALTER TABLE evolution_refusals ADD COLUMN required bigint NOT NULL"))
                 .hasMessageContaining("nullable columns at the end");
         assertThatThrownBy(() -> runner.execute("ALTER TABLE evolution_refusals ADD COLUMN nested array(bigint)"))

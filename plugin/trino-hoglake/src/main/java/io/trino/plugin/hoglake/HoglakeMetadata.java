@@ -173,7 +173,11 @@ public class HoglakeMetadata
     @Override
     public void setColumnType(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column, Type type)
     {
-        throw new TrinoException(NOT_SUPPORTED, "Hoglake SQL column type changes are not supported");
+        HoglakeColumnHandle source = (HoglakeColumnHandle) column;
+        if (!HoglakeTypes.canPromote(source.type(), type)) {
+            throw new TrinoException(NOT_SUPPORTED, "Unsupported Hoglake column type change: %s to %s".formatted(source.type(), type));
+        }
+        alterColumns((HoglakeTableHandle) tableHandle, Map.of("op", "promote_column", "name", source.name(), "to", HoglakeTypes.toHoglakeType(type)));
     }
 
     private void alterColumns(HoglakeTableHandle handle, Map<String, Object> operation)

@@ -147,6 +147,21 @@ final class TestHoglakeLiveWrites
             assertThat(runner.execute("UPDATE mutations SET label = 'no' WHERE false").getUpdateCount()).hasValue(0);
             assertThat(runner.execute("MERGE INTO mutations t USING (VALUES 40001) s(id) ON t.id=s.id WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)").getUpdateCount()).hasValue(1);
             assertThat(runner.execute("MERGE INTO mutations t USING (VALUES 40001) s(id) ON t.id=s.id WHEN MATCHED THEN DELETE").getUpdateCount()).hasValue(1);
+            runner.execute("CREATE TABLE promotions AS SELECT INTEGER '-2147483648' AS i, REAL '1.5' AS r");
+            long beforePromotion = client.getCatalog().headSnapshotId();
+            var originalColumns = client.getTable("test", "promotions").orElseThrow().columns();
+            assertEventually(() -> assertThat(client.scan("test", "promotions", client.getCatalog().headSnapshotId()))
+                    .allMatch(file -> file.dataFile().statsState().equals("provided")));
+            runner.execute("ALTER TABLE promotions ALTER COLUMN i SET DATA TYPE bigint");
+            runner.execute("ALTER TABLE promotions ALTER COLUMN r SET DATA TYPE double");
+            assertThat(client.getTable("test", "promotions", beforePromotion).orElseThrow().columns()).isEqualTo(originalColumns);
+            runner.execute("INSERT INTO promotions VALUES (BIGINT '2147483648', DOUBLE '2.25')");
+            assertThat(runner.execute("SELECT i, r FROM promotions ORDER BY i").getMaterializedRows())
+                    .containsExactlyElementsOf(runner.execute("VALUES (BIGINT '-2147483648', DOUBLE '1.5'), (BIGINT '2147483648', DOUBLE '2.25')").getMaterializedRows());
+            runner.execute("UPDATE promotions SET i = i + 1 WHERE r = 1.5");
+            runner.execute("MERGE INTO promotions t USING (VALUES (BIGINT '2147483648', DOUBLE '3.5')) s(i, r) ON t.i=s.i WHEN MATCHED THEN UPDATE SET r=s.r");
+            assertThat(runner.execute("SELECT i, r FROM promotions ORDER BY i").getMaterializedRows())
+                    .containsExactlyElementsOf(runner.execute("VALUES (BIGINT '-2147483647', DOUBLE '1.5'), (BIGINT '2147483648', DOUBLE '3.5')").getMaterializedRows());
             runner.execute("CREATE SCHEMA evolved");
             runner.execute("CREATE TABLE evolved.records (id bigint, label varchar, discarded bigint)");
             runner.execute("INSERT INTO evolved.records VALUES (1, 'old', 100)");
@@ -167,7 +182,7 @@ final class TestHoglakeLiveWrites
             assertThat(runner.execute("SELECT id, renamed, label FROM evolved.records").getMaterializedRows())
                     .containsExactlyInAnyOrderElementsOf(runner.execute("VALUES (BIGINT '1', 'old', NULL), (BIGINT '2', 'new', NULL), (BIGINT '3', NULL, 'reused')").getMaterializedRows());
             assertThatThrownBy(() -> runner.execute("ALTER TABLE evolved.records ALTER COLUMN id SET DATA TYPE double"))
-                    .hasMessageContaining("SQL column type changes are not supported");
+                    .hasMessageContaining("Unsupported Hoglake column type change");
             assertThatThrownBy(() -> runner.execute("DROP SCHEMA evolved"))
                     .hasMessageContaining("non-empty");
             assertThatThrownBy(() -> runner.execute("DROP SCHEMA evolved CASCADE"))
