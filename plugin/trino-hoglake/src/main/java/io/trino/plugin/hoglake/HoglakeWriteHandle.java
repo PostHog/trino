@@ -16,6 +16,8 @@ package io.trino.plugin.hoglake;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import io.trino.plugin.hoglake.rest.HoglakeDtos.PartitionField;
+import io.trino.plugin.hoglake.rest.HoglakeDtos.SortField;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
 
@@ -33,12 +35,30 @@ public record HoglakeWriteHandle(
         @JsonProperty("columns") List<HoglakeColumnHandle> columns,
         @JsonProperty("inputColumns") List<HoglakeColumnHandle> inputColumns,
         @JsonProperty("creationOperation") Optional<String> creationOperation,
-        @JsonProperty("insertOperation") Optional<String> insertOperation)
+        @JsonProperty("insertOperation") Optional<String> insertOperation,
+        @JsonProperty("partitionFields") List<PartitionField> partitionFields,
+        @JsonProperty("sortFields") List<SortField> sortFields,
+        @JsonProperty("claimUploads") boolean claimUploads)
         implements ConnectorInsertTableHandle, ConnectorOutputTableHandle
 {
     public HoglakeWriteHandle(String namespace, String table, String tableUuid, long snapshot, String dataPath, List<HoglakeColumnHandle> columns, List<HoglakeColumnHandle> inputColumns, Optional<String> creationOperation)
     {
         this(namespace, table, tableUuid, snapshot, dataPath, columns, inputColumns, creationOperation, Optional.empty());
+    }
+
+    public HoglakeWriteHandle(String namespace, String table, String tableUuid, long snapshot, String dataPath, List<HoglakeColumnHandle> columns, List<HoglakeColumnHandle> inputColumns, Optional<String> creationOperation, Optional<String> insertOperation)
+    {
+        this(namespace, table, tableUuid, snapshot, dataPath, columns, inputColumns, creationOperation, insertOperation, List.of());
+    }
+
+    public HoglakeWriteHandle(String namespace, String table, String tableUuid, long snapshot, String dataPath, List<HoglakeColumnHandle> columns, List<HoglakeColumnHandle> inputColumns, Optional<String> creationOperation, Optional<String> insertOperation, List<PartitionField> partitionFields)
+    {
+        this(namespace, table, tableUuid, snapshot, dataPath, columns, inputColumns, creationOperation, insertOperation, partitionFields, List.of());
+    }
+
+    public HoglakeWriteHandle(String namespace, String table, String tableUuid, long snapshot, String dataPath, List<HoglakeColumnHandle> columns, List<HoglakeColumnHandle> inputColumns, Optional<String> creationOperation, Optional<String> insertOperation, List<PartitionField> partitionFields, List<SortField> sortFields)
+    {
+        this(namespace, table, tableUuid, snapshot, dataPath, columns, inputColumns, creationOperation, insertOperation, partitionFields, sortFields, false);
     }
 
     @JsonCreator
@@ -50,6 +70,8 @@ public record HoglakeWriteHandle(
         requireNonNull(dataPath, "dataPath is null");
         requireNonNull(insertOperation, "insertOperation is null");
         requireNonNull(creationOperation, "creationOperation is null");
+        partitionFields = ImmutableList.copyOf(partitionFields);
+        sortFields = ImmutableList.copyOf(sortFields);
         columns = ImmutableList.copyOf(columns);
         inputColumns = ImmutableList.copyOf(inputColumns);
     }

@@ -30,6 +30,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
@@ -64,15 +66,27 @@ final class HoglakeDeletePublisher
 
     void publish(HoglakeDeleteHandle handle, Collection<Slice> fragments, MemoryContext memoryContext)
     {
+        publish(handle, fragments, memoryContext, request -> {
+            if (handle.claimUploads()) {
+                client.commitClaimed(request, true);
+            }
+            else {
+                client.commitMutation(request);
+            }
+        });
+    }
+
+    void publish(HoglakeDeleteHandle handle, Collection<Slice> fragments, MemoryContext memoryContext, Consumer<HoglakeDtos.Commit> publication)
+    {
         try (HoglakeSplitResources resources = new HoglakeSplitResources(bytes -> {
             HoglakeDeleteBitmap.checkSize(bytes);
             memoryContext.setBytes(bytes);
         })) {
-            publish(handle, fragments, resources);
+            publish(handle, fragments, resources, publication);
         }
     }
 
-    private void publish(HoglakeDeleteHandle handle, Collection<Slice> fragments, HoglakeSplitResources workingMemory)
+    private void publish(HoglakeDeleteHandle handle, Collection<Slice> fragments, HoglakeSplitResources workingMemory, Consumer<HoglakeDtos.Commit> publication)
     {
         LocalMemoryContext decodeMemory = workingMemory.allocation().newLocalMemoryContext("delete_decode");
         LocalMemoryContext appendMemory = workingMemory.allocation().newLocalMemoryContext("merge_appends");
@@ -82,8 +96,9 @@ final class HoglakeDeletePublisher
         HoglakeTableHandle table = handle.table();
         Map<Long, HoglakeDeleteBitmap> changes = new TreeMap<>();
         Map<String, HoglakeDtos.FileRegistration> appends = new TreeMap<>();
-        Map<Long, HoglakeDtos.ScanFile> files = client.scan(table.schemaName(), table.tableName(), table.snapshotId()).stream()
+        Map<Long, HoglakeDtos.ScanFile> files = HoglakeSplitManager.scan(client, table).stream()
                 .collect(toMap(file -> file.dataFile().dataFileId(), file -> file));
+        long lastRenewal = System.nanoTime();
         long fragmentBytes = 0;
         for (Slice fragment : fragments) {
             fragmentBytes = Math.addExact(fragmentBytes, fragment.length());
@@ -145,6 +160,13 @@ final class HoglakeDeletePublisher
                 byte[] bytes = bitmap.encode(split.path());
                 String dataPath = handle.dataPath();
                 Location location = Location.of(dataPath.endsWith("/") ? dataPath : dataPath + "/").appendPath("trino-delete/" + UUID.randomUUID() + ".puffin");
+                if (handle.claimUploads()) {
+                    if (System.nanoTime() - lastRenewal > TimeUnit.MINUTES.toNanos(5)) {
+                        client.renewUploads(handle.operationId());
+                        lastRenewal = System.nanoTime();
+                    }
+                    location = Location.of(client.claimUpload(handle.operationId(), dataPath, "delete"));
+                }
                 uploads.add(location);
                 fileSystem.newOutputFile(location).createOrOverwrite(bytes);
                 registrations.add(new HoglakeDtos.DeleteRegistration(change.getKey(), location.toString(), bitmap.cardinality(), bytes.length));
@@ -153,15 +175,27 @@ final class HoglakeDeletePublisher
             // Even a zero-row mutation validates identity and the target-table conflict window.
             // Once submitted, neither cancellation nor missing receipts authorizes cleanup.
             checkCancelled();
+            if (handle.claimUploads()) {
+                client.renewUploads(handle.operationId());
+            }
             publicationStarted = true;
-            client.commitMutation(new HoglakeDtos.Commit(
+            HoglakeDtos.Commit request = new HoglakeDtos.Commit(
                     table.snapshotId(),
                     appends.isEmpty() ? List.of() : List.of(new HoglakeDtos.Append(table.schemaName(), table.tableName(), table.tableUuid(), List.copyOf(appends.values()))),
                     List.of(new HoglakeDtos.Deletes(table.schemaName(), table.tableName(), table.tableUuid(), registrations)),
-                    handle.operationId()));
+                    handle.operationId());
+            publication.accept(request);
         }
         catch (IOException | RuntimeException failure) {
-            if (!publicationStarted) {
+            if (!publicationStarted && handle.claimUploads()) {
+                try {
+                    client.abandonUploads(handle.operationId(), uploads.stream().map(Location::toString).toList());
+                }
+                catch (RuntimeException cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+            }
+            if (!publicationStarted && !handle.claimUploads()) {
                 for (Location upload : uploads) {
                     try {
                         fileSystem.deleteFile(upload);

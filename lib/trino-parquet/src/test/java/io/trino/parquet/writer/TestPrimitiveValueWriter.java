@@ -71,6 +71,7 @@ import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.NANOS;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 final class TestPrimitiveValueWriter
 {
@@ -78,6 +79,25 @@ final class TestPrimitiveValueWriter
     private static final List<Integer> MAX_DICTIONARY_PAGE_SIZES = ImmutableList.of(64, 1048576);
     // boolean values are written in chunks of 64 bits, so counts either side of a chunk boundary are covered
     private static final List<Integer> REPEATED_COUNTS = ImmutableList.of(2, 8, 65, 130);
+
+    @Test
+    void testNanosecondTimestampBoundaries()
+            throws IOException
+    {
+        Type type = createTimestampType(9);
+        TestCase testCase = testCase(type, new LongTimestamp(0, 0));
+        WriteResult result = write(testCase, 64, createBlock(type, List.of(
+                new LongTimestamp(-9_223_372_036_854_776L, 192_000),
+                new LongTimestamp(9_223_372_036_854_775L, 807_000))));
+        assertThat(result.statistics().genericGetMin()).isEqualTo(Long.MIN_VALUE);
+        assertThat(result.statistics().genericGetMax()).isEqualTo(Long.MAX_VALUE);
+        for (LongTimestamp outside : List.of(
+                new LongTimestamp(-9_223_372_036_854_776L, 191_000),
+                new LongTimestamp(9_223_372_036_854_775L, 808_000))) {
+            assertThatThrownBy(() -> write(testCase, 64, createBlock(type, List.of(outside))))
+                    .isInstanceOf(ArithmeticException.class);
+        }
+    }
 
     @Test
     void testRepeatedBlockMatchesValueBlock()

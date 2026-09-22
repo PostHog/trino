@@ -42,6 +42,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.testing.TestingSession.testSessionBuilder;
+import static io.trino.testing.TransactionBuilder.transaction;
 import static io.trino.testing.assertions.Assert.assertEventually;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -90,6 +91,38 @@ final class TestHoglakeLiveWriteFailures
             assertThat(runner.execute("SELECT id FROM uncertain_commit").getOnlyValue()).isEqualTo(2L);
             assertThat(client.getTableCreation(proxy.lastOperation()).state()).isEqualTo("committed");
 
+            runner.execute("CREATE TABLE tx_fault_a (id bigint)");
+            runner.execute("CREATE TABLE tx_fault_b (id bigint)");
+            proxy.dropAfterCommit = true;
+            proxy.failAfter("/commit");
+            transaction(runner.getTransactionManager(), runner.getPlannerContext().getMetadata(), runner.getAccessControl())
+                    .repeatableRead().execute(runner.getDefaultSession(), tx -> {
+                        runner.execute(tx, "INSERT INTO tx_fault_a VALUES 1, 2");
+                        runner.execute(tx, "DELETE FROM tx_fault_a WHERE id=1");
+                        runner.execute(tx, "INSERT INTO tx_fault_b SELECT id FROM tx_fault_a");
+                    });
+            assertThat(runner.execute("SELECT id FROM tx_fault_a").getOnlyValue()).isEqualTo(2L);
+            assertThat(runner.execute("SELECT id FROM tx_fault_b").getOnlyValue()).isEqualTo(2L);
+            proxy.failBeforeCommit = true;
+            transaction(runner.getTransactionManager(), runner.getPlannerContext().getMetadata(), runner.getAccessControl())
+                    .repeatableRead().execute(runner.getDefaultSession(), tx -> {
+                        runner.execute(tx, "INSERT INTO tx_fault_a VALUES 3");
+                        runner.execute(tx, "INSERT INTO tx_fault_b VALUES 3");
+                    });
+            assertThat(runner.execute("SELECT count(*) FROM tx_fault_a").getOnlyValue()).isEqualTo(2L);
+            assertThat(runner.execute("SELECT count(*) FROM tx_fault_b").getOnlyValue()).isEqualTo(2L);
+            proxy.failStatus = true;
+            proxy.dropAfterCommit = true;
+            proxy.failAfter("/commit");
+            assertThatThrownBy(() -> transaction(runner.getTransactionManager(), runner.getPlannerContext().getMetadata(), runner.getAccessControl())
+                    .repeatableRead().execute(runner.getDefaultSession(), tx -> {
+                        runner.execute(tx, "INSERT INTO tx_fault_a VALUES 4");
+                        runner.execute(tx, "INSERT INTO tx_fault_b VALUES 4");
+                    })).hasMessageContaining("outcome is unknown");
+            proxy.failStatus = false;
+            assertThat(runner.execute("SELECT count(*) FROM tx_fault_a").getOnlyValue()).isEqualTo(3L);
+            assertThat(runner.execute("SELECT count(*) FROM tx_fault_b").getOnlyValue()).isEqualTo(3L);
+
             // Lose the connection only AFTER the real server has committed INSERT.
             runner.execute("CREATE TABLE append_target (id bigint)");
             proxy.dropAfterCommit = true;
@@ -125,7 +158,7 @@ final class TestHoglakeLiveWriteFailures
                     .hasMessageContaining("outcome is unknown");
             proxy.failStatus = false;
             assertThat(runner.execute("SELECT id FROM unresolved").getOnlyValue()).isEqualTo(4L);
-            assertThat(proxy.failures()).isEqualTo(6);
+            assertThat(proxy.failures()).isEqualTo(8);
 
             runner.execute("CREATE TABLE merge_recovery (id bigint, label varchar)");
             runner.execute("INSERT INTO merge_recovery VALUES (1, 'old'), (2, 'delete')");
@@ -199,8 +232,8 @@ final class TestHoglakeLiveWriteFailures
             assertThat(client.getTable("test", "stale").orElseThrow().recordCount()).isZero();
             assertThat(runner.execute("SELECT id FROM append_target").getOnlyValue()).isEqualTo(3L);
 
-            for (String evolution : List.of("ADD COLUMN extra bigint", "RENAME COLUMN id TO renamed", "DROP COLUMN spare")) {
-                runner.execute("CREATE OR REPLACE TABLE evolving (id bigint, spare bigint)");
+            for (String evolution : List.of("ADD COLUMN extra bigint", "RENAME COLUMN id TO renamed", "DROP COLUMN spare", "ALTER COLUMN promotable SET DATA TYPE bigint")) {
+                runner.execute("CREATE OR REPLACE TABLE evolving (id bigint, spare bigint, promotable integer)");
                 var evolvingTable = metadata.getTableHandle(session, new SchemaTableName("test", "evolving"), Optional.empty(), Optional.empty());
                 var idColumn = metadata.getColumnHandles(session, evolvingTable).get("id");
                 var evolvingInsert = metadata.beginInsert(session, evolvingTable, List.of(idColumn), RetryMode.NO_RETRIES);
@@ -234,6 +267,13 @@ final class TestHoglakeLiveWriteFailures
                     .hasMessageContaining("Malformed Hoglake write response");
             assertThat(client.getTable("test", "evolution_replacement").orElseThrow().columns())
                     .extracting(HoglakeDtos.Column::name).containsExactly("id", "spare", "added");
+
+            runner.execute("CREATE TABLE promotion_response AS SELECT INTEGER '17' AS id");
+            proxy.failAfter("/alter");
+            assertThatThrownBy(() -> runner.execute("ALTER TABLE promotion_response ALTER COLUMN id SET DATA TYPE bigint"))
+                    .hasMessageContaining("Malformed Hoglake write response");
+            assertThat(client.getTable("test", "promotion_response").orElseThrow().columns().getFirst().type()).isEqualTo("long");
+            assertThat(runner.execute("SELECT id FROM promotion_response").getOnlyValue()).isEqualTo(17L);
 
             runner.execute("CREATE OR REPLACE TABLE replacement AS SELECT BIGINT '20' AS id");
             HoglakeDtos.Table oldReplacement = client.getTable("test", "replacement").orElseThrow();
@@ -467,9 +507,9 @@ final class TestHoglakeLiveWriteFailures
         {
             try (exchange) {
                 String path = exchange.getRequestURI().toString();
-                boolean prepare = exchange.getRequestMethod().equals("PUT");
+                boolean prepare = exchange.getRequestMethod().equals("PUT") && path.contains("/table-creations/");
                 boolean write = prepare || exchange.getRequestMethod().equals("POST");
-                boolean commit = path.endsWith("/commit") || path.endsWith("/commit/prepared") || path.endsWith("/commit/deletes/prepared") || path.endsWith("/commit/mutations/prepared");
+                boolean commit = path.endsWith("/commit") || path.endsWith("/commit/prepared") || path.endsWith("/commit/deletes/prepared") || path.endsWith("/commit/mutations/prepared") || path.endsWith("/commit/uploads") || path.endsWith("/commit/transaction");
                 if (prepare && path.contains("/table-creations/")) {
                     lastOperation = path.substring(path.lastIndexOf('/') + 1);
                 }

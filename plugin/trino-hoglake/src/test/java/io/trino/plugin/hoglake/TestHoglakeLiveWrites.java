@@ -15,7 +15,9 @@ package io.trino.plugin.hoglake;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.trino.Session;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
+import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.StandaloneQueryRunner;
@@ -26,10 +28,13 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 import static io.trino.testing.TestingSession.testSessionBuilder;
+import static io.trino.testing.TransactionBuilder.transaction;
 import static io.trino.testing.assertions.Assert.assertEventually;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -94,6 +99,93 @@ final class TestHoglakeLiveWrites
                     "s3.path-style-access", "true",
                     "s3.aws-access-key", "synthetic-test",
                     "s3.aws-secret-key", "synthetic-test-password"));
+            runner.execute("CREATE TABLE tx_a (id bigint, r row(k bigint)) WITH (partitioning=ARRAY['bucket(id, 4)'], sorted_by=ARRAY['id'])");
+            runner.execute("CREATE TABLE tx_b (id bigint)");
+            runner.execute("INSERT INTO tx_a VALUES (1, ROW(1))");
+            long transactionBase = client.getCatalog().headSnapshotId();
+            transaction(runner.getTransactionManager(), runner.getPlannerContext().getMetadata(), runner.getAccessControl())
+                    .repeatableRead().execute(runner.getDefaultSession(), tx -> {
+                        runner.execute(tx, "INSERT INTO tx_a VALUES (2, ROW(2)), (3, NULL)");
+                        assertThat(runner.execute(tx, "SELECT count(*) FROM tx_a").getOnlyValue()).isEqualTo(3L);
+                        assertThat(runner.execute("SELECT count(*) FROM tx_a").getOnlyValue()).isEqualTo(1L);
+                        runner.execute(tx, "UPDATE tx_a SET id=id+10 WHERE id<=2");
+                        runner.execute(tx, "DELETE FROM tx_a WHERE id=3");
+                        runner.execute(tx, "MERGE INTO tx_a t USING (VALUES BIGINT '12', BIGINT '20') s(id) ON t.id=s.id WHEN MATCHED THEN UPDATE SET id=t.id+1 WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)");
+                        runner.execute(tx, "INSERT INTO tx_b SELECT id FROM tx_a");
+                        assertThat(runner.execute(tx, "SELECT id FROM tx_a ORDER BY id").getMaterializedRows())
+                                .isEqualTo(runner.execute("VALUES BIGINT '11', BIGINT '13', BIGINT '20'").getMaterializedRows());
+                        assertThat(runner.execute(tx, "SELECT count(*) FROM tx_b").getOnlyValue()).isEqualTo(3L);
+                        assertThat(client.getCatalog().headSnapshotId()).isEqualTo(transactionBase);
+                    });
+            assertThat(client.getCatalog().headSnapshotId()).isEqualTo(transactionBase + 1);
+            assertThat(runner.execute("SELECT count(*), sum(id) FROM tx_b").getMaterializedRows())
+                    .isEqualTo(runner.execute("VALUES (BIGINT '3', BIGINT '44')").getMaterializedRows());
+            assertThatThrownBy(() -> transaction(runner.getTransactionManager(), runner.getPlannerContext().getMetadata(), runner.getAccessControl())
+                    .repeatableRead().execute(runner.getDefaultSession(), (Consumer<Session>) tx -> {
+                        runner.execute(tx, "DELETE FROM tx_a");
+                        runner.execute(tx, "INSERT INTO tx_b VALUES 99");
+                        assertThat(runner.execute(tx, "SELECT count(*) FROM tx_a").getOnlyValue()).isEqualTo(0L);
+                        throw new IllegalStateException("rollback test");
+                    })).hasMessageContaining("rollback test");
+            assertThat(runner.execute("SELECT count(*) FROM tx_a").getOnlyValue()).isEqualTo(3L);
+            assertThat(runner.execute("SELECT count(*) FROM tx_b").getOnlyValue()).isEqualTo(3L);
+            assertThatThrownBy(() -> transaction(runner.getTransactionManager(), runner.getPlannerContext().getMetadata(), runner.getAccessControl())
+                    .repeatableRead().execute(runner.getDefaultSession(), tx -> {
+                        runner.execute(tx, "INSERT INTO tx_a VALUES (40, NULL)");
+                        runner.execute(tx, "INSERT INTO tx_b VALUES 40");
+                        runner.execute("INSERT INTO tx_a VALUES (50, NULL)");
+                        // A different head cannot enter the transaction's pinned view.
+                        assertThat(runner.execute(tx, "SELECT count(*) FROM tx_a WHERE id=50").getOnlyValue()).isEqualTo(0L);
+                    })).hasMessageContaining("conflict");
+            assertThat(runner.execute("SELECT count(*) FROM tx_b").getOnlyValue()).isEqualTo(3L);
+            assertThat(runner.execute("SELECT count(*) FROM tx_a WHERE id=40").getOnlyValue()).isEqualTo(0L);
+            assertThatThrownBy(() -> transaction(runner.getTransactionManager(), runner.getPlannerContext().getMetadata(), runner.getAccessControl())
+                    .repeatableRead().execute(runner.getDefaultSession(), tx -> {
+                        runner.execute(tx, "CREATE TABLE tx_forbidden (id bigint)");
+                    })).hasMessageContaining("DDL is not supported in explicit transactions");
+            assertThat(client.getTable("test", "tx_forbidden")).isEmpty();
+            runner.execute("CREATE TABLE described (id integer COMMENT 'identifier', v varchar) COMMENT 'table note' WITH (extra_properties = MAP(ARRAY['owner.team'], ARRAY['data']), partitioning = ARRAY['id'], sorted_by = ARRAY['id'])");
+            long describedSnapshot = client.getCatalog().headSnapshotId();
+            assertThat(client.getTable("test", "described").orElseThrow().properties()).containsEntry("owner.team", "data");
+            assertThat(runner.execute("SHOW CREATE TABLE described").getOnlyValue().toString()).contains("identifier", "table note", "owner.team");
+            assertThat(runner.execute("SELECT comment FROM system.metadata.table_comments WHERE catalog_name='hoglake' AND schema_name='test' AND table_name='described'").getOnlyValue()).isEqualTo("table note");
+            runner.execute("COMMENT ON TABLE described IS 'updated table'");
+            runner.execute("COMMENT ON COLUMN described.id IS 'updated id'");
+            runner.execute("ALTER TABLE described SET PROPERTIES extra_properties = MAP(ARRAY['owner.team'], ARRAY['analytics'])");
+            runner.execute("ALTER TABLE described ADD COLUMN extra bigint COMMENT 'added'");
+            runner.execute("ALTER TABLE described RENAME TO described_renamed");
+            assertThat(client.getTable("test", "described", describedSnapshot).orElseThrow().comment()).isEqualTo("table note");
+            assertThat(client.getTable("test", "described_renamed").orElseThrow().columns().get(2).comment()).isEqualTo("added");
+            assertThat(runner.execute("SHOW CREATE TABLE described_renamed").getOnlyValue().toString()).contains("updated table", "updated id", "analytics");
+            runner.execute("COMMENT ON TABLE described_renamed IS NULL");
+            runner.execute("COMMENT ON COLUMN described_renamed.id IS NULL");
+            runner.execute("ALTER TABLE described_renamed SET PROPERTIES extra_properties = DEFAULT");
+            assertThat(client.getTable("test", "described_renamed").orElseThrow().comment()).isNull();
+            assertThat(client.getTable("test", "described_renamed").orElseThrow().properties()).isEmpty();
+            assertThatThrownBy(() -> runner.execute("ALTER TABLE described_renamed SET PROPERTIES extra_properties = MAP(ARRAY['hoglake.location'], ARRAY['bad'])")).hasMessageContaining("reserved custom property");
+            runner.execute("CREATE OR REPLACE TABLE described_renamed COMMENT 'replacement' WITH (extra_properties = MAP(ARRAY['owner'], ARRAY['new'])) AS SELECT 7 id");
+            assertThat(client.getTable("test", "described_renamed").orElseThrow().comment()).isEqualTo("replacement");
+            assertThat(client.getTable("test", "described_renamed").orElseThrow().properties()).containsExactlyEntriesOf(Map.of("owner", "new"));
+            runner.execute("CREATE TABLE sorted_partitioned (p bigint, r row(k bigint), v bigint) WITH (partitioning = ARRAY['p'], sorted_by = ARRAY['r.k DESC NULLS FIRST', 'v ASC NULLS LAST'])");
+            runner.execute("INSERT INTO sorted_partitioned VALUES (1, ROW(2), 2), (1, ROW(9), 9), (1, NULL, 4), (2, ROW(5), 5)");
+            assertThat(client.getTable("test", "sorted_partitioned").orElseThrow().sortSpec().get("fields")).asList().hasSize(2);
+            runner.execute("UPDATE sorted_partitioned SET p=3, r=ROW(1) WHERE v=2");
+            runner.execute("MERGE INTO sorted_partitioned t USING (VALUES (9, 7), (10, 10)) s(old_v,new_v) ON t.v=s.old_v WHEN MATCHED THEN UPDATE SET v=s.new_v WHEN NOT MATCHED THEN INSERT (p,r,v) VALUES (3,ROW(8),s.new_v)");
+            assertThat(runner.execute("SELECT count(*), sum(v) FROM sorted_partitioned").getMaterializedRows()).isEqualTo(runner.execute("VALUES (BIGINT '5', BIGINT '28')").getMaterializedRows());
+            runner.execute("CREATE TABLE sorted_ctas WITH (sorted_by = ARRAY['v DESC']) AS SELECT v FROM sorted_partitioned");
+            assertThat(runner.execute("SHOW CREATE TABLE sorted_ctas").getOnlyValue().toString()).contains("v DESC NULLS LAST");
+            runner.execute("CREATE TABLE partitioned (id bigint, ts timestamp(6), r row(k bigint)) WITH (partitioning = ARRAY['bucket(id, 16)', 'day(ts)', 'r.k'])");
+            runner.execute("INSERT INTO partitioned VALUES (34, TIMESTAMP '1969-12-31 23:59:59.999999', ROW(7)), (35, TIMESTAMP '1970-01-01 00:00:00', ROW(8)), (NULL, NULL, NULL)");
+            assertThat(runner.execute("SELECT count(*) FROM partitioned").getOnlyValue()).isEqualTo(3L);
+            assertThat(client.getTable("test", "partitioned").orElseThrow().partitionSpec().get("fields")).asList().hasSize(3);
+            runner.execute("UPDATE partitioned SET id=36, ts=TIMESTAMP '1970-01-02 00:00:00', r=ROW(9) WHERE id=34");
+            runner.execute("MERGE INTO partitioned t USING (VALUES (35, 37), (40, 40)) s(old_id,new_id) ON t.id=s.old_id WHEN MATCHED THEN UPDATE SET id=s.new_id WHEN NOT MATCHED THEN INSERT (id) VALUES (s.new_id)");
+            assertThat(runner.execute("SELECT id FROM partitioned WHERE id IS NOT NULL ORDER BY id").getMaterializedRows()).isEqualTo(runner.execute("VALUES BIGINT '36', BIGINT '37', BIGINT '40'").getMaterializedRows());
+            runner.execute("CREATE TABLE partition_ctas WITH (partitioning = ARRAY['id']) AS SELECT id FROM partitioned");
+            assertThat(runner.execute("SELECT count(*) FROM partition_ctas").getOnlyValue()).isEqualTo(4L);
+            assertThat(runner.execute("SHOW CREATE TABLE partition_ctas").getOnlyValue().toString()).contains("partitioning = ARRAY['id']");
+            runner.execute("CREATE OR REPLACE TABLE partition_ctas WITH (partitioning = ARRAY['bucket(id, 8)']) AS SELECT BIGINT '34' id");
+            assertThat(runner.execute("SELECT id FROM partition_ctas").getOnlyValue()).isEqualTo(34L);
             runner.execute("CREATE TABLE deletions (id bigint, label varchar)");
             runner.execute("INSERT INTO deletions SELECT id, IF(id % 3 = 0, NULL, 'keep') FROM UNNEST(sequence(1, 10000)) t(id)");
             runner.execute("INSERT INTO deletions SELECT id, IF(id % 3 = 0, NULL, 'keep') FROM UNNEST(sequence(10001, 20000)) t(id)");
@@ -147,6 +239,72 @@ final class TestHoglakeLiveWrites
             assertThat(runner.execute("UPDATE mutations SET label = 'no' WHERE false").getUpdateCount()).hasValue(0);
             assertThat(runner.execute("MERGE INTO mutations t USING (VALUES 40001) s(id) ON t.id=s.id WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)").getUpdateCount()).hasValue(1);
             assertThat(runner.execute("MERGE INTO mutations t USING (VALUES 40001) s(id) ON t.id=s.id WHEN MATCHED THEN DELETE").getUpdateCount()).hasValue(1);
+            client.createTable("test", "external_scalars", List.of(
+                    new HoglakeDtos.ColumnDefinition("u8", "uint8", null, true),
+                    new HoglakeDtos.ColumnDefinition("u16", "uint16", null, true),
+                    new HoglakeDtos.ColumnDefinition("u32", "uint32", null, true),
+                    new HoglakeDtos.ColumnDefinition("u64", "uint64", null, true),
+                    new HoglakeDtos.ColumnDefinition("j", "json", null, true),
+                    new HoglakeDtos.ColumnDefinition("s", "timestamp_s", null, true),
+                    new HoglakeDtos.ColumnDefinition("ms", "timestamp_ms", null, true),
+                    new HoglakeDtos.ColumnDefinition("nested", "list", null, true, List.of(new HoglakeDtos.ColumnDefinition("element", "uint64", null, true)))));
+            runner.execute("INSERT INTO external_scalars VALUES (255, 65535, 4294967295, DECIMAL '18446744073709551615', '{\"k\":1}', TIMESTAMP '1969-12-31 23:59:59', TIMESTAMP '1969-12-31 23:59:59.999', ARRAY[DECIMAL '18446744073709551615', NULL])");
+            assertThat(runner.execute("SELECT CAST(u8 AS varchar), CAST(u16 AS varchar), CAST(u32 AS varchar), CAST(u64 AS varchar), j, CAST(s AS varchar), CAST(ms AS varchar), CAST(nested[1] AS varchar) FROM external_scalars").getMaterializedRows())
+                    .containsExactlyElementsOf(runner.execute("VALUES ('255', '65535', '4294967295', '18446744073709551615', '{\"k\":1}', '1969-12-31 23:59:59.000000', '1969-12-31 23:59:59.999000', '18446744073709551615')").getMaterializedRows());
+            assertThatThrownBy(() -> runner.execute("INSERT INTO external_scalars (u64) VALUES DECIMAL '18446744073709551616'"))
+                    .hasMessageContaining("outside uint64 range");
+            assertThatThrownBy(() -> runner.execute("INSERT INTO external_scalars (u8) VALUES -1"))
+                    .hasMessageContaining("outside uint8 range");
+            assertThatThrownBy(() -> runner.execute("INSERT INTO external_scalars (j) VALUES 'invalid'"))
+                    .hasMessageContaining("Invalid JSON");
+            assertThatThrownBy(() -> runner.execute("INSERT INTO external_scalars (s) VALUES TIMESTAMP '2020-01-01 00:00:00.001'"))
+                    .hasMessageContaining("precision exceeds");
+            assertEventually(() -> assertThat(client.scan("test", "external_scalars", client.getCatalog().headSnapshotId()))
+                    .allMatch(file -> file.dataFile().statsState().equals("provided")));
+            client.createTable("test", "nested_unsigned", List.of(new HoglakeDtos.ColumnDefinition("r", "struct", null, true, List.of(
+                    new HoglakeDtos.ColumnDefinition("required", "uint64", null, false),
+                    new HoglakeDtos.ColumnDefinition("m", "map", null, true, List.of(
+                            new HoglakeDtos.ColumnDefinition("key", "uint64", null, false),
+                            new HoglakeDtos.ColumnDefinition("value", "uint64", null, true)))))));
+            runner.execute("INSERT INTO nested_unsigned SELECT ROW(DECIMAL '18446744073709551615', MAP(ARRAY[DECIMAL '18446744073709551615'], ARRAY[DECIMAL '9223372036854775808']))");
+            assertThat(runner.execute("SELECT CAST(r.required AS varchar), CAST(r.m[DECIMAL '18446744073709551615'] AS varchar) FROM nested_unsigned").getMaterializedRows())
+                    .containsExactlyElementsOf(runner.execute("VALUES ('18446744073709551615', '9223372036854775808')").getMaterializedRows());
+            assertThatThrownBy(() -> runner.execute("INSERT INTO nested_unsigned SELECT CAST(ROW(NULL, NULL) AS row(required decimal(20,0), m map(decimal(20,0),decimal(20,0))))"))
+                    .hasMessageContaining("NULL value for required column");
+            runner.execute("INSERT INTO nested_unsigned VALUES NULL");
+            assertThat(runner.execute("SELECT count(*) FROM nested_unsigned WHERE r IS NULL").getOnlyValue()).isEqualTo(1L);
+            runner.execute("CREATE TABLE native_variant AS SELECT CAST(42 AS variant) AS v");
+            assertThat(runner.execute("SELECT CAST(v AS integer) FROM native_variant").getOnlyValue()).isEqualTo(42);
+            runner.execute("CREATE TABLE nested_values (id bigint, a array(row(x integer, y varchar)), m map(varchar, array(integer)), r row(x tinyint, y smallint), ts timestamp(9))");
+            runner.execute("INSERT INTO nested_values VALUES (1, ARRAY[ROW(7, 'old'), NULL], MAP(ARRAY['k'], ARRAY[ARRAY[4, NULL]]), ROW(TINYINT '-128', SMALLINT '32767'), TIMESTAMP '1969-12-31 23:59:59.999999999'), (2, ARRAY[], MAP(), NULL, NULL), (3, NULL, NULL, ROW(NULL, NULL), NULL)");
+            assertEventually(() -> assertThat(client.scan("test", "nested_values", client.getCatalog().headSnapshotId()))
+                    .allMatch(file -> file.dataFile().statsState().equals("provided")));
+            var nestedColumns = client.getTable("test", "nested_values").orElseThrow().columns();
+            long nestedFieldId = nestedColumns.get(3).children().getFirst().fieldId();
+            client.alterColumns("test", "nested_values", client.getTable("test", "nested_values").orElseThrow().tableUuid(), client.getCatalog().headSnapshotId(), Map.of("op", "rename_column", "from", "r.x", "to", "renamed"));
+            assertThat(client.getTable("test", "nested_values").orElseThrow().columns().get(3).children().getFirst().fieldId()).isEqualTo(nestedFieldId);
+            assertThat(runner.execute("SELECT r.renamed FROM nested_values WHERE id=1").getOnlyValue()).isEqualTo((byte) -128);
+            runner.execute("UPDATE nested_values SET a = ARRAY[ROW(8, 'new')] WHERE id=1");
+            runner.execute("MERGE INTO nested_values t USING (VALUES 2) s(id) ON t.id=s.id WHEN MATCHED THEN UPDATE SET ts=TIMESTAMP '2020-01-01 00:00:00.123456789'");
+            assertThat(runner.execute("SELECT a[1].x FROM nested_values WHERE id=1").getOnlyValue()).isEqualTo(8);
+            assertThat(runner.execute("SELECT CAST(ts AS varchar) FROM nested_values WHERE id=2").getOnlyValue()).isEqualTo("2020-01-01 00:00:00.123456789");
+            assertThat(runner.execute("SELECT count(*) FROM nested_values WHERE r IS NULL").getOnlyValue()).isEqualTo(1L);
+            assertThat(runner.execute("SELECT count(*) FROM nested_values WHERE r IS NOT NULL AND r.renamed IS NULL").getOnlyValue()).isEqualTo(1L);
+            runner.execute("CREATE TABLE promotions AS SELECT INTEGER '-2147483648' AS i, REAL '1.5' AS r");
+            long beforePromotion = client.getCatalog().headSnapshotId();
+            var originalColumns = client.getTable("test", "promotions").orElseThrow().columns();
+            assertEventually(() -> assertThat(client.scan("test", "promotions", client.getCatalog().headSnapshotId()))
+                    .allMatch(file -> file.dataFile().statsState().equals("provided")));
+            runner.execute("ALTER TABLE promotions ALTER COLUMN i SET DATA TYPE bigint");
+            runner.execute("ALTER TABLE promotions ALTER COLUMN r SET DATA TYPE double");
+            assertThat(client.getTable("test", "promotions", beforePromotion).orElseThrow().columns()).isEqualTo(originalColumns);
+            runner.execute("INSERT INTO promotions VALUES (BIGINT '2147483648', DOUBLE '2.25')");
+            assertThat(runner.execute("SELECT i, r FROM promotions ORDER BY i").getMaterializedRows())
+                    .containsExactlyElementsOf(runner.execute("VALUES (BIGINT '-2147483648', DOUBLE '1.5'), (BIGINT '2147483648', DOUBLE '2.25')").getMaterializedRows());
+            runner.execute("UPDATE promotions SET i = i + 1 WHERE r = 1.5");
+            runner.execute("MERGE INTO promotions t USING (VALUES (BIGINT '2147483648', DOUBLE '3.5')) s(i, r) ON t.i=s.i WHEN MATCHED THEN UPDATE SET r=s.r");
+            assertThat(runner.execute("SELECT i, r FROM promotions ORDER BY i").getMaterializedRows())
+                    .containsExactlyElementsOf(runner.execute("VALUES (BIGINT '-2147483647', DOUBLE '1.5'), (BIGINT '2147483648', DOUBLE '3.5')").getMaterializedRows());
             runner.execute("CREATE SCHEMA evolved");
             runner.execute("CREATE TABLE evolved.records (id bigint, label varchar, discarded bigint)");
             runner.execute("INSERT INTO evolved.records VALUES (1, 'old', 100)");
@@ -167,7 +325,7 @@ final class TestHoglakeLiveWrites
             assertThat(runner.execute("SELECT id, renamed, label FROM evolved.records").getMaterializedRows())
                     .containsExactlyInAnyOrderElementsOf(runner.execute("VALUES (BIGINT '1', 'old', NULL), (BIGINT '2', 'new', NULL), (BIGINT '3', NULL, 'reused')").getMaterializedRows());
             assertThatThrownBy(() -> runner.execute("ALTER TABLE evolved.records ALTER COLUMN id SET DATA TYPE double"))
-                    .hasMessageContaining("SQL column type changes are not supported");
+                    .hasMessageContaining("Unsupported Hoglake column type change");
             assertThatThrownBy(() -> runner.execute("DROP SCHEMA evolved"))
                     .hasMessageContaining("non-empty");
             assertThatThrownBy(() -> runner.execute("DROP SCHEMA evolved CASCADE"))

@@ -55,6 +55,7 @@ import java.util.function.Consumer;
 
 import static io.trino.parquet.ParquetTypeUtils.getDescriptors;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.UuidType.UUID;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
@@ -62,6 +63,8 @@ import static java.nio.ByteOrder.LITTLE_ENDIAN;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MICROS;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.timestampType;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.FLOAT;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT32;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
 import static org.apache.parquet.schema.Types.optional;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -200,6 +203,21 @@ class TestHoglakePredicatePushdown
                 group.getColumns().forEach(column -> column.getMeta_data().getStatistics().unsetNull_count())));
         assertThat(read(missingNullCounts, List.of(NUMBER), NUMBER, Domain.onlyNull(BIGINT)))
                 .contains(Arrays.asList((Object) null));
+    }
+
+    @Test
+    void testPromotedPhysicalTypesRemainResidual()
+    {
+        for (var physical : List.of(INT32, FLOAT)) {
+            Type type = physical == INT32 ? BIGINT : DOUBLE;
+            Object value = physical == INT32 ? (Object) 1L : 1.0;
+            HoglakeColumnHandle column = new HoglakeColumnHandle("promoted", 1, type, true);
+            MessageType schema = new MessageType("test", optional(physical).id(1).named("old_name"));
+            assertThat(HoglakePageSourceProvider.parquetPredicate(
+                    schema,
+                    getDescriptors(schema, schema),
+                    TupleDomain.withColumnDomains(Map.of(column, Domain.singleValue(type, value)))).isAll()).isTrue();
+        }
     }
 
     @Test

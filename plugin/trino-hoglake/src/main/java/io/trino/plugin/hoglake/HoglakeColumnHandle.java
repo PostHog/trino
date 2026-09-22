@@ -15,12 +15,14 @@ package io.trino.plugin.hoglake;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.collect.ImmutableList;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 
 import java.util.List;
+import java.util.Optional;
 
 import static io.trino.spi.type.BigintType.BIGINT;
 import static java.util.Objects.requireNonNull;
@@ -35,7 +37,10 @@ public record HoglakeColumnHandle(
         @JsonProperty("name") String name,
         @JsonProperty("fieldId") long fieldId,
         @JsonProperty("type") Type type,
-        @JsonProperty("nullable") boolean nullable)
+        @JsonProperty("nullable") boolean nullable,
+        @JsonProperty("children") List<HoglakeColumnHandle> children,
+        @JsonProperty("hoglakeType") String hoglakeType,
+        @JsonProperty("comment") String comment)
         implements ColumnHandle
 {
     static final HoglakeColumnHandle ROW_ID = new HoglakeColumnHandle(
@@ -44,11 +49,23 @@ public record HoglakeColumnHandle(
             RowType.anonymous(List.of(BIGINT, BIGINT)),
             false);
 
+    public HoglakeColumnHandle(String name, long fieldId, Type type, boolean nullable)
+    {
+        this(name, fieldId, type, nullable, List.of(), null);
+    }
+
+    public HoglakeColumnHandle(String name, long fieldId, Type type, boolean nullable, List<HoglakeColumnHandle> children, String hoglakeType)
+    {
+        this(name, fieldId, type, nullable, children, hoglakeType, null);
+    }
+
     @JsonCreator
     public HoglakeColumnHandle
     {
         requireNonNull(name, "name is null");
         requireNonNull(type, "type is null");
+        hoglakeType = hoglakeType == null ? HoglakeTypes.toHoglakeType(type) : hoglakeType;
+        children = children == null ? List.of() : ImmutableList.copyOf(children);
     }
 
     public ColumnMetadata columnMetadata()
@@ -57,6 +74,7 @@ public record HoglakeColumnHandle(
                 .setName(name)
                 .setType(type)
                 .setNullable(nullable)
+                .setComment(Optional.ofNullable(comment))
                 .build();
     }
 

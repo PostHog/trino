@@ -20,6 +20,7 @@ import com.google.inject.Singleton;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.spi.NodeVersion;
+import io.trino.spi.PageSorter;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSplitManager;
@@ -68,8 +69,8 @@ public class HoglakeModule
 
     @Provides
     @Singleton
-    public static ConnectorPageSinkProvider createPageSinkProvider(TrinoFileSystemFactory fileSystemFactory, NodeVersion nodeVersion)
+    public static ConnectorPageSinkProvider createPageSinkProvider(TrinoFileSystemFactory fileSystemFactory, NodeVersion nodeVersion, PageSorter pageSorter, HoglakeClient client)
     {
-        return new HoglakePageSinkProvider(fileSystemFactory, nodeVersion.toString());
+        return new HoglakePageSinkProvider(fileSystemFactory, nodeVersion.toString(), pageSorter, client);
     }
 }

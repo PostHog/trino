@@ -40,6 +40,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeoutException;
@@ -216,7 +217,35 @@ public class HoglakeClient
 
     public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns, HoglakeDtos.ReplacementTarget replacement)
     {
+        return prepareTableCreation(operationId, namespace, table, columns, replacement, List.of());
+    }
+
+    public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns, HoglakeDtos.ReplacementTarget replacement, List<HoglakeDtos.PartitionField> partitionFields)
+    {
+        return prepareTableCreation(operationId, namespace, table, columns, replacement, partitionFields, List.of());
+    }
+
+    public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns, HoglakeDtos.ReplacementTarget replacement, List<HoglakeDtos.PartitionField> partitionFields, List<HoglakeDtos.SortField> sortFields)
+    {
+        return prepareTableCreation(operationId, namespace, table, columns, replacement, partitionFields, sortFields, null, Map.of());
+    }
+
+    public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns, HoglakeDtos.ReplacementTarget replacement, List<HoglakeDtos.PartitionField> partitionFields, List<HoglakeDtos.SortField> sortFields, String comment, Map<String, String> properties)
+    {
         Map<String, Object> definition = new HashMap<>();
+        if (comment != null) {
+            definition.put("comment", comment);
+        }
+        if (!properties.isEmpty()) {
+            definition.put("properties", properties);
+        }
+        boolean metadata = comment != null || !properties.isEmpty() || columns.stream().anyMatch(HoglakeDtos.ColumnDefinition::hasComments);
+        if (!partitionFields.isEmpty()) {
+            definition.put("partition_fields", partitionFields);
+        }
+        if (!sortFields.isEmpty()) {
+            definition.put("sort_fields", sortFields);
+        }
         definition.put("namespace", namespace);
         definition.put("name", table);
         definition.put("columns", columns);
@@ -225,14 +254,43 @@ public class HoglakeClient
         }
         return write(
                 "PUT",
-                catalogPath("/table-creations/" + encode(operationId)),
+                catalogPath("/table-creations/" + encode(operationId) + (metadata ? "/metadata" : !sortFields.isEmpty() ? "/sorted" : partitionFields.isEmpty() ? "" : "/partitioned")),
                 definition,
                 new TypeReference<HoglakeDtos.TableCreation>() {});
+    }
+
+    public String claimUpload(String owner, String prefix, String kind)
+    {
+        String id = UUID.randomUUID().toString();
+        HoglakeDtos.UploadClaim claim = write("PUT", catalogPath("/uploads/" + id), Map.of("owner", owner, "prefix", prefix, "file_kind", kind), new TypeReference<HoglakeDtos.UploadClaim>() {});
+        String normalized = prefix.endsWith("/") ? prefix : prefix + "/";
+        if (!id.equals(claim.uploadId()) || !owner.equals(claim.owner()) || !"active".equals(claim.state()) || claim.path() == null || !claim.path().startsWith(normalized + "trino-upload/")) {
+            throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Invalid upload claim response");
+        }
+        return claim.path();
+    }
+
+    public void renewUploads(String owner)
+    {
+        post(catalogPath("/uploads/renew"), Map.of("owner", owner), new TypeReference<Map<String, Integer>>() {});
+    }
+
+    public void abandonUploads(String owner, List<String> paths)
+    {
+        post(catalogPath("/uploads/abandon"), Map.of("owner", owner, "paths", paths), new TypeReference<Map<String, Integer>>() {});
     }
 
     public HoglakeDtos.TableCreation publishTableCreation(String operationId, List<HoglakeDtos.FileRegistration> files)
     {
         return validateCreationReceipt(operationId, post(catalogPath("/table-creations/" + encode(operationId) + "/commit"), Map.of("files", files), new TypeReference<HoglakeDtos.TableCreation>() {}));
+    }
+
+    public HoglakeDtos.TableCreation publishTableCreation(String operationId, List<HoglakeDtos.FileRegistration> files, boolean claimedUploads)
+    {
+        if (!claimedUploads) {
+            return publishTableCreation(operationId, files);
+        }
+        return validateCreationReceipt(operationId, post(catalogPath("/table-creations/" + encode(operationId) + "/commit/uploads"), Map.of("files", files), new TypeReference<HoglakeDtos.TableCreation>() {}));
     }
 
     public HoglakeDtos.TableCreation getTableCreation(String operationId)
@@ -296,18 +354,28 @@ public class HoglakeClient
 
     public void commit(HoglakeDtos.Commit request)
     {
-        commit(request, false);
+        commit(request, false, false, false);
     }
 
     public void commitMutation(HoglakeDtos.Commit request)
     {
-        commit(request, true);
+        commit(request, true, false, false);
     }
 
-    private void commit(HoglakeDtos.Commit request, boolean mutation)
+    public void commitClaimed(HoglakeDtos.Commit request, boolean mutation)
+    {
+        commit(request, mutation, true, false);
+    }
+
+    public void commitTransaction(HoglakeDtos.Commit request)
+    {
+        commit(request, true, true, true);
+    }
+
+    private void commit(HoglakeDtos.Commit request, boolean mutation, boolean claimedUploads, boolean transaction)
     {
         try {
-            commitOnce(request, requestTimeout, mutation);
+            commitOnce(request, requestTimeout, mutation, claimedUploads, transaction);
             return;
         }
         catch (TrinoException failure) {
@@ -337,7 +405,7 @@ public class HoglakeClient
                         return;
                     }
                     if (attempt < 2) {
-                        commitOnce(request, remainingRecoveryTime(recoveryStarted), mutation);
+                        commitOnce(request, remainingRecoveryTime(recoveryStarted), mutation, claimedUploads, transaction);
                         return;
                     }
                 }
@@ -391,7 +459,7 @@ public class HoglakeClient
                 failure.getErrorCode().equals(HOGLAKE_CATALOG_NOT_FOUND.toErrorCode());
     }
 
-    private void commitOnce(HoglakeDtos.Commit request, Duration timeout, boolean mutation)
+    private void commitOnce(HoglakeDtos.Commit request, Duration timeout, boolean mutation, boolean claimedUploads, boolean transaction)
     {
         // The required-key endpoint also protects against an older replica
         // silently ignoring the ID after capability negotiation.
@@ -401,6 +469,12 @@ public class HoglakeClient
         }
         if (mutation) {
             path = "/commit/mutations/prepared";
+        }
+        if (claimedUploads) {
+            path = "/commit/uploads";
+        }
+        if (transaction) {
+            path = "/commit/transaction";
         }
         HoglakeDtos.CommitResult result = write("POST", catalogPath(path), request, new TypeReference<HoglakeDtos.CommitResult>() {}, timeout);
         if (result.snapshotId() <= 0) {

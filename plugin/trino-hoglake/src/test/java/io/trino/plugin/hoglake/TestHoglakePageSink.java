@@ -24,6 +24,9 @@ import io.trino.filesystem.TrinoInputFile;
 import io.trino.filesystem.TrinoOutputFile;
 import io.trino.filesystem.memory.MemoryFileSystem;
 import io.trino.filesystem.memory.MemoryFileSystemFactory;
+import io.trino.operator.PagesIndex.TestingFactory;
+import io.trino.operator.PagesIndexPageSorter;
+import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
 import io.trino.spi.Page;
@@ -35,6 +38,7 @@ import io.trino.spi.type.Type;
 import io.trino.type.TypeDeserializer;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -51,6 +55,157 @@ final class TestHoglakePageSink
     private static final HoglakeColumnHandle FIRST = new HoglakeColumnHandle("first", 7, BIGINT, true);
     private static final HoglakeColumnHandle SECOND = new HoglakeColumnHandle("second", 12, BIGINT, false);
     private static final HoglakeWriteHandle HANDLE = new HoglakeWriteHandle("test", "table", UUID.randomUUID().toString(), 3, "memory:///warehouse/", List.of(FIRST, SECOND), List.of(SECOND), Optional.empty());
+
+    @Test
+    void testClaimsPrecedeUploadAndAbortNeverDeletesHandedOffFiles()
+            throws Exception
+    {
+        MemoryFileSystem storage = new MemoryFileSystem();
+        List<String> abandoned = new ArrayList<>();
+        String owner = UUID.randomUUID().toString();
+        try (var client = new HoglakeClient("http://localhost:1", "test")
+        {
+            @Override
+            public String claimUpload(String claimedOwner, String prefix, String kind)
+            {
+                assertThat(claimedOwner).isEqualTo(owner);
+                assertThat(kind).isEqualTo("data");
+                return prefix + "trino-upload/" + UUID.randomUUID() + ".parquet";
+            }
+
+            @Override
+            public void renewUploads(String claimedOwner)
+            {
+                assertThat(claimedOwner).isEqualTo(owner);
+            }
+
+            @Override
+            public void abandonUploads(String claimedOwner, List<String> paths)
+            {
+                assertThat(claimedOwner).isEqualTo(owner);
+                abandoned.addAll(paths);
+            }
+        }) {
+            HoglakeWriteHandle handle = new HoglakeWriteHandle(
+                    "test",
+                    "table",
+                    HANDLE.tableUuid(),
+                    3,
+                    "memory:///warehouse/",
+                    List.of(FIRST),
+                    List.of(FIRST),
+                    Optional.empty(),
+                    Optional.of(owner),
+                    List.of(),
+                    List.of(),
+                    true);
+            HoglakePageSink sink = new HoglakePageSink(storage, handle, "test", null, client);
+            sink.appendPage(new Page(block(1L)));
+            var fragment = sink.finish().get().iterator().next();
+            var file = new ObjectMapper().readValue(fragment.getBytes(), HoglakeDtos.FileRegistration.class);
+            assertThat(file.path()).contains("/trino-upload/");
+            sink.abort();
+            assertThat(abandoned).isEmpty();
+            assertThat(storage.newInputFile(Location.of(file.path())).exists()).isTrue();
+            HoglakePageSink unfinished = new HoglakePageSink(storage, handle, "test", null, client);
+            unfinished.appendPage(new Page(block(2L)));
+            unfinished.abort();
+            assertThat(abandoned).hasSize(1);
+            // The catalog drain owns deletion after fencing; workers do not delete claimed objects.
+            assertThat(storage.newInputFile(Location.of(abandoned.getFirst())).exists()).isTrue();
+        }
+    }
+
+    @Test
+    void testSortedFilesIncludeNullOrderingAcrossInputPages()
+            throws Exception
+    {
+        MemoryFileSystem storage = new MemoryFileSystem();
+        HoglakeWriteHandle handle = new HoglakeWriteHandle(
+                "test",
+                "sorted",
+                UUID.randomUUID().toString(),
+                3,
+                "memory:///warehouse/",
+                List.of(FIRST),
+                List.of(FIRST),
+                Optional.empty(),
+                Optional.empty(),
+                List.of(),
+                List.of(new HoglakeDtos.SortField(FIRST.fieldId(), "desc", "nulls_first")));
+        var sorter = new PagesIndexPageSorter(new TestingFactory(false));
+        HoglakePageSink sink = new HoglakePageSink(storage, handle, "test", sorter);
+        sink.appendPage(new Page(block(1L)));
+        sink.appendPage(new Page(block(null)));
+        sink.appendPage(new Page(block(9L)));
+        assertThat(sink.getMemoryUsage()).isPositive();
+        var fragments = sink.finish().get();
+        assertThat(fragments).hasSize(1);
+        var file = new ObjectMapper().readValue(fragments.iterator().next().getBytes(), HoglakeDtos.FileRegistration.class);
+        try (var source = new HoglakePageSourceProvider(_ -> storage).createPageSource(
+                HoglakeTransactionHandle.INSTANCE,
+                ConnectorTestFixtures.session(),
+                new HoglakeSplit(file.path(), file.fileSizeBytes(), file.recordCount(), Optional.empty(), 0),
+                new HoglakeTableHandle("test", "sorted", 3, handle.tableUuid(), handle.columns()),
+                Optional.empty(),
+                List.of(FIRST),
+                DynamicFilter.EMPTY,
+                MemoryContext.NO_LIMIT)) {
+            assertThat(ConnectorTestFixtures.readAll(source, List.of(BIGINT)))
+                    .containsExactly(Arrays.asList((Object) null), List.of(9L), List.of(1L));
+        }
+        assertThat(sink.getMemoryUsage()).isZero();
+    }
+
+    @Test
+    void testPartitionFilesContainOnlyTheirRegisteredValues()
+            throws Exception
+    {
+        MemoryFileSystem storage = new MemoryFileSystem();
+        HoglakeWriteHandle handle = new HoglakeWriteHandle(
+                "test",
+                "partitioned",
+                UUID.randomUUID().toString(),
+                3,
+                "memory:///warehouse/",
+                List.of(FIRST),
+                List.of(FIRST),
+                Optional.empty(),
+                Optional.empty(),
+                List.of(new HoglakeDtos.PartitionField(FIRST.fieldId(), "identity", null)));
+        HoglakePageSink sink = new HoglakePageSink(storage, handle, "test");
+        var values = BIGINT.createBlockBuilder(null, 5);
+        BIGINT.writeLong(values, 7);
+        values.appendNull();
+        BIGINT.writeLong(values, 9);
+        BIGINT.writeLong(values, 7);
+        values.appendNull();
+        sink.appendPage(new Page(values.build()));
+        var fragments = sink.finish().get();
+        assertThat(fragments).hasSize(3);
+        long total = 0;
+        for (var fragment : fragments) {
+            var file = new ObjectMapper().readValue(fragment.getBytes(), HoglakeDtos.FileRegistration.class);
+            var split = new HoglakeSplit(file.path(), file.fileSizeBytes(), file.recordCount(), Optional.empty(), 0);
+            try (var source = new HoglakePageSourceProvider(_ -> storage).createPageSource(
+                    HoglakeTransactionHandle.INSTANCE,
+                    ConnectorTestFixtures.session(),
+                    split,
+                    new HoglakeTableHandle("test", "partitioned", 3, handle.tableUuid(), handle.columns()),
+                    Optional.empty(),
+                    List.of(FIRST),
+                    DynamicFilter.EMPTY,
+                    MemoryContext.NO_LIMIT)) {
+                var rows = ConnectorTestFixtures.readAll(source, List.of(BIGINT));
+                assertThat(rows).hasSize((int) file.recordCount());
+                for (var row : rows) {
+                    assertThat(row.getFirst() == null ? null : row.getFirst().toString()).isEqualTo(file.partitionValues().getFirst());
+                }
+                total += rows.size();
+            }
+        }
+        assertThat(total).isEqualTo(5);
+    }
 
     @Test
     void testHandleSerialization()

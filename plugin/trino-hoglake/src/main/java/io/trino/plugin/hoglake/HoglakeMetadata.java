@@ -48,21 +48,26 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.PrincipalType;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.statistics.ComputedStatistics;
-import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.MapType;
+import io.trino.spi.type.RowType;
 import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeOperators;
 import io.trino.spi.type.VarcharType;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -89,6 +94,7 @@ public class HoglakeMetadata
     private final TrinoFileSystemFactory fileSystemFactory;
     private final Map<SchemaTableName, HoglakeDtos.ReplacementTarget> plannedTargets = new ConcurrentHashMap<>();
     private volatile Optional<String> creationOperation = Optional.empty();
+    private HoglakeTransactionState transaction;
 
     public HoglakeMetadata(HoglakeClient client)
     {
@@ -106,8 +112,34 @@ public class HoglakeMetadata
         return new HoglakeMetadata(client, fileSystemFactory);
     }
 
+    public HoglakeMetadata newTransaction(boolean autoCommit)
+    {
+        HoglakeMetadata metadata = newTransaction();
+        if (!autoCommit) {
+            metadata.transaction = new HoglakeTransactionState(client);
+        }
+        return metadata;
+    }
+
+    public void commit()
+    {
+        if (transaction != null) {
+            transaction.commit();
+        }
+    }
+
+    private void checkAutocommitDdl()
+    {
+        if (transaction != null) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake DDL is not supported in explicit transactions; use an autocommit statement");
+        }
+    }
+
     public void rollback()
     {
+        if (transaction != null) {
+            transaction.rollback();
+        }
         creationOperation.ifPresent(client::abortTableCreation);
         creationOperation = Optional.empty();
     }
@@ -147,15 +179,15 @@ public class HoglakeMetadata
     @Override
     public void addColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnMetadata column, ColumnPosition position)
     {
-        if (!(position instanceof ColumnPosition.Last) || !column.isNullable() || column.getComment().isPresent() || !column.getProperties().isEmpty()) {
-            throw new TrinoException(NOT_SUPPORTED, "Hoglake ADD COLUMN supports nullable columns at the end, without comments or properties");
+        if (!(position instanceof ColumnPosition.Last) || !column.isNullable() || !column.getProperties().isEmpty()) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake ADD COLUMN supports nullable columns at the end, without column properties");
         }
-        Map<String, Object> params = Map.of();
-        if (column.getType() instanceof DecimalType decimal) {
-            params = Map.of("precision", decimal.getPrecision(), "scale", decimal.getScale());
+        checkWriteSchemaSupport(client.getCatalog(), List.of(column.getType()));
+        HoglakeDtos.ColumnDefinition definition = HoglakeTypes.columnDefinition(column.getName(), column.getType(), true).withComment(column.getComment().orElse(null));
+        if (column.getComment().isPresent()) {
+            checkMetadataSupport();
         }
-        HoglakeDtos.ColumnDefinition definition = new HoglakeDtos.ColumnDefinition(column.getName(), HoglakeTypes.toHoglakeType(column.getType()), params, true);
-        alterColumns((HoglakeTableHandle) tableHandle, Map.of("op", "add_column", "column", definition));
+        alterColumns((HoglakeTableHandle) tableHandle, Map.of("op", column.getComment().isPresent() ? "add_column_with_metadata" : "add_column", "column", definition));
     }
 
     @Override
@@ -173,7 +205,50 @@ public class HoglakeMetadata
     @Override
     public void setColumnType(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column, Type type)
     {
-        throw new TrinoException(NOT_SUPPORTED, "Hoglake SQL column type changes are not supported");
+        HoglakeColumnHandle source = (HoglakeColumnHandle) column;
+        if (!source.hoglakeType().equals(HoglakeTypes.toHoglakeType(source.type())) || !HoglakeTypes.canPromote(source.type(), type)) {
+            throw new TrinoException(NOT_SUPPORTED, "Unsupported Hoglake column type change: %s to %s".formatted(source.type(), type));
+        }
+        alterColumns((HoglakeTableHandle) tableHandle, Map.of("op", "promote_column", "name", source.name(), "to", HoglakeTypes.toHoglakeType(type)));
+    }
+
+    private void checkMetadataSupport()
+    {
+        HoglakeDtos.Catalog catalog = client.getCatalog();
+        if (catalog.capabilities() == null || !catalog.capabilities().contains("versioned-table-metadata-v1")) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support versioned-table-metadata-v1");
+        }
+    }
+
+    @Override
+    public void setTableComment(ConnectorSession session, ConnectorTableHandle tableHandle, Optional<String> comment)
+    {
+        checkMetadataSupport();
+        Map<String, Object> operation = new HashMap<>();
+        operation.put("op", "set_table_comment");
+        operation.put("comment", comment.orElse(null));
+        alterColumns((HoglakeTableHandle) tableHandle, operation);
+    }
+
+    @Override
+    public void setColumnComment(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column, Optional<String> comment)
+    {
+        checkMetadataSupport();
+        Map<String, Object> operation = new HashMap<>();
+        operation.put("op", "set_column_comment");
+        operation.put("name", ((HoglakeColumnHandle) column).name());
+        operation.put("comment", comment.orElse(null));
+        alterColumns((HoglakeTableHandle) tableHandle, operation);
+    }
+
+    @Override
+    public void setTableProperties(ConnectorSession session, ConnectorTableHandle tableHandle, Map<String, Optional<Object>> properties)
+    {
+        if (!properties.keySet().equals(Set.of("extra_properties"))) {
+            throw new TrinoException(NOT_SUPPORTED, "Only extra_properties can be altered; partitioning and sorted_by are creation properties");
+        }
+        checkMetadataSupport();
+        alterColumns((HoglakeTableHandle) tableHandle, Map.of("op", "set_properties", "properties", properties.get("extra_properties").orElse(Map.of())));
     }
 
     private void alterColumns(HoglakeTableHandle handle, Map<String, Object> operation)
@@ -184,6 +259,7 @@ public class HoglakeMetadata
 
     private void checkSchemaEvolutionSupport()
     {
+        checkAutocommitDdl();
         HoglakeDtos.Catalog catalog = client.getCatalog();
         if (catalog.capabilities() == null || !catalog.capabilities().contains("guarded-schema-evolution-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support guarded-schema-evolution-v1");
@@ -205,16 +281,17 @@ public class HoglakeMetadata
         // Pin the query's snapshot: resolve head once, then fetch the
         // table AT that snapshot (not at whatever head is by the time the
         // second request lands) so the handle is consistent-at-N.
-        long snapshot = client.getCatalog().headSnapshotId();
+        long snapshot = transaction == null ? client.getCatalog().headSnapshotId() : transaction.snapshot();
         Optional<HoglakeDtos.Table> plannedTable = client.getTable(tableName.getSchemaName(), tableName.getTableName(), snapshot);
         plannedTargets.putIfAbsent(tableName, new HoglakeDtos.ReplacementTarget(plannedTable.map(HoglakeDtos.Table::tableUuid).orElse(null), snapshot));
         return plannedTable
-                .map(table -> (ConnectorTableHandle) new HoglakeTableHandle(
+                .map(table -> new HoglakeTableHandle(
                         tableName.getSchemaName(),
                         tableName.getTableName(),
                         snapshot,
                         table.tableUuid(),
                         table.columns().stream().map(HoglakeMetadata::toColumnHandle).toList()))
+                .map(handle -> (ConnectorTableHandle) (transaction == null ? handle : transaction.overlay(handle)))
                 .orElse(null);
     }
 
@@ -222,9 +299,16 @@ public class HoglakeMetadata
     public ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle table)
     {
         HoglakeTableHandle handle = (HoglakeTableHandle) table;
+        HoglakeDtos.Table definition = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId())
+                .orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
         return new ConnectorTableMetadata(
                 handle.schemaTableName(),
-                handle.columns().stream().map(HoglakeColumnHandle::columnMetadata).toList());
+                handle.columns().stream().map(HoglakeColumnHandle::columnMetadata).toList(),
+                Map.of(
+                        "partitioning", HoglakePartitioning.expressions(HoglakePartitioning.read(definition.partitionSpec()), handle.columns()),
+                        "sorted_by", HoglakeSorting.expressions(HoglakeSorting.read(definition.sortSpec()), handle.columns()),
+                        "extra_properties", definition.properties()),
+                Optional.ofNullable(definition.comment()));
     }
 
     @Override
@@ -305,14 +389,28 @@ public class HoglakeMetadata
     @Override
     public Optional<Type> getSupportedType(ConnectorSession session, Map<String, Object> properties, Type type)
     {
+        if (type instanceof ArrayType array) {
+            return Optional.of(new ArrayType(getSupportedType(session, properties, array.getElementType()).orElse(array.getElementType())));
+        }
+        if (type instanceof MapType map) {
+            return Optional.of(new MapType(
+                    getSupportedType(session, properties, map.getKeyType()).orElse(map.getKeyType()),
+                    getSupportedType(session, properties, map.getValueType()).orElse(map.getValueType()),
+                    new TypeOperators()));
+        }
+        if (type instanceof RowType row) {
+            return Optional.of(RowType.from(row.getFields().stream()
+                    .map(field -> new RowType.Field(field.getName(), getSupportedType(session, properties, field.getType()).orElse(field.getType())))
+                    .toList()));
+        }
         if (type instanceof VarcharType) {
             return Optional.of(VarcharType.VARCHAR);
         }
         if (type instanceof TimeType time && time.getPrecision() <= 6) {
             return Optional.of(TimeType.TIME_MICROS);
         }
-        if (type instanceof TimestampType timestamp && timestamp.getPrecision() <= 6) {
-            return Optional.of(TimestampType.TIMESTAMP_MICROS);
+        if (type instanceof TimestampType timestamp && timestamp.getPrecision() <= 9) {
+            return Optional.of(timestamp.getPrecision() <= 6 ? TimestampType.TIMESTAMP_MICROS : TimestampType.TIMESTAMP_NANOS);
         }
         if (type instanceof TimestampWithTimeZoneType timestamp && timestamp.getPrecision() <= 6) {
             return Optional.of(TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS);
@@ -323,6 +421,7 @@ public class HoglakeMetadata
     @Override
     public void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, SaveMode saveMode)
     {
+        checkAutocommitDdl();
         SchemaTableName name = tableMetadata.getTable();
         if (saveMode != SaveMode.REPLACE && client.getTable(name.getSchemaName(), name.getTableName()).isPresent()) {
             if (saveMode == SaveMode.IGNORE) {
@@ -344,29 +443,25 @@ public class HoglakeMetadata
 
     private static List<HoglakeDtos.ColumnDefinition> columnDefinitions(ConnectorTableMetadata metadata)
     {
-        if (metadata.getComment().isPresent() || !metadata.getProperties().isEmpty() || metadata.getColumns().stream().anyMatch(column -> column.getComment().isPresent())) {
-            throw new TrinoException(NOT_SUPPORTED, "Hoglake table properties and comments are not supported");
+        if (metadata.getProperties().keySet().stream().anyMatch(key -> !Set.of("partitioning", "sorted_by", "extra_properties").contains(key)) || metadata.getColumns().stream().anyMatch(column -> !column.getProperties().isEmpty())) {
+            throw new TrinoException(NOT_SUPPORTED, "Unsupported Hoglake table or column properties");
         }
         return metadata.getColumns().stream()
-                .map(column -> {
-                    Map<String, Object> params = Map.of();
-                    if (column.getType() instanceof DecimalType decimal) {
-                        params = Map.of("precision", decimal.getPrecision(), "scale", decimal.getScale());
-                    }
-                    return new HoglakeDtos.ColumnDefinition(column.getName(), HoglakeTypes.toHoglakeType(column.getType()), params, column.isNullable());
-                })
+                .map(column -> HoglakeTypes.columnDefinition(column.getName(), column.getType(), column.isNullable()).withComment(column.getComment().orElse(null)))
                 .toList();
     }
 
     @Override
     public ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata metadata, Optional<ConnectorTableLayout> layout, RetryMode retryMode, boolean replace)
     {
-        checkRetryMode(retryMode);
+        checkAutocommitDdl();
         if (layout.isPresent()) {
             throw new TrinoException(NOT_SUPPORTED, "Custom layouts are not supported");
         }
         List<HoglakeDtos.ColumnDefinition> definitions = columnDefinitions(metadata);
         HoglakeDtos.Catalog catalog = client.getCatalog();
+        checkRetryMode(retryMode, catalog);
+        checkWriteSchemaSupport(catalog, metadata.getColumns().stream().map(ColumnMetadata::getType).toList());
         if (catalog.capabilities() == null || !catalog.capabilities().contains("atomic-table-creation-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support atomic-table-creation-v1");
         }
@@ -379,15 +474,32 @@ public class HoglakeMetadata
                     client.getTable(name.getSchemaName(), name.getTableName(), catalog.headSnapshotId()).map(HoglakeDtos.Table::tableUuid).orElse(null),
                     catalog.headSnapshotId()));
         }
+        @SuppressWarnings("unchecked")
+        List<String> partitioning = (List<String>) metadata.getProperties().getOrDefault("partitioning", List.of());
+        List<HoglakeDtos.PartitionField> partitionFields = HoglakePartitioning.parse(partitioning, HoglakePartitioning.initialColumns(definitions));
+        if (!partitionFields.isEmpty() && !catalog.capabilities().contains("atomic-partitioned-table-creation-v1")) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support atomic-partitioned-table-creation-v1");
+        }
+        @SuppressWarnings("unchecked")
+        List<String> sorting = (List<String>) metadata.getProperties().getOrDefault("sorted_by", List.of());
+        List<HoglakeDtos.SortField> sortFields = HoglakeSorting.parse(sorting, HoglakePartitioning.initialColumns(definitions));
+        if (!sortFields.isEmpty() && !catalog.capabilities().contains("atomic-sorted-table-creation-v1")) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support atomic-sorted-table-creation-v1");
+        }
+        @SuppressWarnings("unchecked")
+        Map<String, String> extraProperties = (Map<String, String>) metadata.getProperties().getOrDefault("extra_properties", Map.of());
+        if (metadata.getComment().isPresent() || !extraProperties.isEmpty() || definitions.stream().anyMatch(HoglakeDtos.ColumnDefinition::hasComments)) {
+            checkMetadataSupport();
+        }
         String operation = UUID.randomUUID().toString();
         // Record before sending: a lost preparation response may still have created the operation.
         creationOperation = Optional.of(operation);
-        HoglakeDtos.TableCreation prepared = client.prepareTableCreation(operation, metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), definitions, replacement);
+        HoglakeDtos.TableCreation prepared = client.prepareTableCreation(operation, metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), definitions, replacement, partitionFields, sortFields, metadata.getComment().orElse(null), extraProperties);
         if (!"prepared".equals(prepared.state()) || !operation.equals(prepared.operationId()) || prepared.tableUuid() == null || prepared.columns() == null || prepared.writePath() == null) {
             throw new TrinoException(HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake preparation response for operation " + operation);
         }
         List<HoglakeColumnHandle> columns = prepared.columns().stream().map(HoglakeMetadata::toColumnHandle).toList();
-        return new HoglakeWriteHandle(metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), prepared.tableUuid(), catalog.headSnapshotId(), prepared.writePath(), columns, columns, Optional.of(operation));
+        return new HoglakeWriteHandle(metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), prepared.tableUuid(), catalog.headSnapshotId(), prepared.writePath(), columns, columns, Optional.of(operation), Optional.empty(), partitionFields, sortFields, catalog.capabilities().contains("claimed-uploads-v1"));
     }
 
     @Override
@@ -419,6 +531,7 @@ public class HoglakeMetadata
 
     private void checkLifecycleSupport()
     {
+        checkAutocommitDdl();
         HoglakeDtos.Catalog catalog = client.getCatalog();
         if (catalog.capabilities() == null || !catalog.capabilities().contains("guarded-table-lifecycle-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support guarded-table-lifecycle-v1");
@@ -428,12 +541,12 @@ public class HoglakeMetadata
     @Override
     public ConnectorInsertTableHandle beginInsert(ConnectorSession session, ConnectorTableHandle tableHandle, List<ColumnHandle> columns, RetryMode retryMode)
     {
-        checkRetryMode(retryMode);
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
         HoglakeDtos.Table table = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId()).orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
-        if (table.partitionSpec() != null && table.partitionSpec().get("fields") instanceof List<?> fields && !fields.isEmpty()) {
-            throw new TrinoException(NOT_SUPPORTED, "Writing partitioned Hoglake tables is not supported");
-        }
+        List<HoglakeDtos.PartitionField> partitionFields = HoglakePartitioning.read(table.partitionSpec());
+        HoglakePartitioning.validate(partitionFields, handle.columns());
+        List<HoglakeDtos.SortField> sortFields = HoglakeSorting.read(table.sortSpec());
+        HoglakeSorting.validate(sortFields, handle.columns());
         handle.columns().forEach(column -> HoglakeTypes.toHoglakeType(column.type()));
         List<HoglakeColumnHandle> inputs = columns.stream().map(HoglakeColumnHandle.class::cast).toList();
         for (HoglakeColumnHandle column : handle.columns()) {
@@ -442,11 +555,16 @@ public class HoglakeMetadata
             }
         }
         HoglakeDtos.Catalog catalog = client.getCatalog();
+        checkRetryMode(retryMode, catalog);
+        if (transaction != null) {
+            transaction.checkWriteSupport(catalog);
+        }
+        checkWriteSchemaSupport(catalog, handle.columns().stream().map(HoglakeColumnHandle::type).toList());
         Optional<String> operation = Optional.empty();
         if (catalog.capabilities() != null && catalog.capabilities().contains("idempotent-append-v1")) {
-            operation = Optional.of(UUID.randomUUID().toString());
+            operation = Optional.of(transaction == null ? UUID.randomUUID().toString() : transaction.operation());
         }
-        return new HoglakeWriteHandle(handle.schemaName(), handle.tableName(), handle.tableUuid(), handle.snapshotId(), catalog.dataPath(), handle.columns(), inputs, Optional.empty(), operation);
+        return new HoglakeWriteHandle(handle.schemaName(), handle.tableName(), handle.tableUuid(), handle.snapshotId(), catalog.dataPath(), handle.columns(), inputs, Optional.empty(), operation, partitionFields, sortFields, catalog.capabilities() != null && catalog.capabilities().contains("claimed-uploads-v1"));
     }
 
     @Override
@@ -457,7 +575,7 @@ public class HoglakeMetadata
         List<HoglakeDtos.FileRegistration> files = decodeFragments(fragments);
         HoglakeDtos.TableCreation result;
         try {
-            result = client.publishTableCreation(operation, files);
+            result = client.publishTableCreation(operation, files, writeHandle.claimUploads());
         }
         catch (TrinoException failure) {
             if (isDefiniteRejection(failure)) {
@@ -468,7 +586,7 @@ public class HoglakeMetadata
             try {
                 result = client.getTableCreation(operation);
                 if ("prepared".equals(result.state())) {
-                    result = client.publishTableCreation(operation, files);
+                    result = client.publishTableCreation(operation, files, writeHandle.claimUploads());
                 }
             }
             catch (RuntimeException recoveryFailure) {
@@ -518,15 +636,22 @@ public class HoglakeMetadata
             Map<Integer, Collection<ColumnHandle>> updateCaseColumns,
             RetryMode retryMode)
     {
-        checkRetryMode(retryMode);
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
         HoglakeDtos.Table table = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId()).orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
         Optional<String> insertFailure = Optional.empty();
-        if (table.partitionSpec() != null && table.partitionSpec().get("fields") instanceof List<?> fields && !fields.isEmpty()) {
-            insertFailure = Optional.of("Writing partitioned Hoglake tables is not supported");
+        List<HoglakeDtos.PartitionField> partitionFields = HoglakePartitioning.read(table.partitionSpec());
+        try {
+            HoglakePartitioning.validate(partitionFields, handle.columns());
         }
-        if (table.sortSpec() != null && table.sortSpec().get("fields") instanceof List<?> fields && !fields.isEmpty()) {
-            insertFailure = Optional.of("Writing sorted Hoglake tables is not supported");
+        catch (TrinoException e) {
+            insertFailure = Optional.of(e.getMessage());
+        }
+        List<HoglakeDtos.SortField> sortFields = HoglakeSorting.read(table.sortSpec());
+        try {
+            HoglakeSorting.validate(sortFields, handle.columns());
+        }
+        catch (TrinoException e) {
+            insertFailure = Optional.of(e.getMessage());
         }
         // INSERT-only MERGE has no update cases, so also enforce this in the worker sink.
         if (!updateCaseColumns.isEmpty() && insertFailure.isPresent()) {
@@ -534,10 +659,15 @@ public class HoglakeMetadata
         }
         handle.columns().forEach(column -> HoglakeTypes.toHoglakeType(column.type()));
         HoglakeDtos.Catalog catalog = client.getCatalog();
+        checkRetryMode(retryMode, catalog);
+        if (transaction != null) {
+            transaction.checkWriteSupport(catalog);
+        }
+        checkWriteSchemaSupport(catalog, handle.columns().stream().map(HoglakeColumnHandle::type).toList());
         if (catalog.capabilities() == null || !catalog.capabilities().contains("idempotent-mutation-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support idempotent-mutation-v1 required for DELETE, UPDATE and MERGE");
         }
-        return new HoglakeDeleteHandle(handle, catalog.dataPath(), UUID.randomUUID().toString(), insertFailure);
+        return new HoglakeDeleteHandle(handle, catalog.dataPath(), transaction == null ? UUID.randomUUID().toString() : transaction.operation(), insertFailure, insertFailure.isPresent() ? List.of() : partitionFields, insertFailure.isPresent() ? List.of() : sortFields, catalog.capabilities().contains("claimed-uploads-v1"));
     }
 
     @Override
@@ -561,7 +691,13 @@ public class HoglakeMetadata
             MemoryContext memoryContext)
     {
         HoglakeDeleteHandle delete = (HoglakeDeleteHandle) handle;
-        new HoglakeDeletePublisher(client, fileSystemFactory.create(session)).publish(delete, fragments, memoryContext);
+        HoglakeDeletePublisher publisher = new HoglakeDeletePublisher(client, fileSystemFactory.create(session));
+        if (transaction == null) {
+            publisher.publish(delete, fragments, memoryContext);
+        }
+        else {
+            publisher.publish(delete, fragments, memoryContext, transaction::stage);
+        }
         return Optional.empty();
     }
 
@@ -574,7 +710,16 @@ public class HoglakeMetadata
                         .thenComparingLong(HoglakeDtos.FileRegistration::footerSize))
                 .toList();
         if (!files.isEmpty()) {
-            client.commit(new HoglakeDtos.Commit(handle.snapshot(), List.of(new HoglakeDtos.Append(handle.namespace(), handle.table(), handle.tableUuid(), files)), handle.insertOperation().orElse(null)));
+            HoglakeDtos.Commit request = new HoglakeDtos.Commit(handle.snapshot(), List.of(new HoglakeDtos.Append(handle.namespace(), handle.table(), handle.tableUuid(), files)), handle.insertOperation().orElse(null));
+            if (transaction != null) {
+                transaction.stage(request);
+            }
+            else if (handle.claimUploads()) {
+                client.commitClaimed(request, false);
+            }
+            else {
+                client.commit(request);
+            }
         }
     }
 
@@ -601,11 +746,27 @@ public class HoglakeMetadata
                 failure.getErrorCode().equals(HoglakeErrorCode.HOGLAKE_CATALOG_NOT_FOUND.toErrorCode());
     }
 
-    private static void checkRetryMode(RetryMode retryMode)
+    private static void checkWriteSchemaSupport(HoglakeDtos.Catalog catalog, List<Type> types)
     {
-        if (retryMode != RetryMode.NO_RETRIES) {
-            throw new TrinoException(NOT_SUPPORTED, "Hoglake writes do not support query retries");
+        if (types.stream().anyMatch(HoglakeTypes::requiresRecursiveWriteSchema) &&
+                (catalog.capabilities() == null || !catalog.capabilities().contains("recursive-write-schema-v1"))) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support recursive-write-schema-v1");
         }
+    }
+
+    private static void checkRetryMode(RetryMode retryMode, HoglakeDtos.Catalog catalog)
+    {
+        if (retryMode == RetryMode.NO_RETRIES) {
+            return;
+        }
+        List<String> capabilities = catalog.capabilities();
+        if (capabilities == null || !capabilities.containsAll(List.of("claimed-uploads-v1", "idempotent-append-v1", "atomic-table-creation-v1"))) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake write retries require claimed-uploads-v1, idempotent-append-v1 and atomic-table-creation-v1");
+        }
+        // Trino retains the planned write handle across TASK and QUERY execution retries.
+        // Each attempt uploads fresh objects; only the engine's winning fragments are
+        // published using that handle's stable operation ID. Losing uploads are fenced
+        // and reclaimed through the server's upload ledger.
     }
 
     // ---- helpers -----------------------------------------------------------
@@ -615,8 +776,11 @@ public class HoglakeMetadata
         return new HoglakeColumnHandle(
                 column.name(),
                 column.fieldId(),
-                HoglakeTypes.toTrinoType(column.type(), column.typeParams()),
-                column.isNullable());
+                HoglakeTypes.toTrinoType(column),
+                column.isNullable(),
+                column.children().stream().map(HoglakeMetadata::toColumnHandle).toList(),
+                column.type(),
+                column.comment());
     }
 
     private static List<ColumnMetadata> columnMetadata(HoglakeDtos.Table table)

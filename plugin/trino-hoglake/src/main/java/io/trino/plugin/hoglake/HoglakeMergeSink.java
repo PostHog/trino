@@ -34,7 +34,7 @@ import static io.trino.spi.type.TinyintType.TINYINT;
 final class HoglakeMergeSink
         implements ConnectorMergeSink
 {
-    // Data file IDs are positive; the sentinel distinguishes append registrations.
+    // Committed IDs are positive, staged IDs start at -2; -1 denotes append registrations.
     static final long APPEND_FRAGMENT = -1;
 
     private final HoglakePageSink inserts;

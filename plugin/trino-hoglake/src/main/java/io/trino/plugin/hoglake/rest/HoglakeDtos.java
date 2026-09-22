@@ -17,6 +17,8 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.trino.plugin.hoglake.HoglakeDeletionVector;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -32,7 +34,35 @@ public final class HoglakeDtos
             @JsonProperty("name") String name,
             @JsonProperty("type") String type,
             @JsonProperty("type_params") Map<String, Object> typeParams,
-            @JsonProperty("nullable") boolean nullable) {}
+            @JsonProperty("nullable") boolean nullable,
+            @JsonInclude(JsonInclude.Include.NON_EMPTY) @JsonProperty("children") List<ColumnDefinition> children,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("comment") String comment)
+    {
+        public ColumnDefinition
+        {
+            children = children == null ? List.of() : List.copyOf(children);
+        }
+
+        public ColumnDefinition(String name, String type, Map<String, Object> typeParams, boolean nullable, List<ColumnDefinition> children)
+        {
+            this(name, type, typeParams, nullable, children, null);
+        }
+
+        public ColumnDefinition withComment(String comment)
+        {
+            return new ColumnDefinition(name, type, typeParams, nullable, children, comment);
+        }
+
+        public boolean hasComments()
+        {
+            return comment != null || children.stream().anyMatch(ColumnDefinition::hasComments);
+        }
+
+        public ColumnDefinition(String name, String type, Map<String, Object> typeParams, boolean nullable)
+        {
+            this(name, type, typeParams, nullable, List.of());
+        }
+    }
 
     public record CreateTable(
             @JsonProperty("name") String name,
@@ -42,7 +72,29 @@ public final class HoglakeDtos
             @JsonProperty("path") String path,
             @JsonProperty("record_count") long recordCount,
             @JsonProperty("file_size_bytes") long fileSizeBytes,
-            @JsonProperty("footer_size") long footerSize) {}
+            @JsonProperty("footer_size") long footerSize,
+            @JsonInclude(JsonInclude.Include.NON_EMPTY) @JsonProperty("partition_values") List<String> partitionValues)
+    {
+        public FileRegistration
+        {
+            partitionValues = partitionValues == null ? List.of() : Collections.unmodifiableList(new ArrayList<>(partitionValues));
+        }
+
+        public FileRegistration(String path, long recordCount, long fileSizeBytes, long footerSize)
+        {
+            this(path, recordCount, fileSizeBytes, footerSize, List.of());
+        }
+    }
+
+    public record PartitionField(
+            @JsonProperty("source_field_id") long sourceFieldId,
+            @JsonProperty("transform") String transform,
+            @JsonProperty("transform_param") Integer transformParam) {}
+
+    public record SortField(
+            @JsonProperty("source_field_id") long sourceFieldId,
+            @JsonProperty("direction") String direction,
+            @JsonProperty("null_order") String nullOrder) {}
 
     public record Append(
             @JsonProperty("namespace") String namespace,
@@ -57,7 +109,18 @@ public final class HoglakeDtos
             @JsonProperty("operation_id") String operationId,
             @JsonProperty("snapshot_id") long snapshotId) {}
 
-    public record DeleteRegistration(@JsonProperty("data_file_id") long dataFileId, @JsonProperty("path") String path, @JsonProperty("delete_count") long deleteCount, @JsonProperty("file_size_bytes") long fileSizeBytes) {}
+    public record DeleteRegistration(
+            @JsonProperty("data_file_id") long dataFileId,
+            @JsonProperty("path") String path,
+            @JsonProperty("delete_count") long deleteCount,
+            @JsonProperty("file_size_bytes") long fileSizeBytes,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("data_file_path") String dataFilePath)
+    {
+        public DeleteRegistration(long dataFileId, String path, long deleteCount, long fileSizeBytes)
+        {
+            this(dataFileId, path, deleteCount, fileSizeBytes, null);
+        }
+    }
 
     public record Deletes(@JsonProperty("namespace") String namespace, @JsonProperty("table") String table, @JsonProperty("expected_table_uuid") String expectedTableUuid, @JsonProperty("files") List<DeleteRegistration> files) {}
 
@@ -106,6 +169,12 @@ public final class HoglakeDtos
             @JsonProperty("snapshot_id") Long snapshotId,
             @JsonProperty("reason") String reason) {}
 
+    public record UploadClaim(
+            @JsonProperty("upload_id") String uploadId,
+            @JsonProperty("owner") String owner,
+            @JsonProperty("path") String path,
+            @JsonProperty("state") String state) {}
+
     public record Namespace(
             @JsonProperty("name") String name,
             @JsonProperty("namespace_id") Long namespaceId) {}
@@ -120,8 +189,25 @@ public final class HoglakeDtos
             @JsonProperty("name") String name,
             @JsonProperty("type") String type,
             @JsonProperty("type_params") Map<String, Object> typeParams,
-            @JsonProperty("nullable") Boolean nullable)
+            @JsonProperty("nullable") Boolean nullable,
+            @JsonProperty("children") List<Column> children,
+            @JsonProperty("comment") String comment)
     {
+        public Column(long fieldId, int ordinal, String name, String type, Map<String, Object> typeParams, Boolean nullable, List<Column> children)
+        {
+            this(fieldId, ordinal, name, type, typeParams, nullable, children, null);
+        }
+
+        public Column(long fieldId, int ordinal, String name, String type, Map<String, Object> typeParams, Boolean nullable)
+        {
+            this(fieldId, ordinal, name, type, typeParams, nullable, List.of());
+        }
+
+        public Column
+        {
+            children = children == null ? List.of() : List.copyOf(children);
+        }
+
         public boolean isNullable()
         {
             return nullable == null || nullable;
@@ -137,8 +223,20 @@ public final class HoglakeDtos
             @JsonProperty("file_count") long fileCount,
             @JsonProperty("file_size_bytes") long fileSizeBytes,
             @JsonProperty("partition_spec") Map<String, Object> partitionSpec,
-            @JsonProperty("sort_spec") Map<String, Object> sortSpec)
+            @JsonProperty("sort_spec") Map<String, Object> sortSpec,
+            @JsonProperty("comment") String comment,
+            @JsonProperty("properties") Map<String, String> properties)
     {
+        public Table
+        {
+            properties = properties == null ? Map.of() : Map.copyOf(properties);
+        }
+
+        public Table(String name, String namespace, String tableUuid, List<Column> columns, long recordCount, long fileCount, long fileSizeBytes, Map<String, Object> partitionSpec, Map<String, Object> sortSpec)
+        {
+            this(name, namespace, tableUuid, columns, recordCount, fileCount, fileSizeBytes, partitionSpec, sortSpec, null, Map.of());
+        }
+
         public Table(String name, String namespace, String tableUuid, List<Column> columns, long recordCount, long fileCount, long fileSizeBytes, Map<String, Object> partitionSpec)
         {
             this(name, namespace, tableUuid, columns, recordCount, fileCount, fileSizeBytes, partitionSpec, null);

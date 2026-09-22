@@ -14,12 +14,16 @@
 package io.trino.plugin.hoglake;
 
 import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.parquet.GroupField;
+import io.trino.parquet.PrimitiveField;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures.FileColumn;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.MemoryContext;
+import io.trino.spi.type.RowType;
+import org.apache.parquet.io.ColumnIOFactory;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
 import org.apache.parquet.schema.Types;
@@ -50,6 +54,36 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class TestHoglakeParquetBinding
 {
     private static final String PATH = "memory:///binding-test.parquet";
+
+    @Test
+    void nestedIdlessFieldsPreferExactName()
+    {
+        var schema = Types.buildMessage()
+                .optionalGroup()
+                .optional(PrimitiveTypeName.INT64).named("A")
+                .optional(PrimitiveTypeName.INT64).named("a")
+                .named("r")
+                .named("test");
+        var child = new HoglakeColumnHandle("a", 2, BIGINT, true);
+        var rowType = RowType.from(List.of(RowType.field("a", BIGINT)));
+        var column = new HoglakeColumnHandle("r", 1, rowType, true, List.of(child), "struct");
+        var physical = new ColumnIOFactory().getColumnIO(schema).getChild("r");
+        var field = (GroupField) HoglakeParquetFields.construct(column, physical).orElseThrow();
+        var leaf = (PrimitiveField) field.getChildren().getFirst().orElseThrow();
+        assertThat(leaf.getDescriptor().getPath()).containsExactly("r", "a");
+    }
+
+    @Test
+    void testNativeUnsignedInt32ReadsLosslessly()
+    {
+        byte[] file = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(
+                Types.optional(PrimitiveTypeName.INT32).as(LogicalTypeAnnotation.intType(32, false)).id(1).named("u"),
+                INTEGER,
+                Arrays.asList(0L, (long) Integer.MAX_VALUE, (long) Integer.MIN_VALUE, -1L))));
+        HoglakeColumnHandle column = new HoglakeColumnHandle("u", 1, BIGINT, true, List.of(), "uint32");
+        assertThat(read(file, List.of(column), 4))
+                .containsExactly(List.of(0L), List.of(2147483647L), List.of(2147483648L), List.of(4294967295L));
+    }
 
     // ---- rename matrix -----------------------------------------------------
 

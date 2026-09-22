@@ -15,6 +15,7 @@ package io.trino.plugin.hoglake;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.predicate.TupleDomain;
@@ -43,7 +44,9 @@ public record HoglakeTableHandle(
         @JsonProperty("snapshotId") long snapshotId,
         @JsonProperty("tableUuid") String tableUuid,
         @JsonProperty("columns") List<HoglakeColumnHandle> columns,
-        @JsonProperty("constraint") TupleDomain<HoglakeColumnHandle> constraint)
+        @JsonProperty("constraint") TupleDomain<HoglakeColumnHandle> constraint,
+        @JsonProperty("stagedFiles") List<HoglakeDtos.ScanFile> stagedFiles,
+        @JsonProperty("stagedDeletes") List<HoglakeDtos.DeleteFile> stagedDeletes)
         implements ConnectorTableHandle
 {
     @JsonCreator
@@ -54,6 +57,13 @@ public record HoglakeTableHandle(
         requireNonNull(tableUuid, "tableUuid is null");
         requireNonNull(constraint, "constraint is null");
         columns = List.copyOf(requireNonNull(columns, "columns is null"));
+        stagedFiles = stagedFiles == null ? List.of() : List.copyOf(stagedFiles);
+        stagedDeletes = stagedDeletes == null ? List.of() : List.copyOf(stagedDeletes);
+    }
+
+    public HoglakeTableHandle(String schemaName, String tableName, long snapshotId, String tableUuid, List<HoglakeColumnHandle> columns, TupleDomain<HoglakeColumnHandle> constraint)
+    {
+        this(schemaName, tableName, snapshotId, tableUuid, columns, constraint, List.of(), List.of());
     }
 
     public HoglakeTableHandle(String schemaName, String tableName, long snapshotId, String tableUuid, List<HoglakeColumnHandle> columns)
@@ -63,7 +73,7 @@ public record HoglakeTableHandle(
 
     public HoglakeTableHandle withConstraint(TupleDomain<HoglakeColumnHandle> constraint)
     {
-        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint);
+        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes);
     }
 
     public SchemaTableName schemaTableName()

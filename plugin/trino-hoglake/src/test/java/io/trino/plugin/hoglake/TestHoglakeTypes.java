@@ -17,13 +17,13 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
-import io.trino.spi.type.SmallintType;
 import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -32,9 +32,11 @@ import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
+import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TimeType.TIME_MICROS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
+import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.UuidType.UUID;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -43,11 +45,52 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TestHoglakeTypes
 {
+    @Test
+    void testPromotionMatrix()
+    {
+        List<Type> types = List.of(
+                INTEGER,
+                BIGINT,
+                REAL,
+                DOUBLE,
+                BOOLEAN,
+                VARCHAR,
+                VARBINARY,
+                DATE,
+                TIME_MICROS,
+                TIMESTAMP_MICROS,
+                TIMESTAMP_TZ_MICROS,
+                UUID,
+                DecimalType.createDecimalType(10, 2),
+                new ArrayType(BIGINT));
+        for (Type source : types) {
+            for (Type target : types) {
+                assertThat(HoglakeTypes.canPromote(source, target))
+                        .as("%s to %s", source, target)
+                        .isEqualTo(Map.of(
+                                TINYINT, List.of(SMALLINT, INTEGER, BIGINT),
+                                SMALLINT, List.of(INTEGER, BIGINT),
+                                INTEGER, List.of(BIGINT),
+                                REAL, List.of(DOUBLE)).getOrDefault(source, List.of()).contains(target));
+            }
+        }
+    }
+
     // ---- hoglake -> Trino --------------------------------------------------
 
     @Test
     void mapsEveryHoglakeTypeToTrino()
     {
+        assertThat(toTrino("int8")).isEqualTo(TINYINT);
+        assertThat(toTrino("int16")).isEqualTo(SMALLINT);
+        assertThat(toTrino("uint8")).isEqualTo(SMALLINT);
+        assertThat(toTrino("uint16")).isEqualTo(INTEGER);
+        assertThat(toTrino("uint32")).isEqualTo(BIGINT);
+        assertThat(toTrino("uint64")).isEqualTo(DecimalType.createDecimalType(20, 0));
+        assertThat(toTrino("json")).isEqualTo(VARCHAR);
+        assertThat(toTrino("timestamp_s")).isEqualTo(TIMESTAMP_MICROS);
+        assertThat(toTrino("timestamp_ms")).isEqualTo(TIMESTAMP_MICROS);
+        assertThat(toTrino("timestamp_ns")).isEqualTo(TimestampType.TIMESTAMP_NANOS);
         assertThat(toTrino("boolean")).isEqualTo(BOOLEAN);
         assertThat(toTrino("int")).isEqualTo(INTEGER);
         assertThat(toTrino("long")).isEqualTo(BIGINT);
@@ -93,9 +136,9 @@ class TestHoglakeTypes
     @Test
     void rejectsUnknownHoglakeType()
     {
-        assertThatThrownBy(() -> toTrino("variant"))
+        assertThatThrownBy(() -> toTrino("unknown_type"))
                 .isInstanceOf(TrinoException.class)
-                .hasMessageContaining("Unsupported hoglake type: variant");
+                .hasMessageContaining("Unsupported hoglake type: unknown_type");
     }
 
     // ---- Trino -> hoglake --------------------------------------------------
@@ -123,11 +166,9 @@ class TestHoglakeTypes
     void rejectsTrinoTypesOutsideTheHoglakeVocabulary()
     {
         for (Type type : new Type[] {
-                SmallintType.SMALLINT,
                 CharType.createCharType(10),
                 TimeType.TIME_MILLIS,
                 TimestampType.TIMESTAMP_MILLIS,
-                new ArrayType(BIGINT),
         }) {
             assertThatThrownBy(() -> HoglakeTypes.toHoglakeType(type))
                     .isInstanceOf(TrinoException.class)

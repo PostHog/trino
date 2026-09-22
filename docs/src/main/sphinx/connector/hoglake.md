@@ -154,7 +154,7 @@ differs from Parquet's binary ordering.
 
 The connector creates one split per file. Catalog file pruning is not available:
 the Hoglake scan API exposes statistics state but no per-file column bounds.
-The connector does not support time-travel SQL or nested types.
+The connector does not support time-travel SQL.
 Only Hoglake's `puffin-dv` deletion-vector format is read; any other format
 fails the query. Equality deletes and any other row-level delete representation
 are not read. SQL `DELETE`, `UPDATE` and `MERGE` write compatible vectors.
@@ -179,10 +179,42 @@ No separate write configuration is required. Files use Snappy-compressed Parquet
 with catalog field IDs, a target size of 128 MiB, and deferred catalog statistics.
 The Hoglake hydrator can populate these statistics later; rows are readable immediately.
 
-The scalar types listed above are writable. Bounded `VARCHAR` becomes unbounded
-`VARCHAR`, and temporal precisions below six become precision six. Higher temporal
-precisions, `CHAR`, `SMALLINT`, `TINYINT`, and nested types are rejected on creation.
-Omitted nullable columns receive nulls. `NOT NULL` constraints are enforced.
+The scalar types listed above, `TINYINT`, `SMALLINT`, `TIMESTAMP(9)`, native
+`VARIANT`, and recursive `ARRAY`, `MAP`, and named `ROW` types are writable.
+New type support requires `recursive-write-schema-v1`: deploy the server to all
+replicas before updating the connector. Bounded `VARCHAR` becomes unbounded;
+`TIME` and zoned timestamps normalize to precision six, and unzoned timestamps
+normalize to six or nine without rounding. Precision above nine for unzoned
+timestamps, precision above six for time/zoned timestamps, and `CHAR` are rejected.
+Nanosecond timestamps must fit signed int64 nanoseconds (approximately 1677–2262);
+out-of-range values fail before file registration.
+
+Every nested catalog node retains its field ID and nullability. Map keys are
+required. Omitted nullable columns receive nulls; required nested values are
+checked only when their parent exists. Reads bind nested row fields by ID after
+external renames, and missing fields produce nulls. A historical row with none
+of its fields remaining is refused because its null-versus-present state cannot
+be recovered by this reader. SQL nested field evolution remains separate from
+whole-column type changes.
+
+Existing Hoglake columns also support these lossless SQL mappings:
+
+| Hoglake type | SQL type | Write constraint |
+| --- | --- | --- |
+| `uint8` | `SMALLINT` | 0 through 255 |
+| `uint16` | `INTEGER` | 0 through 65535 |
+| `uint32` | `BIGINT` | 0 through 4294967295 |
+| `uint64` | `DECIMAL(20,0)` | 0 through 18446744073709551615 |
+| `json` | `VARCHAR` | Valid JSON text, preserved without reserialization |
+| `timestamp_s` | `TIMESTAMP(6)` | Whole seconds |
+| `timestamp_ms` | `TIMESTAMP(6)` | Whole milliseconds |
+
+SQL creation uses the canonical signed/string/microsecond mappings; it does not
+infer unsigned or JSON catalog types from values. Unsigned 64-bit data requires
+block conversion between decimal values and physical unsigned INT64, including
+inside containers; this adds CPU and allocation cost. Unsigned predicates remain
+residuals. Statistics remain field-ID keyed and are populated by the existing
+server hydrator. Native VARIANT writes are unshredded.
 
 An insert registers all its files in one catalog commit. Its table UUID and read
 snapshot guard against concurrent table replacement or schema changes. Concurrent
@@ -202,12 +234,8 @@ renames or drops. The server retains terminal receipts and expires unpublished
 operations after 24 hours, so longer-running creations must be retried as new queries.
 There is no fallback to the old staging-table protocol on older servers.
 
-Writes are limited to single-statement transactions. INSERT and UPDATE require
-unpartitioned tables; UPDATE also rejects sorted tables. MERGE actions that insert
-rows reject partitioned and sorted tables. DELETE and delete-only MERGE support
-both layouts. Query/task retries, comments
-and custom table properties are not supported. INSERT's existing writer treats
-sort specifications as advisory and does not apply them.
+INSERT, UPDATE and MERGE
+support partitioned and sorted tables. DELETE and delete-only MERGE support both layouts. TASK and QUERY execution retries require `claimed-uploads-v1`, `idempotent-append-v1`, and `atomic-table-creation-v1`. The writer applies the live sort specification to each new file.
 
 Servers advertising `idempotent-append-v1` support recovery of one INSERT
 operation. The connector creates one operation ID in `beginInsert` and sends it as
@@ -314,7 +342,7 @@ A namespace containing tables or views cannot be dropped. Deletion sends the
 namespace identity returned by the server, so concurrent name reuse conflicts.
 
 ADD COLUMN appends a nullable column using the existing writable scalar types.
-Column positions, defaults, comments, properties, and nested-field changes are
+Column positions, defaults, column properties, and nested-field changes are
 unsupported. Rename preserves the field ID. Drop retires the field ID; a later
 column with the same name receives a new ID. Existing Parquet files remain
 readable by field ID, with nulls for columns absent from the file. ADD and RENAME
@@ -331,12 +359,26 @@ against the evolved schema. A prepared replacement also conflicts if column
 alteration commits first; if replacement commits first, the old UUID rejects the
 alteration. These operations are serialized by the existing catalog commit lock.
 
-SQL column type changes (`ALTER COLUMN ... SET DATA TYPE`) are explicitly
-unsupported, including widening and same-type requests. The server's existing
-REST promotion policy remains unchanged: signed integer widening through `long`,
-unsigned widening through `uint32`, and `float` to `double`, preserving field IDs.
-This slice adds no type promotions or writable types. Reading externally promoted
-files remains subject to the connector's existing type and Parquet reader support.
+SQL column type changes (`ALTER COLUMN ... SET DATA TYPE`) use the same
+UUID, snapshot, and capability guards. The supported compatibility matrix is:
+
+| Existing SQL type | Target SQL type |
+| --- | --- |
+| `TINYINT` | `SMALLINT`, `INTEGER`, `BIGINT` |
+| `SMALLINT` | `INTEGER`, `BIGINT` |
+| `INTEGER` | `BIGINT` |
+| `REAL` | `DOUBLE` |
+
+All other changes, including narrowing, decimal precision or scale changes,
+temporal precision changes, same-type requests, and container changes, are
+rejected. Promotions preserve field IDs and nullability. Historical Parquet
+files retain their physical types and are widened by the reader; new files use
+the promoted type. Predicates on widened historical physical columns remain
+residuals to avoid interpreting Bloom filters with the wrong physical width;
+these files can require more scanning. The server re-encodes statistics in the
+same transaction.
+Unsigned catalog types are not promoted through their signed SQL aliases.
+Nested field evolution is a separate operation and is not enabled by this matrix.
 
 Schema mutations have no durable receipt and are sent once. A lost response may
 leave the outcome unknown; inspect the catalog before issuing another statement.
@@ -369,7 +411,7 @@ groups guard insert-only and zero-row statements. An older replica cannot silent
 accept this contract. Any intervening target-table change conflicts, including
 INSERT, DELETE, compaction, schema changes, truncate, drop/name reuse and replacement.
 Unrelated tables may change. Rerun conflicting SQL from a fresh snapshot.
-Writing replacement rows to partitioned or sorted tables and additional writable types remain unsupported.
+Replacement rows honor the live partition and sort specifications.
 
 Publication recovery uses the same bounded receipt lookup and identical-request replay
 as INSERT, with a full-payload mixed-mutation server contract. A missing receipt is not proof that
@@ -377,12 +419,155 @@ publication failed. After submission, the connector retains appended files and u
 recovery or cancellation leaves the outcome unknown; the error reports the operation ID.
 Before submission, failures leave the table unchanged. Worker abort cleans files
 until fragment handoff; coordinator failure cleans newly uploaded vectors. Files
-already handed off can remain orphaned. There is no orphan cleanup mechanism in
-this connector.
+already handed off are preserved until publication or explicit upload reclamation
+(see upload cleanup below). Legacy servers do not track these orphaned files.
 
 Mutation sinks limit compressed position sets to 64 MiB per worker sink. The coordinator
 separately limits aggregate fragment payloads and vector-construction working memory
 to 64 MiB each. Retained fragments, decoded vectors, and encoding workspace are also
 charged to query memory; either limit can reject a statement before publication.
 Final vector construction runs on the coordinator;
-query/task retries and multi-statement write transactions remain unsupported.
+explicit DML transactions stage the resulting vectors until commit.
+
+### Partitioned writes
+
+Use `WITH (partitioning = ARRAY['region', 'bucket(id, 16)', 'day(created_at)'])`
+on CREATE TABLE or CTAS. Identity may also be written `identity(region)`.
+Supported transforms are identity, bucket, year, month, day and hour. Sources may
+be scalar columns or struct leaves using dotted paths; arrays, maps and VARIANT
+cannot be sources. Truncate and hour on DATE are refused because the server's
+cross-client transform contract does not define them. Bucket accepts the server's
+explicit allowlist; unsigned 32/64-bit, alternate timestamp precisions, booleans,
+floating-point and JSON sources are not bucketable.
+
+Partitioned CREATE/CTAS and CREATE OR REPLACE require server capability
+`atomic-partitioned-table-creation-v1`. Preparation uses a dedicated endpoint so an
+old replica cannot silently ignore the spec. Publish installs the spec and all
+initial files in one snapshot. Existing partitioned tables need no new server
+contract for INSERT, UPDATE or MERGE. Updated rows route to their new partitions
+and publish atomically with deletion of their old positions. Concurrent target
+DDL conflicts with the write's pinned snapshot.
+
+Partition strings match the Python writer: null remains JSON null, temporal
+transforms floor before the epoch, timestamp identity retains six fractional
+digits when nonzero, and nanosecond timestamp identity uses epoch nanoseconds.
+Identity DATE and microsecond timestamps require years 1–9999 for cross-client
+string compatibility. Timestamps with time zone use UTC. Partition expressions
+use simple, case-sensitive column paths; quoted or punctuation-bearing names are
+not supported in these expressions.
+
+The writer groups each incoming page by partition and keeps one file open. This
+bounds writer memory independently of partition cardinality. Interleaved
+partitions can create smaller files; grouping input by partition keys improves
+file sizes. Partitioning does not add scan pruning in this change.
+
+### Sorted writes
+
+Use `WITH (sorted_by = ARRAY['event_time DESC NULLS LAST', 'id ASC NULLS FIRST'])`
+on CREATE TABLE or CTAS. The default is `ASC NULLS LAST`. Scalar columns and
+struct-leaf paths use the same simple, case-sensitive names as partitioning.
+Sort fields must be distinct, orderable scalar sources; repeated children and
+VARIANT are refused. Combine `sorted_by` and `partitioning` on the same table.
+
+Sorted creation requires server capability `atomic-sorted-table-creation-v1` and
+uses a dedicated preparation endpoint that older replicas refuse. Sort and
+partition specs publish atomically with initial data, including replacement.
+INSERT, UPDATE and MERGE apply existing native sort specs without a new server
+capability. Comparison follows Hoglake ordering on logical values, including
+unsigned values exposed as wider signed or decimal types. Floating-point sort keys
+order negative zero before positive zero and NaN after positive infinity, matching
+Hoglake compaction; original floating-point values remain unchanged.
+
+Sorting applies within each output file, not across files or existing data.
+The writer buffers one partition at a time, flushing at an estimated 32 MiB
+including auxiliary keys and sort-position overhead (plus an incoming page).
+Each sorted batch closes its files so later batches cannot break file ordering.
+This costs CPU and memory and may produce smaller files than unsorted writes.
+
+### Comments and custom properties
+
+Table and column comments are persisted with snapshot history, including CREATE,
+CTAS/replacement, `COMMENT ON`, and `ADD COLUMN ... COMMENT`. Custom annotations
+use `WITH (extra_properties = MAP(ARRAY['owner.team'], ARRAY['analytics']))`.
+`ALTER TABLE t SET PROPERTIES extra_properties = ...` replaces that map;
+`extra_properties = DEFAULT` clears it. Keys are lowercase ASCII, at most 128
+characters; `hoglake.`/`trino.` prefixes and storage-setting names are reserved.
+At most 100 entries, values at most 4096 UTF-16 code units; comments at most 16384.
+NUL is rejected. These annotations do not configure storage. Requires the server's
+`versioned-table-metadata-v1` capability and additive V11 migration. Upgrade all server replicas before metadata
+use: old DDL writers cannot preserve new versioned metadata. Old replicas
+refuse metadata operations, and existing metadata-free operations remain compatible.
+
+
+### Abandoned upload cleanup
+
+Servers advertising `claimed-uploads-v1` provide durable ownership before each
+Parquet or deletion-vector upload. Trino renews 24-hour leases during writes and
+settles ownership atomically with publication. Unknown commit responses never
+permit worker deletion. An operator can explicitly schedule expired claims with
+`POST /v1/catalogs/{catalog}/uploads/schedule-expired`; the existing cleanup drain
+checks retained references before deletion. No new background job is enabled.
+Unclaimed older or foreign files are outside this cleanup mechanism. Permanent
+fences prevent late commits and allow later sweeps to reclaim late-finishing PUTs.
+This costs a claim request and durable row per file. Upgrade all server replicas
+and apply V12 before use; old servers continue legacy writes without claim cleanup.
+Writers idle past 24 hours can be fenced by an explicit reclamation and must retry
+with new paths.
+
+### Execution retries
+
+With the required capabilities above, both `retry_policy = 'TASK'` and
+`retry_policy = 'QUERY'` support CTAS, replacement, INSERT, UPDATE, DELETE and
+MERGE. Trino retains the planned statement handle and operation ID while retrying
+execution. Each worker attempt writes fresh claimed object paths, and Trino
+selects the successful fragments. Only those fragments enter the atomic commit;
+losing attempts remain invisible and can be reclaimed through the upload ledger.
+Commit response recovery continues to use the same durable receipt.
+
+Retries retain the original snapshot and table identity. They do not rebase a
+conflicting mutation or revive an expired snapshot. Trino's retry policy still
+determines which failures are recoverable: a coordinator process loss is not a
+QUERY execution retry. Resubmitting SQL creates a new operation and can apply the
+write again. Inspect the durable receipt when publication has an unknown outcome.
+All server replicas must support claimed uploads before enabling write retries;
+there is no fallback to unclaimed publication.
+
+### Multi-statement DML transactions
+
+Servers advertising `atomic-dml-transactions-v1` and `claimed-uploads-v1` support
+explicit transactions containing INSERT, UPDATE, DELETE and MERGE on existing
+tables. The first table lookup pins one catalog snapshot for the transaction.
+Subsequent statements read that snapshot plus their own staged inserts and
+vectors, including updates or deletes of rows inserted earlier in the transaction.
+Other sessions see none of those changes until commit. Commit publishes all
+written tables in one catalog snapshot; rollback publishes nothing.
+
+The connector provides repeatable reads with snapshot isolation. Concurrent data,
+schema, compaction or identity changes to any written table reject the entire
+commit. Read-only tables are not validated at commit, so write skew is possible;
+SERIALIZABLE is rejected. READ COMMITTED and READ UNCOMMITTED receive the stronger
+repeatable-read behavior. Metadata listing surfaces still list the current head.
+Trino enforces the single write-catalog boundary; there is no distributed commit
+across catalogs. CREATE/CTAS/replacement, ALTER, COMMENT, DROP, RENAME, TRUNCATE and
+schema DDL require autocommit and are rejected inside explicit transactions before
+catalog mutation.
+
+Staging metadata is held on the coordinator, bounded to 64 MiB and 10000 staged
+uploads per transaction (including superseded vectors). Files remain in object
+storage under leased upload claims. Staged files have private negative IDs only
+inside the connector; permanent positive file and row IDs are allocated at commit.
+The transaction endpoint resolves vectors for staged files by the path of exactly
+one same-table append in that commit. No physical rewrite is required to delete
+newly inserted rows, and ordinary numeric file references retain their snapshot
+checks. All other consumers read the usual committed files and vectors.
+
+Commit uses one stable operation ID and durable receipt for the complete payload.
+A lost response is recovered with that receipt; an unresolved outcome reports the
+operation ID and preserves every object. A coordinator loss before publication
+leaves no partial catalog changes, but its in-memory transaction cannot be resumed.
+A loss during publication requires checking the receipt; SQL resubmission is a
+new transaction. Rollback abandons known staged objects only before publication.
+Losing attempts and superseded vectors remain eligible for explicit upload cleanup.
+No permanent snapshot pin is created: retention can expire the read snapshot and
+cause the transaction to fail. Long idle transactions are also subject to upload
+lease expiry. Upgrade every server replica before enabling these writes.

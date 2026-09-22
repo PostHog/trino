@@ -59,9 +59,13 @@ public class HoglakePageSource
     sealed interface ColumnAdaptation
             permits NullColumn,
                     RowIdColumn,
-                    SourceColumn {}
+                    SourceColumn,
+                    UnsignedColumn {}
 
     record SourceColumn(int sourceChannel)
+            implements ColumnAdaptation {}
+
+    record UnsignedColumn(int sourceChannel, HoglakeColumnHandle column)
             implements ColumnAdaptation {}
 
     record RowIdColumn(long fileId)
@@ -157,6 +161,7 @@ public class HoglakePageSource
         for (int channel = 0; channel < columns.size(); channel++) {
             blocks[channel] = switch (columns.get(channel)) {
                 case SourceColumn(int sourceChannel) -> page.getBlock(sourceChannel).getPositions(retained, 0, survivors);
+                case UnsignedColumn(int sourceChannel, HoglakeColumnHandle column) -> HoglakeUnsigned.convert(column, page.getBlock(sourceChannel).getPositions(retained, 0, survivors), false);
                 case NullColumn _ -> RunLengthEncodedBlock.create(nullBlocks.get(channel), survivors);
                 case RowIdColumn(long fileId) -> rowIds(fileId, page).getPositions(retained, 0, survivors);
             };
@@ -170,6 +175,7 @@ public class HoglakePageSource
         for (int channel = 0; channel < columns.size(); channel++) {
             blocks[channel] = switch (columns.get(channel)) {
                 case SourceColumn(int sourceChannel) -> page.getBlock(sourceChannel);
+                case UnsignedColumn(int sourceChannel, HoglakeColumnHandle column) -> HoglakeUnsigned.convert(column, page.getBlock(sourceChannel), false);
                 case NullColumn _ -> RunLengthEncodedBlock.create(nullBlocks.get(channel), page.getPositionCount());
                 case RowIdColumn(long fileId) -> rowIds(fileId, page);
             };

@@ -49,6 +49,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.testing.TestingSession.testSessionBuilder;
@@ -75,12 +76,14 @@ final class TestHoglakeWrites
     private volatile int commitStatus = 200;
     private volatile int commits;
     private volatile boolean atomicCreation = true;
+    private volatile boolean recursiveWriteSchema = true;
     private volatile boolean idempotentAppend;
     private volatile boolean idempotentMutation;
     private final Map<String, Long> deleteReceipts = new ConcurrentHashMap<>();
     private volatile boolean corruptCommitResponse;
     private volatile boolean lifecycleSupport = true;
     private volatile boolean schemaCreationRace;
+    private volatile boolean schemaEvolution;
     private int namespaceCreates;
     private volatile boolean replacementSupport = true;
     private final Map<String, HoglakeDtos.ReplacementTarget> replacementTargets = new ConcurrentHashMap<>();
@@ -147,13 +150,16 @@ final class TestHoglakeWrites
                 if (atomicCreation) {
                     capabilities.add("atomic-table-creation-v1");
                 }
+                if (recursiveWriteSchema) {
+                    capabilities.add("recursive-write-schema-v1");
+                }
                 if (replacementSupport) {
                     capabilities.add("atomic-table-replacement-v1");
                 }
                 if (lifecycleSupport) {
                     capabilities.add("guarded-table-lifecycle-v1");
                 }
-                if (schemaCreationRace) {
+                if (schemaCreationRace || schemaEvolution) {
                     capabilities.add("guarded-schema-evolution-v1");
                 }
                 if (idempotentMutation) {
@@ -200,7 +206,8 @@ final class TestHoglakeWrites
                 }
                 if (!exchange.getRequestMethod().equals("GET")) {
                     lifecycleRequests++;
-                    if (!("expected_table_uuid=" + tables.get(name).tableUuid()).equals(exchange.getRequestURI().getQuery())) {
+                    if (!("expected_table_uuid=" + tables.get(name).tableUuid()).equals(exchange.getRequestURI().getQuery()) &&
+                            !("expected_table_uuid=" + tables.get(name).tableUuid() + "&read_snapshot=" + snapshot).equals(exchange.getRequestURI().getQuery())) {
                         respond(exchange, 409, Map.of("error", "incarnation_changed"));
                         return;
                     }
@@ -213,7 +220,21 @@ final class TestHoglakeWrites
                     respond(exchange, corruptLifecycleResponse ? 503 : 200, Map.of("snapshot_id", snapshot));
                 }
                 else if (path.endsWith("/alter")) {
-                    String newName = mapper.readTree(exchange.getRequestBody()).path("ops").get(0).path("new_name").asText();
+                    var operation = mapper.readTree(exchange.getRequestBody()).path("ops").get(0);
+                    if (operation.path("op").asText().equals("promote_column")) {
+                        HoglakeDtos.Table table = tables.get(name);
+                        List<HoglakeDtos.Column> columns = table.columns().stream()
+                                .map(column -> column.name().equals(operation.path("name").asText())
+                                        ? new HoglakeDtos.Column(column.fieldId(), column.ordinal(), column.name(), operation.path("to").asText(), column.typeParams(), column.nullable())
+                                        : column)
+                                .toList();
+                        HoglakeDtos.Table promoted = new HoglakeDtos.Table(name, table.namespace(), table.tableUuid(), columns, table.recordCount(), table.fileCount(), table.fileSizeBytes());
+                        tables.put(name, promoted);
+                        snapshot++;
+                        respond(exchange, 200, promoted);
+                        return;
+                    }
+                    String newName = operation.path("new_name").asText();
                     if (tables.containsKey(newName)) {
                         respond(exchange, 409, Map.of("error", "already_exists"));
                         return;
@@ -321,6 +342,16 @@ final class TestHoglakeWrites
         }
     }
 
+    private static HoglakeDtos.Column materialize(HoglakeDtos.ColumnDefinition definition, int ordinal, AtomicLong nextId)
+    {
+        long id = nextId.getAndIncrement();
+        List<HoglakeDtos.Column> children = new ArrayList<>();
+        for (var child : definition.children()) {
+            children.add(materialize(child, children.size(), nextId));
+        }
+        return new HoglakeDtos.Column(id, ordinal, definition.name(), definition.type(), definition.typeParams(), definition.nullable(), children);
+    }
+
     private void handleCreation(HttpExchange exchange, String suffix)
             throws IOException
     {
@@ -332,9 +363,10 @@ final class TestHoglakeWrites
                 replacementTargets.put(operation, mapper.treeToValue(request.get("replacement"), HoglakeDtos.ReplacementTarget.class));
             }
             List<HoglakeDtos.Column> columns = new ArrayList<>();
+            AtomicLong nextFieldId = new AtomicLong(1);
             for (var column : request.path("columns")) {
                 HoglakeDtos.ColumnDefinition definition = mapper.treeToValue(column, HoglakeDtos.ColumnDefinition.class);
-                columns.add(new HoglakeDtos.Column(columns.size() + 1, columns.size(), definition.name(), definition.type(), definition.typeParams(), definition.nullable()));
+                columns.add(materialize(definition, columns.size(), nextFieldId));
             }
             creation = new HoglakeDtos.TableCreation(operation, UUID.randomUUID().toString(), "test", request.path("name").asText(), columns, "memory:///warehouse/" + operation + "/", "prepared", null, null);
         }
@@ -410,6 +442,17 @@ final class TestHoglakeWrites
     }
 
     @Test
+    void testMetadataRequiresServerCapability()
+    {
+        assertThatThrownBy(() -> runner.execute("CREATE TABLE described (id bigint) COMMENT 'metadata'"))
+                .hasMessageContaining("versioned-table-metadata-v1");
+        assertThatThrownBy(() -> runner.execute("CREATE TABLE described (id bigint COMMENT 'metadata')"))
+                .hasMessageContaining("versioned-table-metadata-v1");
+        assertThatThrownBy(() -> runner.execute("CREATE TABLE described (id bigint) WITH (extra_properties = MAP(ARRAY['owner'], ARRAY['data']))"))
+                .hasMessageContaining("versioned-table-metadata-v1");
+    }
+
+    @Test
     void testConcurrentSchemaCreation()
     {
         schemaCreationRace = true;
@@ -427,24 +470,71 @@ final class TestHoglakeWrites
     }
 
     @Test
+    void testRecursiveWrites()
+    {
+        runner.execute("CREATE TABLE nested_values (a array(bigint), m map(varchar, array(integer)), r row(x tinyint, y smallint), ts timestamp(9))");
+        runner.execute("INSERT INTO nested_values VALUES (ARRAY[1, NULL, 3], MAP(ARRAY['k'], ARRAY[ARRAY[4, NULL]]), ROW(TINYINT '-128', SMALLINT '32767'), TIMESTAMP '1969-12-31 23:59:59.999999999'), (ARRAY[], MAP(), NULL, NULL), (NULL, NULL, ROW(NULL, NULL), NULL)");
+        assertThat(runner.execute("SELECT a, m, r, ts FROM nested_values").getMaterializedRows())
+                .containsExactlyInAnyOrderElementsOf(runner.execute("VALUES (ARRAY[BIGINT '1', NULL, BIGINT '3'], MAP(ARRAY['k'], ARRAY[ARRAY[4, NULL]]), CAST(ROW(TINYINT '-128', SMALLINT '32767') AS row(x tinyint, y smallint)), TIMESTAMP '1969-12-31 23:59:59.999999999'), (CAST(ARRAY[] AS array(bigint)), CAST(MAP() AS map(varchar,array(integer))), NULL, NULL), (NULL, NULL, CAST(ROW(NULL, NULL) AS row(x tinyint, y smallint)), NULL)").getMaterializedRows());
+        assertThatThrownBy(() -> runner.execute("INSERT INTO nested_values (ts) VALUES TIMESTAMP '3000-01-01 00:00:00.000000001'"))
+                .hasMessageContaining("cannot be represented losslessly");
+        runner.execute("CREATE TABLE variants AS SELECT CAST(42 AS variant) AS v");
+        assertThat(runner.execute("SELECT CAST(v AS integer) FROM variants").getOnlyValue()).isEqualTo(42);
+        runner.execute("CREATE TABLE nested_temporal AS SELECT ARRAY[TIMESTAMP '2020-01-01 01:02:03.123'] AS a");
+        assertThat(runner.execute("SELECT CAST(a[1] AS varchar) FROM nested_temporal").getOnlyValue()).isEqualTo("2020-01-01 01:02:03.123000");
+        recursiveWriteSchema = false;
+        try {
+            assertThatThrownBy(() -> runner.execute("CREATE TABLE old_server_nested (a array(bigint))"))
+                    .hasMessageContaining("recursive-write-schema-v1");
+        }
+        finally {
+            recursiveWriteSchema = true;
+        }
+    }
+
+    @Test
+    void testTypePromotionReadsHistoricalFiles()
+    {
+        schemaEvolution = true;
+        try {
+            runner.execute("CREATE TABLE promotions AS SELECT INTEGER '-2147483648' AS i, REAL '1.5' AS r");
+            String uuid = tables.get("promotions").tableUuid();
+            List<Long> fieldIds = tables.get("promotions").columns().stream().map(HoglakeDtos.Column::fieldId).toList();
+            runner.execute("ALTER TABLE promotions ALTER COLUMN i SET DATA TYPE bigint");
+            runner.execute("ALTER TABLE promotions ALTER COLUMN r SET DATA TYPE double");
+            runner.execute("INSERT INTO promotions VALUES (BIGINT '2147483648', DOUBLE '2.25')");
+            assertThat(runner.execute("SELECT i, r FROM promotions ORDER BY i").getMaterializedRows())
+                    .containsExactlyElementsOf(runner.execute("VALUES (BIGINT '-2147483648', DOUBLE '1.5'), (BIGINT '2147483648', DOUBLE '2.25')").getMaterializedRows());
+            assertThat(tables.get("promotions").tableUuid()).isEqualTo(uuid);
+            assertThat(tables.get("promotions").columns().stream().map(HoglakeDtos.Column::fieldId).toList()).isEqualTo(fieldIds);
+            assertThatThrownBy(() -> runner.execute("ALTER TABLE promotions ALTER COLUMN i SET DATA TYPE integer"))
+                    .hasMessageContaining("Unsupported Hoglake column type change");
+        }
+        finally {
+            schemaEvolution = false;
+        }
+    }
+
+    @Test
     void testSchemaEvolutionRefusals()
     {
-        runner.execute("CREATE TABLE evolution_refusals (id bigint, spare bigint)");
+        runner.execute("CREATE TABLE evolution_refusals (id bigint, spare bigint, promotable integer)");
         assertThatThrownBy(() -> new HoglakeMetadata(client).dropSchema(ConnectorTestFixtures.session(), "test", false))
                 .hasMessageContaining("guarded-schema-evolution-v1");
         for (String statement : List.of(
                 "CREATE SCHEMA new_schema",
                 "ALTER TABLE evolution_refusals ADD COLUMN extra bigint",
                 "ALTER TABLE evolution_refusals RENAME COLUMN spare TO renamed",
-                "ALTER TABLE evolution_refusals DROP COLUMN spare")) {
+                "ALTER TABLE evolution_refusals DROP COLUMN spare",
+                "ALTER TABLE evolution_refusals ALTER COLUMN promotable SET DATA TYPE bigint")) {
             assertThatThrownBy(() -> runner.execute(statement)).hasMessageContaining("guarded-schema-evolution-v1");
         }
         assertThatThrownBy(() -> runner.execute("ALTER TABLE evolution_refusals ALTER COLUMN id SET DATA TYPE double"))
-                .hasMessageContaining("SQL column type changes are not supported");
+                .hasMessageContaining("Unsupported Hoglake column type change");
         assertThatThrownBy(() -> runner.execute("ALTER TABLE evolution_refusals ADD COLUMN required bigint NOT NULL"))
                 .hasMessageContaining("nullable columns at the end");
         assertThatThrownBy(() -> runner.execute("ALTER TABLE evolution_refusals ADD COLUMN nested array(bigint)"))
-                .hasMessageContaining("no hoglake equivalent");
+                .hasMessageContaining("guarded-schema-evolution-v1");
         assertThatThrownBy(() -> runner.execute("ALTER TABLE evolution_refusals ADD COLUMN first_column bigint FIRST"))
                 .hasMessageContaining("nullable columns at the end");
     }
@@ -645,14 +735,14 @@ final class TestHoglakeWrites
                 runner.execute("CREATE TABLE " + name + " (id bigint)");
                 runner.execute("INSERT INTO " + name + " VALUES 1, 2");
                 HoglakeDtos.Table table = tables.get(name);
-                Map<String, Object> spec = Map.of("fields", List.of(Map.of("source_field_id", 1)));
+                Map<String, Object> spec = Map.of("fields", List.of(sorted ? Map.of("source_field_id", 1, "direction", "invalid", "null_order", "nulls_last") : Map.of("source_field_id", 1, "transform", "truncate")));
                 tables.put(name, new HoglakeDtos.Table(table.name(), table.namespace(), table.tableUuid(), table.columns(), 0, 0, 0, sorted ? null : spec, sorted ? spec : null));
                 int before = commits;
                 assertThatThrownBy(() -> runner.execute("UPDATE " + name + " SET id=1"))
-                        .hasMessageContaining(sorted ? "Writing sorted" : "Writing partitioned");
+                        .hasMessageContaining(sorted ? "Invalid Hoglake sort direction" : "Unsupported partition transform");
                 assertThat(commits).isEqualTo(before);
                 assertThatThrownBy(() -> runner.execute("MERGE INTO " + name + " t USING (VALUES 3) s(id) ON t.id=s.id WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)"))
-                        .hasMessageContaining(sorted ? "Writing sorted" : "Writing partitioned");
+                        .hasMessageContaining(sorted ? "Invalid Hoglake sort direction" : "Unsupported partition transform");
                 assertThat(commits).isEqualTo(before);
                 assertThat(runner.execute("DELETE FROM " + name + " WHERE id=1").getUpdateCount()).hasValue(1);
                 assertThat(runner.execute("SELECT id FROM " + name).getOnlyValue()).isEqualTo(2L);
@@ -733,7 +823,7 @@ final class TestHoglakeWrites
     @Test
     void testWriteRejection()
     {
-        assertThatThrownBy(() -> runner.execute("CREATE TABLE unsupported (a array(bigint))")).hasMessageContaining("no hoglake equivalent");
+        assertThatThrownBy(() -> runner.execute("CREATE TABLE unsupported (a time(9))")).hasMessageContaining("no hoglake equivalent");
         assertThat(tables).doesNotContainKey("unsupported");
         runner.execute("CREATE TABLE required (id bigint NOT NULL, label varchar)");
         assertThatThrownBy(() -> runner.execute("INSERT INTO required VALUES (NULL, 'x')")).hasMessageContaining("NULL");
@@ -849,6 +939,17 @@ final class TestHoglakeWrites
     }
 
     @Test
+    void testPartitionedCreationRequiresServerCapability()
+    {
+        assertThatThrownBy(() -> runner.execute("CREATE TABLE partition_unsupported (id bigint) WITH (partitioning = ARRAY['id'])"))
+                .hasMessageContaining("atomic-partitioned-table-creation-v1");
+        assertThat(tables).doesNotContainKey("partition_unsupported");
+        assertThatThrownBy(() -> runner.execute("CREATE TABLE sort_unsupported (id bigint) WITH (sorted_by = ARRAY['id'])"))
+                .hasMessageContaining("atomic-sorted-table-creation-v1");
+        assertThat(tables).doesNotContainKey("sort_unsupported");
+    }
+
+    @Test
     void testUnsupportedWriteModes()
     {
         runner.execute("CREATE TABLE partitioned (id bigint)");
@@ -862,11 +963,12 @@ final class TestHoglakeWrites
                 0,
                 0,
                 Map.of("spec_id", 1, "fields", List.of(Map.of("source_field_id", 1, "transform", "identity")))));
-        assertThatThrownBy(() -> runner.execute("INSERT INTO partitioned VALUES 1")).hasMessageContaining("partitioned Hoglake tables");
+        assertThat(runner.execute("INSERT INTO partitioned VALUES 1, 2, 1, NULL").getUpdateCount()).hasValue(4);
+        assertQuery("SELECT id FROM partitioned", "VALUES BIGINT '1', BIGINT '2', BIGINT '1', CAST(NULL AS BIGINT)");
         var session = ConnectorTestFixtures.session();
         HoglakeMetadata metadata = new HoglakeMetadata(client);
         var table = metadata.getTableHandle(session, new SchemaTableName("test", "partitioned"), Optional.empty(), Optional.empty());
-        assertThatThrownBy(() -> metadata.beginInsert(session, table, List.of(), RetryMode.RETRIES_ENABLED)).hasMessageContaining("do not support query retries");
+        assertThatThrownBy(() -> metadata.beginInsert(session, table, List.of(), RetryMode.RETRIES_ENABLED)).hasMessageContaining("write retries require claimed-uploads-v1");
     }
 
     private void assertQuery(String actual, String expected)

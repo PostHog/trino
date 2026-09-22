@@ -14,6 +14,8 @@
 package io.trino.plugin.hoglake;
 
 import io.airlift.bootstrap.LifeCycleManager;
+import io.trino.spi.StandardErrorCode;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorCapabilities;
 import io.trino.spi.connector.ConnectorMetadata;
@@ -22,9 +24,16 @@ import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.session.PropertyMetadata;
 import io.trino.spi.transaction.IsolationLevel;
+import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.MapType;
+import io.trino.spi.type.TypeOperators;
+import io.trino.spi.type.VarcharType;
 
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -64,8 +73,9 @@ public class HoglakeConnector
             boolean readOnly,
             boolean autoCommit)
     {
+        IsolationLevel.checkConnectorSupports(IsolationLevel.REPEATABLE_READ, isolationLevel);
         HoglakeTransactionHandle handle = new HoglakeTransactionHandle(UUID.randomUUID());
-        transactions.put(handle, metadata.newTransaction());
+        transactions.put(handle, metadata.newTransaction(autoCommit));
         return handle;
     }
 
@@ -78,7 +88,12 @@ public class HoglakeConnector
     @Override
     public void commit(ConnectorTransactionHandle handle)
     {
-        transactions.remove(handle);
+        // Trino marks the catalog transaction finished before invoking commit,
+        // so an exception will not be followed by connector rollback.
+        HoglakeMetadata transaction = transactions.remove(handle);
+        if (transaction != null) {
+            transaction.commit();
+        }
     }
 
     @Override
@@ -109,9 +124,47 @@ public class HoglakeConnector
     }
 
     @Override
+    public List<PropertyMetadata<?>> getTableProperties()
+    {
+        return List.of(new PropertyMetadata<>(
+                        "partitioning",
+                        "Partition transforms",
+                        new ArrayType(VarcharType.VARCHAR),
+                        List.class,
+                        List.of(),
+                        false,
+                        value -> (List<?>) value,
+                        value -> value),
+                new PropertyMetadata<>(
+                        "sorted_by",
+                        "Per-file sort fields",
+                        new ArrayType(VarcharType.VARCHAR),
+                        List.class,
+                        List.of(),
+                        false,
+                        value -> (List<?>) value,
+                        value -> value),
+                new PropertyMetadata<>(
+                        "extra_properties",
+                        "Custom metadata (replaced as a whole by SET PROPERTIES)",
+                        new MapType(VarcharType.VARCHAR, VarcharType.VARCHAR, new TypeOperators()),
+                        Map.class,
+                        Map.of(),
+                        false,
+                        value -> {
+                            Map<?, ?> properties = (Map<?, ?>) value;
+                            if (properties.values().stream().anyMatch(Objects::isNull)) {
+                                throw new TrinoException(StandardErrorCode.INVALID_TABLE_PROPERTY, "Custom property values cannot be null");
+                            }
+                            return Map.copyOf(properties);
+                        },
+                        value -> value));
+    }
+
+    @Override
     public boolean isSingleStatementWritesOnly()
     {
-        return true;
+        return false;
     }
 
     @Override
