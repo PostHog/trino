@@ -13,20 +13,25 @@
  */
 package io.trino.plugin.hoglake;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import io.airlift.slice.Slice;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.parquet.writer.ParquetWriter;
 import io.trino.parquet.writer.ParquetWriterOptions;
+import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.Page;
+import io.trino.spi.PageSorter;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.Int128;
 import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
@@ -36,11 +41,14 @@ import java.io.IOException;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.IntStream;
 
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_WRITE_ERROR;
@@ -55,15 +63,15 @@ import static org.apache.parquet.format.CompressionCodec.SNAPPY;
 public class HoglakePageSink
         implements ConnectorPageSink
 {
-    private static final com.fasterxml.jackson.databind.ObjectReader JSON_READER = new ObjectMapper().reader()
-            .with(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+    private static final ObjectReader JSON_READER = new ObjectMapper().reader()
+            .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     private static final long TARGET_FILE_SIZE = 128L * 1024 * 1024;
 
     private final TrinoFileSystem fileSystem;
     private final HoglakeWriteHandle handle;
     private final HoglakeParquetSchema schema;
     private final String trinoVersion;
-    private final io.trino.spi.PageSorter pageSorter;
+    private final PageSorter pageSorter;
     private final List<Page> sortBuffer = new ArrayList<>();
     private long sortBytes;
     private long sortPositions;
@@ -78,7 +86,7 @@ public class HoglakePageSink
     private long completedBytes;
     private boolean finished;
     private boolean aborted;
-    private final io.trino.plugin.hoglake.rest.HoglakeClient uploadClient;
+    private final HoglakeClient uploadClient;
     private long lastRenewal = System.nanoTime();
 
     public HoglakePageSink(TrinoFileSystem fileSystem, HoglakeWriteHandle handle, String trinoVersion)
@@ -86,12 +94,12 @@ public class HoglakePageSink
         this(fileSystem, handle, trinoVersion, null);
     }
 
-    public HoglakePageSink(TrinoFileSystem fileSystem, HoglakeWriteHandle handle, String trinoVersion, io.trino.spi.PageSorter pageSorter)
+    public HoglakePageSink(TrinoFileSystem fileSystem, HoglakeWriteHandle handle, String trinoVersion, PageSorter pageSorter)
     {
         this(fileSystem, handle, trinoVersion, pageSorter, null);
     }
 
-    public HoglakePageSink(TrinoFileSystem fileSystem, HoglakeWriteHandle handle, String trinoVersion, io.trino.spi.PageSorter pageSorter, io.trino.plugin.hoglake.rest.HoglakeClient client)
+    public HoglakePageSink(TrinoFileSystem fileSystem, HoglakeWriteHandle handle, String trinoVersion, PageSorter pageSorter, HoglakeClient client)
     {
         this.uploadClient = handle.claimUploads() ? requireNonNull(client, "client required for upload claims") : null;
         this.pageSorter = handle.sortFields().isEmpty() ? pageSorter : requireNonNull(pageSorter, "pageSorter is required for sorted writes");
@@ -144,7 +152,7 @@ public class HoglakePageSink
             else {
                 // Group only this input page and keep one writer open. Memory does not
                 // grow with table partition cardinality; interleaved keys may make small files.
-                Map<List<String>, List<Integer>> groups = new java.util.LinkedHashMap<>();
+                Map<List<String>, List<Integer>> groups = new LinkedHashMap<>();
                 for (int position = 0; position < logical.getPositionCount(); position++) {
                     var values = HoglakePartitioning.values(handle.partitionFields(), handle.columns(), logical, position);
                     groups.computeIfAbsent(values, _ -> new ArrayList<>()).add(position);
@@ -190,7 +198,7 @@ public class HoglakePageSink
             return;
         }
         var sorted = HoglakeSorting.sort(pageSorter, sortBuffer, handle.columns(), handle.sortFields());
-        int[] channels = java.util.stream.IntStream.range(0, handle.columns().size()).toArray();
+        int[] channels = IntStream.range(0, handle.columns().size()).toArray();
         while (sorted.hasNext()) {
             writePage(sorted.next().getColumns(channels), partitionValues);
         }
@@ -249,7 +257,7 @@ public class HoglakePageSink
         }
         if (column.hoglakeType().startsWith("uint")) {
             BigInteger value = column.hoglakeType().equals("uint64")
-                    ? ((io.trino.spi.type.Int128) column.type().getObject(block, position)).toBigInteger()
+                    ? ((Int128) column.type().getObject(block, position)).toBigInteger()
                     : BigInteger.valueOf(column.type().getLong(block, position));
             int bits = Integer.parseInt(column.hoglakeType().substring(4));
             if (value.signum() < 0 || value.bitLength() > bits) {
@@ -345,7 +353,7 @@ public class HoglakePageSink
 
     private void renewUploads(boolean force)
     {
-        if (uploadClient != null && (force || System.nanoTime() - lastRenewal > java.util.concurrent.TimeUnit.MINUTES.toNanos(5))) {
+        if (uploadClient != null && (force || System.nanoTime() - lastRenewal > TimeUnit.MINUTES.toNanos(5))) {
             uploadClient.renewUploads(uploadOwner());
             lastRenewal = System.nanoTime();
         }

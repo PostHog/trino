@@ -15,8 +15,10 @@ package io.trino.plugin.hoglake;
 
 import com.google.common.collect.ImmutableMap;
 import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.Type;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.PrimitiveType;
 import org.apache.parquet.schema.Types;
@@ -87,7 +89,7 @@ public record HoglakeParquetSchema(MessageType messageType, Map<List<String>, Ty
             case "uint32" -> Types.primitive(INT64, repetition);
             case "uint64" -> Types.primitive(INT64, repetition).as(LogicalTypeAnnotation.intType(64, false));
             case "json" -> Types.primitive(BINARY, repetition).as(LogicalTypeAnnotation.jsonType());
-            case "timestamp_s", "timestamp_ms" -> Types.primitive(INT64, repetition).as(LogicalTypeAnnotation.timestampType(false, org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MILLIS));
+            case "timestamp_s", "timestamp_ms" -> Types.primitive(INT64, repetition).as(LogicalTypeAnnotation.timestampType(false, TimeUnit.MILLIS));
             case "int8" -> Types.primitive(INT32, repetition).as(LogicalTypeAnnotation.intType(8, true));
             case "int16" -> Types.primitive(INT32, repetition).as(LogicalTypeAnnotation.intType(16, true));
             case "timestamp_ns" -> Types.primitive(INT64, repetition).as(LogicalTypeAnnotation.timestampType(false, NANOS));
@@ -119,7 +121,7 @@ public record HoglakeParquetSchema(MessageType messageType, Map<List<String>, Ty
             default -> throw new IllegalArgumentException("Unsupported column: " + column);
         };
         types.put(List.copyOf(path), wire.equals("timestamp_s") || wire.equals("timestamp_ms")
-                ? io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS
+                ? TimestampType.TIMESTAMP_MILLIS
                 : HoglakeUnsigned.physicalType(column));
         return field.id(toIntExact(column.fieldId())).named(column.name());
     }

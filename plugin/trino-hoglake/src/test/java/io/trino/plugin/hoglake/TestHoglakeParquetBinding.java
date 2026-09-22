@@ -14,12 +14,16 @@
 package io.trino.plugin.hoglake;
 
 import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.parquet.GroupField;
+import io.trino.parquet.PrimitiveField;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures.FileColumn;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.MemoryContext;
+import io.trino.spi.type.RowType;
+import org.apache.parquet.io.ColumnIOFactory;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
 import org.apache.parquet.schema.Types;
@@ -61,11 +65,11 @@ class TestHoglakeParquetBinding
                 .named("r")
                 .named("test");
         var child = new HoglakeColumnHandle("a", 2, BIGINT, true);
-        var rowType = io.trino.spi.type.RowType.from(List.of(io.trino.spi.type.RowType.field("a", BIGINT)));
+        var rowType = RowType.from(List.of(RowType.field("a", BIGINT)));
         var column = new HoglakeColumnHandle("r", 1, rowType, true, List.of(child), "struct");
-        var physical = new org.apache.parquet.io.ColumnIOFactory().getColumnIO(schema).getChild("r");
-        var field = (io.trino.parquet.GroupField) HoglakeParquetFields.construct(column, physical).orElseThrow();
-        var leaf = (io.trino.parquet.PrimitiveField) field.getChildren().getFirst().orElseThrow();
+        var physical = new ColumnIOFactory().getColumnIO(schema).getChild("r");
+        var field = (GroupField) HoglakeParquetFields.construct(column, physical).orElseThrow();
+        var leaf = (PrimitiveField) field.getChildren().getFirst().orElseThrow();
         assertThat(leaf.getDescriptor().getPath()).containsExactly("r", "a");
     }
 
@@ -73,7 +77,7 @@ class TestHoglakeParquetBinding
     void testNativeUnsignedInt32ReadsLosslessly()
     {
         byte[] file = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(
-                Types.optional(PrimitiveTypeName.INT32).as(org.apache.parquet.schema.LogicalTypeAnnotation.intType(32, false)).id(1).named("u"),
+                Types.optional(PrimitiveTypeName.INT32).as(LogicalTypeAnnotation.intType(32, false)).id(1).named("u"),
                 INTEGER,
                 Arrays.asList(0L, (long) Integer.MAX_VALUE, (long) Integer.MIN_VALUE, -1L))));
         HoglakeColumnHandle column = new HoglakeColumnHandle("u", 1, BIGINT, true, List.of(), "uint32");

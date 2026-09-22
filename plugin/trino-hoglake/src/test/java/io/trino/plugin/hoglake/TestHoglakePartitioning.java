@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.hoglake;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.type.DoubleType;
 import org.junit.jupiter.api.Test;
@@ -55,7 +56,7 @@ class TestHoglakePartitioning
     {
         var column = new HoglakeColumnHandle("f", 1, DoubleType.DOUBLE, true);
         try (var input = getClass().getResourceAsStream("/partition-float-vectors.json")) {
-            var vectors = new com.fasterxml.jackson.databind.ObjectMapper().readTree(input);
+            var vectors = new ObjectMapper().readTree(input);
             for (var vector : vectors) {
                 double value = Double.longBitsToDouble(Long.parseUnsignedLong(vector.get("bits").asText(), 16));
                 var block = DoubleType.DOUBLE.createBlockBuilder(null, 1);

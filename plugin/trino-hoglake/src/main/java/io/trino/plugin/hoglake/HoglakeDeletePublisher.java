@@ -30,6 +30,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
@@ -74,7 +76,7 @@ final class HoglakeDeletePublisher
         });
     }
 
-    void publish(HoglakeDeleteHandle handle, Collection<Slice> fragments, MemoryContext memoryContext, java.util.function.Consumer<HoglakeDtos.Commit> publication)
+    void publish(HoglakeDeleteHandle handle, Collection<Slice> fragments, MemoryContext memoryContext, Consumer<HoglakeDtos.Commit> publication)
     {
         try (HoglakeSplitResources resources = new HoglakeSplitResources(bytes -> {
             HoglakeDeleteBitmap.checkSize(bytes);
@@ -84,7 +86,7 @@ final class HoglakeDeletePublisher
         }
     }
 
-    private void publish(HoglakeDeleteHandle handle, Collection<Slice> fragments, HoglakeSplitResources workingMemory, java.util.function.Consumer<HoglakeDtos.Commit> publication)
+    private void publish(HoglakeDeleteHandle handle, Collection<Slice> fragments, HoglakeSplitResources workingMemory, Consumer<HoglakeDtos.Commit> publication)
     {
         LocalMemoryContext decodeMemory = workingMemory.allocation().newLocalMemoryContext("delete_decode");
         LocalMemoryContext appendMemory = workingMemory.allocation().newLocalMemoryContext("merge_appends");
@@ -159,7 +161,7 @@ final class HoglakeDeletePublisher
                 String dataPath = handle.dataPath();
                 Location location = Location.of(dataPath.endsWith("/") ? dataPath : dataPath + "/").appendPath("trino-delete/" + UUID.randomUUID() + ".puffin");
                 if (handle.claimUploads()) {
-                    if (System.nanoTime() - lastRenewal > java.util.concurrent.TimeUnit.MINUTES.toNanos(5)) {
+                    if (System.nanoTime() - lastRenewal > TimeUnit.MINUTES.toNanos(5)) {
                         client.renewUploads(handle.operationId());
                         lastRenewal = System.nanoTime();
                     }

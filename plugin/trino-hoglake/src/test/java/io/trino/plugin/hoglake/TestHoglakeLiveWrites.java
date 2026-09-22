@@ -15,6 +15,7 @@ package io.trino.plugin.hoglake;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.trino.Session;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.testing.DistributedQueryRunner;
@@ -30,6 +31,7 @@ import java.net.http.HttpResponse;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.TransactionBuilder.transaction;
@@ -119,7 +121,7 @@ final class TestHoglakeLiveWrites
             assertThat(runner.execute("SELECT count(*), sum(id) FROM tx_b").getMaterializedRows())
                     .isEqualTo(runner.execute("VALUES (BIGINT '3', BIGINT '44')").getMaterializedRows());
             assertThatThrownBy(() -> transaction(runner.getTransactionManager(), runner.getPlannerContext().getMetadata(), runner.getAccessControl())
-                    .repeatableRead().execute(runner.getDefaultSession(), (java.util.function.Consumer<io.trino.Session>) tx -> {
+                    .repeatableRead().execute(runner.getDefaultSession(), (Consumer<Session>) tx -> {
                         runner.execute(tx, "DELETE FROM tx_a");
                         runner.execute(tx, "INSERT INTO tx_b VALUES 99");
                         assertThat(runner.execute(tx, "SELECT count(*) FROM tx_a").getOnlyValue()).isEqualTo(0L);

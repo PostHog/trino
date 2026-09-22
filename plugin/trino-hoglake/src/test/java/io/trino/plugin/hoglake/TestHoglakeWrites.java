@@ -49,6 +49,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.testing.TestingSession.testSessionBuilder;
@@ -341,7 +342,7 @@ final class TestHoglakeWrites
         }
     }
 
-    private static HoglakeDtos.Column materialize(HoglakeDtos.ColumnDefinition definition, int ordinal, java.util.concurrent.atomic.AtomicLong nextId)
+    private static HoglakeDtos.Column materialize(HoglakeDtos.ColumnDefinition definition, int ordinal, AtomicLong nextId)
     {
         long id = nextId.getAndIncrement();
         List<HoglakeDtos.Column> children = new ArrayList<>();
@@ -362,7 +363,7 @@ final class TestHoglakeWrites
                 replacementTargets.put(operation, mapper.treeToValue(request.get("replacement"), HoglakeDtos.ReplacementTarget.class));
             }
             List<HoglakeDtos.Column> columns = new ArrayList<>();
-            java.util.concurrent.atomic.AtomicLong nextFieldId = new java.util.concurrent.atomic.AtomicLong(1);
+            AtomicLong nextFieldId = new AtomicLong(1);
             for (var column : request.path("columns")) {
                 HoglakeDtos.ColumnDefinition definition = mapper.treeToValue(column, HoglakeDtos.ColumnDefinition.class);
                 columns.add(materialize(definition, columns.size(), nextFieldId));

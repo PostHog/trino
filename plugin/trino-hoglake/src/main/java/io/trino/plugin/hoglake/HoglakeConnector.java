@@ -14,6 +14,8 @@
 package io.trino.plugin.hoglake;
 
 import io.airlift.bootstrap.LifeCycleManager;
+import io.trino.spi.StandardErrorCode;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorCapabilities;
 import io.trino.spi.connector.ConnectorMetadata;
@@ -22,9 +24,16 @@ import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.session.PropertyMetadata;
 import io.trino.spi.transaction.IsolationLevel;
+import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.MapType;
+import io.trino.spi.type.TypeOperators;
+import io.trino.spi.type.VarcharType;
 
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -115,39 +124,39 @@ public class HoglakeConnector
     }
 
     @Override
-    public java.util.List<io.trino.spi.session.PropertyMetadata<?>> getTableProperties()
+    public List<PropertyMetadata<?>> getTableProperties()
     {
-        return java.util.List.of(new io.trino.spi.session.PropertyMetadata<>(
+        return List.of(new PropertyMetadata<>(
                         "partitioning",
                         "Partition transforms",
-                        new io.trino.spi.type.ArrayType(io.trino.spi.type.VarcharType.VARCHAR),
-                        java.util.List.class,
-                        java.util.List.of(),
+                        new ArrayType(VarcharType.VARCHAR),
+                        List.class,
+                        List.of(),
                         false,
-                        value -> (java.util.List<?>) value,
+                        value -> (List<?>) value,
                         value -> value),
-                new io.trino.spi.session.PropertyMetadata<>(
+                new PropertyMetadata<>(
                         "sorted_by",
                         "Per-file sort fields",
-                        new io.trino.spi.type.ArrayType(io.trino.spi.type.VarcharType.VARCHAR),
-                        java.util.List.class,
-                        java.util.List.of(),
+                        new ArrayType(VarcharType.VARCHAR),
+                        List.class,
+                        List.of(),
                         false,
-                        value -> (java.util.List<?>) value,
+                        value -> (List<?>) value,
                         value -> value),
-                new io.trino.spi.session.PropertyMetadata<>(
+                new PropertyMetadata<>(
                         "extra_properties",
                         "Custom metadata (replaced as a whole by SET PROPERTIES)",
-                        new io.trino.spi.type.MapType(io.trino.spi.type.VarcharType.VARCHAR, io.trino.spi.type.VarcharType.VARCHAR, new io.trino.spi.type.TypeOperators()),
-                        java.util.Map.class,
-                        java.util.Map.of(),
+                        new MapType(VarcharType.VARCHAR, VarcharType.VARCHAR, new TypeOperators()),
+                        Map.class,
+                        Map.of(),
                         false,
                         value -> {
-                            java.util.Map<?, ?> properties = (java.util.Map<?, ?>) value;
-                            if (properties.values().stream().anyMatch(java.util.Objects::isNull)) {
-                                throw new io.trino.spi.TrinoException(io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY, "Custom property values cannot be null");
+                            Map<?, ?> properties = (Map<?, ?>) value;
+                            if (properties.values().stream().anyMatch(Objects::isNull)) {
+                                throw new TrinoException(StandardErrorCode.INVALID_TABLE_PROPERTY, "Custom property values cannot be null");
                             }
-                            return java.util.Map.copyOf(properties);
+                            return Map.copyOf(properties);
                         },
                         value -> value));
     }

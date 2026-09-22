@@ -16,9 +16,15 @@ package io.trino.plugin.hoglake;
 import io.trino.operator.PagesIndex;
 import io.trino.operator.PagesIndexPageSorter;
 import io.trino.spi.Page;
+import io.trino.spi.PageSorter;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.DictionaryBlock;
 import io.trino.spi.block.RowBlock;
+import io.trino.spi.block.RunLengthEncodedBlock;
+import io.trino.spi.type.DoubleType;
+import io.trino.spi.type.RealType;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.VarcharType;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -34,16 +40,16 @@ class TestHoglakeSorting
     @Test
     void repeatedAndDictionaryKeysStayEncoded()
     {
-        var type = io.trino.spi.type.VarcharType.VARCHAR;
+        var type = VarcharType.VARCHAR;
         var values = type.createBlockBuilder(null, 1);
         type.writeString(values, "x".repeat(4096));
         var leaf = new HoglakeColumnHandle("k", 2, type, true);
         var row = new HoglakeColumnHandle("r", 1, RowType.from(List.of(RowType.field("k", type))), true, List.of(leaf), "struct");
         Block one = RowBlock.fromFieldBlocks(1, new Block[] {values.build()});
-        Block repeated = io.trino.spi.block.RunLengthEncodedBlock.create(one, 1000);
-        Block dictionary = io.trino.spi.block.DictionaryBlock.create(1000, one, new int[1000]);
+        Block repeated = RunLengthEncodedBlock.create(one, 1000);
+        Block dictionary = DictionaryBlock.create(1000, one, new int[1000]);
         for (Block input : List.of(repeated, dictionary)) {
-            io.trino.spi.PageSorter checkingSorter = (_, pages, _, _, _) -> {
+            PageSorter checkingSorter = (_, pages, _, _, _) -> {
                 Block key = pages.getFirst().getBlock(1);
                 assertThat(key.getRetainedSizeInBytes()).isLessThan(20_000);
                 assertThat(key.getPositionCount()).isEqualTo(1000);
@@ -60,13 +66,13 @@ class TestHoglakeSorting
     @Test
     void floatingOrderMatchesNativeHoglakeInBothDirections()
     {
-        for (io.trino.spi.type.Type type : List.of(io.trino.spi.type.RealType.REAL, io.trino.spi.type.DoubleType.DOUBLE)) {
+        for (io.trino.spi.type.Type type : List.of(RealType.REAL, DoubleType.DOUBLE)) {
             var key = new HoglakeColumnHandle("k", 1, type, true);
             var tie = new HoglakeColumnHandle("tie", 2, BIGINT, true);
             var values = type.createBlockBuilder(null, 8);
             double[] inputs = {0.0, -0.0, Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY, -1.0, 1.0};
             for (double value : inputs) {
-                if (type.equals(io.trino.spi.type.RealType.REAL)) {
+                if (type.equals(RealType.REAL)) {
                     type.writeLong(values, Float.floatToRawIntBits((float) value));
                 }
                 else {

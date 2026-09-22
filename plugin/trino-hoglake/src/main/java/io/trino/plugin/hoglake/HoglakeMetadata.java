@@ -61,11 +61,13 @@ import io.trino.spi.type.VarcharType;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -222,7 +224,7 @@ public class HoglakeMetadata
     public void setTableComment(ConnectorSession session, ConnectorTableHandle tableHandle, Optional<String> comment)
     {
         checkMetadataSupport();
-        Map<String, Object> operation = new java.util.HashMap<>();
+        Map<String, Object> operation = new HashMap<>();
         operation.put("op", "set_table_comment");
         operation.put("comment", comment.orElse(null));
         alterColumns((HoglakeTableHandle) tableHandle, operation);
@@ -232,7 +234,7 @@ public class HoglakeMetadata
     public void setColumnComment(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column, Optional<String> comment)
     {
         checkMetadataSupport();
-        Map<String, Object> operation = new java.util.HashMap<>();
+        Map<String, Object> operation = new HashMap<>();
         operation.put("op", "set_column_comment");
         operation.put("name", ((HoglakeColumnHandle) column).name());
         operation.put("comment", comment.orElse(null));
@@ -242,7 +244,7 @@ public class HoglakeMetadata
     @Override
     public void setTableProperties(ConnectorSession session, ConnectorTableHandle tableHandle, Map<String, Optional<Object>> properties)
     {
-        if (!properties.keySet().equals(java.util.Set.of("extra_properties"))) {
+        if (!properties.keySet().equals(Set.of("extra_properties"))) {
             throw new TrinoException(NOT_SUPPORTED, "Only extra_properties can be altered; partitioning and sorted_by are creation properties");
         }
         checkMetadataSupport();
@@ -441,7 +443,7 @@ public class HoglakeMetadata
 
     private static List<HoglakeDtos.ColumnDefinition> columnDefinitions(ConnectorTableMetadata metadata)
     {
-        if (metadata.getProperties().keySet().stream().anyMatch(key -> !java.util.Set.of("partitioning", "sorted_by", "extra_properties").contains(key)) || metadata.getColumns().stream().anyMatch(column -> !column.getProperties().isEmpty())) {
+        if (metadata.getProperties().keySet().stream().anyMatch(key -> !Set.of("partitioning", "sorted_by", "extra_properties").contains(key)) || metadata.getColumns().stream().anyMatch(column -> !column.getProperties().isEmpty())) {
             throw new TrinoException(NOT_SUPPORTED, "Unsupported Hoglake table or column properties");
         }
         return metadata.getColumns().stream()

@@ -22,6 +22,7 @@ import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 
 import java.util.List;
+import java.util.Optional;
 
 import static io.trino.spi.type.BigintType.BIGINT;
 import static java.util.Objects.requireNonNull;
@@ -73,7 +74,7 @@ public record HoglakeColumnHandle(
                 .setName(name)
                 .setType(type)
                 .setNullable(nullable)
-                .setComment(java.util.Optional.ofNullable(comment))
+                .setComment(Optional.ofNullable(comment))
                 .build();
     }
 

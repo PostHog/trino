@@ -26,8 +26,11 @@ import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.FixedSplitSource;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
 import static java.util.Objects.requireNonNull;
@@ -74,9 +77,9 @@ public class HoglakeSplitManager
 
     static List<HoglakeDtos.ScanFile> scan(HoglakeClient client, HoglakeTableHandle handle)
     {
-        java.util.Map<Long, HoglakeDtos.DeleteFile> deletes = handle.stagedDeletes().stream()
-                .collect(java.util.stream.Collectors.toMap(HoglakeDtos.DeleteFile::dataFileId, file -> file));
-        return java.util.stream.Stream.concat(
+        Map<Long, HoglakeDtos.DeleteFile> deletes = handle.stagedDeletes().stream()
+                .collect(Collectors.toMap(HoglakeDtos.DeleteFile::dataFileId, file -> file));
+        return Stream.concat(
                         client.scan(handle.schemaName(), handle.tableName(), handle.snapshotId()).stream(),
                         handle.stagedFiles().stream())
                 .map(file -> new HoglakeDtos.ScanFile(file.dataFile(), deletes.getOrDefault(file.dataFile().dataFileId(), file.deleteFile())))

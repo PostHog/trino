@@ -19,14 +19,18 @@ import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
+import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Int128;
 import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.LongTimestampWithTimeZone;
+import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.TypeOperators;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.MathContext;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.time.LocalDate;
@@ -84,8 +88,8 @@ final class HoglakePartitioning
         List<HoglakeColumnHandle> children = definition.children().stream().map(child -> initialColumn(child, next)).toList();
         var type = switch (definition.type()) {
             case "struct" -> RowType.from(children.stream().map(child -> RowType.field(child.name(), child.type())).toList());
-            case "list" -> new io.trino.spi.type.ArrayType(children.getFirst().type());
-            case "map" -> new io.trino.spi.type.MapType(children.get(0).type(), children.get(1).type(), new io.trino.spi.type.TypeOperators());
+            case "list" -> new ArrayType(children.getFirst().type());
+            case "map" -> new MapType(children.get(0).type(), children.get(1).type(), new TypeOperators());
             default -> HoglakeTypes.toTrinoType(definition.type(), definition.typeParams());
         };
         return new HoglakeColumnHandle(definition.name(), id, type, definition.nullable(), children, definition.type());
@@ -317,7 +321,7 @@ final class HoglakePartitioning
         BigDecimal decimal = BigDecimal.valueOf(value).stripTrailingZeros();
         // Java's spelling may keep two significant digits where Python's
         // canonical partition spelling uses one (notably the smallest subnormal).
-        BigDecimal oneDigit = new BigDecimal(value).round(new java.math.MathContext(1));
+        BigDecimal oneDigit = new BigDecimal(value).round(new MathContext(1));
         if (oneDigit.doubleValue() == value) {
             decimal = oneDigit.stripTrailingZeros();
         }

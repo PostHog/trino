@@ -17,6 +17,8 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.trino.plugin.hoglake.HoglakeDeletionVector;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -75,7 +77,7 @@ public final class HoglakeDtos
     {
         public FileRegistration
         {
-            partitionValues = partitionValues == null ? List.of() : java.util.Collections.unmodifiableList(new java.util.ArrayList<>(partitionValues));
+            partitionValues = partitionValues == null ? List.of() : Collections.unmodifiableList(new ArrayList<>(partitionValues));
         }
 
         public FileRegistration(String path, long recordCount, long fileSizeBytes, long footerSize)

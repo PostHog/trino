@@ -40,6 +40,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeoutException;
@@ -260,7 +261,7 @@ public class HoglakeClient
 
     public String claimUpload(String owner, String prefix, String kind)
     {
-        String id = java.util.UUID.randomUUID().toString();
+        String id = UUID.randomUUID().toString();
         HoglakeDtos.UploadClaim claim = write("PUT", catalogPath("/uploads/" + id), Map.of("owner", owner, "prefix", prefix, "file_kind", kind), new TypeReference<HoglakeDtos.UploadClaim>() {});
         String normalized = prefix.endsWith("/") ? prefix : prefix + "/";
         if (!id.equals(claim.uploadId()) || !owner.equals(claim.owner()) || !"active".equals(claim.state()) || claim.path() == null || !claim.path().startsWith(normalized + "trino-upload/")) {

@@ -14,6 +14,8 @@
 package io.trino.plugin.hoglake;
 
 import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.plugin.hoglake.rest.HoglakeClient;
+import io.trino.spi.PageSorter;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMergeSink;
 import io.trino.spi.connector.ConnectorMergeTableHandle;
@@ -35,20 +37,20 @@ public class HoglakePageSinkProvider
 {
     private final TrinoFileSystemFactory fileSystemFactory;
     private final String trinoVersion;
-    private final io.trino.plugin.hoglake.rest.HoglakeClient client;
-    private final io.trino.spi.PageSorter pageSorter;
+    private final HoglakeClient client;
+    private final PageSorter pageSorter;
 
     public HoglakePageSinkProvider(TrinoFileSystemFactory fileSystemFactory, String trinoVersion)
     {
         this(fileSystemFactory, trinoVersion, null);
     }
 
-    public HoglakePageSinkProvider(TrinoFileSystemFactory fileSystemFactory, String trinoVersion, io.trino.spi.PageSorter pageSorter)
+    public HoglakePageSinkProvider(TrinoFileSystemFactory fileSystemFactory, String trinoVersion, PageSorter pageSorter)
     {
         this(fileSystemFactory, trinoVersion, pageSorter, null);
     }
 
-    public HoglakePageSinkProvider(TrinoFileSystemFactory fileSystemFactory, String trinoVersion, io.trino.spi.PageSorter pageSorter, io.trino.plugin.hoglake.rest.HoglakeClient client)
+    public HoglakePageSinkProvider(TrinoFileSystemFactory fileSystemFactory, String trinoVersion, PageSorter pageSorter, HoglakeClient client)
     {
         this.client = client;
         this.pageSorter = pageSorter;

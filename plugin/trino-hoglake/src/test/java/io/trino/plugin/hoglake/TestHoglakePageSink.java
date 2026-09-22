@@ -24,6 +24,9 @@ import io.trino.filesystem.TrinoInputFile;
 import io.trino.filesystem.TrinoOutputFile;
 import io.trino.filesystem.memory.MemoryFileSystem;
 import io.trino.filesystem.memory.MemoryFileSystemFactory;
+import io.trino.operator.PagesIndex.TestingFactory;
+import io.trino.operator.PagesIndexPageSorter;
+import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
 import io.trino.spi.Page;
@@ -35,6 +38,7 @@ import io.trino.spi.type.Type;
 import io.trino.type.TypeDeserializer;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -57,9 +61,9 @@ final class TestHoglakePageSink
             throws Exception
     {
         MemoryFileSystem storage = new MemoryFileSystem();
-        java.util.List<String> abandoned = new java.util.ArrayList<>();
+        List<String> abandoned = new ArrayList<>();
         String owner = UUID.randomUUID().toString();
-        try (var client = new io.trino.plugin.hoglake.rest.HoglakeClient("http://localhost:1", "test")
+        try (var client = new HoglakeClient("http://localhost:1", "test")
         {
             @Override
             public String claimUpload(String claimedOwner, String prefix, String kind)
@@ -129,7 +133,7 @@ final class TestHoglakePageSink
                 Optional.empty(),
                 List.of(),
                 List.of(new HoglakeDtos.SortField(FIRST.fieldId(), "desc", "nulls_first")));
-        var sorter = new io.trino.operator.PagesIndexPageSorter(new io.trino.operator.PagesIndex.TestingFactory(false));
+        var sorter = new PagesIndexPageSorter(new TestingFactory(false));
         HoglakePageSink sink = new HoglakePageSink(storage, handle, "test", sorter);
         sink.appendPage(new Page(block(1L)));
         sink.appendPage(new Page(block(null)));

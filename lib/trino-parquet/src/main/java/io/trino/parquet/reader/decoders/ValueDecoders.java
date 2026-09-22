@@ -60,6 +60,7 @@ import org.apache.parquet.column.values.ValuesReader;
 import org.apache.parquet.io.ParquetDecodingException;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.LogicalTypeAnnotation.DecimalLogicalTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.IntLogicalTypeAnnotation;
 import org.apache.parquet.schema.PrimitiveType;
 import org.joda.time.DateTimeZone;
 
@@ -1169,7 +1170,7 @@ public final class ValueDecoders
     public ValueDecoder<long[]> getInt32ToLongDecoder(ParquetEncoding encoding)
     {
         ValueDecoder<int[]> delegate = getInt32Decoder(encoding);
-        boolean unsigned = field.getDescriptor().getPrimitiveType().getLogicalTypeAnnotation() instanceof org.apache.parquet.schema.LogicalTypeAnnotation.IntLogicalTypeAnnotation integer && !integer.isSigned();
+        boolean unsigned = field.getDescriptor().getPrimitiveType().getLogicalTypeAnnotation() instanceof IntLogicalTypeAnnotation integer && !integer.isSigned();
         return new ValueDecoder<>()
         {
             @Override
