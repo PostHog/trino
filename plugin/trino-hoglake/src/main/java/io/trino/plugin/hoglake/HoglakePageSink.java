@@ -81,7 +81,8 @@ public class HoglakePageSink
     @Override
     public long getMemoryUsage()
     {
-        return memoryContext.getBytes() + (writer == null ? 0 : writer.getRetainedBytes());
+        return memoryContext.getBytes() + (writer == null ? 0 : writer.getRetainedBytes()) +
+                fragments.stream().mapToLong(fragment -> fragment.getRetainedSize() + 2L * Long.BYTES).sum();
     }
 
     @Override
@@ -161,7 +162,9 @@ public class HoglakePageSink
             closeFile();
             finished = true;
             memoryContext.close();
-            return completedFuture(List.copyOf(fragments));
+            List<Slice> result = List.copyOf(fragments);
+            fragments.clear();
+            return completedFuture(result);
         }
         catch (IOException e) {
             throw new TrinoException(HOGLAKE_WRITE_ERROR, "Failed to finish Hoglake Parquet file", e);
@@ -187,6 +190,7 @@ public class HoglakePageSink
         }
         finally {
             writer = null;
+            fragments.clear();
             memoryContext.close();
         }
         try {

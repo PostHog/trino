@@ -136,11 +136,17 @@ public final class HoglakeDtos
             @JsonProperty("record_count") long recordCount,
             @JsonProperty("file_count") long fileCount,
             @JsonProperty("file_size_bytes") long fileSizeBytes,
-            @JsonProperty("partition_spec") Map<String, Object> partitionSpec)
+            @JsonProperty("partition_spec") Map<String, Object> partitionSpec,
+            @JsonProperty("sort_spec") Map<String, Object> sortSpec)
     {
+        public Table(String name, String namespace, String tableUuid, List<Column> columns, long recordCount, long fileCount, long fileSizeBytes, Map<String, Object> partitionSpec)
+        {
+            this(name, namespace, tableUuid, columns, recordCount, fileCount, fileSizeBytes, partitionSpec, null);
+        }
+
         public Table(String name, String namespace, String tableUuid, List<Column> columns, long recordCount, long fileCount, long fileSizeBytes)
         {
-            this(name, namespace, tableUuid, columns, recordCount, fileCount, fileSizeBytes, null);
+            this(name, namespace, tableUuid, columns, recordCount, fileCount, fileSizeBytes, null, null);
         }
     }
 

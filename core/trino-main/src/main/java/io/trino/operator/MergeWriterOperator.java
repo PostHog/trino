@@ -172,9 +172,8 @@ public class MergeWriterOperator
         if ((state != State.FINISHING) || !finishFuture.isDone()) {
             return null;
         }
-        state = State.FINISHED;
-
         Collection<Slice> fragments = getFutureValue(finishFuture);
+        state = State.FINISHED;
 
         // output page will only be constructed once,
         // so a new PageBuilder is constructed (instead of using PageBuilder.reset)
@@ -234,10 +233,17 @@ public class MergeWriterOperator
     {
         if (!closed) {
             closed = true;
-            if (finishFuture != null) {
-                finishFuture.cancel(true);
+            try {
+                if (finishFuture != null) {
+                    finishFuture.cancel(true);
+                }
+                if (state != State.FINISHED) {
+                    mergeSink.abort();
+                }
             }
-            mergeSinkMemoryContext.close();
+            finally {
+                mergeSinkMemoryContext.close();
+            }
         }
     }
 }

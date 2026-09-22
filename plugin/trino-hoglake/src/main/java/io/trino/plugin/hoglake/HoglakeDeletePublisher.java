@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.hoglake;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.airlift.slice.Slice;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
@@ -52,7 +53,7 @@ final class HoglakeDeletePublisher
     private static void checkCancelled()
     {
         if (Thread.currentThread().isInterrupted()) {
-            throw new TrinoException(USER_CANCELED, "Hoglake DELETE cancelled before publication");
+            throw new TrinoException(USER_CANCELED, "Hoglake mutation cancelled before publication");
         }
     }
 
@@ -74,10 +75,13 @@ final class HoglakeDeletePublisher
     private void publish(HoglakeDeleteHandle handle, Collection<Slice> fragments, HoglakeSplitResources workingMemory)
     {
         LocalMemoryContext decodeMemory = workingMemory.allocation().newLocalMemoryContext("delete_decode");
+        LocalMemoryContext appendMemory = workingMemory.allocation().newLocalMemoryContext("merge_appends");
+        long appendBytes = 0;
         LocalMemoryContext bitmapMemory = workingMemory.allocation().newLocalMemoryContext("delete_bitmaps");
         LocalMemoryContext temporaryMemory = workingMemory.allocation().newLocalMemoryContext("delete_encoding");
         HoglakeTableHandle table = handle.table();
         Map<Long, HoglakeDeleteBitmap> changes = new TreeMap<>();
+        Map<String, HoglakeDtos.FileRegistration> appends = new TreeMap<>();
         Map<Long, HoglakeDtos.ScanFile> files = client.scan(table.schemaName(), table.tableName(), table.snapshotId()).stream()
                 .collect(toMap(file -> file.dataFile().dataFileId(), file -> file));
         long fragmentBytes = 0;
@@ -88,6 +92,22 @@ final class HoglakeDeletePublisher
                 throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Invalid DELETE fragment");
             }
             long fileId = fragment.getLong(0);
+            if (fileId == HoglakeMergeSink.APPEND_FRAGMENT) {
+                try {
+                    // Includes decoded strings, registration and map/list entry overhead.
+                    appendBytes = Math.addExact(appendBytes, 4L * fragment.length() + 256);
+                    appendMemory.setBytes(appendBytes);
+                    HoglakeDtos.FileRegistration append = new ObjectMapper().readValue(fragment.getBytes(Long.BYTES, fragment.length() - Long.BYTES), HoglakeDtos.FileRegistration.class);
+                    HoglakeDtos.FileRegistration previous = appends.putIfAbsent(append.path(), append);
+                    if (previous != null && !previous.equals(append)) {
+                        throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Conflicting MERGE append fragments");
+                    }
+                }
+                catch (IOException e) {
+                    throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Invalid MERGE append fragment", e);
+                }
+                continue;
+            }
             HoglakeDtos.ScanFile file = files.get(fileId);
             if (file == null) {
                 throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "DELETE fragment targets a file outside the pinned snapshot");
@@ -123,19 +143,20 @@ final class HoglakeDeletePublisher
                 }
                 temporaryMemory.setBytes(bitmap.encodingWorkingBytes());
                 byte[] bytes = bitmap.encode(split.path());
-                Location location = Location.of(handle.dataPath()).appendPath("trino-delete/" + UUID.randomUUID() + ".puffin");
+                String dataPath = handle.dataPath();
+                Location location = Location.of(dataPath.endsWith("/") ? dataPath : dataPath + "/").appendPath("trino-delete/" + UUID.randomUUID() + ".puffin");
                 uploads.add(location);
                 fileSystem.newOutputFile(location).createOrOverwrite(bytes);
                 registrations.add(new HoglakeDtos.DeleteRegistration(change.getKey(), location.toString(), bitmap.cardinality(), bytes.length));
                 temporaryMemory.setBytes(0);
             }
-            // Even a zero-row DELETE validates identity and the DDL conflict window.
+            // Even a zero-row mutation validates identity and the target-table conflict window.
             // Once submitted, neither cancellation nor missing receipts authorizes cleanup.
             checkCancelled();
             publicationStarted = true;
-            client.commit(new HoglakeDtos.Commit(
+            client.commitMutation(new HoglakeDtos.Commit(
                     table.snapshotId(),
-                    List.of(),
+                    appends.isEmpty() ? List.of() : List.of(new HoglakeDtos.Append(table.schemaName(), table.tableName(), table.tableUuid(), List.copyOf(appends.values()))),
                     List.of(new HoglakeDtos.Deletes(table.schemaName(), table.tableName(), table.tableUuid(), registrations)),
                     handle.operationId()));
         }
@@ -153,7 +174,7 @@ final class HoglakeDeletePublisher
             if (failure instanceof TrinoException trinoException) {
                 throw trinoException;
             }
-            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to publish Hoglake DELETE", failure);
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to publish Hoglake mutation", failure);
         }
     }
 

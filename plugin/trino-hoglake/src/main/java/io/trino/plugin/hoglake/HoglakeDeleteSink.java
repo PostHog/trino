@@ -49,7 +49,8 @@ final class HoglakeDeleteSink
     public void storeMergedRows(Page page)
     {
         for (int position = 0; position < page.getPositionCount(); position++) {
-            if (TINYINT.getByte(page.getBlock(page.getChannelCount() - 3), position) != DELETE_OPERATION_NUMBER) {
+            byte operation = TINYINT.getByte(page.getBlock(page.getChannelCount() - 3), position);
+            if (operation != DELETE_OPERATION_NUMBER && operation != UPDATE_DELETE_OPERATION_NUMBER) {
                 throw new TrinoException(NOT_SUPPORTED, "Hoglake supports DELETE only");
             }
             SqlRow row = (SqlRow) HoglakeColumnHandle.ROW_ID.type().getObject(page.getBlock(page.getChannelCount() - 1), position);

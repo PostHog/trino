@@ -103,18 +103,23 @@ class TestHoglakePredicatePushdown
     {
         InternalBlockEncodingSerde blockEncodingSerde = new InternalBlockEncodingSerde(
                 new BlockEncodingManager(new BlockEncodingSimdSupport(new FeaturesConfig())), TESTING_TYPE_MANAGER);
-        JsonCodec<HoglakeTableHandle> codec = new JsonCodecFactory(new JsonMapperProvider()
+        JsonCodecFactory codecFactory = new JsonCodecFactory(new JsonMapperProvider()
                 .withJsonSerializers(Map.of(Block.class, new BlockJsonSerde.Serializer(blockEncodingSerde)))
                 .withJsonDeserializers(Map.of(
                         Type.class, new TypeDeserializer(TESTING_TYPE_MANAGER),
-                        Block.class, new BlockJsonSerde.Deserializer(blockEncodingSerde))).get())
-                .jsonCodec(HoglakeTableHandle.class);
+                        Block.class, new BlockJsonSerde.Deserializer(blockEncodingSerde))).get());
+        JsonCodec<HoglakeTableHandle> codec = codecFactory.jsonCodec(HoglakeTableHandle.class);
         for (TupleDomain<HoglakeColumnHandle> predicate : List.of(
                 TupleDomain.<HoglakeColumnHandle>all(),
                 TupleDomain.<HoglakeColumnHandle>none(),
                 TupleDomain.withColumnDomains(Map.of(TIMESTAMP, range(TIMESTAMP_MICROS, -10, 20))))) {
             HoglakeTableHandle handle = TABLE.withConstraint(predicate);
             assertThat(codec.fromJson(codec.toJson(handle))).isEqualTo(handle);
+            JsonCodec<HoglakeDeleteHandle> mergeCodec = codecFactory.jsonCodec(HoglakeDeleteHandle.class);
+            for (Optional<String> insertFailure : List.of(Optional.<String>empty(), Optional.of("Writing sorted Hoglake tables is not supported"))) {
+                HoglakeDeleteHandle merge = new HoglakeDeleteHandle(handle, "memory:///warehouse/", "synthetic", insertFailure);
+                assertThat(mergeCodec.fromJson(mergeCodec.toJson(merge))).isEqualTo(merge);
+            }
         }
     }
 

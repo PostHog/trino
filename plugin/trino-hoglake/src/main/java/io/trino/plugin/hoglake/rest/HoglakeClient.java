@@ -296,8 +296,18 @@ public class HoglakeClient
 
     public void commit(HoglakeDtos.Commit request)
     {
+        commit(request, false);
+    }
+
+    public void commitMutation(HoglakeDtos.Commit request)
+    {
+        commit(request, true);
+    }
+
+    private void commit(HoglakeDtos.Commit request, boolean mutation)
+    {
         try {
-            commitOnce(request, requestTimeout);
+            commitOnce(request, requestTimeout, mutation);
             return;
         }
         catch (TrinoException failure) {
@@ -327,7 +337,7 @@ public class HoglakeClient
                         return;
                     }
                     if (attempt < 2) {
-                        commitOnce(request, remainingRecoveryTime(recoveryStarted));
+                        commitOnce(request, remainingRecoveryTime(recoveryStarted), mutation);
                         return;
                     }
                 }
@@ -381,13 +391,16 @@ public class HoglakeClient
                 failure.getErrorCode().equals(HOGLAKE_CATALOG_NOT_FOUND.toErrorCode());
     }
 
-    private void commitOnce(HoglakeDtos.Commit request, Duration timeout)
+    private void commitOnce(HoglakeDtos.Commit request, Duration timeout, boolean mutation)
     {
         // The required-key endpoint also protects against an older replica
         // silently ignoring the ID after capability negotiation.
         String path = "/commit";
         if (request.operationId() != null) {
             path = request.deletes().isEmpty() ? "/commit/prepared" : "/commit/deletes/prepared";
+        }
+        if (mutation) {
+            path = "/commit/mutations/prepared";
         }
         HoglakeDtos.CommitResult result = write("POST", catalogPath(path), request, new TypeReference<HoglakeDtos.CommitResult>() {}, timeout);
         if (result.snapshotId() <= 0) {

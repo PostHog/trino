@@ -157,7 +157,7 @@ the Hoglake scan API exposes statistics state but no per-file column bounds.
 The connector does not support time-travel SQL or nested types.
 Only Hoglake's `puffin-dv` deletion-vector format is read; any other format
 fails the query. Equality deletes and any other row-level delete representation
-are not read. SQL `DELETE` writes compatible vectors; `UPDATE` and `MERGE` are not supported.
+are not read. SQL `DELETE`, `UPDATE` and `MERGE` write compatible vectors.
 
 ## Writing tables
 
@@ -202,11 +202,12 @@ renames or drops. The server retains terminal receipts and expires unpublished
 operations after 24 hours, so longer-running creations must be retried as new queries.
 There is no fallback to the old staging-table protocol on older servers.
 
-Writes are limited to single-statement transactions. INSERT and table creation
-require unpartitioned tables; DELETE does not write or change partition values.
-Query/task retries, comments, custom table properties, `UPDATE`,
-and `MERGE` are not supported. Sort specifications on existing tables are
-advisory and are not applied by this writer.
+Writes are limited to single-statement transactions. INSERT and UPDATE require
+unpartitioned tables; UPDATE also rejects sorted tables. MERGE actions that insert
+rows reject partitioned and sorted tables. DELETE and delete-only MERGE support
+both layouts. Query/task retries, comments
+and custom table properties are not supported. INSERT's existing writer treats
+sort specifications as advisory and does not apply them.
 
 Servers advertising `idempotent-append-v1` support recovery of one INSERT
 operation. The connector creates one operation ID in `beginInsert` and sends it as
@@ -351,22 +352,35 @@ as one atomic snapshot. Counts report newly deleted rows, including zero for rep
 or no-match deletes. Data files and prior deletion vectors remain available to retained
 snapshots; DELETE does not change the table UUID.
 
-Deploy the Hoglake server with `idempotent-delete-v1` to **all replicas first**.
-The connector requires that capability and uses `/commit/deletes/prepared`, which
-requires a read snapshot, table UUID and operation ID. An older replica cannot silently
-accept this contract. Publication rejects intervening schema/lifecycle changes, removed
-files (including compaction), and newer deletion vectors on a touched file. Concurrent
-INSERTs and deletes of other files may succeed; rows appended after the pinned snapshot
-are not selected. A conflict requires rerunning the SQL statement from a fresh snapshot.
+### UPDATE and MERGE
+
+`UPDATE` writes replacement rows and deletes the original physical positions.
+`MERGE` supports matched UPDATE/DELETE and unmatched INSERT actions. Trino rejects
+multiple source rows matching the same target row. Upserts provide SQL MERGE
+semantics; they do not enforce unique keys. Unchanged columns, existing deletions
+and historical snapshots are preserved. Affected-row counts count each update
+once. Insert-only, delete-only, mixed and zero-row executions are supported.
+
+Deploy the Hoglake server with `idempotent-mutation-v1` to **all replicas first**.
+The connector requires that capability for DELETE, UPDATE and MERGE and uses
+`/commit/mutations/prepared`. It publishes all appended files and vectors in one
+snapshot, requiring a read snapshot, table UUID and operation ID. Empty delete
+groups guard insert-only and zero-row statements. An older replica cannot silently
+accept this contract. Any intervening target-table change conflicts, including
+INSERT, DELETE, compaction, schema changes, truncate, drop/name reuse and replacement.
+Unrelated tables may change. Rerun conflicting SQL from a fresh snapshot.
+Writing replacement rows to partitioned or sorted tables and additional writable types remain unsupported.
 
 Publication recovery uses the same bounded receipt lookup and identical-request replay
-as INSERT, with a delete-specific server contract. A missing receipt is not proof that
-publication failed. After submission, the connector retains uploaded vectors even if
+as INSERT, with a full-payload mixed-mutation server contract. A missing receipt is not proof that
+publication failed. After submission, the connector retains appended files and uploaded vectors even if
 recovery or cancellation leaves the outcome unknown; the error reports the operation ID.
-Before submission, an upload failure attempts to remove that statement's uploads and
-leaves the table unchanged. There is no orphan cleanup mechanism in this connector.
+Before submission, failures leave the table unchanged. Worker abort cleans files
+until fragment handoff; coordinator failure cleans newly uploaded vectors. Files
+already handed off can remain orphaned. There is no orphan cleanup mechanism in
+this connector.
 
-DELETE limits compressed position sets to 64 MiB per worker sink. The coordinator
+Mutation sinks limit compressed position sets to 64 MiB per worker sink. The coordinator
 separately limits aggregate fragment payloads and vector-construction working memory
 to 64 MiB each. Retained fragments, decoded vectors, and encoding workspace are also
 charged to query memory; either limit can reject a statement before publication.
