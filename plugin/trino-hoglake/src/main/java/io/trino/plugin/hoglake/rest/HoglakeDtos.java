@@ -33,11 +33,27 @@ public final class HoglakeDtos
             @JsonProperty("type") String type,
             @JsonProperty("type_params") Map<String, Object> typeParams,
             @JsonProperty("nullable") boolean nullable,
-            @JsonInclude(JsonInclude.Include.NON_EMPTY) @JsonProperty("children") List<ColumnDefinition> children)
+            @JsonInclude(JsonInclude.Include.NON_EMPTY) @JsonProperty("children") List<ColumnDefinition> children,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("comment") String comment)
     {
         public ColumnDefinition
         {
             children = children == null ? List.of() : List.copyOf(children);
+        }
+
+        public ColumnDefinition(String name, String type, Map<String, Object> typeParams, boolean nullable, List<ColumnDefinition> children)
+        {
+            this(name, type, typeParams, nullable, children, null);
+        }
+
+        public ColumnDefinition withComment(String comment)
+        {
+            return new ColumnDefinition(name, type, typeParams, nullable, children, comment);
+        }
+
+        public boolean hasComments()
+        {
+            return comment != null || children.stream().anyMatch(ColumnDefinition::hasComments);
         }
 
         public ColumnDefinition(String name, String type, Map<String, Object> typeParams, boolean nullable)
@@ -155,8 +171,14 @@ public final class HoglakeDtos
             @JsonProperty("type") String type,
             @JsonProperty("type_params") Map<String, Object> typeParams,
             @JsonProperty("nullable") Boolean nullable,
-            @JsonProperty("children") List<Column> children)
+            @JsonProperty("children") List<Column> children,
+            @JsonProperty("comment") String comment)
     {
+        public Column(long fieldId, int ordinal, String name, String type, Map<String, Object> typeParams, Boolean nullable, List<Column> children)
+        {
+            this(fieldId, ordinal, name, type, typeParams, nullable, children, null);
+        }
+
         public Column(long fieldId, int ordinal, String name, String type, Map<String, Object> typeParams, Boolean nullable)
         {
             this(fieldId, ordinal, name, type, typeParams, nullable, List.of());
@@ -182,8 +204,20 @@ public final class HoglakeDtos
             @JsonProperty("file_count") long fileCount,
             @JsonProperty("file_size_bytes") long fileSizeBytes,
             @JsonProperty("partition_spec") Map<String, Object> partitionSpec,
-            @JsonProperty("sort_spec") Map<String, Object> sortSpec)
+            @JsonProperty("sort_spec") Map<String, Object> sortSpec,
+            @JsonProperty("comment") String comment,
+            @JsonProperty("properties") Map<String, String> properties)
     {
+        public Table
+        {
+            properties = properties == null ? Map.of() : Map.copyOf(properties);
+        }
+
+        public Table(String name, String namespace, String tableUuid, List<Column> columns, long recordCount, long fileCount, long fileSizeBytes, Map<String, Object> partitionSpec, Map<String, Object> sortSpec)
+        {
+            this(name, namespace, tableUuid, columns, recordCount, fileCount, fileSizeBytes, partitionSpec, sortSpec, null, Map.of());
+        }
+
         public Table(String name, String namespace, String tableUuid, List<Column> columns, long recordCount, long fileCount, long fileSizeBytes, Map<String, Object> partitionSpec)
         {
             this(name, namespace, tableUuid, columns, recordCount, fileCount, fileSizeBytes, partitionSpec, null);

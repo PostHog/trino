@@ -226,7 +226,19 @@ public class HoglakeClient
 
     public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns, HoglakeDtos.ReplacementTarget replacement, List<HoglakeDtos.PartitionField> partitionFields, List<HoglakeDtos.SortField> sortFields)
     {
+        return prepareTableCreation(operationId, namespace, table, columns, replacement, partitionFields, sortFields, null, Map.of());
+    }
+
+    public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns, HoglakeDtos.ReplacementTarget replacement, List<HoglakeDtos.PartitionField> partitionFields, List<HoglakeDtos.SortField> sortFields, String comment, Map<String, String> properties)
+    {
         Map<String, Object> definition = new HashMap<>();
+        if (comment != null) {
+            definition.put("comment", comment);
+        }
+        if (!properties.isEmpty()) {
+            definition.put("properties", properties);
+        }
+        boolean metadata = comment != null || !properties.isEmpty() || columns.stream().anyMatch(HoglakeDtos.ColumnDefinition::hasComments);
         if (!partitionFields.isEmpty()) {
             definition.put("partition_fields", partitionFields);
         }
@@ -241,7 +253,7 @@ public class HoglakeClient
         }
         return write(
                 "PUT",
-                catalogPath("/table-creations/" + encode(operationId) + (!sortFields.isEmpty() ? "/sorted" : partitionFields.isEmpty() ? "" : "/partitioned")),
+                catalogPath("/table-creations/" + encode(operationId) + (metadata ? "/metadata" : !sortFields.isEmpty() ? "/sorted" : partitionFields.isEmpty() ? "" : "/partitioned")),
                 definition,
                 new TypeReference<HoglakeDtos.TableCreation>() {});
     }

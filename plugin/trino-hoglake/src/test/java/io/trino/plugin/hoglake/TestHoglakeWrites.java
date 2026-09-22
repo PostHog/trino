@@ -441,6 +441,17 @@ final class TestHoglakeWrites
     }
 
     @Test
+    void testMetadataRequiresServerCapability()
+    {
+        assertThatThrownBy(() -> runner.execute("CREATE TABLE described (id bigint) COMMENT 'metadata'"))
+                .hasMessageContaining("versioned-table-metadata-v1");
+        assertThatThrownBy(() -> runner.execute("CREATE TABLE described (id bigint COMMENT 'metadata')"))
+                .hasMessageContaining("versioned-table-metadata-v1");
+        assertThatThrownBy(() -> runner.execute("CREATE TABLE described (id bigint) WITH (extra_properties = MAP(ARRAY['owner'], ARRAY['data']))"))
+                .hasMessageContaining("versioned-table-metadata-v1");
+    }
+
+    @Test
     void testConcurrentSchemaCreation()
     {
         schemaCreationRace = true;

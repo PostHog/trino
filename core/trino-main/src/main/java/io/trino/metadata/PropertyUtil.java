@@ -32,11 +32,13 @@ import io.trino.sql.tree.BooleanLiteral;
 import io.trino.sql.tree.DoubleLiteral;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.ExpressionTreeRewriter;
+import io.trino.sql.tree.FunctionCall;
 import io.trino.sql.tree.Identifier;
 import io.trino.sql.tree.LongLiteral;
 import io.trino.sql.tree.NodeRef;
 import io.trino.sql.tree.Parameter;
 import io.trino.sql.tree.Property;
+import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.StringLiteral;
 
 import java.util.LinkedHashMap;
@@ -223,6 +225,12 @@ public final class PropertyUtil
             case Boolean _ -> new BooleanLiteral(value.toString());
             case Long _, Integer _ -> new LongLiteral(value.toString());
             case Double _ -> new DoubleLiteral(value.toString());
+            case Map<?, ?> map -> {
+                List<? extends Map.Entry<?, ?>> entries = List.copyOf(map.entrySet());
+                yield new FunctionCall(QualifiedName.of("map"), List.of(
+                        new Array(mappedCopy(entries, entry -> toExpression(errorCode, entry.getKey()))),
+                        new Array(mappedCopy(entries, entry -> toExpression(errorCode, entry.getValue())))));
+            }
             case List<?> list -> new Array(mappedCopy(list, item -> toExpression(errorCode, item)));
             case null -> throw new TrinoException(errorCode, "Property value is null");
             default -> throw new TrinoException(errorCode, "Failed to convert object of type %s to expression".formatted(value.getClass().getName()));

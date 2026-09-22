@@ -128,6 +128,21 @@ public class HoglakeConnector
                         java.util.List.of(),
                         false,
                         value -> (java.util.List<?>) value,
+                        value -> value),
+                new io.trino.spi.session.PropertyMetadata<>(
+                        "extra_properties",
+                        "Custom metadata (replaced as a whole by SET PROPERTIES)",
+                        new io.trino.spi.type.MapType(io.trino.spi.type.VarcharType.VARCHAR, io.trino.spi.type.VarcharType.VARCHAR, new io.trino.spi.type.TypeOperators()),
+                        java.util.Map.class,
+                        java.util.Map.of(),
+                        false,
+                        value -> {
+                            java.util.Map<?, ?> properties = (java.util.Map<?, ?>) value;
+                            if (properties.values().stream().anyMatch(java.util.Objects::isNull)) {
+                                throw new io.trino.spi.TrinoException(io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY, "Custom property values cannot be null");
+                            }
+                            return java.util.Map.copyOf(properties);
+                        },
                         value -> value));
     }
 

@@ -235,8 +235,7 @@ operations after 24 hours, so longer-running creations must be retried as new qu
 There is no fallback to the old staging-table protocol on older servers.
 
 Writes are limited to single-statement transactions. INSERT, UPDATE and MERGE
-support partitioned and sorted tables. DELETE and delete-only MERGE support both layouts. Query/task retries, comments
-and custom table properties are not supported. The writer applies the live sort specification to each new file.
+support partitioned and sorted tables. DELETE and delete-only MERGE support both layouts. Query/task retries are not supported. The writer applies the live sort specification to each new file.
 
 Servers advertising `idempotent-append-v1` support recovery of one INSERT
 operation. The connector creates one operation ID in `beginInsert` and sends it as
@@ -343,7 +342,7 @@ A namespace containing tables or views cannot be dropped. Deletion sends the
 namespace identity returned by the server, so concurrent name reuse conflicts.
 
 ADD COLUMN appends a nullable column using the existing writable scalar types.
-Column positions, defaults, comments, properties, and nested-field changes are
+Column positions, defaults, column properties, and nested-field changes are
 unsupported. Rename preserves the field ID. Drop retires the field ID; a later
 column with the same name receives a new ID. Existing Parquet files remain
 readable by field ID, with nulls for columns absent from the file. ADD and RENAME
@@ -484,3 +483,17 @@ The writer buffers one partition at a time, flushing at an estimated 32 MiB
 including auxiliary keys and sort-position overhead (plus an incoming page).
 Each sorted batch closes its files so later batches cannot break file ordering.
 This costs CPU and memory and may produce smaller files than unsorted writes.
+
+### Comments and custom properties
+
+Table and column comments are persisted with snapshot history, including CREATE,
+CTAS/replacement, `COMMENT ON`, and `ADD COLUMN ... COMMENT`. Custom annotations
+use `WITH (extra_properties = MAP(ARRAY['owner.team'], ARRAY['analytics']))`.
+`ALTER TABLE t SET PROPERTIES extra_properties = ...` replaces that map;
+`extra_properties = DEFAULT` clears it. Keys are lowercase ASCII, at most 128
+characters; `hoglake.`/`trino.` prefixes and storage-setting names are reserved.
+At most 100 entries, values at most 4096 UTF-16 code units; comments at most 16384.
+NUL is rejected. These annotations do not configure storage. Requires the server's
+`versioned-table-metadata-v1` capability and additive V11 migration. Upgrade all server replicas before metadata
+use: old DDL writers cannot preserve new versioned metadata. Old replicas
+refuse metadata operations, and existing metadata-free operations remain compatible.

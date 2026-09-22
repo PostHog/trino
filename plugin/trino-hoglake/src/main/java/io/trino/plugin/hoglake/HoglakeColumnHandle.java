@@ -38,7 +38,8 @@ public record HoglakeColumnHandle(
         @JsonProperty("type") Type type,
         @JsonProperty("nullable") boolean nullable,
         @JsonProperty("children") List<HoglakeColumnHandle> children,
-        @JsonProperty("hoglakeType") String hoglakeType)
+        @JsonProperty("hoglakeType") String hoglakeType,
+        @JsonProperty("comment") String comment)
         implements ColumnHandle
 {
     static final HoglakeColumnHandle ROW_ID = new HoglakeColumnHandle(
@@ -50,6 +51,11 @@ public record HoglakeColumnHandle(
     public HoglakeColumnHandle(String name, long fieldId, Type type, boolean nullable)
     {
         this(name, fieldId, type, nullable, List.of(), null);
+    }
+
+    public HoglakeColumnHandle(String name, long fieldId, Type type, boolean nullable, List<HoglakeColumnHandle> children, String hoglakeType)
+    {
+        this(name, fieldId, type, nullable, children, hoglakeType, null);
     }
 
     @JsonCreator
@@ -67,6 +73,7 @@ public record HoglakeColumnHandle(
                 .setName(name)
                 .setType(type)
                 .setNullable(nullable)
+                .setComment(java.util.Optional.ofNullable(comment))
                 .build();
     }
 

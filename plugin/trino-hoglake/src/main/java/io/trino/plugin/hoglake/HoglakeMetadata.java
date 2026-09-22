@@ -150,12 +150,15 @@ public class HoglakeMetadata
     @Override
     public void addColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnMetadata column, ColumnPosition position)
     {
-        if (!(position instanceof ColumnPosition.Last) || !column.isNullable() || column.getComment().isPresent() || !column.getProperties().isEmpty()) {
-            throw new TrinoException(NOT_SUPPORTED, "Hoglake ADD COLUMN supports nullable columns at the end, without comments or properties");
+        if (!(position instanceof ColumnPosition.Last) || !column.isNullable() || !column.getProperties().isEmpty()) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake ADD COLUMN supports nullable columns at the end, without column properties");
         }
         checkWriteSchemaSupport(client.getCatalog(), List.of(column.getType()));
-        HoglakeDtos.ColumnDefinition definition = HoglakeTypes.columnDefinition(column.getName(), column.getType(), true);
-        alterColumns((HoglakeTableHandle) tableHandle, Map.of("op", "add_column", "column", definition));
+        HoglakeDtos.ColumnDefinition definition = HoglakeTypes.columnDefinition(column.getName(), column.getType(), true).withComment(column.getComment().orElse(null));
+        if (column.getComment().isPresent()) {
+            checkMetadataSupport();
+        }
+        alterColumns((HoglakeTableHandle) tableHandle, Map.of("op", column.getComment().isPresent() ? "add_column_with_metadata" : "add_column", "column", definition));
     }
 
     @Override
@@ -178,6 +181,45 @@ public class HoglakeMetadata
             throw new TrinoException(NOT_SUPPORTED, "Unsupported Hoglake column type change: %s to %s".formatted(source.type(), type));
         }
         alterColumns((HoglakeTableHandle) tableHandle, Map.of("op", "promote_column", "name", source.name(), "to", HoglakeTypes.toHoglakeType(type)));
+    }
+
+    private void checkMetadataSupport()
+    {
+        HoglakeDtos.Catalog catalog = client.getCatalog();
+        if (catalog.capabilities() == null || !catalog.capabilities().contains("versioned-table-metadata-v1")) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support versioned-table-metadata-v1");
+        }
+    }
+
+    @Override
+    public void setTableComment(ConnectorSession session, ConnectorTableHandle tableHandle, Optional<String> comment)
+    {
+        checkMetadataSupport();
+        Map<String, Object> operation = new java.util.HashMap<>();
+        operation.put("op", "set_table_comment");
+        operation.put("comment", comment.orElse(null));
+        alterColumns((HoglakeTableHandle) tableHandle, operation);
+    }
+
+    @Override
+    public void setColumnComment(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column, Optional<String> comment)
+    {
+        checkMetadataSupport();
+        Map<String, Object> operation = new java.util.HashMap<>();
+        operation.put("op", "set_column_comment");
+        operation.put("name", ((HoglakeColumnHandle) column).name());
+        operation.put("comment", comment.orElse(null));
+        alterColumns((HoglakeTableHandle) tableHandle, operation);
+    }
+
+    @Override
+    public void setTableProperties(ConnectorSession session, ConnectorTableHandle tableHandle, Map<String, Optional<Object>> properties)
+    {
+        if (!properties.keySet().equals(java.util.Set.of("extra_properties"))) {
+            throw new TrinoException(NOT_SUPPORTED, "Only extra_properties can be altered; partitioning and sorted_by are creation properties");
+        }
+        checkMetadataSupport();
+        alterColumns((HoglakeTableHandle) tableHandle, Map.of("op", "set_properties", "properties", properties.get("extra_properties").orElse(Map.of())));
     }
 
     private void alterColumns(HoglakeTableHandle handle, Map<String, Object> operation)
@@ -233,7 +275,9 @@ public class HoglakeMetadata
                 handle.columns().stream().map(HoglakeColumnHandle::columnMetadata).toList(),
                 Map.of(
                         "partitioning", HoglakePartitioning.expressions(HoglakePartitioning.read(definition.partitionSpec()), handle.columns()),
-                        "sorted_by", HoglakeSorting.expressions(HoglakeSorting.read(definition.sortSpec()), handle.columns())));
+                        "sorted_by", HoglakeSorting.expressions(HoglakeSorting.read(definition.sortSpec()), handle.columns()),
+                        "extra_properties", definition.properties()),
+                Optional.ofNullable(definition.comment()));
     }
 
     @Override
@@ -367,11 +411,11 @@ public class HoglakeMetadata
 
     private static List<HoglakeDtos.ColumnDefinition> columnDefinitions(ConnectorTableMetadata metadata)
     {
-        if (metadata.getComment().isPresent() || metadata.getProperties().keySet().stream().anyMatch(key -> !key.equals("partitioning") && !key.equals("sorted_by")) || metadata.getColumns().stream().anyMatch(column -> column.getComment().isPresent())) {
-            throw new TrinoException(NOT_SUPPORTED, "Hoglake table properties and comments are not supported");
+        if (metadata.getProperties().keySet().stream().anyMatch(key -> !java.util.Set.of("partitioning", "sorted_by", "extra_properties").contains(key)) || metadata.getColumns().stream().anyMatch(column -> !column.getProperties().isEmpty())) {
+            throw new TrinoException(NOT_SUPPORTED, "Unsupported Hoglake table or column properties");
         }
         return metadata.getColumns().stream()
-                .map(column -> HoglakeTypes.columnDefinition(column.getName(), column.getType(), column.isNullable()))
+                .map(column -> HoglakeTypes.columnDefinition(column.getName(), column.getType(), column.isNullable()).withComment(column.getComment().orElse(null)))
                 .toList();
     }
 
@@ -409,10 +453,15 @@ public class HoglakeMetadata
         if (!sortFields.isEmpty() && !catalog.capabilities().contains("atomic-sorted-table-creation-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support atomic-sorted-table-creation-v1");
         }
+        @SuppressWarnings("unchecked")
+        Map<String, String> extraProperties = (Map<String, String>) metadata.getProperties().getOrDefault("extra_properties", Map.of());
+        if (metadata.getComment().isPresent() || !extraProperties.isEmpty() || definitions.stream().anyMatch(HoglakeDtos.ColumnDefinition::hasComments)) {
+            checkMetadataSupport();
+        }
         String operation = UUID.randomUUID().toString();
         // Record before sending: a lost preparation response may still have created the operation.
         creationOperation = Optional.of(operation);
-        HoglakeDtos.TableCreation prepared = client.prepareTableCreation(operation, metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), definitions, replacement, partitionFields, sortFields);
+        HoglakeDtos.TableCreation prepared = client.prepareTableCreation(operation, metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), definitions, replacement, partitionFields, sortFields, metadata.getComment().orElse(null), extraProperties);
         if (!"prepared".equals(prepared.state()) || !operation.equals(prepared.operationId()) || prepared.tableUuid() == null || prepared.columns() == null || prepared.writePath() == null) {
             throw new TrinoException(HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake preparation response for operation " + operation);
         }
@@ -667,7 +716,8 @@ public class HoglakeMetadata
                 HoglakeTypes.toTrinoType(column),
                 column.isNullable(),
                 column.children().stream().map(HoglakeMetadata::toColumnHandle).toList(),
-                column.type());
+                column.type(),
+                column.comment());
     }
 
     private static List<ColumnMetadata> columnMetadata(HoglakeDtos.Table table)

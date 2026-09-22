@@ -96,6 +96,28 @@ final class TestHoglakeLiveWrites
                     "s3.path-style-access", "true",
                     "s3.aws-access-key", "synthetic-test",
                     "s3.aws-secret-key", "synthetic-test-password"));
+            runner.execute("CREATE TABLE described (id integer COMMENT 'identifier', v varchar) COMMENT 'table note' WITH (extra_properties = MAP(ARRAY['owner.team'], ARRAY['data']), partitioning = ARRAY['id'], sorted_by = ARRAY['id'])");
+            long describedSnapshot = client.getCatalog().headSnapshotId();
+            assertThat(client.getTable("test", "described").orElseThrow().properties()).containsEntry("owner.team", "data");
+            assertThat(runner.execute("SHOW CREATE TABLE described").getOnlyValue().toString()).contains("identifier", "table note", "owner.team");
+            assertThat(runner.execute("SELECT comment FROM system.metadata.table_comments WHERE catalog_name='hoglake' AND schema_name='test' AND table_name='described'").getOnlyValue()).isEqualTo("table note");
+            runner.execute("COMMENT ON TABLE described IS 'updated table'");
+            runner.execute("COMMENT ON COLUMN described.id IS 'updated id'");
+            runner.execute("ALTER TABLE described SET PROPERTIES extra_properties = MAP(ARRAY['owner.team'], ARRAY['analytics'])");
+            runner.execute("ALTER TABLE described ADD COLUMN extra bigint COMMENT 'added'");
+            runner.execute("ALTER TABLE described RENAME TO described_renamed");
+            assertThat(client.getTable("test", "described", describedSnapshot).orElseThrow().comment()).isEqualTo("table note");
+            assertThat(client.getTable("test", "described_renamed").orElseThrow().columns().get(2).comment()).isEqualTo("added");
+            assertThat(runner.execute("SHOW CREATE TABLE described_renamed").getOnlyValue().toString()).contains("updated table", "updated id", "analytics");
+            runner.execute("COMMENT ON TABLE described_renamed IS NULL");
+            runner.execute("COMMENT ON COLUMN described_renamed.id IS NULL");
+            runner.execute("ALTER TABLE described_renamed SET PROPERTIES extra_properties = DEFAULT");
+            assertThat(client.getTable("test", "described_renamed").orElseThrow().comment()).isNull();
+            assertThat(client.getTable("test", "described_renamed").orElseThrow().properties()).isEmpty();
+            assertThatThrownBy(() -> runner.execute("ALTER TABLE described_renamed SET PROPERTIES extra_properties = MAP(ARRAY['hoglake.location'], ARRAY['bad'])")).hasMessageContaining("reserved custom property");
+            runner.execute("CREATE OR REPLACE TABLE described_renamed COMMENT 'replacement' WITH (extra_properties = MAP(ARRAY['owner'], ARRAY['new'])) AS SELECT 7 id");
+            assertThat(client.getTable("test", "described_renamed").orElseThrow().comment()).isEqualTo("replacement");
+            assertThat(client.getTable("test", "described_renamed").orElseThrow().properties()).containsExactlyEntriesOf(Map.of("owner", "new"));
             runner.execute("CREATE TABLE sorted_partitioned (p bigint, r row(k bigint), v bigint) WITH (partitioning = ARRAY['p'], sorted_by = ARRAY['r.k DESC NULLS FIRST', 'v ASC NULLS LAST'])");
             runner.execute("INSERT INTO sorted_partitioned VALUES (1, ROW(2), 2), (1, ROW(9), 9), (1, NULL, 4), (2, ROW(5), 5)");
             assertThat(client.getTable("test", "sorted_partitioned").orElseThrow().sortSpec().get("fields")).asList().hasSize(2);
