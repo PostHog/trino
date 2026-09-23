@@ -47,6 +47,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -128,7 +129,8 @@ final class TestHoglakeWrites
                                 new HoglakeSplitManager(client),
                                 new HoglakePageSourceProvider(storage),
                                 new HoglakePageSinkProvider(storage, "test"),
-                                new Bootstrap().quiet().initialize().getInstance(LifeCycleManager.class));
+                                new Bootstrap().quiet().initialize().getInstance(LifeCycleManager.class),
+                                Set.of());
                     }
                 });
             }

@@ -16,8 +16,10 @@ package io.trino.plugin.hoglake;
 import com.google.inject.Binder;
 import com.google.inject.Module;
 import com.google.inject.Provides;
+import com.google.inject.Scopes;
 import com.google.inject.Singleton;
 import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.spi.NodeVersion;
 import io.trino.spi.PageSorter;
@@ -25,6 +27,7 @@ import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSplitManager;
 
+import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static io.airlift.bootstrap.ClosingBinder.closingBinder;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 
@@ -36,6 +39,7 @@ public class HoglakeModule
     {
         configBinder(binder).bindConfig(HoglakeConfig.class);
         closingBinder(binder).registerCloseable(HoglakeClient.class);
+        newSetBinder(binder, SessionPropertiesProvider.class).addBinding().to(HoglakeSessionProperties.class).in(Scopes.SINGLETON);
     }
 
     @Provides
@@ -57,7 +61,7 @@ public class HoglakeModule
     @Singleton
     public static ConnectorSplitManager createSplitManager(HoglakeClient client)
     {
-        return new HoglakeSplitManager(client);
+        return new HoglakeSplitManager(client, HoglakeSessionProperties::getMaxSplitSize);
     }
 
     @Provides

@@ -18,6 +18,7 @@ import io.trino.parquet.writer.ParquetWriterOptions;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures.FileColumn;
 import io.trino.plugin.hoglake.testing.PuffinDeletionVectorFixtures;
+import io.trino.spi.SplitWeight;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
@@ -80,6 +81,135 @@ class TestHoglakeDeletionVectorReads
     {
         assertThat(read(parquet(), List.of(value()), vector(), Optional.empty(), 10))
                 .containsExactlyElementsOf(rows(VALUES));
+    }
+
+    // ---- byte ranges --------------------------------------------------------
+
+    /**
+     * A file cut into byte ranges loads the whole vector for every range. Its
+     * positions are file row ordinals, and a later range's rows are numbered
+     * from the file's first row, so each deleted row is dropped by the range
+     * that holds it and returned by none.
+     */
+    // A hundred sequential rows in ten row groups of ten, with deletes at the
+    // edges of row groups and in their middles, on both sides of a cut between
+    // row groups 4 and 5.
+    private static final int RANGE_ROWS = 100;
+    private static final long[] RANGE_DELETED = {0, 9, 10, 45, 49, 50, 51, 99};
+
+    private static byte[] rangeFile()
+    {
+        List<Object> values = new ArrayList<>(RANGE_ROWS);
+        for (int i = 0; i < RANGE_ROWS; i++) {
+            values.add((long) i);
+        }
+        return ConnectorTestFixtures.writeParquet(
+                List.of(new FileColumn(Types.optional(PrimitiveTypeName.INT64).id(1).named("value"), BIGINT, values)),
+                ParquetWriterOptions.builder().setMaxRowGroupRowCount(10).build());
+    }
+
+    @Test
+    void deletionVectorAppliesAcrossByteRanges()
+    {
+        int rows = RANGE_ROWS;
+        byte[] file = rangeFile();
+        long[] deleted = RANGE_DELETED;
+        byte[] deletionVector = PuffinDeletionVectorFixtures.deletionVector(DATA_PATH, deleted);
+        TrinoFileSystemFactory fileSystem = ConnectorTestFixtures.memoryFileSystem(Map.of(DATA_PATH, file, DV_PATH, deletionVector));
+        HoglakeSplit wholeFile = splitWithCatalogDeleteCount(file.length, deletionVector, rows);
+
+        List<Long> survivors = new ArrayList<>();
+        for (long value = 0; value < rows; value++) {
+            if (Arrays.binarySearch(deleted, value) < 0) {
+                survivors.add(value);
+            }
+        }
+
+        // Cut on the row group holding rows 50 to 59, then inside the bytes of
+        // the row group before it.
+        List<Long> rowGroupOffsets = ConnectorTestFixtures.rowGroupOffsets(file);
+        assertThat(rowGroupOffsets).hasSize(10);
+        long insideRowGroup = (rowGroupOffsets.get(4) + rowGroupOffsets.get(5)) / 2;
+        for (long cut : new long[] {rowGroupOffsets.get(5), insideRowGroup}) {
+            HoglakeSplit first = wholeFile.withRange(0, cut, SplitWeight.standard());
+            HoglakeSplit second = wholeFile.withRange(cut, file.length - cut, SplitWeight.standard());
+            List<Long> firstValues = readValues(fileSystem, first);
+            List<Long> secondValues = readValues(fileSystem, second);
+
+            assertThat(firstValues).isNotEmpty();
+            assertThat(secondValues).isNotEmpty();
+            List<Long> union = new ArrayList<>(firstValues);
+            union.addAll(secondValues);
+            assertThat(union)
+                    .describedAs("ranges cut at byte %s", cut)
+                    .containsExactlyElementsOf(survivors);
+        }
+
+        List<Long> secondHalf = readValues(fileSystem, wholeFile.withRange(rowGroupOffsets.get(5), file.length - rowGroupOffsets.get(5), SplitWeight.standard()));
+        assertThat(secondHalf.getFirst()).isEqualTo(52L);
+        assertThat(secondHalf).doesNotContain(50L, 51L, 99L);
+
+        // A count through the ranges reads no columns and still drops deleted rows.
+        long counted = 0;
+        for (HoglakeSplit range : List.of(
+                wholeFile.withRange(0, insideRowGroup, SplitWeight.standard()),
+                wholeFile.withRange(insideRowGroup, file.length - insideRowGroup, SplitWeight.standard()))) {
+            ConnectorPageSource pageSource = open(fileSystem, List.of(), range);
+            try {
+                counted += ConnectorTestFixtures.readAll(pageSource, List.of()).size();
+            }
+            finally {
+                close(pageSource);
+            }
+        }
+        assertThat(counted).isEqualTo(rows - deleted.length);
+    }
+
+    /**
+     * An unfiltered {@code count(*)} projects no column. A whole-file split
+     * answers it from the catalog's counts; a byte-range split cannot, and
+     * falls through to the reader, whose pages then carry only the appended
+     * row position the vector is applied against. Both paths must agree.
+     */
+    @Test
+    void countThroughRangesAppliesTheDeletionVector()
+    {
+        byte[] file = rangeFile();
+        byte[] deletionVector = PuffinDeletionVectorFixtures.deletionVector(DATA_PATH, RANGE_DELETED);
+        TrinoFileSystemFactory fileSystem = ConnectorTestFixtures.memoryFileSystem(Map.of(DATA_PATH, file, DV_PATH, deletionVector));
+        HoglakeSplit wholeFile = splitWithCatalogDeleteCount(file.length, deletionVector, RANGE_ROWS);
+        long cut = ConnectorTestFixtures.rowGroupOffsets(file).get(5);
+        HoglakeSplit first = wholeFile.withRange(0, cut, SplitWeight.standard());
+        HoglakeSplit second = wholeFile.withRange(cut, file.length - cut, SplitWeight.standard());
+
+        // Rows 0 to 49 lose 0, 9, 10, 45 and 49; rows 50 to 99 lose 50, 51 and 99.
+        assertThat(countRows(fileSystem, first)).isEqualTo(45);
+        assertThat(countRows(fileSystem, second)).isEqualTo(47);
+        assertThat(countRows(fileSystem, wholeFile)).isEqualTo(RANGE_ROWS - RANGE_DELETED.length);
+    }
+
+    private static long countRows(TrinoFileSystemFactory fileSystem, HoglakeSplit split)
+    {
+        ConnectorPageSource pageSource = open(fileSystem, List.of(), split);
+        try {
+            return ConnectorTestFixtures.readAll(pageSource, List.of()).size();
+        }
+        finally {
+            close(pageSource);
+        }
+    }
+
+    private static List<Long> readValues(TrinoFileSystemFactory fileSystem, HoglakeSplit split)
+    {
+        ConnectorPageSource pageSource = open(fileSystem, List.of(value()), split);
+        try {
+            return ConnectorTestFixtures.readAll(pageSource, List.of(BIGINT)).stream()
+                    .map(row -> (Long) row.getFirst())
+                    .toList();
+        }
+        finally {
+            close(pageSource);
+        }
     }
 
     // ---- positions ----------------------------------------------------------

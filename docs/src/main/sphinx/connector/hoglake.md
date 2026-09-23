@@ -24,6 +24,7 @@ the catalog's files.
 | `hoglake.uri` | Hoglake REST base URI; required. | None |
 | `hoglake.catalog` | Hoglake catalog to expose. | `hoglake` |
 | `hoglake.client.request-timeout` | Positive request timeout, with `ms`, `s`, `m`, `h`, or `d` suffix. | `2m` |
+| `hoglake.max-split-size` | Largest byte range of one Parquet file assigned to a single split; at least `1MB`. See [](hoglake-split-planning). Use the `max_split_size` catalog session property to change it for a session. | `128MB` |
 | `fs.s3.enabled` | Enable the native S3 filesystem. | `true` |
 | `s3.endpoint` | Optional S3-compatible endpoint. | AWS endpoint resolution |
 | `s3.region` | S3 region. | `us-east-1` |
@@ -111,11 +112,15 @@ blob's declared length and checksum are big-endian, while the roaring bitmap's
 own fields are little-endian. Hoglake's server reader, its writer, and its DuckDB
 client all use this layout, and the connector reads it.
 
-An unfiltered `count(*)` still answers from catalog metadata: a file's visible
-rows are its record count minus its deletion vector's delete count. The vector
-is read and validated in that path too, so a count cannot silently ignore
-deletes. Counts with a filter, and every other aggregation, read the data and
-apply the vector.
+An unfiltered `count(*)` over a file read by a single split still answers from
+catalog metadata: a file's visible rows are its record count minus its deletion
+vector's delete count. The vector is read and validated in that path too, so a
+count cannot silently ignore deletes. A file read by several byte-range splits
+is counted from its Parquet footers instead, since the catalog's record count
+describes the whole file; no column data is read and the vector is still
+applied. Counts with a filter, and every other aggregation, read the data and
+apply the vector. Every split of a file with a deletion vector reads the whole
+vector.
 
 A deletion vector that is missing, corrupt, truncated, unsupported, or
 inconsistent with the catalog fails the query; it is never treated as "no
@@ -138,6 +143,28 @@ arrays against query memory before allocating them. There is no fixed ratio
 between serialized and decoded size. Retained bitmap memory remains charged
 until the split closes; a metadata-only count releases it before returning.
 
+(hoglake-split-planning)=
+## Split planning
+
+A file no larger than `hoglake.max-split-size` is read by one split. A larger file
+is divided into consecutive byte ranges, each read by its own split, so several
+workers or threads read a large file in parallel. A split reads the row groups that
+start inside its range; the ranges of a file together read every row group exactly
+once. Splits are planned from the file sizes in the catalog's scan response, without
+opening any file, so planning costs the same single REST call however large the
+files are.
+
+When the scan response lists a file's row-group start offsets in `split_offsets`,
+ranges are cut on those offsets: consecutive row groups are packed into one range
+while they fit within `hoglake.max-split-size`, and a row group larger than that is a
+range of its own. Without usable offsets, a file is cut into equal ranges of
+`hoglake.max-split-size`, the last one shorter; a range that holds no row-group start
+reads only the footer and returns no rows. The catalog's `footer_size`, when known,
+lets each split fetch the Parquet footer in a single request.
+
+Splits are weighted by the share of `hoglake.max-split-size` they cover, so the
+scheduler assigns more short ranges than full ones to each worker.
+
 ## Read consistency and limitations
 
 Each table handle pins the catalog snapshot and resolved columns during planning.
@@ -156,7 +183,7 @@ Trino retains the residual filters to evaluate matching rows. Missing or unusabl
 statistics do not exclude data. UUID bounds are not used because their ordering
 differs from Parquet's binary ordering.
 
-The connector creates one split per file. Catalog file pruning is not available:
+Catalog file pruning is not available:
 the Hoglake scan API exposes statistics state but no per-file column bounds.
 The connector does not support time-travel SQL.
 Only Hoglake's `puffin-dv` deletion-vector format is read; any other format

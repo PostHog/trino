@@ -17,21 +17,34 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.airlift.slice.SizeOf;
 import io.trino.spi.HostAddress;
+import io.trino.spi.SplitWeight;
 import io.trino.spi.connector.ConnectorSplit;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalLong;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.slice.SizeOf.estimatedSizeOf;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
 import static java.util.Objects.requireNonNull;
 
 /**
- * One split per data file from GET /scan, carrying the deletion vector the
- * scan paired with that file at the query's pinned snapshot. The page
- * source reads the vector from object storage and drops the rows it marks
- * deleted.
+ * One byte range of a data file from GET /scan, carrying the deletion
+ * vector the scan paired with that file at the query's pinned snapshot.
+ * The page source reads the vector from object storage and drops the rows
+ * it marks deleted.
+ *
+ * <p>A split covers {@code [start, start + length)} of the file. The worker
+ * reads the row groups whose first column chunk starts inside that range, so
+ * the ranges of one file together read every row group exactly once. A file
+ * no larger than the target split size is a single split covering the whole
+ * file.
+ *
+ * <p>{@code recordCount} is the catalog's row count for the whole file. It is
+ * {@code -1} for a split that covers only part of a file, since the catalog
+ * does not know how many rows fall in a byte range.
  *
  * <p>{@code deleteCount} is the catalog's count of rows deleted from the
  * data file. It is compared against the decoded bitmap before a single row
@@ -45,7 +58,11 @@ public record HoglakeSplit(
         @JsonProperty("recordCount") long recordCount,
         @JsonProperty("deleteFilePath") Optional<String> deleteFilePath,
         @JsonProperty("deleteCount") long deleteCount,
-        @JsonProperty("deleteFileFormat") Optional<String> deleteFileFormat)
+        @JsonProperty("deleteFileFormat") Optional<String> deleteFileFormat,
+        @JsonProperty("start") long start,
+        @JsonProperty("length") long length,
+        @JsonProperty("splitWeight") SplitWeight splitWeight,
+        @JsonProperty("footerSize") OptionalLong footerSize)
         implements ConnectorSplit
 {
     private static final int INSTANCE_SIZE = instanceSize(HoglakeSplit.class);
@@ -56,6 +73,27 @@ public record HoglakeSplit(
         requireNonNull(path, "path is null");
         requireNonNull(deleteFilePath, "deleteFilePath is null");
         requireNonNull(deleteFileFormat, "deleteFileFormat is null");
+        requireNonNull(splitWeight, "splitWeight is null");
+        requireNonNull(footerSize, "footerSize is null");
+        checkArgument(start >= 0, "start is negative: %s", start);
+        checkArgument(length >= 0, "length is negative: %s", length);
+        checkArgument(start + length <= fileSizeBytes, "range [%s, %s) exceeds file size %s", start, start + length, fileSizeBytes);
+    }
+
+    /**
+     * A split covering a whole data file, with a standard weight and no
+     * catalog footer size.
+     */
+    public HoglakeSplit(
+            long dataFileId,
+            String path,
+            long fileSizeBytes,
+            long recordCount,
+            Optional<String> deleteFilePath,
+            long deleteCount,
+            Optional<String> deleteFileFormat)
+    {
+        this(dataFileId, path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat, 0, fileSizeBytes, SplitWeight.standard(), OptionalLong.empty());
     }
 
     /**
@@ -70,6 +108,29 @@ public record HoglakeSplit(
     public HoglakeSplit(String path, long fileSizeBytes, long recordCount, Optional<String> deleteFilePath, long deleteCount, Optional<String> deleteFileFormat)
     {
         this(0, path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat);
+    }
+
+    /**
+     * The same file restricted to {@code [start, start + length)}. The
+     * catalog's whole-file record count does not describe a partial range,
+     * so a range that is not the whole file carries {@code -1}.
+     */
+    public HoglakeSplit withRange(long start, long length, SplitWeight splitWeight)
+    {
+        long rangeRecordCount = -1;
+        if (start == 0 && length == fileSizeBytes) {
+            rangeRecordCount = recordCount;
+        }
+        return new HoglakeSplit(dataFileId, path, fileSizeBytes, rangeRecordCount, deleteFilePath, deleteCount, deleteFileFormat, start, length, splitWeight, footerSize);
+    }
+
+    /**
+     * Whether this split reads every row group of its file, which is when the
+     * catalog's whole-file record count describes it.
+     */
+    public boolean wholeFile()
+    {
+        return start == 0 && length == fileSizeBytes;
     }
 
     /**
@@ -88,11 +149,19 @@ public record HoglakeSplit(
     }
 
     @Override
+    public SplitWeight getSplitWeight()
+    {
+        return splitWeight;
+    }
+
+    @Override
     public long getRetainedSizeInBytes()
     {
         return INSTANCE_SIZE
                 + estimatedSizeOf(path)
                 + sizeOf(deleteFilePath, SizeOf::estimatedSizeOf)
-                + sizeOf(deleteFileFormat, SizeOf::estimatedSizeOf);
+                + sizeOf(deleteFileFormat, SizeOf::estimatedSizeOf)
+                + splitWeight.getRetainedSizeInBytes()
+                + sizeOf(footerSize);
     }
 }

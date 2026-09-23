@@ -14,6 +14,7 @@
 package io.trino.plugin.hoglake;
 
 import com.google.inject.Injector;
+import com.google.inject.Key;
 import io.airlift.bootstrap.Bootstrap;
 import io.airlift.bootstrap.LifeCycleManager;
 import io.trino.filesystem.manager.FileSystemModule;
@@ -22,6 +23,7 @@ import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorPageSinkProvider
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorPageSourceProvider;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorSplitManager;
 import io.trino.plugin.base.jmx.MBeanServerModule;
+import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.spi.classloader.ThreadContextClassLoader;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorContext;
@@ -32,6 +34,7 @@ import io.trino.spi.connector.ConnectorSplitManager;
 import org.weakref.jmx.guice.MBeanModule;
 
 import java.util.Map;
+import java.util.Set;
 
 import static io.trino.plugin.base.Versions.checkStrictSpiVersionMatch;
 
@@ -68,7 +71,8 @@ public class HoglakeConnectorFactory
                     new ClassLoaderSafeConnectorSplitManager(injector.getInstance(ConnectorSplitManager.class), classLoader),
                     new ClassLoaderSafeConnectorPageSourceProvider(injector.getInstance(ConnectorPageSourceProvider.class), classLoader),
                     new ClassLoaderSafeConnectorPageSinkProvider(injector.getInstance(ConnectorPageSinkProvider.class), classLoader),
-                    injector.getInstance(LifeCycleManager.class));
+                    injector.getInstance(LifeCycleManager.class),
+                    injector.getInstance(new Key<Set<SessionPropertiesProvider>>() {}));
         }
     }
 }

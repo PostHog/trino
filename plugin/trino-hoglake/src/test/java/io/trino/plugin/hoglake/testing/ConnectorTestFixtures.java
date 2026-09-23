@@ -32,12 +32,18 @@ import io.trino.spi.type.RowType;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
+import org.apache.parquet.format.ColumnMetaData;
 import org.apache.parquet.format.CompressionCodec;
+import org.apache.parquet.format.FileMetaData;
+import org.apache.parquet.format.RowGroup;
+import org.apache.parquet.format.Util;
 import org.apache.parquet.schema.MessageType;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -45,6 +51,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+
+import static java.lang.Math.toIntExact;
+import static java.nio.ByteOrder.LITTLE_ENDIAN;
 
 /**
  * Unit-level fixtures for exercising the connector's parquet read path
@@ -154,6 +163,47 @@ public final class ConnectorTestFixtures
             throw new UncheckedIOException(e);
         }
         return out.toByteArray();
+    }
+
+    /**
+     * The length of a Parquet file's footer, as a catalog records it in
+     * {@code footer_size}: the metadata bytes, without the 8-byte trailer.
+     */
+    public static long footerSize(byte[] file)
+    {
+        return ByteBuffer.wrap(file, file.length - 8, 4).order(LITTLE_ENDIAN).getInt();
+    }
+
+    /**
+     * Where each row group of a Parquet file starts, as a catalog records it
+     * in {@code split_offsets}: the first column chunk's first page (its
+     * dictionary page when it has one), which is the position a split's
+     * byte range is matched against.
+     */
+    public static List<Long> rowGroupOffsets(byte[] file)
+    {
+        int footerLength = toIntExact(footerSize(file));
+        int footerOffset = file.length - 8 - footerLength;
+        FileMetaData metadata;
+        try {
+            metadata = Util.readFileMetaData(new ByteArrayInputStream(file, footerOffset, footerLength));
+        }
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        List<Long> offsets = new ArrayList<>();
+        for (RowGroup rowGroup : metadata.getRow_groups()) {
+            ColumnMetaData column = rowGroup.getColumns().getFirst().getMeta_data();
+            long dataPageOffset = column.getData_page_offset();
+            long dictionaryPageOffset = column.getDictionary_page_offset();
+            if (column.isSetDictionary_page_offset() && dictionaryPageOffset > 0 && dictionaryPageOffset < dataPageOffset) {
+                offsets.add(dictionaryPageOffset);
+            }
+            else {
+                offsets.add(dataPageOffset);
+            }
+        }
+        return List.copyOf(offsets);
     }
 
     private static Block buildBlock(Type type, List<Object> values)
