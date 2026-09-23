@@ -18,11 +18,15 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.airlift.bootstrap.Bootstrap;
 import io.airlift.bootstrap.LifeCycleManager;
+import io.airlift.units.DataSize;
+import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.filesystem.memory.MemoryFileSystemFactory;
+import io.trino.parquet.writer.ParquetWriterOptions;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
+import io.trino.plugin.hoglake.testing.ConnectorTestFixtures.FileColumn;
 import io.trino.spi.Page;
 import io.trino.spi.Plugin;
 import io.trino.spi.block.RunLengthEncodedBlock;
@@ -31,9 +35,11 @@ import io.trino.spi.connector.ConnectorContext;
 import io.trino.spi.connector.ConnectorFactory;
 import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.security.ConnectorIdentity;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.StandaloneQueryRunner;
+import org.apache.parquet.schema.Types;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -52,9 +58,11 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static io.trino.plugin.hoglake.HoglakeConfig.DEFAULT_MAX_SPLIT_SIZE;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.assertions.Assert.assertEventually;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
@@ -88,6 +96,7 @@ final class TestHoglakeWrites
     private int namespaceCreates;
     private volatile boolean replacementSupport = true;
     private final Map<String, HoglakeDtos.ReplacementTarget> replacementTargets = new ConcurrentHashMap<>();
+    private volatile DataSize maxSplitSize = DEFAULT_MAX_SPLIT_SIZE;
     private volatile boolean corruptLifecycleResponse;
     private int lifecycleRequests;
     private HttpServer server;
@@ -126,7 +135,7 @@ final class TestHoglakeWrites
                     {
                         return new HoglakeConnector(
                                 new HoglakeMetadata(client, storage),
-                                new HoglakeSplitManager(client),
+                                new HoglakeSplitManager(client, _ -> maxSplitSize),
                                 new HoglakePageSourceProvider(storage),
                                 new HoglakePageSinkProvider(storage, "test"),
                                 new Bootstrap().quiet().initialize().getInstance(LifeCycleManager.class),
@@ -789,6 +798,63 @@ final class TestHoglakeWrites
             idempotentMutation = false;
             corruptCommitResponse = false;
             commitStatus = 200;
+        }
+    }
+
+    /**
+     * A data file read by several byte-range splits, spread over two workers,
+     * yields one DELETE fragment per split for the same file. Row positions
+     * are file-absolute across ranges and the publisher unions the fragments
+     * into a single vector, so exactly the matched rows disappear.
+     */
+    @Test
+    void testDeleteAcrossByteRangeSplits()
+            throws Exception
+    {
+        idempotentMutation = true;
+        try (DistributedQueryRunner distributed = DistributedQueryRunner.builder(runner.getDefaultSession())
+                .setWorkerCount(2)
+                .setCoordinatorProperties(Map.of("node-scheduler.include-coordinator", "false"))
+                .build()) {
+            installConnector(distributed);
+            runner.execute("CREATE TABLE range_deletes (id bigint)");
+
+            // Ten row groups of ten rows, registered with their row-group offsets
+            // so a target smaller than two row groups makes each one its own split.
+            List<Object> ids = new ArrayList<>();
+            for (long id = 0; id < 100; id++) {
+                ids.add(id);
+            }
+            byte[] file = ConnectorTestFixtures.writeParquet(
+                    List.of(new FileColumn(Types.optional(INT64).id(1).named("id"), BIGINT, ids)),
+                    ParquetWriterOptions.builder().setMaxRowGroupRowCount(10).build());
+            String path = "memory:///warehouse/range_deletes/rows.parquet";
+            storage.create(ConnectorIdentity.ofUser("test")).newOutputFile(Location.of(path)).createOrOverwrite(file);
+            List<Long> offsets = ConnectorTestFixtures.rowGroupOffsets(file);
+            files.get("range_deletes").add(new HoglakeDtos.ScanFile(
+                    new HoglakeDtos.DataFile(nextFileId++, path, "parquet", 100, file.length, ConnectorTestFixtures.footerSize(file), 0, "provided", snapshot, offsets),
+                    null));
+            long target = offsets.get(1) - offsets.get(0);
+            assertThat(HoglakeSplitManager.toSplits(files.get("range_deletes"), target)).hasSize(10);
+            maxSplitSize = DataSize.ofBytes(target);
+
+            // Rows from every row group, plus the first and last row of the file.
+            assertThat(distributed.execute("DELETE FROM range_deletes WHERE id % 10 = 3 OR id IN (0, 99)").getUpdateCount()).hasValue(12);
+            assertThat(files.get("range_deletes")).hasSize(1);
+            HoglakeDtos.DeleteFile published = files.get("range_deletes").getFirst().deleteFile();
+            assertThat(published).isNotNull();
+            assertThat(published.deleteCount()).isEqualTo(12);
+            assertQuery("SELECT count(*), sum(id) FROM range_deletes", "VALUES (BIGINT '88', BIGINT '4371')");
+            assertQuery("SELECT id FROM range_deletes WHERE id < 15", "VALUES BIGINT '1', BIGINT '2', BIGINT '4', BIGINT '5', BIGINT '6', BIGINT '7', BIGINT '8', BIGINT '9', BIGINT '10', BIGINT '11', BIGINT '12', BIGINT '14'");
+
+            // A second delete through the same splits unions with the published vector.
+            assertThat(distributed.execute("DELETE FROM range_deletes WHERE id % 10 = 7").getUpdateCount()).hasValue(10);
+            assertThat(files.get("range_deletes").getFirst().deleteFile().deleteCount()).isEqualTo(22);
+            assertQuery("SELECT count(*), sum(id) FROM range_deletes", "VALUES (BIGINT '78', BIGINT '3851')");
+        }
+        finally {
+            maxSplitSize = DEFAULT_MAX_SPLIT_SIZE;
+            idempotentMutation = false;
         }
     }
 
