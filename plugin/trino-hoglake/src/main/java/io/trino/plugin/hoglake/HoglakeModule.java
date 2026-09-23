@@ -19,6 +19,7 @@ import com.google.inject.Provides;
 import com.google.inject.Scopes;
 import com.google.inject.Singleton;
 import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.filesystem.cache.SplitAffinityProvider;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.spi.NodeVersion;
@@ -59,9 +60,11 @@ public class HoglakeModule
 
     @Provides
     @Singleton
-    public static ConnectorSplitManager createSplitManager(HoglakeClient client)
+    public static ConnectorSplitManager createSplitManager(HoglakeClient client, SplitAffinityProvider affinityProvider)
     {
-        return new HoglakeSplitManager(client, HoglakeSessionProperties::getMaxSplitSize);
+        // The filesystem module binds a key-producing provider only when the
+        // catalog caches filesystem data, and a no-op provider otherwise.
+        return new HoglakeSplitManager(client, HoglakeSessionProperties::getMaxSplitSize, affinityProvider);
     }
 
     @Provides

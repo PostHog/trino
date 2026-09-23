@@ -16,6 +16,7 @@ package io.trino.plugin.hoglake;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.airlift.json.JsonCodec;
+import io.trino.filesystem.cache.CacheSplitAffinityProvider;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.SplitWeight;
 import io.trino.spi.TrinoException;
@@ -161,6 +162,7 @@ class TestHoglakeSplits
             assertThat(split.wholeFile()).isTrue();
             assertThat(split.recordCount()).isEqualTo(25);
             assertThat(split.getSplitWeight()).isEqualTo(SplitWeight.standard());
+            assertThat(split.getAffinityKey()).isEmpty();
             assertThat(split.footerSize()).isEqualTo(OptionalLong.of(321));
         }
     }
@@ -189,7 +191,27 @@ class TestHoglakeSplits
             assertThat(split.wholeFile()).isFalse();
             assertThat(split.getSplitWeight()).isEqualTo(SplitWeight.standard());
             assertThat(split.footerSize()).isEqualTo(OptionalLong.of(50));
+            assertThat(split.getAffinityKey()).isEmpty();
         });
+    }
+
+    @Test
+    void affinityKeysComeFromTheFilesystemProvider()
+    {
+        List<HoglakeDtos.ScanFile> scan = List.of(
+                new HoglakeDtos.ScanFile(largeFile(2 * TARGET, List.of()), null),
+                new HoglakeDtos.ScanFile(new HoglakeDtos.DataFile(10, "s3://lake/t/small.parquet", "parquet", 25, TARGET, 321L, 0, "provided", 3), null));
+
+        // Without a caching filesystem the provider is a no-op and scheduling is unconstrained.
+        assertThat(HoglakeSplitManager.toSplits(scan, TARGET)).allSatisfy(split -> assertThat(split.getAffinityKey()).isEmpty());
+
+        // With one, every range and every whole file carries the filesystem's own key.
+        assertThat(HoglakeSplitManager.toSplits(scan, TARGET, new CacheSplitAffinityProvider()))
+                .extracting(split -> split.getAffinityKey().orElseThrow())
+                .containsExactly(
+                        "s3://lake/t/large.parquet:0:1000",
+                        "s3://lake/t/large.parquet:1000:1000",
+                        "s3://lake/t/small.parquet:0:1000");
     }
 
     @Test
@@ -338,13 +360,14 @@ class TestHoglakeSplits
         JsonCodec<HoglakeSplit> codec = JsonCodec.jsonCodec(HoglakeSplit.class);
         List<HoglakeSplit> splits = HoglakeSplitManager.toSplits(List.of(
                 new HoglakeDtos.ScanFile(largeFile(2 * TARGET + 300, List.of()), null),
-                new HoglakeDtos.ScanFile(new HoglakeDtos.DataFile(11, "s3://lake/t/b.parquet", "parquet", 17, 2 * TARGET, null, 25, "provided", 4), DELETE_FILE)), TARGET);
+                new HoglakeDtos.ScanFile(new HoglakeDtos.DataFile(11, "s3://lake/t/b.parquet", "parquet", 17, 2 * TARGET, null, 25, "provided", 4), DELETE_FILE)), TARGET, new CacheSplitAffinityProvider());
 
         assertThat(splits).hasSize(5);
         for (HoglakeSplit split : splits) {
             HoglakeSplit deserialized = codec.fromJson(codec.toJson(split));
             assertThat(deserialized).isEqualTo(split);
             assertThat(deserialized.getSplitWeight()).isEqualTo(split.getSplitWeight());
+            assertThat(deserialized.getAffinityKey()).isEqualTo(split.getAffinityKey()).isPresent();
         }
     }
 

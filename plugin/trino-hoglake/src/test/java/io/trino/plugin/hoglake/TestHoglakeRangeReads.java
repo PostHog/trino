@@ -178,7 +178,7 @@ class TestHoglakeRangeReads
 
         // Reads succeed whether the hint is exact, too small, or unusable.
         for (long hint : new long[] {footerSize, 1, FILE.length}) {
-            HoglakeSplit split = new HoglakeSplit(0, PATH, FILE.length, ROWS, Optional.empty(), 0, Optional.empty(), 0, FILE.length, SplitWeight.standard(), OptionalLong.of(hint));
+            HoglakeSplit split = new HoglakeSplit(0, PATH, FILE.length, ROWS, Optional.empty(), 0, Optional.empty(), 0, FILE.length, SplitWeight.standard(), OptionalLong.of(hint), Optional.empty());
             assertThat(values(read(split, List.of(VALUE), TupleDomain.all()))).containsExactlyElementsOf(allValues());
         }
     }

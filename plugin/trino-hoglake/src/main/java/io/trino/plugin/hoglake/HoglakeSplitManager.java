@@ -15,6 +15,8 @@ package io.trino.plugin.hoglake;
 
 import com.google.common.collect.ImmutableList;
 import io.airlift.units.DataSize;
+import io.trino.filesystem.cache.NoopSplitAffinityProvider;
+import io.trino.filesystem.cache.SplitAffinityProvider;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.SplitWeight;
@@ -54,6 +56,11 @@ import static java.util.Objects.requireNonNull;
  * same single REST call however large the files are. A file no larger than
  * the target split size stays one whole-file split.
  *
+ * <p>Each split's scheduling affinity comes from the filesystem's
+ * {@link SplitAffinityProvider}, which the filesystem module binds to a key
+ * provider only when the catalog caches filesystem data and to a no-op
+ * otherwise, so an uncached catalog schedules splits without constraint.
+ *
  * <p>The vector's bytes are not fetched at planning: a split describes a
  * worker's job, and the page source reads the vector through the
  * connector's filesystem for the split it is actually running. What is
@@ -70,10 +77,12 @@ public class HoglakeSplitManager
 
     private final HoglakeClient client;
     private final Function<ConnectorSession, DataSize> maxSplitSize;
+    private final SplitAffinityProvider affinityProvider;
 
     /**
-     * A split manager with the default target split size, for connectors
-     * that register no session properties.
+     * A split manager with the default target split size and no scheduling
+     * affinity, for connectors that register no session properties and do
+     * not cache filesystem data.
      */
     public HoglakeSplitManager(HoglakeClient client)
     {
@@ -82,8 +91,14 @@ public class HoglakeSplitManager
 
     public HoglakeSplitManager(HoglakeClient client, Function<ConnectorSession, DataSize> maxSplitSize)
     {
+        this(client, maxSplitSize, new NoopSplitAffinityProvider());
+    }
+
+    public HoglakeSplitManager(HoglakeClient client, Function<ConnectorSession, DataSize> maxSplitSize, SplitAffinityProvider affinityProvider)
+    {
         this.client = requireNonNull(client, "client is null");
         this.maxSplitSize = requireNonNull(maxSplitSize, "maxSplitSize is null");
+        this.affinityProvider = requireNonNull(affinityProvider, "affinityProvider is null");
     }
 
     @Override
@@ -99,7 +114,7 @@ public class HoglakeSplitManager
             return new FixedSplitSource(List.of());
         }
         List<HoglakeDtos.ScanFile> scan = scan(client, handle);
-        return new FixedSplitSource(toSplits(scan, maxSplitSize.apply(session).toBytes()));
+        return new FixedSplitSource(toSplits(scan, maxSplitSize.apply(session).toBytes(), affinityProvider));
     }
 
     static List<HoglakeDtos.ScanFile> scan(HoglakeClient client, HoglakeTableHandle handle)
@@ -123,12 +138,22 @@ public class HoglakeSplitManager
     }
 
     /**
+     * Pure split construction with no scheduling affinity, unit-testable
+     * without a server.
+     */
+    static List<HoglakeSplit> toSplits(List<HoglakeDtos.ScanFile> scan, long maxSplitSize)
+    {
+        return toSplits(scan, maxSplitSize, new NoopSplitAffinityProvider());
+    }
+
+    /**
      * Pure split construction, unit-testable without a server. Each file
      * becomes one or more byte-range splits of at most {@code maxSplitSize}
      * bytes (a single row group larger than that stays whole), emitted in
-     * file order and ascending range order.
+     * file order and ascending range order, each carrying the affinity key
+     * the provider assigns to its byte range.
      */
-    static List<HoglakeSplit> toSplits(List<HoglakeDtos.ScanFile> scan, long maxSplitSize)
+    static List<HoglakeSplit> toSplits(List<HoglakeDtos.ScanFile> scan, long maxSplitSize, SplitAffinityProvider affinityProvider)
     {
         checkArgument(maxSplitSize > 0, "maxSplitSize must be positive: %s", maxSplitSize);
         ImmutableList.Builder<HoglakeSplit> splits = ImmutableList.builder();
@@ -138,11 +163,15 @@ public class HoglakeSplitManager
             if (fileSizeBytes <= maxSplitSize) {
                 // Unchanged from whole-file planning: one split, the catalog's
                 // record count, and a standard weight.
-                splits.add(wholeFile);
+                splits.add(wholeFile.withRange(0, fileSizeBytes, SplitWeight.standard(), affinityProvider.getKey(wholeFile.path(), 0, fileSizeBytes)));
                 continue;
             }
             for (ByteRange range : planRanges(fileSizeBytes, wholeFile.footerSize(), file.dataFile().splitOffsets(), maxSplitSize)) {
-                splits.add(wholeFile.withRange(range.start(), range.length(), splitWeight(range.length(), maxSplitSize)));
+                splits.add(wholeFile.withRange(
+                        range.start(),
+                        range.length(),
+                        splitWeight(range.length(), maxSplitSize),
+                        affinityProvider.getKey(wholeFile.path(), range.start(), range.length())));
             }
         }
         return splits.build();
@@ -297,6 +326,7 @@ public class HoglakeSplitManager
                 0,
                 dataFile.fileSizeBytes(),
                 SplitWeight.standard(),
-                footerSize);
+                footerSize,
+                Optional.empty());
     }
 }

@@ -75,9 +75,13 @@ are not Hoglake snapshot identifiers or per-user cache partitions. Published dat
 files should remain immutable; changing content while retaining the same location,
 modification time, and length cannot be detected by this key scheme.
 
-This caches filesystem data only, not Hoglake REST metadata. Split scheduling is
-unchanged: there is no preference for workers already holding a file in cache.
-Per-catalog cache metrics and tracing are provided by the shared cache infrastructure.
+This caches filesystem data only, not Hoglake REST metadata. When caching is
+enabled, each split carries the filesystem's scheduling affinity key for its file
+and byte range, so with the default `node-scheduler.optimized-local-scheduling=true`
+the same range of the same file tends to be read by the same worker across queries,
+which is the worker whose cache holds it. Without caching, splits carry no affinity
+key and are scheduled without that constraint. Per-catalog cache metrics and tracing
+are provided by the shared cache infrastructure.
 
 ## Types
 

@@ -62,7 +62,8 @@ public record HoglakeSplit(
         @JsonProperty("start") long start,
         @JsonProperty("length") long length,
         @JsonProperty("splitWeight") SplitWeight splitWeight,
-        @JsonProperty("footerSize") OptionalLong footerSize)
+        @JsonProperty("footerSize") OptionalLong footerSize,
+        @JsonProperty("affinityKey") Optional<String> affinityKey)
         implements ConnectorSplit
 {
     private static final int INSTANCE_SIZE = instanceSize(HoglakeSplit.class);
@@ -75,14 +76,15 @@ public record HoglakeSplit(
         requireNonNull(deleteFileFormat, "deleteFileFormat is null");
         requireNonNull(splitWeight, "splitWeight is null");
         requireNonNull(footerSize, "footerSize is null");
+        requireNonNull(affinityKey, "affinityKey is null");
         checkArgument(start >= 0, "start is negative: %s", start);
         checkArgument(length >= 0, "length is negative: %s", length);
         checkArgument(start + length <= fileSizeBytes, "range [%s, %s) exceeds file size %s", start, start + length, fileSizeBytes);
     }
 
     /**
-     * A split covering a whole data file, with a standard weight and no
-     * catalog footer size.
+     * A split covering a whole data file, with a standard weight, no
+     * catalog footer size and no scheduling affinity.
      */
     public HoglakeSplit(
             long dataFileId,
@@ -93,7 +95,7 @@ public record HoglakeSplit(
             long deleteCount,
             Optional<String> deleteFileFormat)
     {
-        this(dataFileId, path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat, 0, fileSizeBytes, SplitWeight.standard(), OptionalLong.empty());
+        this(dataFileId, path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat, 0, fileSizeBytes, SplitWeight.standard(), OptionalLong.empty(), Optional.empty());
     }
 
     /**
@@ -117,11 +119,20 @@ public record HoglakeSplit(
      */
     public HoglakeSplit withRange(long start, long length, SplitWeight splitWeight)
     {
+        return withRange(start, length, splitWeight, Optional.empty());
+    }
+
+    /**
+     * The same file restricted to {@code [start, start + length)}, scheduled
+     * with the given affinity key (see {@link #getAffinityKey()}).
+     */
+    public HoglakeSplit withRange(long start, long length, SplitWeight splitWeight, Optional<String> affinityKey)
+    {
         long rangeRecordCount = -1;
         if (start == 0 && length == fileSizeBytes) {
             rangeRecordCount = recordCount;
         }
-        return new HoglakeSplit(dataFileId, path, fileSizeBytes, rangeRecordCount, deleteFilePath, deleteCount, deleteFileFormat, start, length, splitWeight, footerSize);
+        return new HoglakeSplit(dataFileId, path, fileSizeBytes, rangeRecordCount, deleteFilePath, deleteCount, deleteFileFormat, start, length, splitWeight, footerSize, affinityKey);
     }
 
     /**
@@ -148,6 +159,19 @@ public record HoglakeSplit(
         return List.of();
     }
 
+    /**
+     * The key the split manager obtained from the filesystem's
+     * {@code SplitAffinityProvider}: present only when the catalog caches
+     * filesystem data, so that the same byte range of the same file is
+     * preferably scheduled on the worker whose cache holds it. Empty for an
+     * uncached catalog, which leaves scheduling unconstrained.
+     */
+    @Override
+    public Optional<String> getAffinityKey()
+    {
+        return affinityKey;
+    }
+
     @Override
     public SplitWeight getSplitWeight()
     {
@@ -162,6 +186,7 @@ public record HoglakeSplit(
                 + sizeOf(deleteFilePath, SizeOf::estimatedSizeOf)
                 + sizeOf(deleteFileFormat, SizeOf::estimatedSizeOf)
                 + splitWeight.getRetainedSizeInBytes()
-                + sizeOf(footerSize);
+                + sizeOf(footerSize)
+                + sizeOf(affinityKey, SizeOf::estimatedSizeOf);
     }
 }
