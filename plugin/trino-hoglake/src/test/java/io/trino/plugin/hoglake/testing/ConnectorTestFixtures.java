@@ -27,6 +27,7 @@ import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.SourcePage;
 import io.trino.spi.security.ConnectorIdentity;
+import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.Type;
@@ -177,6 +178,9 @@ public final class ConnectorTestFixtures
             else if (type.getJavaType() == Slice.class) {
                 type.writeSlice(builder, Slices.utf8Slice((String) value));
             }
+            else if (type.getJavaType() == LongTimestampWithTimeZone.class) {
+                type.writeObject(builder, value);
+            }
             else {
                 throw new IllegalArgumentException("Unsupported test value type for " + type);
             }
@@ -242,6 +246,9 @@ public final class ConnectorTestFixtures
         }
         if (type.getJavaType() == boolean.class) {
             return type.getBoolean(block, position);
+        }
+        if (type.getJavaType() == LongTimestampWithTimeZone.class) {
+            return type.getObject(block, position);
         }
         if (type instanceof RowType) {
             return type.getObjectValue(block, position);
