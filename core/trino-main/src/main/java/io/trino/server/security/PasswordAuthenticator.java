@@ -15,6 +15,7 @@ package io.trino.server.security;
 
 import com.google.inject.Inject;
 import io.trino.client.ProtocolDetectionException;
+import io.trino.client.ProtocolHeaders;
 import io.trino.server.ProtocolConfig;
 import io.trino.spi.security.AccessDeniedException;
 import io.trino.spi.security.Identity;
@@ -22,6 +23,7 @@ import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MultivaluedMap;
 
 import java.security.Principal;
+import java.util.List;
 import java.util.Optional;
 
 import static com.google.common.base.Verify.verify;
@@ -97,29 +99,26 @@ public class PasswordAuthenticator
      */
     private Identity rewriteUserHeaderToMappedUser(Identity mappedIdentity, BasicAuthCredentials basicAuthCredentials, MultivaluedMap<String, String> headers)
     {
-        String userHeader;
+        ProtocolHeaders protocolHeaders;
         try {
-            userHeader = getUserHeader(headers);
+            protocolHeaders = detectProtocol(alternateHeaderName, headers.keySet());
         }
         catch (ProtocolDetectionException _) {
             // this shouldn't fail here, but ignore and it will be handled elsewhere
             return mappedIdentity;
         }
-        if (basicAuthCredentials.getUser().equals(headers.getFirst(userHeader))) {
-            headers.putSingle(userHeader, mappedIdentity.getUser());
+        // Current clients send the login in both the original-user and the user header. Rewrite every
+        // header that repeats the typed login, not only the preferred one: when the mapped identity differs
+        // from the typed login (a host-qualified user), a user header left as typed reads as a request to
+        // impersonate the typed name, which the access control then denies. A header is only ever replaced
+        // with the identity this request just authenticated, so the rewrite grants nothing.
+        String typedUser = basicAuthCredentials.getUser();
+        for (String userHeader : List.of(protocolHeaders.requestOriginalUser(), protocolHeaders.requestUser())) {
+            if (typedUser.equals(headers.getFirst(userHeader))) {
+                headers.putSingle(userHeader, mappedIdentity.getUser());
+            }
         }
         return mappedIdentity;
-    }
-
-    // Extract this out in a method so that the logic of preferring originalUser and fallback on user remains in one place
-    private String getUserHeader(MultivaluedMap<String, String> headers)
-            throws ProtocolDetectionException
-    {
-        String userHeader = detectProtocol(alternateHeaderName, headers.keySet()).requestOriginalUser();
-        if (headers.getFirst(userHeader) == null || headers.getFirst(userHeader).isEmpty()) {
-            userHeader = detectProtocol(alternateHeaderName, headers.keySet()).requestUser();
-        }
-        return userHeader;
     }
 
     /**

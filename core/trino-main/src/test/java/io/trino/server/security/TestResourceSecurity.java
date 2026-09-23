@@ -1025,6 +1025,37 @@ public class TestResourceSecurity
                 assertThat(response.header("principal")).isEqualTo("tenant-a." + TEST_USER_LOGIN);
             }
 
+            // The JDBC driver and the Trino client send the login in X-Trino-Original-User as well as
+            // X-Trino-User. Both follow the qualified identity, so this is still not an impersonation.
+            Request bothHeaders = new Request.Builder()
+                    .url(identityLocation)
+                    .header("Host", hostHeader(tenantHost, httpsUri))
+                    .addHeader("Authorization", Credentials.basic(TEST_USER_LOGIN, TEST_PASSWORD))
+                    .addHeader("X-Trino-Original-User", TEST_USER_LOGIN)
+                    .addHeader("X-Trino-User", TEST_USER_LOGIN)
+                    .build();
+            try (Response response = client.newCall(bothHeaders).execute()) {
+                assertThat(response.code()).isEqualTo(SC_OK);
+                assertThat(response.header("user")).isEqualTo("tenant-a." + TEST_USER_LOGIN);
+                assertThat(response.header("principal")).isEqualTo("tenant-a." + TEST_USER_LOGIN);
+            }
+
+            // A user header naming someone else is left alone: only the header that repeats the typed
+            // login follows the qualified identity, so the other name stays an impersonation request,
+            // which the access control checks when the session is created.
+            Request otherUser = new Request.Builder()
+                    .url(identityLocation)
+                    .header("Host", hostHeader(tenantHost, httpsUri))
+                    .addHeader("Authorization", Credentials.basic(TEST_USER_LOGIN, TEST_PASSWORD))
+                    .addHeader("X-Trino-Original-User", TEST_USER_LOGIN)
+                    .addHeader("X-Trino-User", "tenant-b." + TEST_USER_LOGIN)
+                    .build();
+            try (Response response = client.newCall(otherUser).execute()) {
+                assertThat(response.code()).isEqualTo(SC_OK);
+                assertThat(response.header("user")).isEqualTo("tenant-b." + TEST_USER_LOGIN);
+                assertThat(response.header("principal")).isEqualTo("tenant-a." + TEST_USER_LOGIN);
+            }
+
             // The same credentials do not authenticate for another tenant, or without a tenant host
             assertResponseCode(client, identityLocation, SC_UNAUTHORIZED, Headers.of(
                     "Host",
