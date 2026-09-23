@@ -10,6 +10,8 @@ from pathlib import Path
 
 SUITE_DIR = Path("testing/trino-product-tests/src/test/java/io/trino/tests/product/suite")
 SUITE_HELPERS = {"SuiteRunner", "SuiteTag"}
+# TODO https://github.com/trinodb/trino/pull/26519 Re-enable once the connector supports key-pair authentication
+DISABLED_SUITES = {"SuiteSnowflake"}
 
 # This fork runs DuckLake's integration tests in plugin/trino-ducklake.
 # Retain product coverage of shared SQL, clients, security, fault tolerance,
@@ -217,7 +219,7 @@ def validate_configuration(suite_dir=SUITE_DIR):
     if duplicate_suites:
         raise ValueError(f"Suites declared more than once: {', '.join(duplicate_suites)}")
 
-    actual_suites = {path.stem for path in suite_dir.glob("Suite*.java")} - SUITE_HELPERS
+    actual_suites = {path.stem for path in suite_dir.glob("Suite*.java")} - SUITE_HELPERS - DISABLED_SUITES
     missing_suites = sorted(set(declared_suites) - actual_suites)
     if missing_suites:
         raise ValueError(f"Declared product test suites are missing: {', '.join(missing_suites)}")

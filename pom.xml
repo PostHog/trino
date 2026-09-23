@@ -5,7 +5,7 @@
     <parent>
         <groupId>io.airlift</groupId>
         <artifactId>airbase</artifactId>
-        <version>413</version>
+        <version>414</version>
     </parent>
 
     <groupId>io.trino</groupId>
@@ -608,7 +608,7 @@
             <dependency>
                 <groupId>io.airlift</groupId>
                 <artifactId>aircompressor-v3</artifactId>
-                <version>3.8</version>
+                <version>3.9</version>
             </dependency>
 
             <dependency>
