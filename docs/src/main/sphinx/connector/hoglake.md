@@ -148,6 +148,10 @@ Parquet columns bind by field ID. Fields without IDs fall back to column names.
 Columns absent from older files produce nulls.
 
 Query predicates are used to prune Parquet row groups using compatible statistics.
+For `timestamp(6) with time zone`, value pruning supports UTC-adjusted Parquet
+`INT64 TIMESTAMP(MICROS, true)` columns. Bounds are compared as UTC instants,
+independent of their displayed offsets. Other timestamp precisions and encodings
+retain value predicates as residuals.
 Trino retains the residual filters to evaluate matching rows. Missing or unusable
 statistics do not exclude data. UUID bounds are not used because their ordering
 differs from Parquet's binary ordering.

@@ -43,9 +43,14 @@ import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.EmptyPageSource;
 import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.Range;
+import io.trino.spi.predicate.SortedRangeSet;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.type.LongTimestampWithTimeZone;
+import io.trino.spi.type.TimestampWithTimeZoneType;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.io.MessageColumnIO;
+import org.apache.parquet.schema.LogicalTypeAnnotation.TimestampLogicalTypeAnnotation;
 import org.apache.parquet.schema.MessageType;
 import org.joda.time.DateTimeZone;
 
@@ -65,10 +70,14 @@ import static io.trino.parquet.predicate.PredicateUtils.getFilteredRowGroups;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
+import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.spi.type.UuidType.UUID;
 import static java.util.Objects.requireNonNull;
+import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MICROS;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.FLOAT;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT32;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
 
 /**
  * Reads a split's parquet file from object storage through Trino's own
@@ -401,12 +410,61 @@ public class HoglakePageSourceProvider
                     (column.type().equals(DOUBLE) && physicalType == FLOAT)) {
                 continue;
             }
+            if (column.type() instanceof TimestampWithTimeZoneType) {
+                // Match the exact microsecond decoder semantics. Other encodings and
+                // precisions retain value predicates as residuals, but can still prune nulls.
+                if (column.type().equals(TIMESTAMP_TZ_MICROS) && physicalType == INT64 &&
+                        binding.get().asPrimitiveType().getLogicalTypeAnnotation() instanceof TimestampLogicalTypeAnnotation annotation &&
+                        annotation.isAdjustedToUTC() && annotation.getUnit() == MICROS) {
+                    try {
+                        domain = utcTimestampDomain(domain);
+                    }
+                    catch (ArithmeticException e) {
+                        // A bound outside the plain timestamp representation cannot be pushed.
+                        continue;
+                    }
+                }
+                else if (!domain.getValues().isAll() && !domain.getValues().isNone()) {
+                    continue;
+                }
+            }
             ColumnDescriptor descriptor = descriptorsByPath.get(List.of(binding.get().getName()));
             if (descriptor != null) {
                 domains.merge(descriptor, domain, Domain::intersect);
             }
         }
         return TupleDomain.withColumnDomains(domains);
+    }
+
+    private static Domain utcTimestampDomain(Domain domain)
+    {
+        List<Range> ranges = new ArrayList<>();
+        for (Range range : domain.getValues().getRanges().getOrderedRanges()) {
+            Range converted = Range.all(TIMESTAMP_MICROS);
+            if (!range.isLowUnbounded()) {
+                long low = epochMicros((LongTimestampWithTimeZone) range.getLowBoundedValue());
+                converted = converted.intersect(range.isLowInclusive()
+                        ? Range.greaterThanOrEqual(TIMESTAMP_MICROS, low)
+                        : Range.greaterThan(TIMESTAMP_MICROS, low)).orElseThrow();
+            }
+            if (!range.isHighUnbounded()) {
+                long high = epochMicros((LongTimestampWithTimeZone) range.getHighBoundedValue());
+                converted = converted.intersect(range.isHighInclusive()
+                        ? Range.lessThanOrEqual(TIMESTAMP_MICROS, high)
+                        : Range.lessThan(TIMESTAMP_MICROS, high)).orElseThrow();
+            }
+            ranges.add(converted);
+        }
+        return Domain.create(SortedRangeSet.copyOf(TIMESTAMP_MICROS, ranges), domain.isNullAllowed());
+    }
+
+    private static long epochMicros(LongTimestampWithTimeZone value)
+    {
+        // Zone keys describe presentation; the stored epoch already identifies the instant.
+        if (value.getPicosOfMilli() % 1_000_000 != 0) {
+            throw new ArithmeticException("Timestamp bound is not an exact microsecond");
+        }
+        return Math.addExact(Math.multiplyExact(value.getEpochMillis(), 1_000), value.getPicosOfMilli() / 1_000_000);
     }
 
     /**
