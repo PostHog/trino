@@ -21,6 +21,7 @@ import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
 import io.trino.spi.TrinoException;
 import org.junit.jupiter.api.Test;
 
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.trino.spi.StandardErrorCode.TRANSACTION_CONFLICT;
@@ -69,7 +70,8 @@ final class TestHoglakeTransactionLifecycle
                         new HoglakeSplitManager(client),
                         new HoglakePageSourceProvider(storage),
                         new HoglakePageSinkProvider(storage, "test"),
-                        new Bootstrap().quiet().initialize().getInstance(LifeCycleManager.class));
+                        new Bootstrap().quiet().initialize().getInstance(LifeCycleManager.class),
+                        Set.of());
                 try {
                     var handle = connector.beginTransaction(REPEATABLE_READ, false, false);
                     assertThat(connector.getMetadata(ConnectorTestFixtures.session(), handle)).isSameAs(metadata);

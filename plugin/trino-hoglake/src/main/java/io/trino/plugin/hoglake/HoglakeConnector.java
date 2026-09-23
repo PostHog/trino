@@ -14,6 +14,7 @@
 package io.trino.plugin.hoglake;
 
 import io.airlift.bootstrap.LifeCycleManager;
+import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.spi.StandardErrorCode;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.Connector;
@@ -38,6 +39,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -52,19 +54,30 @@ public class HoglakeConnector
     private final ConnectorPageSourceProvider pageSourceProvider;
     private final ConnectorPageSinkProvider pageSinkProvider;
     private final LifeCycleManager lifeCycleManager;
+    private final List<PropertyMetadata<?>> sessionProperties;
 
+    /**
+     * The session properties must be those the split manager reads: a
+     * manager built by {@link HoglakeModule} reads {@code max_split_size},
+     * so it is paired with the module's providers; a manager built with a
+     * fixed target size is paired with an empty set.
+     */
     public HoglakeConnector(
             HoglakeMetadata metadata,
             ConnectorSplitManager splitManager,
             ConnectorPageSourceProvider pageSourceProvider,
             ConnectorPageSinkProvider pageSinkProvider,
-            LifeCycleManager lifeCycleManager)
+            LifeCycleManager lifeCycleManager,
+            Set<SessionPropertiesProvider> sessionPropertiesProviders)
     {
         this.metadata = requireNonNull(metadata, "metadata is null");
         this.splitManager = requireNonNull(splitManager, "splitManager is null");
         this.pageSourceProvider = requireNonNull(pageSourceProvider, "pageSourceProvider is null");
         this.pageSinkProvider = requireNonNull(pageSinkProvider, "pageSinkProvider is null");
         this.lifeCycleManager = requireNonNull(lifeCycleManager, "lifeCycleManager is null");
+        this.sessionProperties = requireNonNull(sessionPropertiesProviders, "sessionPropertiesProviders is null").stream()
+                .flatMap(sessionPropertiesProvider -> sessionPropertiesProvider.getSessionProperties().stream())
+                .collect(toImmutableList());
     }
 
     @Override
@@ -115,6 +128,12 @@ public class HoglakeConnector
     public ConnectorPageSourceProvider getPageSourceProvider()
     {
         return pageSourceProvider;
+    }
+
+    @Override
+    public List<PropertyMetadata<?>> getSessionProperties()
+    {
+        return sessionProperties;
     }
 
     @Override

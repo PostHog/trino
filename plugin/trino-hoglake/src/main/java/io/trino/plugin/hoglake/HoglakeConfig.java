@@ -15,6 +15,8 @@ package io.trino.plugin.hoglake;
 
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
+import io.airlift.units.DataSize;
+import io.airlift.units.MinDataSize;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import jakarta.validation.constraints.NotNull;
 
@@ -22,13 +24,18 @@ import java.time.Duration;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static io.airlift.units.DataSize.Unit.MEGABYTE;
+
 public class HoglakeConfig
 {
+    public static final DataSize DEFAULT_MAX_SPLIT_SIZE = DataSize.of(128, MEGABYTE);
+
     private static final Pattern DURATION = Pattern.compile("\\s*(\\d+(?:\\.\\d+)?)\\s*(ms|s|m|h|d)\\s*");
 
     private String uri;
     private String catalog = "hoglake";
     private Duration requestTimeout = Duration.ofMinutes(2);
+    private DataSize maxSplitSize = DEFAULT_MAX_SPLIT_SIZE;
 
     @NotNull
     public String getUri()
@@ -70,6 +77,21 @@ public class HoglakeConfig
     public HoglakeConfig setRequestTimeout(String requestTimeout)
     {
         this.requestTimeout = parseDuration(requestTimeout);
+        return this;
+    }
+
+    @NotNull
+    @MinDataSize("1MB")
+    public DataSize getMaxSplitSize()
+    {
+        return maxSplitSize;
+    }
+
+    @Config("hoglake.max-split-size")
+    @ConfigDescription("Largest byte range of one Parquet file assigned to a single split")
+    public HoglakeConfig setMaxSplitSize(DataSize maxSplitSize)
+    {
+        this.maxSplitSize = maxSplitSize;
         return this;
     }
 

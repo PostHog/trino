@@ -14,6 +14,7 @@
 package io.trino.plugin.hoglake;
 
 import io.airlift.configuration.ConfigurationFactory;
+import io.airlift.units.DataSize;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -22,6 +23,8 @@ import java.util.Map;
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
+import static io.airlift.units.DataSize.Unit.GIGABYTE;
+import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -33,7 +36,8 @@ class TestHoglakeConfig
         assertRecordedDefaults(recordDefaults(HoglakeConfig.class)
                 .setUri(null)
                 .setCatalog("hoglake")
-                .setRequestTimeout("2m"));
+                .setRequestTimeout("2m")
+                .setMaxSplitSize(DataSize.of(128, MEGABYTE)));
     }
 
     @Test
@@ -42,8 +46,25 @@ class TestHoglakeConfig
         assertFullMapping(Map.of(
                         "hoglake.uri", "http://localhost:8080",
                         "hoglake.catalog", "lake",
-                        "hoglake.client.request-timeout", "45s"),
-                new HoglakeConfig().setUri("http://localhost:8080").setCatalog("lake").setRequestTimeout("45s"));
+                        "hoglake.client.request-timeout", "45s",
+                        "hoglake.max-split-size", "1GB"),
+                new HoglakeConfig()
+                        .setUri("http://localhost:8080")
+                        .setCatalog("lake")
+                        .setRequestTimeout("45s")
+                        .setMaxSplitSize(DataSize.of(1, GIGABYTE)));
+    }
+
+    @Test
+    void maxSplitSizeBelowOneMegabyteIsRejected()
+    {
+        assertThatThrownBy(() -> parse(Map.of(
+                "hoglake.uri", "http://h:1",
+                "hoglake.max-split-size", "512kB")))
+                .isInstanceOf(RuntimeException.class)
+                .hasStackTraceContaining("maxSplitSize");
+        assertThat(parse(Map.of("hoglake.uri", "http://h:1", "hoglake.max-split-size", "1MB")).getMaxSplitSize())
+                .isEqualTo(DataSize.of(1, MEGABYTE));
     }
 
     @Test

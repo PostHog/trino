@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Wire DTOs for the hoglake REST API (openapi/hoglake.yaml, snake_case
@@ -257,7 +258,39 @@ public final class HoglakeDtos
             @JsonProperty("footer_size") Long footerSize,
             @JsonProperty("row_id_start") long rowIdStart,
             @JsonProperty("stats_state") String statsState,
-            @JsonProperty("begin_snapshot") long beginSnapshot) {}
+            @JsonProperty("begin_snapshot") long beginSnapshot,
+            @JsonProperty("split_offsets") List<Long> splitOffsets)
+    {
+        /**
+         * {@code split_offsets} lists the byte offsets where the file's row
+         * groups start, ascending (the Iceberg convention). A server that does
+         * not report them omits the field, and an unusable list is treated the
+         * same way: split planning then cuts the file evenly instead.
+         */
+        public DataFile
+        {
+            if (splitOffsets == null || splitOffsets.stream().anyMatch(Objects::isNull)) {
+                splitOffsets = List.of();
+            }
+            else {
+                splitOffsets = List.copyOf(splitOffsets);
+            }
+        }
+
+        public DataFile(
+                long dataFileId,
+                String path,
+                String fileFormat,
+                long recordCount,
+                long fileSizeBytes,
+                Long footerSize,
+                long rowIdStart,
+                String statsState,
+                long beginSnapshot)
+        {
+            this(dataFileId, path, fileFormat, recordCount, fileSizeBytes, footerSize, rowIdStart, statsState, beginSnapshot, List.of());
+        }
+    }
 
     public record DeleteFile(
             @JsonProperty("delete_file_id") long deleteFileId,

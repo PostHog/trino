@@ -13,12 +13,15 @@
  */
 package io.trino.plugin.hoglake;
 
+import io.airlift.units.DataSize;
+import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorFactory;
 import io.trino.testing.TestingConnectorContext;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
+import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static org.assertj.core.api.Assertions.assertThat;
 
 final class TestHoglakePlugin
@@ -32,5 +35,25 @@ final class TestHoglakePlugin
                 "hoglake.uri", "http://localhost:8080",
                 "hoglake.catalog", "test",
                 "hoglake.s3.region", "us-east-1"), new TestingConnectorContext()).shutdown();
+    }
+
+    @Test
+    void testMaxSplitSizeSessionPropertyDefaultsToTheCatalogConfig()
+    {
+        ConnectorFactory factory = new HoglakePlugin().getConnectorFactories().iterator().next();
+        Connector connector = factory.create("test", Map.of(
+                "hoglake.uri", "http://localhost:8080",
+                "hoglake.catalog", "test",
+                "hoglake.s3.region", "us-east-1",
+                "hoglake.max-split-size", "256MB"), new TestingConnectorContext());
+        try {
+            assertThat(connector.getSessionProperties())
+                    .filteredOn(property -> property.getName().equals("max_split_size"))
+                    .singleElement()
+                    .satisfies(property -> assertThat(property.getDefaultValue()).isEqualTo(DataSize.of(256, MEGABYTE)));
+        }
+        finally {
+            connector.shutdown();
+        }
     }
 }

@@ -14,6 +14,7 @@
 package io.trino.plugin.hoglake;
 
 import com.sun.net.httpserver.HttpServer;
+import io.airlift.units.DataSize;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
@@ -48,6 +49,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
 import static org.apache.parquet.schema.Types.optional;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
@@ -139,6 +141,8 @@ final class TestHoglakeCount
                     @Override
                     public Connector create(String catalogName, Map<String, String> config, ConnectorContext context)
                     {
+                        // A catalog configured with a split size smaller than the files plans byte ranges.
+                        DataSize maxSplitSize = DataSize.valueOf(config.getOrDefault("max-split-size", HoglakeConfig.DEFAULT_MAX_SPLIT_SIZE.toString()));
                         return new Connector()
                         {
                             @Override
@@ -159,7 +163,7 @@ final class TestHoglakeCount
                             @Override
                             public ConnectorSplitManager getSplitManager()
                             {
-                                return new HoglakeSplitManager(client);
+                                return new HoglakeSplitManager(client, _ -> maxSplitSize);
                             }
 
                             @Override
@@ -173,6 +177,7 @@ final class TestHoglakeCount
             }
         });
         queryRunner.createCatalog("hoglake", "hoglake_count_test", Map.of());
+        queryRunner.createCatalog("hoglake_ranges", "hoglake_count_test", Map.of("max-split-size", "64B"));
     }
 
     @AfterAll
@@ -194,6 +199,28 @@ final class TestHoglakeCount
     {
         assertThat(queryRunner.execute("SELECT count(*) FROM counts").getOnlyValue()).isEqualTo(8L);
         assertThat(queryRunner.execute("SELECT count(*) FROM empty").getOnlyValue()).isEqualTo(0L);
+    }
+
+    /**
+     * The catalog's record count describes a whole file, so it cannot answer
+     * for a byte range: range splits count their rows from the files, and
+     * the ranges of each file add up to its row count exactly once.
+     */
+    @Test
+    void testRangeSplitsCountFromTheFiles()
+    {
+        assertThatThrownBy(() -> queryRunner.execute("SELECT count(*) FROM hoglake_ranges.test.counts"))
+                .hasStackTraceContaining("Object storage must not be accessed for catalog counts");
+
+        storageAllowed.set(true);
+        try {
+            assertThat(queryRunner.execute("SELECT count(*) FROM hoglake_ranges.test.counts").getOnlyValue()).isEqualTo(8L);
+            assertThat(queryRunner.execute("SELECT count(value) FROM hoglake_ranges.test.counts").getOnlyValue()).isEqualTo(6L);
+            assertThat(queryRunner.execute("SELECT count(*) FROM hoglake_ranges.test.counts WHERE value = 1").getOnlyValue()).isEqualTo(4L);
+        }
+        finally {
+            storageAllowed.set(false);
+        }
     }
 
     @Test

@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.hoglake;
 
+import io.airlift.units.DataSize;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
@@ -60,6 +61,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.stream.Stream;
 
 import static io.trino.parquet.ParquetTypeUtils.getColumnIO;
@@ -73,6 +75,7 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.spi.type.UuidType.UUID;
+import static java.lang.Math.min;
 import static java.util.Objects.requireNonNull;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MICROS;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.FLOAT;
@@ -98,6 +101,8 @@ public class HoglakePageSourceProvider
         implements ConnectorPageSourceProvider
 {
     private static final int DOMAIN_COMPACTION_THRESHOLD = 100;
+    // Parquet ends with a 4-byte footer length and the 4-byte "PAR1" magic.
+    private static final int PARQUET_TRAILER_SIZE = Integer.BYTES + 4;
 
     private final TrinoFileSystemFactory fileSystemFactory;
 
@@ -124,9 +129,12 @@ public class HoglakePageSourceProvider
             return new EmptyPageSource();
         }
 
-        // Splits cover whole files at the query's pinned snapshot. With no columns or
-        // reader-side predicate, only row cardinality is needed (for example, COUNT(*)).
-        if (columns.isEmpty() && predicate.isAll() && hoglakeSplit.recordCount() >= 0) {
+        // With no columns or reader-side predicate, only row cardinality is needed (for
+        // example, COUNT(*)). The catalog's record count describes a whole file at the
+        // query's pinned snapshot, so only a whole-file split can answer from it. A range
+        // split falls through to the reader with no columns, which counts the rows of its
+        // row groups from the footer without reading any data page.
+        if (columns.isEmpty() && predicate.isAll() && hoglakeSplit.recordCount() >= 0 && hoglakeSplit.wholeFile()) {
             return createCountPageSource(session, hoglakeSplit, memoryContext);
         }
 
@@ -137,7 +145,7 @@ public class HoglakePageSourceProvider
         TrinoFileSystem fileSystem = fileSystemFactory.create(session);
         TrinoInputFile inputFile = fileSystem.newInputFile(Location.of(hoglakeSplit.path()), hoglakeSplit.fileSizeBytes());
 
-        ParquetReaderOptions options = ParquetReaderOptions.defaultOptions();
+        ParquetReaderOptions options = readerOptions(ParquetReaderOptions.defaultOptions(), hoglakeSplit);
         ParquetDataSource dataSource = null;
         // The split's scope exists before any allocation on its behalf, and
         // owns everything until a page source adopts it.
@@ -145,13 +153,16 @@ public class HoglakePageSourceProvider
         ConnectorPageSource pageSource = null;
         try {
             dataSource = createDataSource(inputFile, hoglakeSplit.fileSizeBytes(), options);
-            ParquetMetadata parquetMetadata = MetadataReader.readFooter(dataSource, Optional.empty());
+            ParquetMetadata parquetMetadata = MetadataReader.readFooter(dataSource, options, Optional.empty(), Optional.empty());
+            // Every range of a file with a deletion vector loads the whole vector:
+            // its positions are file row ordinals, and the reader numbers a range's
+            // rows from the file's first row, so the vector applies unchanged.
             HoglakeDeletionVector deletionVector = loadDeletionVector(fileSystem, parquetMetadata, hoglakeSplit, resources);
             pageSource = createParquetPageSource(
                     dataSource,
                     parquetMetadata,
                     deletionVector,
-                    hoglakeSplit.dataFileId(),
+                    hoglakeSplit,
                     hoglakeColumns,
                     predicate.simplify(DOMAIN_COMPACTION_THRESHOLD),
                     resources,
@@ -257,6 +268,47 @@ public class HoglakePageSourceProvider
         return HoglakeDeletionVectorLoader.load(fileSystem, split, fileRows, resources);
     }
 
+    /**
+     * Reader options for one split. The catalog's footer size lets the footer
+     * be fetched in one request. A small file is normally buffered whole on
+     * first read, which serves its only split well; a file cut into ranges
+     * would be buffered whole once per range, so ranges read only their own
+     * bytes. (Ranges exist only for files larger than the target split size,
+     * so with the defaults this never applies.)
+     */
+    static ParquetReaderOptions readerOptions(ParquetReaderOptions options, HoglakeSplit split)
+    {
+        options = withCatalogFooterSize(options, split.footerSize(), split.fileSizeBytes());
+        if (!split.wholeFile()) {
+            options = ParquetReaderOptions.builder(options)
+                    .withSmallFileThreshold(DataSize.ofBytes(0))
+                    .build();
+        }
+        return options;
+    }
+
+    /**
+     * Sizes the first footer read from the catalog's {@code footer_size}, so
+     * the footer and its trailer arrive in a single request instead of after a
+     * guess that may be too small.
+     */
+    static ParquetReaderOptions withCatalogFooterSize(ParquetReaderOptions options, OptionalLong footerSize, long fileSizeBytes)
+    {
+        if (footerSize.isEmpty()) {
+            return options;
+        }
+        long footerLength = footerSize.orElseThrow();
+        if (footerLength < 0 || footerLength + PARQUET_TRAILER_SIZE > fileSizeBytes) {
+            // The catalog disagrees with the file, so let the reader find the footer on its own.
+            return options;
+        }
+        // Reading beyond the configured maximum is wasted, because a footer that long is rejected.
+        long footerReadSize = min(footerLength + PARQUET_TRAILER_SIZE, options.getMaxFooterReadSize().toBytes());
+        return ParquetReaderOptions.builder(options)
+                .withFooterReadSize(DataSize.ofBytes(footerReadSize))
+                .build();
+    }
+
     // Package-private to inject failures at the real Parquet planRead boundary.
     ParquetDataSource createDataSource(TrinoInputFile inputFile, long fileSize, ParquetReaderOptions options)
             throws IOException
@@ -268,7 +320,7 @@ public class HoglakePageSourceProvider
             ParquetDataSource dataSource,
             ParquetMetadata parquetMetadata,
             HoglakeDeletionVector deletionVector,
-            long fileId,
+            HoglakeSplit split,
             List<HoglakeColumnHandle> columns,
             TupleDomain<HoglakeColumnHandle> predicate,
             HoglakeSplitResources resources,
@@ -296,7 +348,7 @@ public class HoglakePageSourceProvider
         for (int i = 0; i < columns.size(); i++) {
             HoglakeColumnHandle column = columns.get(i);
             if (column.equals(HoglakeColumnHandle.ROW_ID)) {
-                adaptations.add(new HoglakePageSource.RowIdColumn(fileId));
+                adaptations.add(new HoglakePageSource.RowIdColumn(split.dataFileId()));
                 continue;
             }
             Optional<Field> field = bindings.get(i).flatMap(parquetField ->
@@ -324,12 +376,12 @@ public class HoglakePageSourceProvider
         TupleDomain<ColumnDescriptor> parquetDomain = parquetPredicate(fileSchema, descriptorsByPath, predicate);
         List<RowGroupInfo> rowGroups;
         try {
-            rowGroups = filterRowGroups(dataSource, parquetMetadata, parquetDomain, descriptorsByPath, options);
+            rowGroups = filterRowGroups(split, dataSource, parquetMetadata, parquetDomain, descriptorsByPath, options);
         }
         catch (ParquetCorruptionException e) {
             // Unusable statistics must not exclude data. Retry without pruning; structural
             // corruption will still fail when constructing metadata or reading the data.
-            rowGroups = filterRowGroups(dataSource, parquetMetadata, TupleDomain.all(), descriptorsByPath, options);
+            rowGroups = filterRowGroups(split, dataSource, parquetMetadata, TupleDomain.all(), descriptorsByPath, options);
         }
 
         // The reader charges into the split's one aggregation, alongside the
@@ -356,7 +408,14 @@ public class HoglakePageSourceProvider
         return new HoglakePageSource(parquetReader, adaptations, deletionVector, resources);
     }
 
+    /**
+     * The row groups whose first column chunk starts inside the split's byte
+     * range, minus those the predicate prunes. Each kept row group carries
+     * its offset among all the file's rows, not just the range's, so row
+     * positions stay file-absolute for deletion vectors and row ids.
+     */
     private static List<RowGroupInfo> filterRowGroups(
+            HoglakeSplit split,
             ParquetDataSource dataSource,
             ParquetMetadata parquetMetadata,
             TupleDomain<ColumnDescriptor> parquetDomain,
@@ -367,8 +426,8 @@ public class HoglakePageSourceProvider
         TupleDomainParquetPredicate parquetPredicate =
                 buildPredicate(parquetMetadata.getFileMetaData().getSchema(), parquetDomain, descriptorsByPath, DateTimeZone.UTC);
         return getFilteredRowGroups(
-                0,
-                dataSource.getEstimatedSize(),
+                split.start(),
+                split.length(),
                 dataSource,
                 parquetMetadata,
                 List.of(parquetDomain),
