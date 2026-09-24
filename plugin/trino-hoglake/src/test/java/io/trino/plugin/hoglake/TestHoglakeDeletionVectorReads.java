@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.hoglake;
 
+import io.airlift.units.DataSize;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.parquet.writer.ParquetWriterOptions;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
@@ -43,6 +44,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_DELETION_VECTOR_INVALID;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_DELETION_VECTOR_NOT_FOUND;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -188,6 +190,61 @@ class TestHoglakeDeletionVectorReads
         assertThat(countRows(fileSystem, wholeFile)).isEqualTo(RANGE_ROWS - RANGE_DELETED.length);
     }
 
+    /**
+     * With the footer cache, a file's later ranges take its row count from the
+     * footer an earlier range parsed. The vector is bounded by that count and
+     * applied exactly as when every range parses the footer itself.
+     */
+    @Test
+    void deletionVectorAppliesAcrossByteRangesWithACachedFooter()
+    {
+        byte[] file = rangeFile();
+        byte[] deletionVector = PuffinDeletionVectorFixtures.deletionVector(DATA_PATH, RANGE_DELETED);
+        HoglakeParquetFooterCache footerCache = new HoglakeParquetFooterCache(DataSize.of(1, MEGABYTE));
+        HoglakePageSourceProvider provider = new HoglakePageSourceProvider(
+                ConnectorTestFixtures.memoryFileSystem(Map.of(DATA_PATH, file, DV_PATH, deletionVector)),
+                footerCache);
+        HoglakeSplit wholeFile = splitWithCatalogDeleteCount(file.length, deletionVector, RANGE_ROWS);
+
+        // Three ranges: up to row group 3, then to the middle of row group 4's
+        // bytes, then the rest of the file.
+        List<Long> rowGroupOffsets = ConnectorTestFixtures.rowGroupOffsets(file);
+        long firstCut = rowGroupOffsets.get(3);
+        long secondCut = (rowGroupOffsets.get(4) + rowGroupOffsets.get(5)) / 2;
+        List<HoglakeSplit> ranges = List.of(
+                wholeFile.withRange(0, firstCut, SplitWeight.standard()),
+                wholeFile.withRange(firstCut, secondCut - firstCut, SplitWeight.standard()),
+                wholeFile.withRange(secondCut, file.length - secondCut, SplitWeight.standard()));
+
+        List<Long> survivors = new ArrayList<>();
+        for (long value = 0; value < RANGE_ROWS; value++) {
+            if (Arrays.binarySearch(RANGE_DELETED, value) < 0) {
+                survivors.add(value);
+            }
+        }
+        List<Long> values = new ArrayList<>();
+        for (HoglakeSplit range : ranges) {
+            values.addAll(readValues(provider, range));
+        }
+        assertThat(values).containsExactlyElementsOf(survivors);
+        assertThat(footerCache.stats().missCount()).isEqualTo(1);
+        assertThat(footerCache.stats().hitCount()).isEqualTo(ranges.size() - 1);
+
+        // The cached row count still bounds the vector: a range served from
+        // the cache refuses a vector deleting a row beyond the file.
+        byte[] beyondTheFile = PuffinDeletionVectorFixtures.deletionVector(DATA_PATH, 3, RANGE_ROWS);
+        HoglakePageSourceProvider beyondTheFileProvider = new HoglakePageSourceProvider(
+                ConnectorTestFixtures.memoryFileSystem(Map.of(DATA_PATH, file, DV_PATH, beyondTheFile)),
+                footerCache);
+        HoglakeSplit beyondTheFileRange = splitWithCatalogDeleteCount(file.length, beyondTheFile, RANGE_ROWS)
+                .withRange(secondCut, file.length - secondCut, SplitWeight.standard());
+        assertThatThrownBy(() -> open(beyondTheFileProvider, List.of(value()), beyondTheFileRange, Optional.empty(), MemoryContext.NO_LIMIT))
+                .isInstanceOfSatisfying(TrinoException.class, e ->
+                        assertThat(e.getErrorCode()).isEqualTo(HOGLAKE_DELETION_VECTOR_INVALID.toErrorCode()))
+                .hasMessageContaining("the vector deletes row 100, beyond the 100 rows");
+        assertThat(footerCache.stats().missCount()).isEqualTo(1);
+    }
+
     private static long countRows(TrinoFileSystemFactory fileSystem, HoglakeSplit split)
     {
         ConnectorPageSource pageSource = open(fileSystem, List.of(), split);
@@ -201,7 +258,12 @@ class TestHoglakeDeletionVectorReads
 
     private static List<Long> readValues(TrinoFileSystemFactory fileSystem, HoglakeSplit split)
     {
-        ConnectorPageSource pageSource = open(fileSystem, List.of(value()), split);
+        return readValues(new HoglakePageSourceProvider(fileSystem), split);
+    }
+
+    private static List<Long> readValues(HoglakePageSourceProvider provider, HoglakeSplit split)
+    {
+        ConnectorPageSource pageSource = open(provider, List.of(value()), split, Optional.empty(), MemoryContext.NO_LIMIT);
         try {
             return ConnectorTestFixtures.readAll(pageSource, List.of(BIGINT)).stream()
                     .map(row -> (Long) row.getFirst())
@@ -873,7 +935,17 @@ class TestHoglakeDeletionVectorReads
             Optional<TupleDomain<HoglakeColumnHandle>> predicate,
             MemoryContext memoryContext)
     {
-        return new HoglakePageSourceProvider(fileSystem).createPageSource(
+        return open(new HoglakePageSourceProvider(fileSystem), columns, split, predicate, memoryContext);
+    }
+
+    private static ConnectorPageSource open(
+            HoglakePageSourceProvider provider,
+            List<HoglakeColumnHandle> columns,
+            HoglakeSplit split,
+            Optional<TupleDomain<HoglakeColumnHandle>> predicate,
+            MemoryContext memoryContext)
+    {
+        return provider.createPageSource(
                 HoglakeTransactionHandle.INSTANCE,
                 ConnectorTestFixtures.session(),
                 split,

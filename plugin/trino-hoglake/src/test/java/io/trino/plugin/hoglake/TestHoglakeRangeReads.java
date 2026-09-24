@@ -13,8 +13,16 @@
  */
 package io.trino.plugin.hoglake;
 
+import com.google.common.collect.ListMultimap;
+import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
+import io.trino.filesystem.TrinoInputFile;
+import io.trino.memory.context.AggregatedMemoryContext;
+import io.trino.parquet.DiskRange;
+import io.trino.parquet.ParquetDataSource;
+import io.trino.parquet.ParquetDataSourceId;
 import io.trino.parquet.ParquetReaderOptions;
+import io.trino.parquet.reader.ChunkedInputStream;
 import io.trino.parquet.writer.ParquetWriterOptions;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
@@ -24,6 +32,7 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.MemoryContext;
+import io.trino.spi.metrics.Metrics;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
@@ -39,6 +48,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.stream.LongStream;
 
+import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
 import static org.apache.parquet.schema.Types.optional;
@@ -73,16 +83,52 @@ class TestHoglakeRangeReads
     @Test
     void adjacentRangesReturnTheWholeFileOnce()
     {
-        // A cut inside row group 4's bytes, not on a row-group boundary.
-        long middle = (ROW_GROUP_OFFSETS.get(4) + ROW_GROUP_OFFSETS.get(5)) / 2;
-        List<Long> first = values(read(range(0, middle), List.of(VALUE), TupleDomain.all()));
-        List<Long> second = values(read(range(middle, FILE.length - middle), List.of(VALUE), TupleDomain.all()));
+        // Without the footer cache every range parses the footer; with it the
+        // second range reuses the first one's parse. The rows must not differ.
+        for (HoglakeParquetFooterCache footerCache : List.of(HoglakeParquetFooterCache.disabled(), new HoglakeParquetFooterCache(DataSize.of(1, MEGABYTE)))) {
+            TailCountingProvider provider = new TailCountingProvider(footerCache);
+            // A cut inside row group 4's bytes, not on a row-group boundary.
+            long middle = (ROW_GROUP_OFFSETS.get(4) + ROW_GROUP_OFFSETS.get(5)) / 2;
+            List<Long> first = values(read(provider, range(0, middle), List.of(VALUE), TupleDomain.all()));
+            List<Long> second = values(read(provider, range(middle, FILE.length - middle), List.of(VALUE), TupleDomain.all()));
 
-        assertThat(first).isNotEmpty();
-        assertThat(second).isNotEmpty();
-        List<Long> union = new ArrayList<>(first);
-        union.addAll(second);
-        assertThat(union).containsExactlyElementsOf(allValues());
+            assertThat(first).isNotEmpty();
+            assertThat(second).isNotEmpty();
+            List<Long> union = new ArrayList<>(first);
+            union.addAll(second);
+            assertThat(union).containsExactlyElementsOf(allValues());
+        }
+    }
+
+    /**
+     * Every range of a file needs the whole footer. With the footer cache, the
+     * ranges one worker reads parse it once between them, rather than once per
+     * range; without it, each range fetches the footer again.
+     */
+    @Test
+    void rangesOfOneFileReadTheFooterOnceWithTheCache()
+    {
+        List<HoglakeSplit> splits = HoglakeSplitManager.toSplits(scan(List.of()), 256);
+        assertThat(splits).hasSizeGreaterThan(2);
+
+        HoglakeParquetFooterCache footerCache = new HoglakeParquetFooterCache(DataSize.of(1, MEGABYTE));
+        TailCountingProvider cached = new TailCountingProvider(footerCache);
+        assertThat(readAllSplits(cached, splits, List.of(VALUE))).containsExactlyElementsOf(allValues());
+        assertThat(cached.tailReads).isEqualTo(1);
+        assertThat(footerCache.contains(new HoglakeParquetFooterCache.Key(PATH, FILE.length))).isTrue();
+
+        // Reading the file again, or counting its rows, reads no footer at all.
+        assertThat(readAllSplits(cached, splits, List.of(VALUE))).containsExactlyElementsOf(allValues());
+        long rows = 0;
+        for (HoglakeSplit split : splits) {
+            rows += read(cached, split, List.of(), TupleDomain.all()).size();
+        }
+        assertThat(rows).isEqualTo(ROWS);
+        assertThat(cached.tailReads).isEqualTo(1);
+
+        TailCountingProvider uncached = new TailCountingProvider(HoglakeParquetFooterCache.disabled());
+        assertThat(readAllSplits(uncached, splits, List.of(VALUE))).containsExactlyElementsOf(allValues());
+        assertThat(uncached.tailReads).isEqualTo(splits.size());
     }
 
     @Test
@@ -197,16 +243,25 @@ class TestHoglakeRangeReads
 
     private static List<Long> readAllSplits(List<HoglakeSplit> splits, List<HoglakeColumnHandle> columns)
     {
+        return readAllSplits(new HoglakePageSourceProvider(ConnectorTestFixtures.memoryFileSystem(Map.of(PATH, FILE))), splits, columns);
+    }
+
+    private static List<Long> readAllSplits(HoglakePageSourceProvider provider, List<HoglakeSplit> splits, List<HoglakeColumnHandle> columns)
+    {
         List<Long> values = new ArrayList<>();
         for (HoglakeSplit split : splits) {
-            values.addAll(values(read(split, columns, TupleDomain.all())));
+            values.addAll(values(read(provider, split, columns, TupleDomain.all())));
         }
         return values;
     }
 
     private static List<List<Object>> read(HoglakeSplit split, List<HoglakeColumnHandle> columns, TupleDomain<HoglakeColumnHandle> predicate)
     {
-        HoglakePageSourceProvider provider = new HoglakePageSourceProvider(ConnectorTestFixtures.memoryFileSystem(Map.of(PATH, FILE)));
+        return read(new HoglakePageSourceProvider(ConnectorTestFixtures.memoryFileSystem(Map.of(PATH, FILE))), split, columns, predicate);
+    }
+
+    private static List<List<Object>> read(HoglakePageSourceProvider provider, HoglakeSplit split, List<HoglakeColumnHandle> columns, TupleDomain<HoglakeColumnHandle> predicate)
+    {
         try (ConnectorPageSource source = provider.createPageSource(
                 HoglakeTransactionHandle.INSTANCE,
                 ConnectorTestFixtures.session(),
@@ -233,5 +288,96 @@ class TestHoglakeRangeReads
     private static List<Long> allValues()
     {
         return LongStream.range(0, ROWS).boxed().toList();
+    }
+
+    /**
+     * Counts the footer fetches of every split it opens: the reader fetches a
+     * footer, and only a footer, through {@link ParquetDataSource#readTail}.
+     */
+    private static final class TailCountingProvider
+            extends HoglakePageSourceProvider
+    {
+        private int tailReads;
+
+        private TailCountingProvider(HoglakeParquetFooterCache footerCache)
+        {
+            super(ConnectorTestFixtures.memoryFileSystem(Map.of(PATH, FILE)), footerCache);
+        }
+
+        @Override
+        ParquetDataSource createDataSource(TrinoInputFile inputFile, long fileSize, ParquetReaderOptions options)
+                throws IOException
+        {
+            return new TailCountingDataSource(super.createDataSource(inputFile, fileSize, options));
+        }
+
+        private final class TailCountingDataSource
+                implements ParquetDataSource
+        {
+            private final ParquetDataSource delegate;
+
+            private TailCountingDataSource(ParquetDataSource delegate)
+            {
+                this.delegate = delegate;
+            }
+
+            @Override
+            public ParquetDataSourceId getId()
+            {
+                return delegate.getId();
+            }
+
+            @Override
+            public long getReadBytes()
+            {
+                return delegate.getReadBytes();
+            }
+
+            @Override
+            public long getReadTimeNanos()
+            {
+                return delegate.getReadTimeNanos();
+            }
+
+            @Override
+            public long getEstimatedSize()
+            {
+                return delegate.getEstimatedSize();
+            }
+
+            @Override
+            public Slice readTail(int length)
+                    throws IOException
+            {
+                tailReads++;
+                return delegate.readTail(length);
+            }
+
+            @Override
+            public Slice readFully(long position, int length)
+                    throws IOException
+            {
+                return delegate.readFully(position, length);
+            }
+
+            @Override
+            public <K> Map<K, ChunkedInputStream> planRead(ListMultimap<K, DiskRange> diskRanges, AggregatedMemoryContext memoryContext)
+            {
+                return delegate.planRead(diskRanges, memoryContext);
+            }
+
+            @Override
+            public Metrics getMetrics()
+            {
+                return delegate.getMetrics();
+            }
+
+            @Override
+            public void close()
+                    throws IOException
+            {
+                delegate.close();
+            }
+        }
     }
 }

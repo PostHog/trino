@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.hoglake;
 
+import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
@@ -24,13 +25,13 @@ import io.trino.parquet.Field;
 import io.trino.parquet.ParquetCorruptionException;
 import io.trino.parquet.ParquetDataSource;
 import io.trino.parquet.ParquetReaderOptions;
-import io.trino.parquet.metadata.BlockMetadata;
 import io.trino.parquet.metadata.FileMetadata;
 import io.trino.parquet.metadata.ParquetMetadata;
 import io.trino.parquet.predicate.TupleDomainParquetPredicate;
 import io.trino.parquet.reader.MetadataReader;
 import io.trino.parquet.reader.ParquetReader;
 import io.trino.parquet.reader.RowGroupInfo;
+import io.trino.plugin.hoglake.HoglakeParquetFooterCache.ParsedFooter;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
@@ -105,10 +106,17 @@ public class HoglakePageSourceProvider
     private static final int PARQUET_TRAILER_SIZE = Integer.BYTES + 4;
 
     private final TrinoFileSystemFactory fileSystemFactory;
+    private final HoglakeParquetFooterCache footerCache;
 
     public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory)
     {
+        this(fileSystemFactory, HoglakeParquetFooterCache.disabled());
+    }
+
+    public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache)
+    {
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
+        this.footerCache = requireNonNull(footerCache, "footerCache is null");
     }
 
     @Override
@@ -153,14 +161,14 @@ public class HoglakePageSourceProvider
         ConnectorPageSource pageSource = null;
         try {
             dataSource = createDataSource(inputFile, hoglakeSplit.fileSizeBytes(), options);
-            ParquetMetadata parquetMetadata = MetadataReader.readFooter(dataSource, options, Optional.empty(), Optional.empty());
+            ParsedFooter footer = readFooter(dataSource, hoglakeSplit, options);
             // Every range of a file with a deletion vector loads the whole vector:
             // its positions are file row ordinals, and the reader numbers a range's
             // rows from the file's first row, so the vector applies unchanged.
-            HoglakeDeletionVector deletionVector = loadDeletionVector(fileSystem, parquetMetadata, hoglakeSplit, resources);
+            HoglakeDeletionVector deletionVector = loadDeletionVector(fileSystem, footer.fileRowCount(), hoglakeSplit, resources);
             pageSource = createParquetPageSource(
                     dataSource,
-                    parquetMetadata,
+                    footer.metadata(),
                     deletionVector,
                     hoglakeSplit,
                     hoglakeColumns,
@@ -241,6 +249,26 @@ public class HoglakePageSourceProvider
     }
 
     /**
+     * The split's parsed footer. Every range of a file needs the whole footer,
+     * so the ranges a worker reads share one parse through the footer cache;
+     * a hit reads nothing from the file. A miss fetches the footer in a single
+     * tail request sized from the catalog's {@code footer_size}.
+     */
+    private ParsedFooter readFooter(ParquetDataSource dataSource, HoglakeSplit split, ParquetReaderOptions options)
+            throws IOException
+    {
+        // The decoded footer is shared read-only between splits, which is safe
+        // only because no decryption properties are passed: the metadata then
+        // holds no per-reader decryption state. If file decryption is ever
+        // added, encrypted files must bypass this cache.
+        return footerCache.get(new HoglakeParquetFooterCache.Key(split.path(), split.fileSizeBytes()), () -> {
+            Slice footerBytes = MetadataReader.readFooterBytes(dataSource, options);
+            ParquetMetadata metadata = MetadataReader.parseFooter(dataSource.getId(), dataSource.getEstimatedSize(), footerBytes, Optional.empty(), Optional.empty());
+            return ParsedFooter.of(metadata, footerBytes.length());
+        });
+    }
+
+    /**
      * Reads a split's deletion vector through the connector's filesystem, so
      * object-storage configuration, authentication, and filesystem caching
      * apply to deletion vectors exactly as they do to Parquet data. The
@@ -249,7 +277,7 @@ public class HoglakePageSourceProvider
      */
     private static HoglakeDeletionVector loadDeletionVector(
             TrinoFileSystem fileSystem,
-            ParquetMetadata parquetMetadata,
+            long fileRowCount,
             HoglakeSplit split,
             HoglakeSplitResources resources)
             throws IOException
@@ -261,11 +289,7 @@ public class HoglakePageSourceProvider
         // file's real row count from its own footer rather than the
         // catalog's record_count, which a wrong vector would be measured
         // against.
-        long fileRows = 0;
-        for (BlockMetadata block : parquetMetadata.getBlocks()) {
-            fileRows = Math.addExact(fileRows, block.rowCount());
-        }
-        return HoglakeDeletionVectorLoader.load(fileSystem, split, fileRows, resources);
+        return HoglakeDeletionVectorLoader.load(fileSystem, split, fileRowCount, resources);
     }
 
     /**
