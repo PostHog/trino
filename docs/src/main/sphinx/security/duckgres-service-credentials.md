@@ -21,10 +21,18 @@ duckgres-service-credential.endpoint=https://auth.example.com/auth/trino/service
 duckgres-service-credential.token-file=/etc/trino/secrets/service-auth-token
 ```
 
-The token is a dedicated credential for this validation endpoint. Do not reuse a
-provisioning secret or a tenant password. Its file is read for every request; the
-first nonempty line is sent as a bearer token. To rotate without an outage, deploy
-the new and previous tokens to the control plane first, then update the coordinator
+The token is a dedicated credential for this coordinator's cell and validation
+endpoint. Do not share it with another cell, a provisioning service, or a tenant.
+The control plane maps each token to one immutable configured cell ID and verifies
+that the organization currently belongs to that cell. No cell ID is sent in the
+authentication request body.
+
+Mount only this cell's token file on its coordinators. The control plane receives
+a separate JSON configuration mapping cell IDs to current and previous tokens;
+never mount that complete map on a coordinator. This plugin reads its plain-text
+file for every request and sends the first nonempty line as the bearer token.
+To rotate without an outage, add the new token to the cell's control-plane entry
+and restart the control-plane replicas first, then update this cell's coordinator
 file to put the new token first, and finally remove the previous token from both.
 
 | Property | Default | Description |
