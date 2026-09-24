@@ -36,6 +36,7 @@ import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.MemoryContext;
+import io.trino.spi.connector.ProjectionApplicationResult;
 import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.RowChangeParadigm;
 import io.trino.spi.connector.SaveMode;
@@ -44,6 +45,7 @@ import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
 import io.trino.spi.connector.TableColumnsMetadata;
 import io.trino.spi.connector.TableNotFoundException;
+import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.PrincipalType;
 import io.trino.spi.security.TrinoPrincipal;
@@ -384,6 +386,28 @@ public class HoglakeMetadata
         // Statistics only exclude row groups; the engine must still evaluate every filter.
         return Optional.of(new ConstraintApplicationResult<>(
                 handle.withConstraint(predicate), constraint.getSummary(), constraint.getExpression(), false));
+    }
+
+    /**
+     * A scan that projects no column, such as {@code SELECT count(*) FROM t},
+     * becomes count-only: its rows are counted from the catalog without
+     * reading any file, so split planning gives it one whole-file split per
+     * file instead of byte ranges. The engine's column pruning offers the
+     * empty projection once the scan's outputs are unreferenced; any other
+     * projection is left to the engine.
+     */
+    @Override
+    public Optional<ProjectionApplicationResult<ConnectorTableHandle>> applyProjection(
+            ConnectorSession session,
+            ConnectorTableHandle table,
+            List<ConnectorExpression> projections,
+            Map<String, ColumnHandle> assignments)
+    {
+        HoglakeTableHandle handle = (HoglakeTableHandle) table;
+        if (!projections.isEmpty() || handle.countOnly()) {
+            return Optional.empty();
+        }
+        return Optional.of(new ProjectionApplicationResult<>(handle.withCountOnly(), List.of(), List.of(), false));
     }
 
     @Override

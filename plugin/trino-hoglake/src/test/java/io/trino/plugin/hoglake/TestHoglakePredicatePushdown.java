@@ -127,6 +127,8 @@ class TestHoglakePredicatePushdown
                 TupleDomain.withColumnDomains(Map.of(TIMESTAMP, range(TIMESTAMP_MICROS, -10, 20))))) {
             HoglakeTableHandle handle = TABLE.withConstraint(predicate);
             assertThat(codec.fromJson(codec.toJson(handle))).isEqualTo(handle);
+            assertThat(codec.fromJson(codec.toJson(handle.withCountOnly()))).isEqualTo(handle.withCountOnly());
+            assertThat(codec.fromJson(codec.toJson(handle.withCountOnly())).countOnly()).isTrue();
             JsonCodec<HoglakeDeleteHandle> mergeCodec = codecFactory.jsonCodec(HoglakeDeleteHandle.class);
             for (Optional<String> insertFailure : List.of(Optional.<String>empty(), Optional.of("Writing sorted Hoglake tables is not supported"))) {
                 HoglakeDeleteHandle merge = new HoglakeDeleteHandle(handle, "memory:///warehouse/", "synthetic", insertFailure);

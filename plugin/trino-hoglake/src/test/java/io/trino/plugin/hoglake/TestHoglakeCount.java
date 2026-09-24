@@ -27,7 +27,12 @@ import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
+import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.Constraint;
+import io.trino.spi.connector.DynamicFilterSnapshot;
+import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.transaction.IsolationLevel;
 import io.trino.testing.StandaloneQueryRunner;
 import org.junit.jupiter.api.AfterAll;
@@ -41,6 +46,7 @@ import java.net.InetSocketAddress;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -289,6 +295,53 @@ final class TestHoglakeCount
         assertThatThrownBy(() -> queryRunner.execute("SELECT count(value) FROM bounded"))
                 .hasStackTraceContaining("Object storage must not be accessed for catalog counts");
         assertThat(scanQueries.get("/v1/catalogs/lake/namespaces/test/tables/bounded/scan")).isEqualTo("snapshot=7");
+    }
+
+    /**
+     * An unfiltered count(*) projects no column: the engine hands the
+     * connector an empty projection, the handle becomes count-only, and
+     * planning gives each file one whole-file split however small the split
+     * size. A count that needs a column or a predicate keeps byte ranges.
+     */
+    @Test
+    void testUnfilteredCountPlansOneWholeFileSplitPerFile()
+            throws Exception
+    {
+        assertThat(explain("SELECT count(*) FROM hoglake_ranges.test.counts")).contains("counts@7 countOnly");
+        assertThat(explain("SELECT count(value) FROM hoglake_ranges.test.counts")).doesNotContain("countOnly");
+        assertThat(explain("SELECT count(*) FROM hoglake_ranges.test.counts WHERE value = 1")).doesNotContain("countOnly");
+        assertThat(queryRunner.execute("SELECT count(*) FROM hoglake_ranges.test.counts").getOnlyValue()).isEqualTo(8L);
+
+        HoglakeColumnHandle value = new HoglakeColumnHandle("value", 1, BIGINT, true);
+        HoglakeTableHandle table = new HoglakeTableHandle("test", "counts", 7, "synthetic-table", List.of(value));
+        HoglakeSplitManager splitManager = new HoglakeSplitManager(client, _ -> DataSize.ofBytes(64));
+
+        List<HoglakeSplit> countOnly = splits(splitManager, table.withCountOnly());
+        assertThat(countOnly).hasSize(2);
+        assertThat(countOnly).allSatisfy(split -> {
+            assertThat(split.start()).isZero();
+            assertThat(split.length()).isEqualTo(split.fileSizeBytes());
+        });
+        assertThat(countOnly).extracting(HoglakeSplit::path).containsExactly(FIRST_FILE_PATH, SECOND_FILE_PATH);
+
+        // Byte ranges otherwise, and for a count-only handle with a predicate.
+        assertThat(splits(splitManager, table)).hasSizeGreaterThan(2);
+        assertThat(splits(splitManager, table.withConstraint(TupleDomain.withColumnDomains(Map.of(value, Domain.singleValue(BIGINT, 1L)))).withCountOnly()))
+                .hasSizeGreaterThan(2);
+    }
+
+    private String explain(String query)
+    {
+        return (String) queryRunner.execute("EXPLAIN " + query).getOnlyValue();
+    }
+
+    private static List<HoglakeSplit> splits(HoglakeSplitManager splitManager, HoglakeTableHandle table)
+            throws Exception
+    {
+        ConnectorSplitSource source = splitManager.getSplits(HoglakeTransactionHandle.INSTANCE, ConnectorTestFixtures.session(), table, Set.of(), Constraint.alwaysTrue());
+        return source.getNextBatch(1_000, DynamicFilterSnapshot.EMPTY).get().stream()
+                .map(HoglakeSplit.class::cast)
+                .toList();
     }
 
     @Test

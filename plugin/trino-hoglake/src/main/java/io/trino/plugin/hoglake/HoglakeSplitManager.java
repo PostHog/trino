@@ -40,6 +40,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.hoglake.HoglakeConfig.DEFAULT_MAX_SPLIT_SIZE;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
 import static java.util.Objects.requireNonNull;
@@ -61,6 +62,11 @@ import static java.util.Objects.requireNonNull;
  * ({@link HoglakeFilePruner}), and files whose bounds cannot satisfy the
  * predicate get no splits at all. Files this query staged itself are never
  * pruned.
+ *
+ * <p>A count-only scan with no pushed-down predicate (an unfiltered
+ * {@code count(*)}) reads no file: every row count comes from the catalog.
+ * It gets one whole-file split per file, since byte ranges would only add
+ * splits that each report nothing.
  *
  * <p>Each split's scheduling affinity comes from the filesystem's
  * {@link SplitAffinityProvider}, which the filesystem module binds to a key
@@ -120,7 +126,24 @@ public class HoglakeSplitManager
             return new FixedSplitSource(List.of());
         }
         List<HoglakeDtos.ScanFile> scan = prunedScan(client, handle);
+        // The isAll guard is load-bearing: a count over a pushed predicate
+        // reads the files, so it keeps byte ranges and file pruning.
+        if (handle.countOnly() && handle.constraint().isAll()) {
+            return new FixedSplitSource(wholeFileSplits(scan, affinityProvider));
+        }
         return new FixedSplitSource(toSplits(scan, maxSplitSize.apply(session).toBytes(), affinityProvider));
+    }
+
+    /**
+     * One split per file covering the whole file, whatever its size, for a
+     * scan answered from catalog counts.
+     */
+    static List<HoglakeSplit> wholeFileSplits(List<HoglakeDtos.ScanFile> scan, SplitAffinityProvider affinityProvider)
+    {
+        return scan.stream()
+                .map(HoglakeSplitManager::toSplit)
+                .map(split -> split.withRange(0, split.fileSizeBytes(), SplitWeight.standard(), affinityProvider.getKey(split.path(), 0, split.fileSizeBytes())))
+                .collect(toImmutableList());
     }
 
     /**

@@ -79,7 +79,7 @@ final class HoglakeTransactionState
         List<HoglakeDtos.DeleteFile> deletes = changes.deletes.values().stream()
                 .map(file -> new HoglakeDtos.DeleteFile(0, file.dataFileId(), file.path(), file.deleteCount(), file.fileSizeBytes(), snapshot()))
                 .toList();
-        return new HoglakeTableHandle(handle.schemaName(), handle.tableName(), handle.snapshotId(), handle.tableUuid(), handle.columns(), handle.constraint(), files, deletes);
+        return handle.withStaged(files, deletes);
     }
 
     synchronized void stage(HoglakeDtos.Commit request)
