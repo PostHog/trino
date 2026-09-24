@@ -24,7 +24,7 @@ the catalog's files.
 | `hoglake.uri` | Hoglake REST base URI; required. | None |
 | `hoglake.catalog` | Hoglake catalog to expose. | `hoglake` |
 | `hoglake.client.request-timeout` | Positive request timeout, with `ms`, `s`, `m`, `h`, or `d` suffix. | `2m` |
-| `hoglake.max-split-size` | Largest byte range of one Parquet file assigned to a single split; at least `1MB`. See [](hoglake-split-planning). Use the `max_split_size` catalog session property to change it for a session. | `128MB` |
+| `hoglake.max-split-size` | Largest byte range of one Parquet file assigned to a single split; at least `1MB`. See [](hoglake-split-planning). Use the `max_split_size` catalog session property to change it for a session. | `1GB` |
 | `hoglake.parquet-footer-cache.max-size` | Serialized size of the parsed Parquet footers each worker keeps for the catalog; `0B` disables the cache. See [](hoglake-split-planning). | `64MB` |
 | `fs.s3.enabled` | Enable the native S3 filesystem. | `true` |
 | `s3.endpoint` | Optional S3-compatible endpoint. | AWS endpoint resolution |
@@ -180,6 +180,11 @@ cached, size the bound to at least the sum of the `footer_size` of its data file
 This cache is separate from
 [filesystem caching](hoglake-filesystem-caching), which caches bytes and so still
 leaves every range to decode the footer.
+
+The default of `1GB` suits Hoglake's large files: their row groups average around
+150 MiB, so a smaller range often holds no row-group start while still costing a
+split and reader setup. A 1 GB range packs several row groups and still leaves
+ample parallelism; a scan of about 170 GiB is planned as about 170 splits.
 
 Splits are weighted by the share of `hoglake.max-split-size` they cover, so the
 scheduler assigns more short ranges than full ones to each worker.

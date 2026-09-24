@@ -24,11 +24,13 @@ import java.time.Duration;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static io.airlift.units.DataSize.Unit.GIGABYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 
 public class HoglakeConfig
 {
-    public static final DataSize DEFAULT_MAX_SPLIT_SIZE = DataSize.of(128, MEGABYTE);
+    // Hoglake row groups average about 150 MiB, so a range this size holds several of them.
+    public static final DataSize DEFAULT_MAX_SPLIT_SIZE = DataSize.of(1, GIGABYTE);
 
     private static final Pattern DURATION = Pattern.compile("\\s*(\\d+(?:\\.\\d+)?)\\s*(ms|s|m|h|d)\\s*");
 

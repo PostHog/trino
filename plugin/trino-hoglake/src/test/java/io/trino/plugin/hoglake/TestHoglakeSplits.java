@@ -16,6 +16,7 @@ package io.trino.plugin.hoglake;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.airlift.json.JsonCodec;
+import io.airlift.units.DataSize;
 import io.trino.filesystem.cache.CacheSplitAffinityProvider;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.SplitWeight;
@@ -29,6 +30,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 
+import static io.airlift.units.DataSize.Unit.GIGABYTE;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -175,6 +177,16 @@ class TestHoglakeSplits
         assertThat(splits.getFirst().wholeFile()).isTrue();
         assertThat(splits.getFirst().footerSize()).isEqualTo(OptionalLong.of(321));
         assertThat(HoglakeSplitManager.toSplits(List.of(new HoglakeDtos.ScanFile(DELETED_FROM, DELETE_FILE))).getFirst().footerSize()).isEmpty();
+
+        // The default target is 1GB: a file of exactly that size stays whole, one byte more is cut in two.
+        long target = HoglakeConfig.DEFAULT_MAX_SPLIT_SIZE.toBytes();
+        assertThat(target).isEqualTo(DataSize.of(1, GIGABYTE).toBytes());
+        assertThat(HoglakeSplitManager.toSplits(List.of(new HoglakeDtos.ScanFile(largeFile(target, List.of()), null))))
+                .singleElement()
+                .satisfies(split -> assertThat(split.wholeFile()).isTrue());
+        assertThat(HoglakeSplitManager.toSplits(List.of(new HoglakeDtos.ScanFile(largeFile(target + 1, List.of()), null))))
+                .extracting(HoglakeSplit::start)
+                .containsExactly(0L, target);
     }
 
     @Test
