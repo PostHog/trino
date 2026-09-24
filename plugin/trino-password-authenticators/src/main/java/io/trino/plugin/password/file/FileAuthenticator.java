@@ -21,7 +21,9 @@ import io.trino.spi.security.PasswordAuthenticator;
 
 import java.io.File;
 import java.security.Principal;
+import java.util.Optional;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 import static com.google.common.base.Suppliers.memoizeWithExpiration;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -30,10 +32,12 @@ public class FileAuthenticator
         implements PasswordAuthenticator, LoadedConfiguration
 {
     private final Supplier<PasswordStore> passwordStoreSupplier;
+    private final Optional<Pattern> reservedUserPattern;
 
     @Inject
     public FileAuthenticator(FileConfig config)
     {
+        reservedUserPattern = Optional.ofNullable(config.getReservedUserRegex()).map(Pattern::compile);
         File file = config.getPasswordFile();
         int cacheMaxSize = config.getAuthTokenCacheMaxSize();
 
@@ -46,7 +50,7 @@ public class FileAuthenticator
     @Override
     public Principal createAuthenticatedPrincipal(String user, String password)
     {
-        if (!passwordStoreSupplier.get().authenticate(user, password)) {
+        if (reservedUserPattern.filter(pattern -> pattern.matcher(user).matches()).isPresent() || !passwordStoreSupplier.get().authenticate(user, password)) {
             throw new AccessDeniedException("Invalid credentials");
         }
 

@@ -117,3 +117,16 @@ Query 20220919_113804_00017_54qfi, FINISHED, 1 node
 Splits: 1 total, 1 done (100.00%)
 0.12 [0 rows, 0B] [0 rows/s, 0B/s]
 ```
+
+## Reserved user names
+
+The optional `file.reserved-user-regex` property rejects matching user names before
+password lookup, including cached passwords. Use it when another authenticator owns
+a credential namespace. Leave it unset to preserve the default behavior.
+
+For example, when enabling Duckgres service credentials alongside persistent users,
+reserve service logins in the file authenticator:
+
+```properties
+file.reserved-user-regex=(?:[^.]+[.])?svc_[0-9a-f]{24}
+```

@@ -29,6 +29,7 @@ public class FileConfig
     private File passwordFile;
     private Duration refreshPeriod = new Duration(5, SECONDS);
     private int authTokenCacheMaxSize = 1000;
+    private String reservedUserRegex;
 
     @NotNull
     @FileExists
@@ -57,6 +58,19 @@ public class FileConfig
     public FileConfig setRefreshPeriod(Duration refreshPeriod)
     {
         this.refreshPeriod = refreshPeriod;
+        return this;
+    }
+
+    public String getReservedUserRegex()
+    {
+        return reservedUserRegex;
+    }
+
+    @Config("file.reserved-user-regex")
+    @ConfigDescription("User names reserved for another authenticator and rejected before password-file lookup")
+    public FileConfig setReservedUserRegex(String reservedUserRegex)
+    {
+        this.reservedUserRegex = reservedUserRegex;
         return this;
     }
 

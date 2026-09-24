@@ -14,6 +14,7 @@
 package io.trino.plugin.password;
 
 import com.google.common.collect.ImmutableList;
+import io.trino.plugin.password.duckgres.DuckgresServiceCredentialAuthenticatorFactory;
 import io.trino.plugin.password.file.FileAuthenticatorFactory;
 import io.trino.plugin.password.file.FileGroupProviderFactory;
 import io.trino.plugin.password.ldap.LdapAuthenticatorFactory;
@@ -29,6 +30,7 @@ public class PasswordAuthenticatorPlugin
     public Iterable<PasswordAuthenticatorFactory> getPasswordAuthenticatorFactories()
     {
         return ImmutableList.<PasswordAuthenticatorFactory>builder()
+                .add(new DuckgresServiceCredentialAuthenticatorFactory())
                 .add(new FileAuthenticatorFactory())
                 .add(new LdapAuthenticatorFactory())
                 .add(new SalesforceAuthenticatorFactory())
