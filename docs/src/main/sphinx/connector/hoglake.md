@@ -118,15 +118,15 @@ blob's declared length and checksum are big-endian, while the roaring bitmap's
 own fields are little-endian. Hoglake's server reader, its writer, and its DuckDB
 client all use this layout, and the connector reads it.
 
-An unfiltered `count(*)` over a file read by a single split still answers from
-catalog metadata: a file's visible rows are its record count minus its deletion
-vector's delete count. The vector is read and validated in that path too, so a
-count cannot silently ignore deletes. A file read by several byte-range splits
-is counted from its Parquet footers instead, since the catalog's record count
-describes the whole file; no column data is read and the vector is still
-applied. Counts with a filter, and every other aggregation, read the data and
-apply the vector. Every split of a file with a deletion vector reads the whole
-vector.
+An unfiltered `count(*)` answers from catalog metadata: a file's visible rows
+are its record count minus its deletion vector's delete count. The vector is
+read and validated in that path too, so a count cannot silently ignore deletes.
+For a file read by several byte-range splits, the range starting at offset 0
+reports the whole file's count and the file's other ranges report no rows, so no
+split reads the Parquet footer or any data, and the vector is read once per file.
+Counts with a filter or of a column, and every other aggregation, read the data
+and apply the vector. Every split of a file with a deletion vector that reads
+data reads the whole vector.
 
 A deletion vector that is missing, corrupt, truncated, unsupported, or
 inconsistent with the catalog fails the query; it is never treated as "no
@@ -168,7 +168,7 @@ range of its own. Without usable offsets, a file is cut into equal ranges of
 reads only the footer and returns no rows. The catalog's `footer_size`, when known,
 lets each split fetch the Parquet footer in a single request.
 
-Every range of a file needs the file's whole Parquet footer, which for a file with
+Every range of a file that reads data needs the file's whole Parquet footer, which for a file with
 many row groups is megabytes of metadata that is costly to decode. Each worker keeps
 the decoded footers of the files it has recently read, so the ranges of a file read
 by one worker decode its footer once between them, and later queries reading the

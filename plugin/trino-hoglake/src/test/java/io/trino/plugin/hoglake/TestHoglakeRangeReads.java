@@ -117,13 +117,8 @@ class TestHoglakeRangeReads
         assertThat(cached.tailReads).isEqualTo(1);
         assertThat(footerCache.contains(new HoglakeParquetFooterCache.Key(PATH, FILE.length))).isTrue();
 
-        // Reading the file again, or counting its rows, reads no footer at all.
+        // Reading the file again reads no footer at all.
         assertThat(readAllSplits(cached, splits, List.of(VALUE))).containsExactlyElementsOf(allValues());
-        long rows = 0;
-        for (HoglakeSplit split : splits) {
-            rows += read(cached, split, List.of(), TupleDomain.all()).size();
-        }
-        assertThat(rows).isEqualTo(ROWS);
         assertThat(cached.tailReads).isEqualTo(1);
 
         TailCountingProvider uncached = new TailCountingProvider(HoglakeParquetFooterCache.disabled());
@@ -189,21 +184,36 @@ class TestHoglakeRangeReads
     }
 
     /**
-     * A range split has no catalog count to answer from, so a read with no
-     * columns counts its row groups' rows through the reader instead.
+     * An unfiltered count needs no column: the file's first range answers it
+     * from the catalog's whole-file record count, and its other ranges return
+     * no rows, so the ranges sum to the file's count without any range reading
+     * the footer or the data.
      */
     @Test
     void countThroughRangesSumsToTheFileRowCount()
     {
         List<HoglakeSplit> splits = HoglakeSplitManager.toSplits(scan(List.of()), 256);
         assertThat(splits).hasSizeGreaterThan(1);
-        assertThat(splits).allSatisfy(split -> assertThat(split.recordCount()).isEqualTo(-1));
+        assertThat(splits).allSatisfy(split -> assertThat(split.recordCount()).isEqualTo(ROWS));
 
+        assertThat(splits.getFirst().start()).isZero();
+        assertThat(read(splits.getFirst(), List.of(), TupleDomain.all())).hasSize(ROWS);
         long rows = 0;
         for (HoglakeSplit split : splits) {
-            rows += read(split, List.of(), TupleDomain.all()).size();
+            long rangeRows = read(split, List.of(), TupleDomain.all()).size();
+            if (split.start() > 0) {
+                assertThat(rangeRows).isZero();
+            }
+            rows += rangeRows;
         }
         assertThat(rows).isEqualTo(ROWS);
+
+        // Not even the footer is read, with or without the footer cache.
+        TailCountingProvider uncached = new TailCountingProvider(HoglakeParquetFooterCache.disabled());
+        for (HoglakeSplit split : splits) {
+            read(uncached, split, List.of(), TupleDomain.all());
+        }
+        assertThat(uncached.tailReads).isZero();
     }
 
     @Test

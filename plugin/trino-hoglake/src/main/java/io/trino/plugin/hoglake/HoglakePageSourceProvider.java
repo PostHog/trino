@@ -138,12 +138,18 @@ public class HoglakePageSourceProvider
         }
 
         // With no columns or reader-side predicate, only row cardinality is needed (for
-        // example, COUNT(*)). The catalog's record count describes a whole file at the
-        // query's pinned snapshot, so only a whole-file split can answer from it. A range
-        // split falls through to the reader with no columns, which counts the rows of its
-        // row groups from the footer without reading any data page.
-        if (columns.isEmpty() && predicate.isAll() && hoglakeSplit.recordCount() >= 0 && hoglakeSplit.wholeFile()) {
-            return createCountPageSource(session, hoglakeSplit, memoryContext);
+        // example, COUNT(*)). The catalog's record count describes the whole file at the
+        // query's pinned snapshot, so the range starting at offset 0 reports it, less the
+        // rows its validated deletion vector removes, exactly as a whole-file split does,
+        // and the file's other ranges report no rows. Split planning covers every file
+        // from offset 0, so each file is counted once; its deletion vector is read and
+        // validated once per query rather than once per range, and no range reads the
+        // Parquet footer or any data.
+        if (columns.isEmpty() && predicate.isAll() && hoglakeSplit.recordCount() >= 0) {
+            if (hoglakeSplit.start() == 0) {
+                return createCountPageSource(session, hoglakeSplit, memoryContext);
+            }
+            return new EmptyPageSource();
         }
 
         List<HoglakeColumnHandle> hoglakeColumns = columns.stream()
