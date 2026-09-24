@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.hoglake;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
@@ -29,6 +30,8 @@ import java.net.InetSocketAddress;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -42,6 +45,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class TestHoglakeClient
 {
     private static final Map<String, String> RESPONSES = new HashMap<>();
+    private static final Map<String, String> QUERIES = new ConcurrentHashMap<>();
     private static HttpServer server;
     private static HoglakeClient client;
 
@@ -109,8 +113,29 @@ class TestHoglakeClient
                 ]
                 """);
 
+        // /scan with column statistics: absent (pending), empty (provided,
+        // nothing for the requested columns) and present, with a long bound
+        // past 2^53 that must arrive as its exact token.
+        RESPONSES.put("/v1/catalogs/lake/namespaces/analytics/tables/stats/scan",
+                """
+                [
+                  {"data_file": {"data_file_id": 20, "path": "s3://lake/stats/pending.parquet", "file_format": "parquet",
+                    "record_count": 5, "file_size_bytes": 512, "row_id_start": 0, "stats_state": "pending", "begin_snapshot": 3}},
+                  {"data_file": {"data_file_id": 21, "path": "s3://lake/stats/empty.parquet", "file_format": "parquet",
+                    "record_count": 5, "file_size_bytes": 512, "row_id_start": 5, "stats_state": "provided", "begin_snapshot": 3,
+                    "column_stats": []}},
+                  {"data_file": {"data_file_id": 22, "path": "s3://lake/stats/full.parquet", "file_format": "parquet",
+                    "record_count": 5, "file_size_bytes": 512, "row_id_start": 10, "stats_state": "provided", "begin_snapshot": 3,
+                    "column_stats": [
+                      {"field_id": 1, "value_count": 5, "null_count": 0, "lower_bound": 9007199254740993, "upper_bound": 9223372036854775807},
+                      {"field_id": 7, "value_count": 5, "null_count": 5, "nan_count": 0, "lower_bound": null, "upper_bound": null}]}}
+                ]
+                """);
+
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", exchange -> {
+            String rawQuery = exchange.getRequestURI().getRawQuery();
+            QUERIES.put(exchange.getRequestURI().getPath(), rawQuery == null ? "" : rawQuery);
             String body = RESPONSES.get(exchange.getRequestURI().getPath());
             byte[] payload = (body == null ? "{\"error\":\"not_found\"}" : body).getBytes(UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "application/json");
@@ -216,6 +241,45 @@ class TestHoglakeClient
         assertThat(paired.deleteFile()).isNotNull();
         assertThat(paired.deleteFile().path()).isEqualTo("s3://lake/events/b.dv");
         assertThat(paired.deleteFile().deleteCount()).isEqualTo(3);
+    }
+
+    @Test
+    void scanRequestsStatisticsOnlyForTheGivenFields()
+    {
+        String scanPath = "/v1/catalogs/lake/namespaces/analytics/tables/stats/scan";
+        client.scan("analytics", "stats", 6);
+        assertThat(QUERIES.get(scanPath)).isEqualTo("snapshot=6");
+        client.scan("analytics", "stats", 6, Set.of());
+        assertThat(QUERIES.get(scanPath)).isEqualTo("snapshot=6");
+        client.scan("analytics", "stats", 6, Set.of(7L, 1L));
+        assertThat(QUERIES.get(scanPath)).isEqualTo("snapshot=6&include=column_stats&stats_fields=1,7");
+    }
+
+    @Test
+    void parsesAbsentEmptyAndPresentColumnStatistics()
+            throws Exception
+    {
+        List<HoglakeDtos.ScanFile> scan = client.scan("analytics", "stats", 6, Set.of(1L, 7L));
+        assertThat(scan).hasSize(3);
+        assertThat(scan.get(0).dataFile().columnStats()).isNull();
+        assertThat(scan.get(1).dataFile().columnStats()).isEmpty();
+
+        List<HoglakeDtos.ScanColumnStats> stats = scan.get(2).dataFile().columnStats();
+        assertThat(stats).extracting(HoglakeDtos.ScanColumnStats::fieldId).containsExactly(1L, 7L);
+        assertThat(stats.get(0).lowerBound().bigIntegerValue()).hasToString("9007199254740993");
+        assertThat(stats.get(0).nanCount()).isNull();
+        assertThat(stats.get(1).nullCount()).isEqualTo(stats.get(1).valueCount());
+        assertThat(stats.get(1).nanCount()).isZero();
+        assertThat(stats.get(1).lowerBound().isNull()).isTrue();
+
+        // Staged files ride the table handle as JSON: absent and empty must
+        // stay distinct through a round trip.
+        ObjectMapper mapper = new ObjectMapper();
+        for (HoglakeDtos.ScanFile file : scan) {
+            HoglakeDtos.DataFile roundTripped = mapper.readValue(mapper.writeValueAsString(file.dataFile()), HoglakeDtos.DataFile.class);
+            assertThat(roundTripped.columnStats()).isEqualTo(file.dataFile().columnStats());
+        }
+        assertThat(mapper.writeValueAsString(scan.get(0).dataFile())).doesNotContain("column_stats");
     }
 
     @Test

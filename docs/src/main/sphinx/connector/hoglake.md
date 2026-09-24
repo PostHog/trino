@@ -121,9 +121,11 @@ client all use this layout, and the connector reads it.
 An unfiltered `count(*)` answers from catalog metadata: a file's visible rows
 are its record count minus its deletion vector's delete count. The vector is
 read and validated in that path too, so a count cannot silently ignore deletes.
-For a file read by several byte-range splits, the range starting at offset 0
-reports the whole file's count and the file's other ranges report no rows, so no
-split reads the Parquet footer or any data, and the vector is read once per file.
+Such a count is planned as one whole-file split per file (see
+[](hoglake-split-planning)). Should a file be counted through several byte-range
+splits, the range starting at offset 0 reports the whole file's count and the
+file's other ranges report no rows, so no split reads the Parquet footer or any
+data, and the vector is read once per file.
 Counts with a filter or of a column, and every other aggregation, read the data
 and apply the vector. Every split of a file with a deletion vector that reads
 data reads the whole vector.
@@ -188,6 +190,26 @@ ample parallelism; a scan of about 170 GiB is planned as about 170 splits.
 
 Splits are weighted by the share of `hoglake.max-split-size` they cover, so the
 scheduler assigns more short ranges than full ones to each worker.
+
+A query that reads no column and has no pushed-down predicate, such as
+`SELECT count(*) FROM t`, is answered from the catalog's record counts without
+opening any data file, so it is planned as one whole-file split per file
+regardless of `hoglake.max-split-size`. A count with a predicate, or of a
+column, reads the files and keeps byte-range splits and file pruning.
+
+Files are also pruned at planning from the catalog's per-file column bounds. When
+a query's pushed-down predicate constrains columns of a supported type, the scan
+request asks the catalog for those columns' statistics only, and a file whose
+bounds cannot satisfy the predicate gets no splits, so it is neither opened nor
+scheduled. The supported types are `BOOLEAN`, `INTEGER`, `BIGINT`, `REAL`,
+`DOUBLE`, `DATE`, `VARCHAR`, `TIMESTAMP(6)` and `TIMESTAMP(6) WITH TIME ZONE`;
+`REAL` and `DOUBLE` columns prune only when the catalog reports that the file
+holds no NaN values. A file is always read when the catalog has no statistics
+for it (its stats are pending or failed), when a constrained column has no
+recorded bounds in it, or when a bound cannot be decoded. A column that holds
+only nulls in a file prunes that file for any predicate that rejects nulls.
+Pruning never changes results: the engine still evaluates every predicate on
+the rows it reads.
 
 ## Read consistency and limitations
 

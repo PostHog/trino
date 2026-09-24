@@ -103,9 +103,11 @@ final class TestHoglakeDeletionVectorQueries
                         {"name":"lake", "head_snapshot_id":7, "schema_version":1}
                         """;
             }
-            else if (!"snapshot=7".equals(exchange.getRequestURI().getQuery())) {
+            else if (!exchange.getRequestURI().getQuery().split("&")[0].equals("snapshot=7")) {
                 // A pinned-snapshot read must ask for the handle's snapshot;
                 // anything else would be reading a different snapshot's vector.
+                // A filtered read may also ask for column statistics, which
+                // this catalog does not keep, so its files are never pruned.
                 exchange.sendResponseHeaders(400, -1);
                 exchange.close();
                 return;

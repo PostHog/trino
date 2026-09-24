@@ -37,6 +37,11 @@ import static java.util.Objects.requireNonNull;
  * query, one consistent snapshot.
  *
  * <p>The constraint is used only for scan pruning; the engine retains residual filters.
+ *
+ * <p>{@code countOnly} marks a scan that projects no column at all, such as
+ * {@code SELECT count(*) FROM t}: its rows are counted from the catalog and
+ * no file is read, so planning needs one split per file rather than byte
+ * ranges.
  */
 public record HoglakeTableHandle(
         @JsonProperty("schemaName") String schemaName,
@@ -46,7 +51,8 @@ public record HoglakeTableHandle(
         @JsonProperty("columns") List<HoglakeColumnHandle> columns,
         @JsonProperty("constraint") TupleDomain<HoglakeColumnHandle> constraint,
         @JsonProperty("stagedFiles") List<HoglakeDtos.ScanFile> stagedFiles,
-        @JsonProperty("stagedDeletes") List<HoglakeDtos.DeleteFile> stagedDeletes)
+        @JsonProperty("stagedDeletes") List<HoglakeDtos.DeleteFile> stagedDeletes,
+        @JsonProperty("countOnly") boolean countOnly)
         implements ConnectorTableHandle
 {
     @JsonCreator
@@ -61,6 +67,19 @@ public record HoglakeTableHandle(
         stagedDeletes = stagedDeletes == null ? List.of() : List.copyOf(stagedDeletes);
     }
 
+    public HoglakeTableHandle(
+            String schemaName,
+            String tableName,
+            long snapshotId,
+            String tableUuid,
+            List<HoglakeColumnHandle> columns,
+            TupleDomain<HoglakeColumnHandle> constraint,
+            List<HoglakeDtos.ScanFile> stagedFiles,
+            List<HoglakeDtos.DeleteFile> stagedDeletes)
+    {
+        this(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, false);
+    }
+
     public HoglakeTableHandle(String schemaName, String tableName, long snapshotId, String tableUuid, List<HoglakeColumnHandle> columns, TupleDomain<HoglakeColumnHandle> constraint)
     {
         this(schemaName, tableName, snapshotId, tableUuid, columns, constraint, List.of(), List.of());
@@ -73,7 +92,17 @@ public record HoglakeTableHandle(
 
     public HoglakeTableHandle withConstraint(TupleDomain<HoglakeColumnHandle> constraint)
     {
-        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes);
+        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly);
+    }
+
+    public HoglakeTableHandle withCountOnly()
+    {
+        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, true);
+    }
+
+    public HoglakeTableHandle withStaged(List<HoglakeDtos.ScanFile> stagedFiles, List<HoglakeDtos.DeleteFile> stagedDeletes)
+    {
+        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly);
     }
 
     public SchemaTableName schemaTableName()
@@ -84,6 +113,10 @@ public record HoglakeTableHandle(
     @Override
     public String toString()
     {
-        return schemaName + "." + tableName + "@" + snapshotId;
+        String table = schemaName + "." + tableName + "@" + snapshotId;
+        if (countOnly) {
+            return table + " countOnly";
+        }
+        return table;
     }
 }

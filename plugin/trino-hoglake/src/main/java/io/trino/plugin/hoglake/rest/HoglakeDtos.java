@@ -15,6 +15,7 @@ package io.trino.plugin.hoglake.rest;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.JsonNode;
 import io.trino.plugin.hoglake.HoglakeDeletionVector;
 
 import java.util.ArrayList;
@@ -259,13 +260,21 @@ public final class HoglakeDtos
             @JsonProperty("row_id_start") long rowIdStart,
             @JsonProperty("stats_state") String statsState,
             @JsonProperty("begin_snapshot") long beginSnapshot,
-            @JsonProperty("split_offsets") List<Long> splitOffsets)
+            @JsonProperty("split_offsets") List<Long> splitOffsets,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("column_stats") List<ScanColumnStats> columnStats)
     {
         /**
          * {@code split_offsets} lists the byte offsets where the file's row
          * groups start, ascending (the Iceberg convention). A server that does
          * not report them omits the field, and an unusable list is treated the
          * same way: split planning then cuts the file evenly instead.
+         *
+         * <p>{@code column_stats} is present only when the scan was asked for
+         * it and the file's statistics are provided. Absent (null) and empty
+         * are different answers and both survive: absent means the file has
+         * no statistics and is never pruned, empty means it has none for the
+         * requested columns. A list with a null entry is not a valid answer
+         * and is treated as absent.
          */
         public DataFile
         {
@@ -275,6 +284,24 @@ public final class HoglakeDtos
             else {
                 splitOffsets = List.copyOf(splitOffsets);
             }
+            if (columnStats != null) {
+                columnStats = columnStats.stream().anyMatch(Objects::isNull) ? null : List.copyOf(columnStats);
+            }
+        }
+
+        public DataFile(
+                long dataFileId,
+                String path,
+                String fileFormat,
+                long recordCount,
+                long fileSizeBytes,
+                Long footerSize,
+                long rowIdStart,
+                String statsState,
+                long beginSnapshot,
+                List<Long> splitOffsets)
+        {
+            this(dataFileId, path, fileFormat, recordCount, fileSizeBytes, footerSize, rowIdStart, statsState, beginSnapshot, splitOffsets, null);
         }
 
         public DataFile(
@@ -291,6 +318,20 @@ public final class HoglakeDtos
             this(dataFileId, path, fileFormat, recordCount, fileSizeBytes, footerSize, rowIdStart, statsState, beginSnapshot, List.of());
         }
     }
+
+    /**
+     * One column's statistics for one file in a scan plan
+     * (openapi/hoglake.yaml ScanColumnStats). The bounds stay raw JSON so the
+     * pruner decodes the server's exact tokens; a JSON null bound means the
+     * column must not be pruned on. {@code value_count} includes nulls.
+     */
+    public record ScanColumnStats(
+            @JsonProperty("field_id") long fieldId,
+            @JsonProperty("value_count") long valueCount,
+            @JsonProperty("null_count") long nullCount,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("nan_count") Long nanCount,
+            @JsonProperty("lower_bound") JsonNode lowerBound,
+            @JsonProperty("upper_bound") JsonNode upperBound) {}
 
     public record DeleteFile(
             @JsonProperty("delete_file_id") long deleteFileId,

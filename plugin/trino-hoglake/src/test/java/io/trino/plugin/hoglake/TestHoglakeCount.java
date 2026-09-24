@@ -15,6 +15,7 @@ package io.trino.plugin.hoglake;
 
 import com.sun.net.httpserver.HttpServer;
 import io.airlift.units.DataSize;
+import io.trino.Session;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
@@ -27,8 +28,15 @@ import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
+import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.Constraint;
+import io.trino.spi.connector.DynamicFilterSnapshot;
+import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.transaction.IsolationLevel;
+import io.trino.spi.type.LongTimestampWithTimeZone;
+import io.trino.spi.type.TimeZoneKey;
 import io.trino.testing.StandaloneQueryRunner;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -38,14 +46,21 @@ import org.junit.jupiter.api.parallel.Execution;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
+import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MICROS;
+import static org.apache.parquet.schema.LogicalTypeAnnotation.timestampType;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
 import static org.apache.parquet.schema.Types.optional;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -59,8 +74,13 @@ final class TestHoglakeCount
 {
     private static final String FIRST_FILE_PATH = "memory:///counts-first.parquet";
     private static final String SECOND_FILE_PATH = "memory:///counts-second.parquet";
+    // Registered in the catalog but absent from storage: a query that reads
+    // it fails, so a passing query proves the file was pruned at planning.
+    private static final String UNREADABLE_FILE_PATH = "memory:///pruned-never-read.parquet";
+    private static final String INSTANTS_FILE_PATH = "memory:///instants.parquet";
 
     private final AtomicBoolean storageAllowed = new AtomicBoolean();
+    private final Map<String, String> scanQueries = new ConcurrentHashMap<>();
     private HttpServer server;
     private HoglakeClient client;
     private StandaloneQueryRunner queryRunner;
@@ -71,7 +91,15 @@ final class TestHoglakeCount
     {
         byte[] parquet = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(
                 optional(INT64).id(1).named("value"), BIGINT, Arrays.asList(1L, 1L, 2L, null))));
-        TrinoFileSystemFactory storage = ConnectorTestFixtures.memoryFileSystem(Map.of(FIRST_FILE_PATH, parquet, SECOND_FILE_PATH, parquet));
+        // 2026-03-01T00:00Z, 06:00Z and 12:00Z.
+        byte[] instants = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(
+                optional(INT64).as(timestampType(true, MICROS)).id(1).named("at"),
+                TIMESTAMP_TZ_MICROS,
+                List.of(utcInstant("2026-03-01T00:00:00Z"), utcInstant("2026-03-01T06:00:00Z"), utcInstant("2026-03-01T12:00:00Z")))));
+        TrinoFileSystemFactory storage = ConnectorTestFixtures.memoryFileSystem(Map.of(
+                FIRST_FILE_PATH, parquet,
+                SECOND_FILE_PATH, parquet,
+                INSTANTS_FILE_PATH, instants));
         HoglakePageSourceProvider pageSources = new HoglakePageSourceProvider(identity -> {
             if (!storageAllowed.get()) {
                 throw new AssertionError("Object storage must not be accessed for catalog counts");
@@ -88,14 +116,54 @@ final class TestHoglakeCount
                         {"name":"lake", "head_snapshot_id":7, "schema_version":1}
                         """;
             }
-            else if (!"snapshot=7".equals(exchange.getRequestURI().getQuery())) {
+            else if (!exchange.getRequestURI().getQuery().split("&")[0].equals("snapshot=7")) {
                 exchange.sendResponseHeaders(400, -1);
                 exchange.close();
                 return;
             }
             else if (path.endsWith("/scan")) {
+                String query = exchange.getRequestURI().getQuery();
+                scanQueries.put(path, query);
+                boolean withStats = query.contains("include=column_stats");
                 if (path.contains("/empty/")) {
                     body = "[]";
+                }
+                else if (path.contains("/instants/")) {
+                    // The file holding 2026-03-01 00:00Z..12:00Z, and a
+                    // February file storage does not have. Bounds are the
+                    // server's tokens, trailing zero units elided.
+                    String instant =
+                            """
+                            {"data_file":{"data_file_id":%d, "path":"%s", "record_count":3, "file_size_bytes":%d,
+                             "file_format":"parquet", "stats_state":"provided", "begin_snapshot":1%s}}
+                            """;
+                    String stats = ", \"column_stats\":[{\"field_id\":1, \"value_count\":3, \"null_count\":0, \"lower_bound\":\"%s\", \"upper_bound\":\"%s\"}]";
+                    body = "[" + instant.formatted(4, INSTANTS_FILE_PATH, instants.length, withStats ? stats.formatted("2026-03-01T00:00Z", "2026-03-01T12:00Z") : "") +
+                            "," + instant.formatted(5, UNREADABLE_FILE_PATH, instants.length, withStats ? stats.formatted("2026-02-01T00:00Z", "2026-02-01T23:59:59.999999Z") : "") + "]";
+                }
+                else if (path.contains("/bounded/") || path.contains("/mixed/")) {
+                    // A provided file holding [1, 2] (and a null), a provided
+                    // file holding [100, 200] that storage does not have, and
+                    // in `mixed` a pending file with no statistics at all.
+                    String bounded =
+                            """
+                            {"data_file":{"data_file_id":%d, "path":"%s", "record_count":4, "file_size_bytes":%d,
+                             "file_format":"parquet", "stats_state":"provided", "begin_snapshot":1%s}}
+                            """;
+                    String first = bounded.formatted(1, FIRST_FILE_PATH, parquet.length, withStats
+                            ? ", \"column_stats\":[{\"field_id\":1, \"value_count\":4, \"null_count\":1, \"lower_bound\":1, \"upper_bound\":2}]"
+                            : "");
+                    String unreadable = bounded.formatted(3, UNREADABLE_FILE_PATH, parquet.length, withStats
+                            ? ", \"column_stats\":[{\"field_id\":1, \"value_count\":4, \"null_count\":0, \"lower_bound\":100, \"upper_bound\":200}]"
+                            : "");
+                    String pending =
+                            """
+                            {"data_file":{"data_file_id":2, "path":"%s", "record_count":4, "file_size_bytes":%d,
+                             "file_format":"parquet", "stats_state":"pending", "begin_snapshot":1}}
+                            """.formatted(SECOND_FILE_PATH, parquet.length);
+                    body = path.contains("/mixed/")
+                            ? "[" + first + "," + unreadable + "," + pending + "]"
+                            : "[" + first + "," + unreadable + "]";
                 }
                 else {
                     // Two catalog files, each containing four rows, including a null.
@@ -106,6 +174,14 @@ final class TestHoglakeCount
                             """;
                     body = "[" + file.formatted(1, FIRST_FILE_PATH, parquet.length) + "," + file.formatted(2, SECOND_FILE_PATH, parquet.length) + "]";
                 }
+            }
+            else if (path.endsWith("/instants")) {
+                body =
+                        """
+                        {"name":"instants", "namespace":"test", "table_uuid":"synthetic-instants",
+                         "columns":[{"field_id":1, "ordinal":0, "name":"at", "type":"timestamptz", "nullable":true}],
+                         "record_count":0, "file_count":0, "file_size_bytes":0}
+                        """;
             }
             else {
                 body =
@@ -225,6 +301,124 @@ final class TestHoglakeCount
         finally {
             storageAllowed.set(false);
         }
+    }
+
+    /**
+     * A filtered read asks the catalog for the predicate's bounds and plans
+     * no splits for files those bounds exclude. The excluded file is not in
+     * storage, so any read of it would fail the query.
+     */
+    @Test
+    void testFilesOutsideThePredicateArePrunedAtPlanning()
+    {
+        // Every file excluded: no split, so no object storage at all.
+        assertThat(queryRunner.execute("SELECT count(*) FROM bounded WHERE value > 1000").getOnlyValue()).isEqualTo(0L);
+        assertThat(scanQueries.get("/v1/catalogs/lake/namespaces/test/tables/bounded/scan"))
+                .isEqualTo("snapshot=7&include=column_stats&stats_fields=1");
+        assertThat(queryRunner.execute("SELECT count(*) FROM bounded WHERE value IS NULL AND value > 1000").getOnlyValue()).isEqualTo(0L);
+
+        storageAllowed.set(true);
+        try {
+            // Only the file whose bounds cover the value is read.
+            assertThat(queryRunner.execute("SELECT count(*) FROM bounded WHERE value = 1").getOnlyValue()).isEqualTo(2L);
+            assertThat(queryRunner.execute("SELECT count(*) FROM bounded WHERE value BETWEEN 2 AND 50").getOnlyValue()).isEqualTo(1L);
+            // A file without statistics is always read, beside a pruned one.
+            assertThat(queryRunner.execute("SELECT count(*) FROM mixed WHERE value = 1").getOnlyValue()).isEqualTo(4L);
+            assertThat(queryRunner.execute("SELECT count(*) FROM mixed WHERE value > 1000").getOnlyValue()).isEqualTo(0L);
+        }
+        finally {
+            storageAllowed.set(false);
+        }
+        // A read with no prunable predicate requests no statistics.
+        assertThatThrownBy(() -> queryRunner.execute("SELECT count(value) FROM bounded"))
+                .hasStackTraceContaining("Object storage must not be accessed for catalog counts");
+        assertThat(scanQueries.get("/v1/catalogs/lake/namespaces/test/tables/bounded/scan")).isEqualTo("snapshot=7");
+    }
+
+    /**
+     * The predicate shape the benchmark runs: a TIMESTAMP WITH TIME ZONE
+     * range in a session zone other than UTC, with literals in a third zone,
+     * reaching the pruner through applyFilter and the table handle.
+     */
+    @Test
+    void testTimestampWithTimeZonePruningInAnotherSessionZone()
+    {
+        Session losAngeles = Session.builder(queryRunner.getDefaultSession())
+                .setTimeZoneKey(TimeZoneKey.getTimeZoneKey("America/Los_Angeles"))
+                .build();
+        // Excludes both files: no split, so no object storage at all. The
+        // zoneless literal is Los Angeles time, 2026-03-02T07:00Z.
+        assertThat(queryRunner.execute(losAngeles, "SELECT count(*) FROM instants WHERE at >= TIMESTAMP '2026-03-01 23:00:00'").getOnlyValue()).isEqualTo(0L);
+        assertThat(scanQueries.get("/v1/catalogs/lake/namespaces/test/tables/instants/scan"))
+                .isEqualTo("snapshot=7&include=column_stats&stats_fields=1");
+
+        storageAllowed.set(true);
+        try {
+            // [2026-02-28T22:00Z, 2026-03-01T22:00Z) covers the March file
+            // only; the February file is not in storage, so reading it fails.
+            assertThat(queryRunner.execute(
+                    losAngeles,
+                    "SELECT count(*) FROM instants WHERE at >= TIMESTAMP '2026-03-01 00:00:00 +02:00' AND at < TIMESTAMP '2026-03-02 00:00:00 +02:00'").getOnlyValue())
+                    .isEqualTo(3L);
+            // One microsecond past the March file's upper bound.
+            assertThat(queryRunner.execute(losAngeles, "SELECT count(*) FROM instants WHERE at > TIMESTAMP '2026-03-01 12:00:00 UTC'").getOnlyValue())
+                    .isEqualTo(0L);
+        }
+        finally {
+            storageAllowed.set(false);
+        }
+    }
+
+    private static LongTimestampWithTimeZone utcInstant(String instant)
+    {
+        return LongTimestampWithTimeZone.fromEpochMillisAndFraction(Instant.parse(instant).toEpochMilli(), 0, UTC_KEY);
+    }
+
+    /**
+     * An unfiltered count(*) projects no column: the engine hands the
+     * connector an empty projection, the handle becomes count-only, and
+     * planning gives each file one whole-file split however small the split
+     * size. A count that needs a column or a predicate keeps byte ranges.
+     */
+    @Test
+    void testUnfilteredCountPlansOneWholeFileSplitPerFile()
+            throws Exception
+    {
+        assertThat(explain("SELECT count(*) FROM hoglake_ranges.test.counts")).contains("counts@7 countOnly");
+        assertThat(explain("SELECT count(value) FROM hoglake_ranges.test.counts")).doesNotContain("countOnly");
+        assertThat(explain("SELECT count(*) FROM hoglake_ranges.test.counts WHERE value = 1")).doesNotContain("countOnly");
+        assertThat(queryRunner.execute("SELECT count(*) FROM hoglake_ranges.test.counts").getOnlyValue()).isEqualTo(8L);
+
+        HoglakeColumnHandle value = new HoglakeColumnHandle("value", 1, BIGINT, true);
+        HoglakeTableHandle table = new HoglakeTableHandle("test", "counts", 7, "synthetic-table", List.of(value));
+        HoglakeSplitManager splitManager = new HoglakeSplitManager(client, _ -> DataSize.ofBytes(64));
+
+        List<HoglakeSplit> countOnly = splits(splitManager, table.withCountOnly());
+        assertThat(countOnly).hasSize(2);
+        assertThat(countOnly).allSatisfy(split -> {
+            assertThat(split.start()).isZero();
+            assertThat(split.length()).isEqualTo(split.fileSizeBytes());
+        });
+        assertThat(countOnly).extracting(HoglakeSplit::path).containsExactly(FIRST_FILE_PATH, SECOND_FILE_PATH);
+
+        // Byte ranges otherwise, and for a count-only handle with a predicate.
+        assertThat(splits(splitManager, table)).hasSizeGreaterThan(2);
+        assertThat(splits(splitManager, table.withConstraint(TupleDomain.withColumnDomains(Map.of(value, Domain.singleValue(BIGINT, 1L)))).withCountOnly()))
+                .hasSizeGreaterThan(2);
+    }
+
+    private String explain(String query)
+    {
+        return (String) queryRunner.execute("EXPLAIN " + query).getOnlyValue();
+    }
+
+    private static List<HoglakeSplit> splits(HoglakeSplitManager splitManager, HoglakeTableHandle table)
+            throws Exception
+    {
+        ConnectorSplitSource source = splitManager.getSplits(HoglakeTransactionHandle.INSTANCE, ConnectorTestFixtures.session(), table, Set.of(), Constraint.alwaysTrue());
+        return source.getNextBatch(1_000, DynamicFilterSnapshot.EMPTY).get().stream()
+                .map(HoglakeSplit.class::cast)
+                .toList();
     }
 
     @Test
