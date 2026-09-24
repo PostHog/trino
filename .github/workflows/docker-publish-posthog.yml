@@ -105,13 +105,17 @@ jobs:
           distribution: temurin
           java-version: 25
 
-      - name: Build trino-server tarball (skip tests and checks)
+      - name: Build trino-server-posthog tarball (skip tests and checks)
         if: steps.metadata.outputs.digest == '' && steps.metadata.outputs.build-digest == ''
-        # Full build: the trino-server provisio assembly resolves every plugin
-        # zip plus trino-server-core from the local repo, so -pl/-am is not
-        # sufficient.
+        # Only what the image needs. trino-server-posthog is the fork's server
+        # package (core/trino-server-posthog); unlike trino-server it declares its
+        # plugin zips as dependencies, so -am builds exactly the plugins that end
+        # up in the image and nothing else. build.sh reads two artifacts,
+        # core/<package>/target/*.tar.gz and client/trino-cli/target/*-executable.jar,
+        # hence the second -pl entry.
         run: |
           ./mvnw clean install \
+            -pl core/trino-server-posthog,client/trino-cli -am \
             -T 1C -DskipTests -Dmaven.javadoc.skip=true -Dair.check.skip-all=true
 
       - name: Build and push arm64 OCI image
@@ -124,7 +128,7 @@ jobs:
         run: |
           set -euo pipefail
           staging_image="${ECR_REPOSITORY}:build-${GITHUB_SHA}"
-          core/docker/build.sh -a arm64 -x -o "$staging_image"
+          core/docker/build.sh -a arm64 -p trino-server-posthog -x -o "$staging_image"
           digest="$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "$staging_image" | jq -er 'select(test("^sha256:[0-9a-f]{64}$"))')"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 

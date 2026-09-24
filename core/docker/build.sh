@@ -134,7 +134,21 @@ mv "${WORK_DIR}/${SERVER_ARTIFACT}-${TRINO_VERSION}" "${WORK_DIR}/trino-server"
 cp -R bin "${WORK_DIR}/trino-server"
 cp -R default "${WORK_DIR}/"
 if [ "${SERVER_ARTIFACT}" != "trino-server" ]; then
-    rm -rf "${WORK_DIR}"/default/etc/catalog/*.properties
+    # The default catalogs are written for the full trino-server plugin set. A smaller
+    # server package need not carry the connector a default catalog names, and under
+    # static catalog management an unresolvable connector is a startup failure, so drop
+    # exactly the catalogs this package cannot serve and keep the ones it can. This is
+    # what lets a package that does ship, say, tpch keep behaving like the stock image
+    # for tooling that assumes those catalogs exist (Testcontainers' TrinoContainer
+    # probes tpch to decide the server is up). trino-server-core carries none of the
+    # default catalogs' connectors, so it still ends up with an empty catalog directory.
+    for catalog in "${WORK_DIR}"/default/etc/catalog/*.properties; do
+        [ -e "${catalog}" ] || continue
+        connector=$(sed -n 's/^connector\.name=//p' "${catalog}" | head -1)
+        if [[ -z "${connector}" || ! -d "${WORK_DIR}/trino-server/plugin/${connector}" ]]; then
+            rm -f "${catalog}"
+        fi
+    done
 fi
 
 TAG="${TAG_PREFIX}:${TRINO_VERSION}"
