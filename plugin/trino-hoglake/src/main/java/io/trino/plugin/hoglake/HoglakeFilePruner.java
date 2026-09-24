@@ -156,7 +156,7 @@ public final class HoglakeFilePruner
         }
         // Bounds exclude NaN, so a column that may hold NaNs is unbounded.
         // The hydrator cannot count NaNs from a footer and reports none.
-        if ((type.equals(DOUBLE) || type.equals(REAL)) && !Long.valueOf(0).equals(stats.nanCount())) {
+        if ((type.equals(DOUBLE) || type.equals(REAL)) && (stats.nanCount() == null || stats.nanCount() != 0)) {
             return Optional.empty();
         }
         Object low = decode(type, stats.lowerBound());

@@ -15,6 +15,7 @@ package io.trino.plugin.hoglake;
 
 import com.sun.net.httpserver.HttpServer;
 import io.airlift.units.DataSize;
+import io.trino.Session;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
@@ -34,6 +35,8 @@ import io.trino.spi.connector.DynamicFilterSnapshot;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.transaction.IsolationLevel;
+import io.trino.spi.type.LongTimestampWithTimeZone;
+import io.trino.spi.type.TimeZoneKey;
 import io.trino.testing.StandaloneQueryRunner;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -43,6 +46,7 @@ import org.junit.jupiter.api.parallel.Execution;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -51,8 +55,12 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
+import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MICROS;
+import static org.apache.parquet.schema.LogicalTypeAnnotation.timestampType;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
 import static org.apache.parquet.schema.Types.optional;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -69,6 +77,7 @@ final class TestHoglakeCount
     // Registered in the catalog but absent from storage: a query that reads
     // it fails, so a passing query proves the file was pruned at planning.
     private static final String UNREADABLE_FILE_PATH = "memory:///pruned-never-read.parquet";
+    private static final String INSTANTS_FILE_PATH = "memory:///instants.parquet";
 
     private final AtomicBoolean storageAllowed = new AtomicBoolean();
     private final Map<String, String> scanQueries = new ConcurrentHashMap<>();
@@ -82,7 +91,15 @@ final class TestHoglakeCount
     {
         byte[] parquet = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(
                 optional(INT64).id(1).named("value"), BIGINT, Arrays.asList(1L, 1L, 2L, null))));
-        TrinoFileSystemFactory storage = ConnectorTestFixtures.memoryFileSystem(Map.of(FIRST_FILE_PATH, parquet, SECOND_FILE_PATH, parquet));
+        // 2026-03-01T00:00Z, 06:00Z and 12:00Z.
+        byte[] instants = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(
+                optional(INT64).as(timestampType(true, MICROS)).id(1).named("at"),
+                TIMESTAMP_TZ_MICROS,
+                List.of(utcInstant("2026-03-01T00:00:00Z"), utcInstant("2026-03-01T06:00:00Z"), utcInstant("2026-03-01T12:00:00Z")))));
+        TrinoFileSystemFactory storage = ConnectorTestFixtures.memoryFileSystem(Map.of(
+                FIRST_FILE_PATH, parquet,
+                SECOND_FILE_PATH, parquet,
+                INSTANTS_FILE_PATH, instants));
         HoglakePageSourceProvider pageSources = new HoglakePageSourceProvider(identity -> {
             if (!storageAllowed.get()) {
                 throw new AssertionError("Object storage must not be accessed for catalog counts");
@@ -110,6 +127,19 @@ final class TestHoglakeCount
                 boolean withStats = query.contains("include=column_stats");
                 if (path.contains("/empty/")) {
                     body = "[]";
+                }
+                else if (path.contains("/instants/")) {
+                    // The file holding 2026-03-01 00:00Z..12:00Z, and a
+                    // February file storage does not have. Bounds are the
+                    // server's tokens, trailing zero units elided.
+                    String instant =
+                            """
+                            {"data_file":{"data_file_id":%d, "path":"%s", "record_count":3, "file_size_bytes":%d,
+                             "file_format":"parquet", "stats_state":"provided", "begin_snapshot":1%s}}
+                            """;
+                    String stats = ", \"column_stats\":[{\"field_id\":1, \"value_count\":3, \"null_count\":0, \"lower_bound\":\"%s\", \"upper_bound\":\"%s\"}]";
+                    body = "[" + instant.formatted(4, INSTANTS_FILE_PATH, instants.length, withStats ? stats.formatted("2026-03-01T00:00Z", "2026-03-01T12:00Z") : "") +
+                            "," + instant.formatted(5, UNREADABLE_FILE_PATH, instants.length, withStats ? stats.formatted("2026-02-01T00:00Z", "2026-02-01T23:59:59.999999Z") : "") + "]";
                 }
                 else if (path.contains("/bounded/") || path.contains("/mixed/")) {
                     // A provided file holding [1, 2] (and a null), a provided
@@ -144,6 +174,14 @@ final class TestHoglakeCount
                             """;
                     body = "[" + file.formatted(1, FIRST_FILE_PATH, parquet.length) + "," + file.formatted(2, SECOND_FILE_PATH, parquet.length) + "]";
                 }
+            }
+            else if (path.endsWith("/instants")) {
+                body =
+                        """
+                        {"name":"instants", "namespace":"test", "table_uuid":"synthetic-instants",
+                         "columns":[{"field_id":1, "ordinal":0, "name":"at", "type":"timestamptz", "nullable":true}],
+                         "record_count":0, "file_count":0, "file_size_bytes":0}
+                        """;
             }
             else {
                 body =
@@ -295,6 +333,45 @@ final class TestHoglakeCount
         assertThatThrownBy(() -> queryRunner.execute("SELECT count(value) FROM bounded"))
                 .hasStackTraceContaining("Object storage must not be accessed for catalog counts");
         assertThat(scanQueries.get("/v1/catalogs/lake/namespaces/test/tables/bounded/scan")).isEqualTo("snapshot=7");
+    }
+
+    /**
+     * The predicate shape the benchmark runs: a TIMESTAMP WITH TIME ZONE
+     * range in a session zone other than UTC, with literals in a third zone,
+     * reaching the pruner through applyFilter and the table handle.
+     */
+    @Test
+    void testTimestampWithTimeZonePruningInAnotherSessionZone()
+    {
+        Session losAngeles = Session.builder(queryRunner.getDefaultSession())
+                .setTimeZoneKey(TimeZoneKey.getTimeZoneKey("America/Los_Angeles"))
+                .build();
+        // Excludes both files: no split, so no object storage at all. The
+        // zoneless literal is Los Angeles time, 2026-03-02T07:00Z.
+        assertThat(queryRunner.execute(losAngeles, "SELECT count(*) FROM instants WHERE at >= TIMESTAMP '2026-03-01 23:00:00'").getOnlyValue()).isEqualTo(0L);
+        assertThat(scanQueries.get("/v1/catalogs/lake/namespaces/test/tables/instants/scan"))
+                .isEqualTo("snapshot=7&include=column_stats&stats_fields=1");
+
+        storageAllowed.set(true);
+        try {
+            // [2026-02-28T22:00Z, 2026-03-01T22:00Z) covers the March file
+            // only; the February file is not in storage, so reading it fails.
+            assertThat(queryRunner.execute(
+                    losAngeles,
+                    "SELECT count(*) FROM instants WHERE at >= TIMESTAMP '2026-03-01 00:00:00 +02:00' AND at < TIMESTAMP '2026-03-02 00:00:00 +02:00'").getOnlyValue())
+                    .isEqualTo(3L);
+            // One microsecond past the March file's upper bound.
+            assertThat(queryRunner.execute(losAngeles, "SELECT count(*) FROM instants WHERE at > TIMESTAMP '2026-03-01 12:00:00 UTC'").getOnlyValue())
+                    .isEqualTo(0L);
+        }
+        finally {
+            storageAllowed.set(false);
+        }
+    }
+
+    private static LongTimestampWithTimeZone utcInstant(String instant)
+    {
+        return LongTimestampWithTimeZone.fromEpochMillisAndFraction(Instant.parse(instant).toEpochMilli(), 0, UTC_KEY);
     }
 
     /**
