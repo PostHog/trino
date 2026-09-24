@@ -51,6 +51,14 @@
 
         <dependency>
             <groupId>${project.groupId}</groupId>
+            <artifactId>trino-blob-cache-alluxio</artifactId>
+            <version>${project.version}</version>
+            <type>zip</type>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
             <artifactId>trino-blob-cache-memory</artifactId>
             <version>${project.version}</version>
             <type>zip</type>
@@ -91,6 +99,14 @@
 
         <dependency>
             <groupId>${project.groupId}</groupId>
+            <artifactId>trino-http-event-listener</artifactId>
+            <version>${project.version}</version>
+            <type>zip</type>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
             <artifactId>trino-iceberg</artifactId>
             <version>${project.version}</version>
             <type>zip</type>
@@ -108,6 +124,14 @@
         <dependency>
             <groupId>${project.groupId}</groupId>
             <artifactId>trino-memory</artifactId>
+            <version>${project.version}</version>
+            <type>zip</type>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>trino-opa</artifactId>
             <version>${project.version}</version>
             <type>zip</type>
             <scope>provided</scope>
