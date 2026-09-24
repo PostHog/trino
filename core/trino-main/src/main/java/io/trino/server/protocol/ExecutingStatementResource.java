@@ -169,6 +169,11 @@ public class ExecutingStatementResource
         throw new NotFoundException("Query not found");
     }
 
+    public boolean hasQuery(QueryId queryId)
+    {
+        return queries.containsKey(queryId);
+    }
+
     protected Query getQuery(QueryId queryId, String slug, long token)
     {
         Query query = queries.get(queryId);

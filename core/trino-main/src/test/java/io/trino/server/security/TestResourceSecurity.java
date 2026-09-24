@@ -252,6 +252,10 @@ public class TestResourceSecurity
             HttpServerInfo httpServerInfo = server.getInstance(Key.get(HttpServerInfo.class));
             assertAuthenticationDisabled(httpServerInfo.getHttpUri());
             assertPasswordAuthentication(httpServerInfo.getHttpsUri());
+            String drainStatus = getLocation(httpServerInfo.getHttpsUri(), "/v1/query/20000101_000000_00000_other/drain-status");
+            assertResponseCode(client, drainStatus, SC_UNAUTHORIZED);
+            assertResponseCode(client, drainStatus, SC_FORBIDDEN, TEST_USER_LOGIN, TEST_PASSWORD);
+            assertResponseCode(client, drainStatus, SC_OK, MANAGEMENT_USER_LOGIN, MANAGEMENT_PASSWORD);
         }
     }
 

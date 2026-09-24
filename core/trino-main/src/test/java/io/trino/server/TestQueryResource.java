@@ -13,6 +13,7 @@
  */
 package io.trino.server;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.inject.Key;
 import io.airlift.http.client.HeaderName;
@@ -26,6 +27,7 @@ import io.airlift.json.JsonCodecFactory;
 import io.airlift.json.JsonMapperProvider;
 import io.airlift.tracing.SpanSerialization.SpanDeserializer;
 import io.airlift.tracing.SpanSerialization.SpanSerializer;
+import io.airlift.units.Duration;
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.trace.Span;
 import io.trino.client.Column;
@@ -33,6 +35,7 @@ import io.trino.client.QueryData;
 import io.trino.client.QueryDataJacksonModule;
 import io.trino.client.QueryResults;
 import io.trino.client.ResultRowsDecoder;
+import io.trino.execution.QueryIdGenerator;
 import io.trino.execution.QueryInfo;
 import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.server.testing.TestingTrinoServer;
@@ -67,7 +70,11 @@ import static io.trino.spi.StandardErrorCode.USER_CANCELED;
 import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.KILL_QUERY;
 import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.VIEW_QUERY;
 import static io.trino.testing.TestingAccessControlManager.privilege;
+import static io.trino.testing.assertions.Assert.assertConsistently;
+import static io.trino.testing.assertions.Assert.assertEventually;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Fail.fail;
@@ -109,6 +116,89 @@ public class TestQueryResource
         closeAll(server, client);
         server = null;
         client = null;
+    }
+
+    @Test
+    public void testDrainStatusKeepsUnsubmittedQueries()
+    {
+        QueryResults query = client.execute(
+                preparePost()
+                        .setHeader(REQUEST_USER_HEADER, "user")
+                        .setUri(server.getBaseUrl().resolve("/v1/statement"))
+                        .setBodyGenerator(createStaticBodyGenerator("SELECT 1", UTF_8))
+                        .build(),
+                createJsonResponseHandler(QUERY_RESULTS_JSON_CODEC));
+
+        assertThat(server.getDispatchManager().isQueryRegistered(new QueryId(query.getId()))).isFalse();
+        JsonNode status = drainStatus(query.getId());
+        assertThat(status.get("absent").asBoolean()).isFalse();
+        assertThat(status.get("nodeId").asText()).isNotEmpty();
+        assertThat(query.getId()).endsWith("_" + status.get("coordinatorId").asText());
+        assertThat(status.size()).isEqualTo(3);
+        assertThat(server.getDispatchManager().isQueryRegistered(new QueryId(query.getId()))).isFalse();
+    }
+
+    @Test
+    public void testDrainStatusRequiresSameCoordinator()
+    {
+        String coordinatorId = server.getInstance(Key.get(QueryIdGenerator.class)).getCoordinatorId();
+        assertThat(drainStatus("20000101_000000_00000_" + coordinatorId).get("absent").asBoolean()).isTrue();
+        assertThat(drainStatus("20000101_000000_00000_other").get("absent").asBoolean()).isFalse();
+    }
+
+    @Test
+    public void testDrainStatusKeepsRetainedResults()
+            throws Exception
+    {
+        String queryId = runToCompletion("SELECT 1");
+        assertConsistently(new Duration(6, SECONDS),
+                new Duration(100, MILLISECONDS),
+                () -> assertThat(drainStatus(queryId).get("absent").asBoolean()).isFalse());
+    }
+
+    @Test
+    public void testDrainStatusAfterHistoryAgeExpires()
+            throws Exception
+    {
+        server.close();
+        server = TestingTrinoServer.builder()
+                .setProperties(Map.of("query.max-history-age", "1s"))
+                .build();
+
+        QueryResults waiting = client.execute(
+                preparePost()
+                        .setHeader(REQUEST_USER_HEADER, "user")
+                        .setUri(server.resolve("/v1/statement"))
+                        .setBodyGenerator(createStaticBodyGenerator("SELECT 1", UTF_8))
+                        .build(),
+                createJsonResponseHandler(QUERY_RESULTS_JSON_CODEC));
+        while (waiting.getNextUri().getPath().contains("/queued/")) {
+            waiting = client.execute(
+                    prepareGet().setUri(waiting.getNextUri()).build(),
+                    createJsonResponseHandler(QUERY_RESULTS_JSON_CODEC));
+        }
+        String waitingQueryId = waiting.getId();
+        String completedQueryId = runToCompletion("SELECT 2");
+
+        assertConsistently(new Duration(2, SECONDS), new Duration(50, MILLISECONDS), () -> {
+            assertThat(drainStatus(completedQueryId).get("absent").asBoolean()).isFalse();
+            assertThat(drainStatus(waitingQueryId).get("absent").asBoolean()).isFalse();
+        });
+        assertEventually(new Duration(10, SECONDS), () -> {
+            assertThat(drainStatus(completedQueryId).get("absent").asBoolean()).isTrue();
+            assertThat(drainStatus(waitingQueryId).get("absent").asBoolean()).isFalse();
+            assertThat(server.getDispatchManager().getQueryInfo(new QueryId(waitingQueryId)).getState().isDone()).isFalse();
+        });
+    }
+
+    private JsonNode drainStatus(String queryId)
+    {
+        return client.execute(
+                prepareGet()
+                        .setHeader(REQUEST_USER_HEADER, "user")
+                        .setUri(server.getBaseUrl().resolve("/v1/query/" + queryId + "/drain-status"))
+                        .build(),
+                createJsonResponseHandler(new JsonCodecFactory(JSON_MAPPER).jsonCodec(JsonNode.class)));
     }
 
     @Test

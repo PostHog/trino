@@ -82,6 +82,7 @@ public class QueryManagerConfig
     private int maxWriterTaskCount = 100;
     private Duration minQueryExpireAge = new Duration(15, MINUTES);
     private int maxQueryHistory = 100;
+    private Optional<Duration> maxQueryHistoryAge = Optional.empty();
     private int maxQueryLength = 1_000_000;
     private int maxStageCount = 150;
     private int stageCountWarningThreshold = 50;
@@ -338,6 +339,21 @@ public class QueryManagerConfig
     public QueryManagerConfig setMaxQueryHistory(int maxQueryHistory)
     {
         this.maxQueryHistory = maxQueryHistory;
+        return this;
+    }
+
+    @NotNull
+    public Optional<Duration> getMaxQueryHistoryAge()
+    {
+        return maxQueryHistoryAge;
+    }
+
+    @Config("query.max-history-age")
+    @ConfigDescription("Maximum age of completed query history, subject to query.min-expire-age")
+    public QueryManagerConfig setMaxQueryHistoryAge(Duration maxQueryHistoryAge)
+    {
+        checkArgument(maxQueryHistoryAge == null || maxQueryHistoryAge.getValue() >= 0, "maxQueryHistoryAge is negative");
+        this.maxQueryHistoryAge = Optional.ofNullable(maxQueryHistoryAge);
         return this;
     }
 

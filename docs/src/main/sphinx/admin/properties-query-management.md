@@ -206,6 +206,26 @@ on age.
 To store query events and therefore information about more queries in an
 external system you must use [an event listener](admin-event-listeners).
 
+## `query.max-history-age`
+
+- **Type:** {ref}`prop-type-duration`
+- **Default value:** none
+
+The maximum age of completed query history, measured from query completion.
+When set, completed queries expire after this age even when fewer than
+`query.max-history` queries remain.
+The `query.min-expire-age` minimum still applies, so the effective age limit is
+at least that minimum.
+This property does not expire running queries or queries waiting for their results
+to be consumed.
+
+Without this setting, the coordinator can retain up to `query.max-history`
+completed queries indefinitely.
+A finite age lets an idle coordinator release retained results and finish draining
+without waiting for more queries to replace its history.
+Expired query history is no longer available through the web interface or result
+retry endpoints.
+
 ## `query.min-expire-age`
 
 - **Type:** {ref}`prop-type-duration`
