@@ -27,7 +27,7 @@
 - { modules: plugin/trino-ducklake }
 - { modules: plugin/trino-hoglake }
 - { modules: plugin/trino-hive }
-- { modules: plugin/trino-hive, profile: cloud-tests }
+- { modules: plugin/trino-hive, profile: fte-tests }
 - { modules: plugin/trino-hive, profile: test-parquet }
 - { modules: plugin/trino-posthog-catalogstore }
 - { modules: plugin/trino-resource-group-managers }
