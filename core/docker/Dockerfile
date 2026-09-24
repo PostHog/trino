@@ -71,10 +71,16 @@ RUN \
     chown -R "trino:trino" /home/trino /usr/lib/trino /data/trino
 
 COPY --chown=trino:trino trino-cli.jar /usr/bin/trino
-COPY --chown=trino:trino --exclude=bin/darwin-* --exclude=bin/linux-* trino-server /usr/lib/trino
+# The plugin directory is the bulk of the server and the part that changes on almost
+# every commit, so it is copied last and on its own. Everything above it -- the JDK,
+# the server lib directory, bin and etc -- then keeps its layer across a plugin-only
+# change, and a puller that already has the previous image fetches the plugin layer
+# alone instead of one combined ~1 GB layer.
+COPY --chown=trino:trino --exclude=bin/darwin-* --exclude=bin/linux-* --exclude=plugin trino-server /usr/lib/trino
 COPY --chown=trino:trino trino-server/bin/linux-${ARCH} /usr/lib/trino/bin/linux-${ARCH}
 COPY --chown=trino:trino default/etc /etc/trino
 COPY --chown=trino:trino --from=jvmkill /libjvmkill.so /usr/lib/trino/bin
+COPY --chown=trino:trino trino-server/plugin /usr/lib/trino/plugin
 
 EXPOSE 8080
 USER trino:trino

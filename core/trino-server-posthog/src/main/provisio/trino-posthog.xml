@@ -1,0 +1,160 @@
+<!--
+    PostHog managed-warehouse server package.
+
+    Same launcher and server runtime as trino-server-core, but with an explicit,
+    closed plugin set instead of the 51 sets that trino-server ships. The published
+    image is pulled on every fresh CI runner and on every node scale-up, so a plugin
+    only earns its place here if something actually loads it.
+
+    Adding a plugin here means adding it to pom.xml as well: provisio resolves from
+    the local repository and would otherwise silently pick up a stale artifact (or
+    fail) under `-pl ... -am`.
+-->
+<runtime>
+    <!-- Target -->
+    <archive name="${project.artifactId}-${project.version}.tar.gz" streaming="true" gzipCompressionLevel="6" hardLinkIncludes="**/*.jar" />
+
+    <!-- Notices -->
+    <fileSet to="/">
+        <directory path="${basedir}">
+            <include>NOTICE</include>
+            <include>README.txt</include>
+        </directory>
+    </fileSet>
+
+    <!-- Launcher -->
+    <artifactSet to="bin">
+        <artifact id="io.airlift:launcher:tar.gz:bin:${dep.launcher.version}">
+            <unpack />
+        </artifact>
+        <artifact id="io.airlift:launcher:tar.gz:properties:${dep.launcher.version}">
+            <unpack filter="true" />
+        </artifact>
+    </artifactSet>
+
+    <!-- Server -->
+    <artifactSet to="lib">
+        <artifact id="${project.groupId}:trino-server-main:${project.version}" />
+    </artifactSet>
+
+    <!-- Configuration Plugins -->
+    <artifactSet to="secrets-plugin/keystore-secrets-plugin">
+        <artifact id="io.airlift:secrets-keystore-plugin:zip:${dep.airlift.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <!--
+        Production connectors. The duckgres control plane creates managed-warehouse
+        catalogs with connector.name=ducklake and connector.name=hoglake; hoglake's
+        own server-integration harness runs connector.name=hoglake against this image.
+        Dropping either one breaks production catalog creation outright.
+    -->
+    <artifactSet to="plugin/hoglake">
+        <artifact id="${project.groupId}:trino-hoglake:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <artifactSet to="plugin/ducklake">
+        <artifact id="${project.groupId}:trino-ducklake:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <!--
+        Fork catalog store. This is how the control plane's catalogs reach the server
+        at all, so it ships wherever ducklake and hoglake ship.
+    -->
+    <artifactSet to="plugin/posthog-catalogstore">
+        <artifact id="${project.groupId}:trino-posthog-catalogstore:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <!--
+        Iceberg parity. Both fork connectors are Iceberg-shaped, and keeping stock
+        Iceberg on the same image is what makes a "does upstream do this too?" check
+        a one-catalog experiment instead of a second image. trino-hdfs comes with it,
+        exactly as in trino-server's iceberg set.
+    -->
+    <artifactSet to="plugin/iceberg">
+        <artifact id="${project.groupId}:trino-iceberg:zip:${project.version}">
+            <unpack />
+        </artifact>
+        <artifact id="${project.groupId}:trino-hdfs:zip:${project.version}">
+            <unpack useRoot="true" />
+        </artifact>
+    </artifactSet>
+
+    <!--
+        Debugging connectors, all small. jmx reads the server's own metrics from SQL,
+        memory gives a writable scratch catalog that touches no object store, and tpch
+        gives generated data to reproduce a plan against. Note that build.sh strips
+        default/etc/catalog/*.properties for a non-default server artifact, so none of
+        these three is mounted as a catalog unless somebody adds one deliberately.
+    -->
+    <artifactSet to="plugin/jmx">
+        <artifact id="${project.groupId}:trino-jmx:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <artifactSet to="plugin/memory">
+        <artifact id="${project.groupId}:trino-memory:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <artifactSet to="plugin/tpch">
+        <artifact id="${project.groupId}:trino-tpch:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <!--
+        Server runtime plugins, as in trino-server-core, minus three that nothing in
+        the managed warehouse configures:
+          - blob-cache-alluxio: the image's default cache-manager config file selects
+            the memory cache manager, not Alluxio.
+          - functions-python: no Python UDFs, and it carries a bundled runtime.
+          - geospatial: no geospatial queries, and it carries the EPSG database.
+        Restoring any of them is one artifactSet here plus one dependency in pom.xml.
+    -->
+    <artifactSet to="plugin/exchange-filesystem">
+        <artifact id="${project.groupId}:trino-exchange-filesystem:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <artifactSet to="plugin/blob-cache-memory">
+        <artifact id="${project.groupId}:trino-blob-cache-memory:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <artifactSet to="plugin/password-authenticators">
+        <artifact id="${project.groupId}:trino-password-authenticators:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <artifactSet to="plugin/resource-group-managers">
+        <artifact id="${project.groupId}:trino-resource-group-managers:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <artifactSet to="plugin/session-property-managers">
+        <artifact id="${project.groupId}:trino-session-property-managers:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <artifactSet to="plugin/spooling-filesystem">
+        <artifact id="${project.groupId}:trino-spooling-filesystem:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+</runtime>

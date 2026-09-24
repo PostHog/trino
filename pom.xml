@@ -37,6 +37,7 @@
         <module>core/trino-server</module>
         <module>core/trino-server-core</module>
         <module>core/trino-server-main</module>
+        <module>core/trino-server-posthog</module>
         <module>core/trino-spi</module>
         <module>core/trino-web-ui</module>
         <module>docs</module>

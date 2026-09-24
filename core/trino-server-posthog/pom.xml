@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.trino</groupId>
+        <artifactId>trino-root</artifactId>
+        <version>484-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>trino-server-posthog</artifactId>
+    <packaging>provisio</packaging>
+    <name>${project.artifactId}</name>
+    <description>Trino - Server package (PostHog fork, managed-warehouse plugin set)</description>
+
+    <!--
+        Fork-owned server package. This module exists only in the PostHog fork and is
+        never merged upstream, so nightly merges from trinodb/trino do not touch it.
+
+        trino-server (the upstream package) stays exactly as upstream ships it so that
+        upstream tooling, docs and release scripts keep working. This module is what the
+        published managed-warehouse image is built from: the same launcher and server
+        runtime, but only the plugins the managed warehouse actually loads. See
+        src/main/provisio/trino-posthog.xml for the per-plugin justification.
+    -->
+
+    <properties>
+        <air.check.skip-enforcer>false</air.check.skip-enforcer>
+        <air.check.skip-duplicate-finder>true</air.check.skip-duplicate-finder>
+        <air.check.skip-findbugs>true</air.check.skip-findbugs>
+        <air.check.skip-dependency>true</air.check.skip-dependency>
+
+        <!-- Launcher properties -->
+        <main-class>io.trino.server.TrinoServer</main-class>
+        <process-name>trino-server</process-name>
+
+        <!-- Special consideration for Takari Lifecycle -->
+        <!-- This works as the server packages have no sources (they are just provisio packaged) -->
+        <takari.skip>false</takari.skip>
+    </properties>
+
+    <!--
+        Provisio resolves every artifact below out of the local repository, so on its own it
+        gives Maven no reason to build those modules first. Declaring them here is what makes
+        `-pl core/trino-server-posthog -am` a correct and complete build: `-am` pulls in exactly
+        these modules and their own dependencies, and the reactor orders them before this
+        module. Keep this list in step with trino-posthog.xml.
+    -->
+    <dependencies>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>trino-blob-cache-memory</artifactId>
+            <version>${project.version}</version>
+            <type>zip</type>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>trino-ducklake</artifactId>
+            <version>${project.version}</version>
+            <type>zip</type>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>trino-exchange-filesystem</artifactId>
+            <version>${project.version}</version>
+            <type>zip</type>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>trino-hdfs</artifactId>
+            <version>${project.version}</version>
+            <type>zip</type>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>trino-hoglake</artifactId>
+            <version>${project.version}</version>
+            <type>zip</type>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>trino-iceberg</artifactId>
+            <version>${project.version}</version>
+            <type>zip</type>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>trino-jmx</artifactId>
+            <version>${project.version}</version>
+            <type>zip</type>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>trino-memory</artifactId>
+            <version>${project.version}</version>
+            <type>zip</type>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>trino-password-authenticators</artifactId>
+            <version>${project.version}</version>
+            <type>zip</type>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>trino-posthog-catalogstore</artifactId>
+            <version>${project.version}</version>
+            <type>zip</type>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>trino-resource-group-managers</artifactId>
+            <version>${project.version}</version>
+            <type>zip</type>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>trino-server-main</artifactId>
+            <version>${project.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>trino-session-property-managers</artifactId>
+            <version>${project.version}</version>
+            <type>zip</type>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>trino-spooling-filesystem</artifactId>
+            <version>${project.version}</version>
+            <type>zip</type>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
+            <artifactId>trino-tpch</artifactId>
+            <version>${project.version}</version>
+            <type>zip</type>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>junit-extensions</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <!-- Needed for provisio to resolve transitive dependencies for server assembly -->
+    <repositories>
+        <repository>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
+            <id>confluent</id>
+            <url>https://packages.confluent.io/maven/</url>
+        </repository>
+    </repositories>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>io.takari.maven.plugins</groupId>
+                <artifactId>takari-lifecycle-plugin</artifactId>
+                <version>${dep.takari.version}</version>
+                <configuration>
+                    <proc>none</proc>
+                    <skip>${takari.skip}</skip>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
