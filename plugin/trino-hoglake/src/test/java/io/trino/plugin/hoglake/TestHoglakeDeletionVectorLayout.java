@@ -45,16 +45,20 @@ class TestHoglakeDeletionVectorLayout
             byte[] bytes = serialize(bitmap);
             HoglakeDeletionVectorLayout layout = HoglakeDeletionVectorLayout.inspect(bytes, 0, bytes.length, "test");
             assertThat(layout.serializedBytes()).isEqualTo(bytes.length);
-            // Warm the library and allocation counter before measuring. This
-            // measures all deserializer allocations, a stronger bound than
+            // This measures all deserializer allocations, a stronger bound than
             // its peak live scratch, independently of the sizing formulas.
-            for (int i = 0; i < 5; i++) {
-                deserialize(bytes);
-                allocations.getCurrentThreadAllocatedBytes();
+            // Every decode allocates the same bytes, but the JVM charges
+            // one-off work to whichever decode triggers it: class loading, and
+            // the interned string constants HotSpot resolves on this thread
+            // when it queues a C2 compile. Each happens once, so the minimum
+            // over several decodes is exactly the deserializer's allocation.
+            RoaringBitmap decoded = null;
+            long allocated = Long.MAX_VALUE;
+            for (int i = 0; i < 10; i++) {
+                long before = allocations.getCurrentThreadAllocatedBytes();
+                decoded = deserialize(bytes);
+                allocated = Math.min(allocated, allocations.getCurrentThreadAllocatedBytes() - before);
             }
-            long before = allocations.getCurrentThreadAllocatedBytes();
-            RoaringBitmap decoded = deserialize(bytes);
-            long allocated = allocations.getCurrentThreadAllocatedBytes() - before;
             assertThat(layout.retainedBytes())
                     .describedAs("retained heap for %d containers", bitmap.getContainerCount())
                     .isEqualTo(TestingDeletionVectorMemory.retainedBytes(decoded));
