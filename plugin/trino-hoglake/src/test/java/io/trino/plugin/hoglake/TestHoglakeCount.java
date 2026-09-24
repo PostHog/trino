@@ -41,6 +41,7 @@ import java.net.InetSocketAddress;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -59,8 +60,12 @@ final class TestHoglakeCount
 {
     private static final String FIRST_FILE_PATH = "memory:///counts-first.parquet";
     private static final String SECOND_FILE_PATH = "memory:///counts-second.parquet";
+    // Registered in the catalog but absent from storage: a query that reads
+    // it fails, so a passing query proves the file was pruned at planning.
+    private static final String UNREADABLE_FILE_PATH = "memory:///pruned-never-read.parquet";
 
     private final AtomicBoolean storageAllowed = new AtomicBoolean();
+    private final Map<String, String> scanQueries = new ConcurrentHashMap<>();
     private HttpServer server;
     private HoglakeClient client;
     private StandaloneQueryRunner queryRunner;
@@ -88,14 +93,41 @@ final class TestHoglakeCount
                         {"name":"lake", "head_snapshot_id":7, "schema_version":1}
                         """;
             }
-            else if (!"snapshot=7".equals(exchange.getRequestURI().getQuery())) {
+            else if (!exchange.getRequestURI().getQuery().split("&")[0].equals("snapshot=7")) {
                 exchange.sendResponseHeaders(400, -1);
                 exchange.close();
                 return;
             }
             else if (path.endsWith("/scan")) {
+                String query = exchange.getRequestURI().getQuery();
+                scanQueries.put(path, query);
+                boolean withStats = query.contains("include=column_stats");
                 if (path.contains("/empty/")) {
                     body = "[]";
+                }
+                else if (path.contains("/bounded/") || path.contains("/mixed/")) {
+                    // A provided file holding [1, 2] (and a null), a provided
+                    // file holding [100, 200] that storage does not have, and
+                    // in `mixed` a pending file with no statistics at all.
+                    String bounded =
+                            """
+                            {"data_file":{"data_file_id":%d, "path":"%s", "record_count":4, "file_size_bytes":%d,
+                             "file_format":"parquet", "stats_state":"provided", "begin_snapshot":1%s}}
+                            """;
+                    String first = bounded.formatted(1, FIRST_FILE_PATH, parquet.length, withStats
+                            ? ", \"column_stats\":[{\"field_id\":1, \"value_count\":4, \"null_count\":1, \"lower_bound\":1, \"upper_bound\":2}]"
+                            : "");
+                    String unreadable = bounded.formatted(3, UNREADABLE_FILE_PATH, parquet.length, withStats
+                            ? ", \"column_stats\":[{\"field_id\":1, \"value_count\":4, \"null_count\":0, \"lower_bound\":100, \"upper_bound\":200}]"
+                            : "");
+                    String pending =
+                            """
+                            {"data_file":{"data_file_id":2, "path":"%s", "record_count":4, "file_size_bytes":%d,
+                             "file_format":"parquet", "stats_state":"pending", "begin_snapshot":1}}
+                            """.formatted(SECOND_FILE_PATH, parquet.length);
+                    body = path.contains("/mixed/")
+                            ? "[" + first + "," + unreadable + "," + pending + "]"
+                            : "[" + first + "," + unreadable + "]";
                 }
                 else {
                     // Two catalog files, each containing four rows, including a null.
@@ -225,6 +257,38 @@ final class TestHoglakeCount
         finally {
             storageAllowed.set(false);
         }
+    }
+
+    /**
+     * A filtered read asks the catalog for the predicate's bounds and plans
+     * no splits for files those bounds exclude. The excluded file is not in
+     * storage, so any read of it would fail the query.
+     */
+    @Test
+    void testFilesOutsideThePredicateArePrunedAtPlanning()
+    {
+        // Every file excluded: no split, so no object storage at all.
+        assertThat(queryRunner.execute("SELECT count(*) FROM bounded WHERE value > 1000").getOnlyValue()).isEqualTo(0L);
+        assertThat(scanQueries.get("/v1/catalogs/lake/namespaces/test/tables/bounded/scan"))
+                .isEqualTo("snapshot=7&include=column_stats&stats_fields=1");
+        assertThat(queryRunner.execute("SELECT count(*) FROM bounded WHERE value IS NULL AND value > 1000").getOnlyValue()).isEqualTo(0L);
+
+        storageAllowed.set(true);
+        try {
+            // Only the file whose bounds cover the value is read.
+            assertThat(queryRunner.execute("SELECT count(*) FROM bounded WHERE value = 1").getOnlyValue()).isEqualTo(2L);
+            assertThat(queryRunner.execute("SELECT count(*) FROM bounded WHERE value BETWEEN 2 AND 50").getOnlyValue()).isEqualTo(1L);
+            // A file without statistics is always read, beside a pruned one.
+            assertThat(queryRunner.execute("SELECT count(*) FROM mixed WHERE value = 1").getOnlyValue()).isEqualTo(4L);
+            assertThat(queryRunner.execute("SELECT count(*) FROM mixed WHERE value > 1000").getOnlyValue()).isEqualTo(0L);
+        }
+        finally {
+            storageAllowed.set(false);
+        }
+        // A read with no prunable predicate requests no statistics.
+        assertThatThrownBy(() -> queryRunner.execute("SELECT count(value) FROM bounded"))
+                .hasStackTraceContaining("Object storage must not be accessed for catalog counts");
+        assertThat(scanQueries.get("/v1/catalogs/lake/namespaces/test/tables/bounded/scan")).isEqualTo("snapshot=7");
     }
 
     @Test

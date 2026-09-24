@@ -40,6 +40,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ThreadLocalRandom;
@@ -54,6 +55,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
+import static java.util.stream.Collectors.joining;
 
 /**
  * Minimal REST client for the hoglake control plane (/v1). Metadata
@@ -198,7 +200,24 @@ public class HoglakeClient
      */
     public List<HoglakeDtos.ScanFile> scan(String namespace, String table, long snapshot)
     {
-        return get(tablePath(namespace, table, "/scan?snapshot=" + snapshot),
+        return scan(namespace, table, snapshot, Set.of());
+    }
+
+    /**
+     * The split source, with each provided file's statistics for the given
+     * field ids ({@code include=column_stats&stats_fields=...}), so planning
+     * can prune files. An empty set requests no statistics.
+     */
+    public List<HoglakeDtos.ScanFile> scan(String namespace, String table, long snapshot, Set<Long> statsFields)
+    {
+        String query = "/scan?snapshot=" + snapshot;
+        if (!statsFields.isEmpty()) {
+            query += "&include=column_stats&stats_fields=" + statsFields.stream()
+                    .sorted()
+                    .map(String::valueOf)
+                    .collect(joining(","));
+        }
+        return get(tablePath(namespace, table, query),
                 new TypeReference<List<HoglakeDtos.ScanFile>>() {})
                 .orElseThrow(() -> new TableNotFoundException(new SchemaTableName(namespace, table)));
     }

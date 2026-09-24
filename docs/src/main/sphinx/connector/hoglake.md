@@ -189,6 +189,20 @@ ample parallelism; a scan of about 170 GiB is planned as about 170 splits.
 Splits are weighted by the share of `hoglake.max-split-size` they cover, so the
 scheduler assigns more short ranges than full ones to each worker.
 
+Files are also pruned at planning from the catalog's per-file column bounds. When
+a query's pushed-down predicate constrains columns of a supported type, the scan
+request asks the catalog for those columns' statistics only, and a file whose
+bounds cannot satisfy the predicate gets no splits, so it is neither opened nor
+scheduled. The supported types are `BOOLEAN`, `INTEGER`, `BIGINT`, `REAL`,
+`DOUBLE`, `DATE`, `VARCHAR`, `TIMESTAMP(6)` and `TIMESTAMP(6) WITH TIME ZONE`;
+`REAL` and `DOUBLE` columns prune only when the catalog reports that the file
+holds no NaN values. A file is always read when the catalog has no statistics
+for it (its stats are pending or failed), when a constrained column has no
+recorded bounds in it, or when a bound cannot be decoded. A column that holds
+only nulls in a file prunes that file for any predicate that rejects nulls.
+Pruning never changes results: the engine still evaluates every predicate on
+the rows it reads.
+
 ## Read consistency and limitations
 
 Each table handle pins the catalog snapshot and resolved columns during planning.

@@ -56,6 +56,12 @@ import static java.util.Objects.requireNonNull;
  * same single REST call however large the files are. A file no larger than
  * the target split size stays one whole-file split.
  *
+ * <p>When the pushed-down predicate constrains columns the catalog keeps
+ * bounds for, the same scan also returns those columns' per-file statistics
+ * ({@link HoglakeFilePruner}), and files whose bounds cannot satisfy the
+ * predicate get no splits at all. Files this query staged itself are never
+ * pruned.
+ *
  * <p>Each split's scheduling affinity comes from the filesystem's
  * {@link SplitAffinityProvider}, which the filesystem module binds to a key
  * provider only when the catalog caches filesystem data and to a no-op
@@ -113,17 +119,42 @@ public class HoglakeSplitManager
         if (handle.constraint().isNone() || constraint.getSummary().isNone()) {
             return new FixedSplitSource(List.of());
         }
-        List<HoglakeDtos.ScanFile> scan = scan(client, handle);
+        List<HoglakeDtos.ScanFile> scan = prunedScan(client, handle);
         return new FixedSplitSource(toSplits(scan, maxSplitSize.apply(session).toBytes(), affinityProvider));
     }
 
+    /**
+     * Every file visible to the handle: the catalog's scan at the pinned
+     * snapshot plus the files and deletes this transaction staged. Nothing
+     * is pruned; writers need the whole set.
+     */
     static List<HoglakeDtos.ScanFile> scan(HoglakeClient client, HoglakeTableHandle handle)
+    {
+        return withStaged(handle, client.scan(handle.schemaName(), handle.tableName(), handle.snapshotId()));
+    }
+
+    /**
+     * The files a read must plan: the catalog's scan, requesting bounds for
+     * the predicate's prunable columns and dropping files those bounds
+     * exclude, plus every staged file.
+     */
+    static List<HoglakeDtos.ScanFile> prunedScan(HoglakeClient client, HoglakeTableHandle handle)
+    {
+        Set<Long> statsFields = HoglakeFilePruner.prunableFieldIds(handle.constraint());
+        if (statsFields.isEmpty()) {
+            return scan(client, handle);
+        }
+        List<HoglakeDtos.ScanFile> catalogFiles = client.scan(handle.schemaName(), handle.tableName(), handle.snapshotId(), statsFields).stream()
+                .filter(file -> file.dataFile() == null || HoglakeFilePruner.mayContain(handle.constraint(), file.dataFile()))
+                .toList();
+        return withStaged(handle, catalogFiles);
+    }
+
+    private static List<HoglakeDtos.ScanFile> withStaged(HoglakeTableHandle handle, List<HoglakeDtos.ScanFile> catalogFiles)
     {
         Map<Long, HoglakeDtos.DeleteFile> deletes = handle.stagedDeletes().stream()
                 .collect(Collectors.toMap(HoglakeDtos.DeleteFile::dataFileId, file -> file));
-        return Stream.concat(
-                        client.scan(handle.schemaName(), handle.tableName(), handle.snapshotId()).stream(),
-                        handle.stagedFiles().stream())
+        return Stream.concat(catalogFiles.stream(), handle.stagedFiles().stream())
                 .map(file -> new HoglakeDtos.ScanFile(file.dataFile(), deletes.getOrDefault(file.dataFile().dataFileId(), file.deleteFile())))
                 .toList();
     }
