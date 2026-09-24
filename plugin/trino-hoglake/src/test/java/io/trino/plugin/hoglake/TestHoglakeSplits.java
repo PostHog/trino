@@ -16,6 +16,7 @@ package io.trino.plugin.hoglake;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.airlift.json.JsonCodec;
+import io.airlift.units.DataSize;
 import io.trino.filesystem.cache.CacheSplitAffinityProvider;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.SplitWeight;
@@ -29,6 +30,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 
+import static io.airlift.units.DataSize.Unit.GIGABYTE;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -175,6 +177,16 @@ class TestHoglakeSplits
         assertThat(splits.getFirst().wholeFile()).isTrue();
         assertThat(splits.getFirst().footerSize()).isEqualTo(OptionalLong.of(321));
         assertThat(HoglakeSplitManager.toSplits(List.of(new HoglakeDtos.ScanFile(DELETED_FROM, DELETE_FILE))).getFirst().footerSize()).isEmpty();
+
+        // The default target is 1GB: a file of exactly that size stays whole, one byte more is cut in two.
+        long target = HoglakeConfig.DEFAULT_MAX_SPLIT_SIZE.toBytes();
+        assertThat(target).isEqualTo(DataSize.of(1, GIGABYTE).toBytes());
+        assertThat(HoglakeSplitManager.toSplits(List.of(new HoglakeDtos.ScanFile(largeFile(target, List.of()), null))))
+                .singleElement()
+                .satisfies(split -> assertThat(split.wholeFile()).isTrue());
+        assertThat(HoglakeSplitManager.toSplits(List.of(new HoglakeDtos.ScanFile(largeFile(target + 1, List.of()), null))))
+                .extracting(HoglakeSplit::start)
+                .containsExactly(0L, target);
     }
 
     @Test
@@ -187,7 +199,8 @@ class TestHoglakeSplits
         assertThat(splits).extracting(HoglakeSplit::start).containsExactly(0L, TARGET, 2 * TARGET, 3 * TARGET);
         assertThat(splits).allSatisfy(split -> {
             assertThat(split.length()).isEqualTo(TARGET);
-            assertThat(split.recordCount()).isEqualTo(-1);
+            // Every range carries the file's catalog count; only the first answers a metadata count from it.
+            assertThat(split.recordCount()).isEqualTo(40);
             assertThat(split.wholeFile()).isFalse();
             assertThat(split.getSplitWeight()).isEqualTo(SplitWeight.standard());
             assertThat(split.footerSize()).isEqualTo(OptionalLong.of(50));
@@ -223,6 +236,7 @@ class TestHoglakeSplits
         assertContiguousCover(splits, 2 * TARGET + 300);
         assertThat(splits.getLast().length()).isEqualTo(300);
         assertThat(splits.getLast().getSplitWeight()).isEqualTo(SplitWeight.fromProportion(0.3));
+        assertThat(splits).allSatisfy(split -> assertThat(split.recordCount()).isEqualTo(40));
 
         // A tiny remainder still costs the minimum weight.
         HoglakeSplit tiny = HoglakeSplitManager.toSplits(List.of(new HoglakeDtos.ScanFile(largeFile(TARGET + 1, List.of()), null)), TARGET).getLast();
@@ -243,6 +257,7 @@ class TestHoglakeSplits
             assertThat(split.deleteCount()).isEqualTo(3);
             assertThat(split.deleteFileFormat()).contains("puffin-dv");
             assertThat(split.footerSize()).isEmpty();
+            assertThat(split.recordCount()).isEqualTo(17);
         });
     }
 
@@ -368,6 +383,7 @@ class TestHoglakeSplits
             assertThat(deserialized).isEqualTo(split);
             assertThat(deserialized.getSplitWeight()).isEqualTo(split.getSplitWeight());
             assertThat(deserialized.getAffinityKey()).isEqualTo(split.getAffinityKey()).isPresent();
+            assertThat(deserialized.recordCount()).isEqualTo(split.recordCount()).isNotNegative();
         }
     }
 
@@ -380,7 +396,7 @@ class TestHoglakeSplits
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> WHOLE.withRange(2000, 49, SplitWeight.standard()))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThat(WHOLE.withRange(2000, 48, SplitWeight.standard()).recordCount()).isEqualTo(-1);
+        assertThat(WHOLE.withRange(2000, 48, SplitWeight.standard()).recordCount()).isEqualTo(25);
         assertThat(WHOLE.withRange(0, 2048, SplitWeight.standard()).recordCount()).isEqualTo(25);
     }
 

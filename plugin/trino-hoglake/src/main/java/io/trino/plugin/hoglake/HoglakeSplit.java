@@ -42,9 +42,10 @@ import static java.util.Objects.requireNonNull;
  * no larger than the target split size is a single split covering the whole
  * file.
  *
- * <p>{@code recordCount} is the catalog's row count for the whole file. It is
- * {@code -1} for a split that covers only part of a file, since the catalog
- * does not know how many rows fall in a byte range.
+ * <p>{@code recordCount} is the catalog's row count for the whole file, or
+ * {@code -1} when the catalog has none. Every range of a file carries it, so
+ * the range that starts at offset 0 can answer a metadata count for the whole
+ * file; it never describes the rows inside a range.
  *
  * <p>{@code deleteCount} is the catalog's count of rows deleted from the
  * data file. It is compared against the decoded bitmap before a single row
@@ -113,9 +114,9 @@ public record HoglakeSplit(
     }
 
     /**
-     * The same file restricted to {@code [start, start + length)}. The
-     * catalog's whole-file record count does not describe a partial range,
-     * so a range that is not the whole file carries {@code -1}.
+     * The same file restricted to {@code [start, start + length)}. The range
+     * keeps the catalog's whole-file record count, so the range starting at
+     * offset 0 can answer a metadata count for the file.
      */
     public HoglakeSplit withRange(long start, long length, SplitWeight splitWeight)
     {
@@ -128,11 +129,7 @@ public record HoglakeSplit(
      */
     public HoglakeSplit withRange(long start, long length, SplitWeight splitWeight, Optional<String> affinityKey)
     {
-        long rangeRecordCount = -1;
-        if (start == 0 && length == fileSizeBytes) {
-            rangeRecordCount = recordCount;
-        }
-        return new HoglakeSplit(dataFileId, path, fileSizeBytes, rangeRecordCount, deleteFilePath, deleteCount, deleteFileFormat, start, length, splitWeight, footerSize, affinityKey);
+        return new HoglakeSplit(dataFileId, path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat, start, length, splitWeight, footerSize, affinityKey);
     }
 
     /**

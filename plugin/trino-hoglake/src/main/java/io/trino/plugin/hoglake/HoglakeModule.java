@@ -69,9 +69,10 @@ public class HoglakeModule
 
     @Provides
     @Singleton
-    public static ConnectorPageSourceProvider createPageSourceProvider(TrinoFileSystemFactory fileSystemFactory)
+    public static ConnectorPageSourceProvider createPageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeConfig config)
     {
-        return new HoglakePageSourceProvider(fileSystemFactory);
+        // One cache per catalog on each node, shared by every split the node reads.
+        return new HoglakePageSourceProvider(fileSystemFactory, new HoglakeParquetFooterCache(config.getParquetFooterCacheMaxSize()));
     }
 
     @Provides

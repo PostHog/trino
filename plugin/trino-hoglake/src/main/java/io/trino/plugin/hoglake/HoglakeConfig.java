@@ -24,11 +24,13 @@ import java.time.Duration;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static io.airlift.units.DataSize.Unit.GIGABYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 
 public class HoglakeConfig
 {
-    public static final DataSize DEFAULT_MAX_SPLIT_SIZE = DataSize.of(128, MEGABYTE);
+    // Hoglake row groups average about 150 MiB, so a range this size holds several of them.
+    public static final DataSize DEFAULT_MAX_SPLIT_SIZE = DataSize.of(1, GIGABYTE);
 
     private static final Pattern DURATION = Pattern.compile("\\s*(\\d+(?:\\.\\d+)?)\\s*(ms|s|m|h|d)\\s*");
 
@@ -36,6 +38,7 @@ public class HoglakeConfig
     private String catalog = "hoglake";
     private Duration requestTimeout = Duration.ofMinutes(2);
     private DataSize maxSplitSize = DEFAULT_MAX_SPLIT_SIZE;
+    private DataSize parquetFooterCacheMaxSize = DataSize.of(64, MEGABYTE);
 
     @NotNull
     public String getUri()
@@ -92,6 +95,20 @@ public class HoglakeConfig
     public HoglakeConfig setMaxSplitSize(DataSize maxSplitSize)
     {
         this.maxSplitSize = maxSplitSize;
+        return this;
+    }
+
+    @NotNull
+    public DataSize getParquetFooterCacheMaxSize()
+    {
+        return parquetFooterCacheMaxSize;
+    }
+
+    @Config("hoglake.parquet-footer-cache.max-size")
+    @ConfigDescription("Maximum serialized size of the parsed Parquet footers each worker caches; 0B disables the cache")
+    public HoglakeConfig setParquetFooterCacheMaxSize(DataSize parquetFooterCacheMaxSize)
+    {
+        this.parquetFooterCacheMaxSize = parquetFooterCacheMaxSize;
         return this;
     }
 

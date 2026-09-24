@@ -181,7 +181,9 @@ public class HoglakeSplitManager
      * A contiguous cover of {@code [0, fileSizeBytes)}: the worker reads the
      * row groups whose first column chunk starts inside its range, so any
      * cover reads every row group exactly once. Row-group offsets from the
-     * catalog, when usable, only decide where the cuts fall.
+     * catalog, when usable, only decide where the cuts fall. The first range
+     * always starts at offset 0, which is the range a metadata count takes the
+     * file's catalog record count from.
      */
     static List<ByteRange> planRanges(long fileSizeBytes, OptionalLong footerSize, List<Long> splitOffsets, long maxSplitSize)
     {

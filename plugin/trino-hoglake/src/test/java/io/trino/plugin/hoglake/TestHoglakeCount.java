@@ -202,19 +202,23 @@ final class TestHoglakeCount
     }
 
     /**
-     * The catalog's record count describes a whole file, so it cannot answer
-     * for a byte range: range splits count their rows from the files, and
-     * the ranges of each file add up to its row count exactly once.
+     * The catalog's record count describes a whole file, and every file is
+     * cut from offset 0: the file's first range answers an unfiltered count
+     * from the catalog and its other ranges report no rows, so a count over
+     * byte-range splits still touches no object storage. A count that needs
+     * a column or a filter reads the files through every range.
      */
     @Test
-    void testRangeSplitsCountFromTheFiles()
+    void testRangeSplitsCountFromTheCatalog()
     {
-        assertThatThrownBy(() -> queryRunner.execute("SELECT count(*) FROM hoglake_ranges.test.counts"))
+        assertThat(queryRunner.execute("SELECT count(*) FROM hoglake_ranges.test.counts").getOnlyValue()).isEqualTo(8L);
+        assertThatThrownBy(() -> queryRunner.execute("SELECT count(value) FROM hoglake_ranges.test.counts"))
+                .hasStackTraceContaining("Object storage must not be accessed for catalog counts");
+        assertThatThrownBy(() -> queryRunner.execute("SELECT count(*) FROM hoglake_ranges.test.counts WHERE value = 1"))
                 .hasStackTraceContaining("Object storage must not be accessed for catalog counts");
 
         storageAllowed.set(true);
         try {
-            assertThat(queryRunner.execute("SELECT count(*) FROM hoglake_ranges.test.counts").getOnlyValue()).isEqualTo(8L);
             assertThat(queryRunner.execute("SELECT count(value) FROM hoglake_ranges.test.counts").getOnlyValue()).isEqualTo(6L);
             assertThat(queryRunner.execute("SELECT count(*) FROM hoglake_ranges.test.counts WHERE value = 1").getOnlyValue()).isEqualTo(4L);
         }

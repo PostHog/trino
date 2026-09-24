@@ -24,7 +24,8 @@ the catalog's files.
 | `hoglake.uri` | Hoglake REST base URI; required. | None |
 | `hoglake.catalog` | Hoglake catalog to expose. | `hoglake` |
 | `hoglake.client.request-timeout` | Positive request timeout, with `ms`, `s`, `m`, `h`, or `d` suffix. | `2m` |
-| `hoglake.max-split-size` | Largest byte range of one Parquet file assigned to a single split; at least `1MB`. See [](hoglake-split-planning). Use the `max_split_size` catalog session property to change it for a session. | `128MB` |
+| `hoglake.max-split-size` | Largest byte range of one Parquet file assigned to a single split; at least `1MB`. See [](hoglake-split-planning). Use the `max_split_size` catalog session property to change it for a session. | `1GB` |
+| `hoglake.parquet-footer-cache.max-size` | Serialized size of the parsed Parquet footers each worker keeps for the catalog; `0B` disables the cache. See [](hoglake-split-planning). | `64MB` |
 | `fs.s3.enabled` | Enable the native S3 filesystem. | `true` |
 | `s3.endpoint` | Optional S3-compatible endpoint. | AWS endpoint resolution |
 | `s3.region` | S3 region. | `us-east-1` |
@@ -53,6 +54,7 @@ initialization. Blank legacy endpoint and credential values retain their default
 behavior. Unrecognized properties and invalid configuration now fail catalog
 initialization, including properties that older versions silently ignored.
 
+(hoglake-filesystem-caching)=
 ## Filesystem caching
 
 Set `fs.cache.enabled=true` in the catalog to cache Parquet reads through Trino's
@@ -116,15 +118,15 @@ blob's declared length and checksum are big-endian, while the roaring bitmap's
 own fields are little-endian. Hoglake's server reader, its writer, and its DuckDB
 client all use this layout, and the connector reads it.
 
-An unfiltered `count(*)` over a file read by a single split still answers from
-catalog metadata: a file's visible rows are its record count minus its deletion
-vector's delete count. The vector is read and validated in that path too, so a
-count cannot silently ignore deletes. A file read by several byte-range splits
-is counted from its Parquet footers instead, since the catalog's record count
-describes the whole file; no column data is read and the vector is still
-applied. Counts with a filter, and every other aggregation, read the data and
-apply the vector. Every split of a file with a deletion vector reads the whole
-vector.
+An unfiltered `count(*)` answers from catalog metadata: a file's visible rows
+are its record count minus its deletion vector's delete count. The vector is
+read and validated in that path too, so a count cannot silently ignore deletes.
+For a file read by several byte-range splits, the range starting at offset 0
+reports the whole file's count and the file's other ranges report no rows, so no
+split reads the Parquet footer or any data, and the vector is read once per file.
+Counts with a filter or of a column, and every other aggregation, read the data
+and apply the vector. Every split of a file with a deletion vector that reads
+data reads the whole vector.
 
 A deletion vector that is missing, corrupt, truncated, unsupported, or
 inconsistent with the catalog fails the query; it is never treated as "no
@@ -165,6 +167,24 @@ range of its own. Without usable offsets, a file is cut into equal ranges of
 `hoglake.max-split-size`, the last one shorter; a range that holds no row-group start
 reads only the footer and returns no rows. The catalog's `footer_size`, when known,
 lets each split fetch the Parquet footer in a single request.
+
+Every range of a file that reads data needs the file's whole Parquet footer, which for a file with
+many row groups is megabytes of metadata that is costly to decode. Each worker keeps
+the decoded footers of the files it has recently read, so the ranges of a file read
+by one worker decode its footer once between them, and later queries reading the
+same file on that worker do not read or decode it again. Footers are keyed by file
+location and length. `hoglake.parquet-footer-cache.max-size` bounds the cache by the
+footers' serialized size; decoded footers occupy more heap memory than that,
+and a footer larger than the whole bound is not cached. To keep a hot table's footers
+cached, size the bound to at least the sum of the `footer_size` of its data files.
+This cache is separate from
+[filesystem caching](hoglake-filesystem-caching), which caches bytes and so still
+leaves every range to decode the footer.
+
+The default of `1GB` suits Hoglake's large files: their row groups average around
+150 MiB, so a smaller range often holds no row-group start while still costing a
+split and reader setup. A 1 GB range packs several row groups and still leaves
+ample parallelism; a scan of about 170 GiB is planned as about 170 splits.
 
 Splits are weighted by the share of `hoglake.max-split-size` they cover, so the
 scheduler assigns more short ranges than full ones to each worker.
