@@ -113,16 +113,46 @@
     </artifactSet>
 
     <!--
-        Server runtime plugins, as in trino-server-core, minus three that nothing in
+        Access control and event listeners the deployed coordinators configure. A
+        coordinator whose config names a plugin that is not in the image refuses to
+        start, so each of these is load-bearing:
+          - opa: every managed-warehouse coordinator sets access-control.name=opa
+            (the Trino chart and the duckgres pool-cell blueprints) for tenant
+            isolation. Without it the coordinator exits with "Access control 'opa'
+            is not registered".
+          - http-event-listener: deployments that stream query events set
+            event-listener.name=http, which fails startup the same way without it.
+    -->
+    <artifactSet to="plugin/opa">
+        <artifact id="${project.groupId}:trino-opa:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <artifactSet to="plugin/http-event-listener">
+        <artifact id="${project.groupId}:trino-http-event-listener:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <!--
+        Server runtime plugins, as in trino-server-core, minus two that nothing in
         the managed warehouse configures:
-          - blob-cache-alluxio: the image's default cache-manager config file selects
-            the memory cache manager, not Alluxio.
           - functions-python: no Python UDFs, and it carries a bundled runtime.
           - geospatial: no geospatial queries, and it carries the EPSG database.
+        blob-cache-alluxio stays: a cell with filesystem caching sets
+        cache-manager.name=alluxio, and the coordinator refuses to start without the
+        factory ("Blob cache manager factory 'alluxio' is not registered").
         Restoring any of them is one artifactSet here plus one dependency in pom.xml.
     -->
     <artifactSet to="plugin/exchange-filesystem">
         <artifact id="${project.groupId}:trino-exchange-filesystem:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <artifactSet to="plugin/blob-cache-alluxio">
+        <artifact id="${project.groupId}:trino-blob-cache-alluxio:zip:${project.version}">
             <unpack />
         </artifact>
     </artifactSet>
