@@ -430,3 +430,32 @@ subsequent requests to be consistent with the response headers received.
 Class `io.trino.client.ProtocolHeaders` in module `trino-client` in the
 `client` directory of Trino source enumerates all the HTTP request and
 response headers allowed by the Trino client REST API.
+
+## Query drain status
+
+An authenticated caller with permission to read system information can inspect
+`GET /v1/query/{queryId}/drain-status` on a coordinator.
+The response contains `nodeId`, `coordinatorId`, and `absent`.
+The identity fields match `/v1/info` on that coordinator.
+The endpoint does not fetch results, record a client heartbeat, submit a queued query,
+or cancel work.
+It does not return SQL, result data, or continuation capabilities.
+
+`absent: true` means that this coordinator no longer tracks the query in any of its
+queued-request, dispatch, execution, or retained-result registries.
+A query ID from another coordinator yields `absent: false`.
+Finished queries with retained results also yield `absent: false`.
+Configure `query.max-history-age` to bound this retention on coordinators that drain
+without further query traffic, while keeping the `query.min-expire-age` retry window.
+A missing query in `/v1/query/{queryId}` alone is not an absence proof: queued
+submissions and cached results have separate lifecycles.
+
+A gateway must bind this response to the original coordinator identity and backend
+incarnation before retiring an abandoned query binding.
+It must also fence concurrent admissions, reject a proof if any request is pending
+or uncertain, and verify that its admission revision did not change during the check.
+An already admitted request can otherwise hold a query reference across registry removal.
+The response does not prove that a transaction is closed, and does not replace
+transaction checks or the gateway's terminal retry-retention interval.
+Unsupported endpoints, authentication failures, timeouts, and malformed responses
+must fail closed.

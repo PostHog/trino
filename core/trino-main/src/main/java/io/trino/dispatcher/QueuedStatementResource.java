@@ -245,6 +245,11 @@ public class QueuedStatementResource
         return Response.noContent().build();
     }
 
+    public boolean hasQuery(QueryId queryId)
+    {
+        return queryManager.getQuery(queryId) != null;
+    }
+
     private Query getQuery(QueryId queryId, String slug, long token)
     {
         Query query = queryManager.getQuery(queryId);

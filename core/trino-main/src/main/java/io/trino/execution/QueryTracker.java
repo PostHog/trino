@@ -54,6 +54,7 @@ public class QueryTracker<T extends TrackedQuery>
 
     private final int maxQueryHistory;
     private final Duration minQueryExpireAge;
+    private final Optional<Duration> maxQueryHistoryAge;
 
     private final ConcurrentMap<QueryId, T> queries = new ConcurrentHashMap<>();
     private final Queue<T> expirationQueue = new LinkedBlockingQueue<>();
@@ -70,6 +71,7 @@ public class QueryTracker<T extends TrackedQuery>
     {
         this.minQueryExpireAge = queryManagerConfig.getMinQueryExpireAge();
         this.maxQueryHistory = queryManagerConfig.getMaxQueryHistory();
+        this.maxQueryHistoryAge = queryManagerConfig.getMaxQueryHistoryAge();
         this.clientTimeout = queryManagerConfig.getClientTimeout();
 
         this.queryManagementExecutor = requireNonNull(queryManagementExecutor, "queryManagementExecutor is null");
@@ -233,10 +235,11 @@ public class QueryTracker<T extends TrackedQuery>
      */
     private void removeExpiredQueries()
     {
-        Instant timeHorizon = Instant.now().minusMillis(minQueryExpireAge.toMillis());
+        Instant now = Instant.now();
+        Instant timeHorizon = now.minusMillis(minQueryExpireAge.toMillis());
+        Optional<Instant> maxAgeHorizon = maxQueryHistoryAge.map(age -> now.minusMillis(age.toMillis()));
 
-        // we're willing to keep queries beyond timeHorizon as long as we have fewer than maxQueryHistory
-        while (expirationQueue.size() > maxQueryHistory) {
+        while (!expirationQueue.isEmpty()) {
             T query = expirationQueue.peek();
             if (query == null) {
                 return;
@@ -247,9 +250,12 @@ public class QueryTracker<T extends TrackedQuery>
             Optional<Instant> endTime = query.getEndTime();
             if (endTime.isEmpty()) {
                 // this shouldn't happen but it is better to be safe here
-                continue;
+                return;
             }
             if (endTime.get().isAfter(timeHorizon)) {
+                return;
+            }
+            if (expirationQueue.size() <= maxQueryHistory && maxAgeHorizon.map(horizon -> endTime.get().isAfter(horizon)).orElse(true)) {
                 return;
             }
 
