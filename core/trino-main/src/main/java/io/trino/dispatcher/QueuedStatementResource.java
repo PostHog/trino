@@ -166,6 +166,11 @@ public class QueuedStatementResource
         return Response.ok().build();
     }
 
+    public boolean hasQuery(QueryId queryId)
+    {
+        return queryManager.getQuery(queryId) != null;
+    }
+
     @ResourceSecurity(AUTHENTICATED_USER)
     @POST
     @Produces(APPLICATION_JSON)
