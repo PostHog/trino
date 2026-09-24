@@ -430,3 +430,31 @@ subsequent requests to be consistent with the response headers received.
 Class `io.trino.client.ProtocolHeaders` in module `trino-client` in the
 `client` directory of Trino source enumerates all the HTTP request and
 response headers allowed by the Trino client REST API.
+
+## Gateway query lifecycle observation
+
+This distribution provides `GET /v1/integrations/gateway/query/{queryId}/lifecycle`
+for gateway reconciliation. It uses the existing `MANAGEMENT_READ` authentication
+and authorization policy, including the permission to read system information.
+It does not return query text, result data, or continuation capabilities.
+
+A successful response contains `queryId`, `nodeId`, `coordinatorId`, and the
+boolean `queryPresent`. Presence includes queued statements, dispatch and
+execution records, and cached statement results. A completed query is therefore
+still present while the coordinator retains its results. Observation does not
+submit a queued query, record a heartbeat, consume results, or cancel anything.
+
+A gateway may use `queryPresent: false` only for a query ID it already observed
+from this coordinator process. It must compare both identity fields against the
+original backend identity and compare the returned query ID against the request.
+The endpoint rejects malformed IDs with HTTP 400 and IDs belonging to another
+coordinator process with HTTP 409. Errors, unavailable endpoints, and mismatched
+identities are not evidence of absence. A coordinator restart does not prove
+anything about results retained by the previous process.
+
+The gateway must still preserve in-flight request obligations, transaction
+affinity, uncertain admissions, and its own retained-response guarantees.
+Observing query absence alone does not authorize deleting those obligations.
+This endpoint does not change query retention or impose a maximum drain time.
+In particular, completed queries can remain present until the existing query
+history eviction rules remove them.
