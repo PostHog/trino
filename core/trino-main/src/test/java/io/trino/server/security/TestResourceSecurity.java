@@ -1006,7 +1006,27 @@ public class TestResourceSecurity
                 .setAdditionalModule(binder -> jaxrsBinder(binder).bind(TestResource.class))
                 .setSystemAccessControl(TestSystemAccessControl.NO_IMPERSONATION)
                 .build()) {
-            server.getInstance(Key.get(PasswordAuthenticatorManager.class)).setAuthenticators(TestResourceSecurity::authenticateTenantUser);
+            String serviceUser = "svc_0123456789abcdef01234567";
+            server.getInstance(Key.get(PasswordAuthenticatorManager.class)).setAuthenticators(new io.trino.spi.security.PasswordAuthenticator()
+            {
+                @Override
+                public Principal createAuthenticatedPrincipal(String user, String password)
+                {
+                    return authenticateTenantUser(user, password);
+                }
+
+                @Override
+                public Optional<Identity> createAuthenticatedIdentity(String user, String password)
+                {
+                    if (!user.equals("tenant-a." + serviceUser) || !password.equals(TEST_PASSWORD)) {
+                        return Optional.empty();
+                    }
+                    return Optional.of(Identity.forUser(user)
+                            .withPrincipal(new BasicPrincipal(user))
+                            .withGroups(ImmutableSet.of("org_tenant_a", "tier_scale"))
+                            .build());
+                }
+            });
             URI httpsUri = server.getInstance(Key.get(HttpServerInfo.class)).getHttpsUri();
             String identityLocation = getLocation(httpsUri, "/protocol/identity");
             String tenantHost = "tenant-a." + TENANT_DOMAIN;
@@ -1078,6 +1098,25 @@ public class TestResourceSecurity
                     hostHeader(TENANT_DOMAIN, httpsUri),
                     "Authorization",
                     Credentials.basic("tenant-a." + TEST_USER_LOGIN, TEST_PASSWORD)));
+
+            Request serviceIdentity = new Request.Builder()
+                    .url(identityLocation)
+                    .header("Host", hostHeader(tenantHost, httpsUri))
+                    .addHeader("Authorization", Credentials.basic(serviceUser, TEST_PASSWORD))
+                    .addHeader("X-Trino-Original-User", serviceUser)
+                    .addHeader("X-Trino-User", serviceUser)
+                    .build();
+            try (Response response = client.newCall(serviceIdentity).execute()) {
+                assertThat(response.code()).isEqualTo(SC_OK);
+                assertThat(response.header("user")).isEqualTo("tenant-a." + serviceUser);
+                assertThat(response.header("principal")).isEqualTo("tenant-a." + serviceUser);
+                assertThat(response.header("groups").split(",")).containsExactlyInAnyOrder("org_tenant_a", "tier_scale");
+            }
+            assertResponseCode(client, identityLocation, SC_UNAUTHORIZED, Headers.of(
+                    "Host",
+                    hostHeader("tenant-b." + TENANT_DOMAIN, httpsUri),
+                    "Authorization",
+                    Credentials.basic(serviceUser, TEST_PASSWORD)));
 
             // The client follows nextUri with the same credentials, so it must keep the tenant host
             Request statement = new Request.Builder()
@@ -1488,6 +1527,7 @@ public class TestResourceSecurity
             return jakarta.ws.rs.core.Response.ok()
                     .header("user", identity.getUser())
                     .header("principal", identity.getPrincipal().map(Principal::getName).orElse(null))
+                    .header("groups", String.join(",", identity.getGroups()))
                     .build();
         }
     }

@@ -34,6 +34,7 @@ public class TestFileConfig
     {
         assertRecordedDefaults(recordDefaults(FileConfig.class)
                 .setPasswordFile(null)
+                .setReservedUserRegex(null)
                 .setRefreshPeriod(new Duration(5, SECONDS))
                 .setAuthTokenCacheMaxSize(1000));
     }
@@ -48,10 +49,12 @@ public class TestFileConfig
                 .put("file.password-file", passwordFile.toString())
                 .put("file.refresh-period", "42s")
                 .put("file.auth-token-cache.max-size", "1234")
+                .put("file.reserved-user-regex", "svc_.*")
                 .buildOrThrow();
 
         FileConfig expected = new FileConfig()
                 .setPasswordFile(passwordFile.toFile())
+                .setReservedUserRegex("svc_.*")
                 .setRefreshPeriod(new Duration(42, SECONDS))
                 .setAuthTokenCacheMaxSize(1234);
 

@@ -25,6 +25,7 @@ security/inspect-jks
 :maxdepth: 1
 
 security/authentication-types
+security/duckgres-service-credentials
 security/password-file
 security/ldap
 security/salesforce
