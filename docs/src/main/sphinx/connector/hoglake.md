@@ -169,7 +169,9 @@ into one range while they fit within `hoglake.max-split-size`, and a row group l
 than that is a range of its own. Without usable offsets, a file is cut into equal ranges of
 `hoglake.max-split-size`, the last one shorter; a range that holds no row-group start
 reads only the footer and returns no rows. The catalog's `footer_size`, when known,
-lets each split fetch the Parquet footer in a single request.
+lets each split fetch the Parquet footer in a single request. A catalog too old to
+serve row-group offsets or per-file column bounds is detected, and planning proceeds
+without them.
 
 Every range of a file that reads data needs the file's whole Parquet footer, which for a file with
 many row groups is megabytes of metadata that is costly to decode. Each worker keeps

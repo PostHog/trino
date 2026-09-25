@@ -160,8 +160,8 @@ public class HoglakeSplitManager
     /**
      * The files a read must plan: the catalog's planning scan, carrying
      * row-group offsets to cut splits on and bounds for the predicate's
-     * prunable columns, dropping files those bounds exclude, plus every
-     * staged file.
+     * prunable columns when the catalog serves them, dropping files those
+     * bounds exclude, plus every staged file.
      */
     static List<HoglakeDtos.ScanFile> prunedScan(HoglakeClient client, HoglakeTableHandle handle)
     {

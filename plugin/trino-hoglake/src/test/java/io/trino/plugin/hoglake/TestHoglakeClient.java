@@ -14,6 +14,9 @@
 package io.trino.plugin.hoglake;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Ticker;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.sun.net.httpserver.HttpServer;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
@@ -27,13 +30,18 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicLong;
 
+import static io.trino.plugin.hoglake.rest.HoglakeClient.REJECTED_INCLUDE_RETENTION;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.stream.Collectors.joining;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -44,6 +52,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class TestHoglakeClient
 {
+    private static final Set<String> COLUMN_STATS_ONLY = ImmutableSet.of("column_stats");
     private static final Map<String, String> RESPONSES = new HashMap<>();
     private static final Map<String, String> QUERIES = new ConcurrentHashMap<>();
     private static HttpServer server;
@@ -304,10 +313,205 @@ class TestHoglakeClient
     }
 
     @Test
+    void catalogWithoutSplitOffsetsIsPlannedWithColumnStatisticsOnly()
+            throws IOException
+    {
+        try (IncludeValidatingCatalog catalog = new IncludeValidatingCatalog(COLUMN_STATS_ONLY)) {
+            HoglakeClient client = catalog.client(new AtomicLong());
+            List<HoglakeDtos.ScanFile> scan = client.planningScan("analytics", "stats", 6, Set.of(7L, 1L));
+            assertThat(scan).extracting(file -> file.dataFile().path()).containsExactly("s3://lake/stats/file.parquet");
+            assertThat(catalog.queries()).containsExactly(
+                    "snapshot=6&include=column_stats,split_offsets&stats_fields=1,7",
+                    "snapshot=6&include=column_stats&stats_fields=1,7");
+        }
+    }
+
+    @Test
+    void catalogWithoutAnyIncludeIsPlannedWithAPlainScan()
+            throws IOException
+    {
+        try (IncludeValidatingCatalog catalog = new IncludeValidatingCatalog(ImmutableSet.of())) {
+            HoglakeClient client = catalog.client(new AtomicLong());
+            assertThat(client.planningScan("analytics", "stats", 6, Set.of(7L, 1L))).hasSize(1);
+            // The refusal names both values, and stats_fields goes with
+            // column_stats: without it, stats_fields is a 422 of its own.
+            assertThat(catalog.queries()).containsExactly(
+                    "snapshot=6&include=column_stats,split_offsets&stats_fields=1,7",
+                    "snapshot=6");
+        }
+        try (IncludeValidatingCatalog catalog = new IncludeValidatingCatalog(ImmutableSet.of())) {
+            HoglakeClient client = catalog.client(new AtomicLong());
+            assertThat(client.planningScan("analytics", "stats", 6, Set.of())).hasSize(1);
+            assertThat(client.planningScan("analytics", "stats", 6, Set.of(3L))).hasSize(1);
+            // Each part is remembered on its own: the first scan learned
+            // nothing about column_stats, so the second still asks for it.
+            assertThat(catalog.queries()).containsExactly(
+                    "snapshot=6&include=split_offsets",
+                    "snapshot=6",
+                    "snapshot=6&include=column_stats&stats_fields=3",
+                    "snapshot=6");
+        }
+    }
+
+    @Test
+    void rejectedIncludeIsNotRequestedAgainWithinTheRetention()
+            throws IOException
+    {
+        try (IncludeValidatingCatalog catalog = new IncludeValidatingCatalog(COLUMN_STATS_ONLY)) {
+            AtomicLong now = new AtomicLong();
+            HoglakeClient client = catalog.client(now);
+            client.planningScan("analytics", "stats", 6, Set.of(1L));
+            catalog.clearQueries();
+
+            now.addAndGet(REJECTED_INCLUDE_RETENTION.minusNanos(1).toNanos());
+            client.planningScan("analytics", "stats", 6, Set.of(1L));
+            client.planningScan("analytics", "stats", 6, Set.of());
+            assertThat(catalog.queries()).containsExactly(
+                    "snapshot=6&include=column_stats&stats_fields=1",
+                    "snapshot=6");
+        }
+    }
+
+    @Test
+    void rejectedIncludeIsRequestedAgainAfterTheRetention()
+            throws IOException
+    {
+        try (IncludeValidatingCatalog catalog = new IncludeValidatingCatalog(COLUMN_STATS_ONLY)) {
+            AtomicLong now = new AtomicLong();
+            HoglakeClient client = catalog.client(now);
+            client.planningScan("analytics", "stats", 6, Set.of());
+
+            // Not upgraded yet: the probe is refused and the retention restarts.
+            now.addAndGet(REJECTED_INCLUDE_RETENTION.toNanos());
+            catalog.clearQueries();
+            client.planningScan("analytics", "stats", 6, Set.of());
+            now.addAndGet(REJECTED_INCLUDE_RETENTION.minusNanos(1).toNanos());
+            client.planningScan("analytics", "stats", 6, Set.of());
+            assertThat(catalog.queries()).containsExactly(
+                    "snapshot=6&include=split_offsets",
+                    "snapshot=6",
+                    "snapshot=6");
+
+            // Upgraded: the next probe is served, and later scans keep asking.
+            catalog.support(ImmutableSet.of("column_stats", "split_offsets"));
+            now.addAndGet(1);
+            catalog.clearQueries();
+            List<HoglakeDtos.ScanFile> scan = client.planningScan("analytics", "stats", 6, Set.of());
+            client.planningScan("analytics", "stats", 6, Set.of(1L));
+            assertThat(scan.getFirst().dataFile().splitOffsets()).containsExactly(4L);
+            assertThat(catalog.queries()).containsExactly(
+                    "snapshot=6&include=split_offsets",
+                    "snapshot=6&include=column_stats,split_offsets&stats_fields=1");
+        }
+    }
+
+    @Test
     void scanOfMissingTableFailsLoudly()
     {
         assertThatThrownBy(() -> client.scan("analytics", "nope", 6))
                 .isInstanceOf(TableNotFoundException.class)
                 .hasMessageContaining("analytics.nope");
+    }
+
+    /**
+     * A catalog serving one table's scan and validating {@code include} as
+     * Hoglake's scan route does: an unknown value is a 422 naming it, and
+     * {@code stats_fields} without {@code column_stats} is a 422 of its own.
+     */
+    private static final class IncludeValidatingCatalog
+            implements AutoCloseable
+    {
+        private final HttpServer server;
+        private final List<String> queries = new CopyOnWriteArrayList<>();
+        private volatile Set<String> supported;
+
+        public IncludeValidatingCatalog(Set<String> supported)
+                throws IOException
+        {
+            this.supported = ImmutableSet.copyOf(supported);
+            server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            server.createContext("/v1/catalogs/lake/namespaces/analytics/tables/stats/scan", exchange -> {
+                String query = exchange.getRequestURI().getRawQuery();
+                queries.add(query);
+                Map<String, String> parameters = new HashMap<>();
+                for (String parameter : query.split("&")) {
+                    String[] parts = parameter.split("=", 2);
+                    parameters.put(parts[0], parts[1]);
+                }
+                Set<String> includes = ImmutableSet.of();
+                if (parameters.containsKey("include")) {
+                    includes = ImmutableSet.copyOf(parameters.get("include").split(","));
+                }
+                Set<String> known = this.supported;
+                List<String> unknown = includes.stream()
+                        .filter(value -> !known.contains(value))
+                        .sorted()
+                        .toList();
+                int status = 200;
+                String splitOffsets = includes.contains("split_offsets") ? ", \"split_offsets\": [4]" : "";
+                String body =
+                        """
+                        [{"data_file": {"data_file_id": 30, "path": "s3://lake/stats/file.parquet", "file_format": "parquet",
+                          "record_count": 5, "file_size_bytes": 512, "row_id_start": 0, "stats_state": "provided", "begin_snapshot": 3%s}}]
+                        """.formatted(splitOffsets);
+                if (!unknown.isEmpty()) {
+                    status = 422;
+                    body =
+                            """
+                            {"error": "validation", "detail": "include: unknown value(s) %s; supported: %s"}
+                            """.formatted(
+                            unknown.stream().map(value -> "'" + value + "'").collect(joining(", ")),
+                            known.stream().sorted().collect(joining(", ")));
+                }
+                else if (parameters.containsKey("stats_fields") && !includes.contains("column_stats")) {
+                    status = 422;
+                    body =
+                            """
+                            {"error": "validation", "detail": "stats_fields requires include=column_stats"}
+                            """;
+                }
+                byte[] payload = body.getBytes(UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.sendResponseHeaders(status, payload.length);
+                try (OutputStream out = exchange.getResponseBody()) {
+                    out.write(payload);
+                }
+            });
+            server.start();
+        }
+
+        public HoglakeClient client(AtomicLong now)
+        {
+            Ticker ticker = new Ticker()
+            {
+                @Override
+                public long read()
+                {
+                    return now.get();
+                }
+            };
+            return new HoglakeClient("http://127.0.0.1:" + server.getAddress().getPort(), "lake", Duration.ofSeconds(30), ticker);
+        }
+
+        public void support(Set<String> values)
+        {
+            supported = ImmutableSet.copyOf(values);
+        }
+
+        public List<String> queries()
+        {
+            return ImmutableList.copyOf(queries);
+        }
+
+        public void clearQueries()
+        {
+            queries.clear();
+        }
+
+        @Override
+        public void close()
+        {
+            server.stop(0);
+        }
     }
 }

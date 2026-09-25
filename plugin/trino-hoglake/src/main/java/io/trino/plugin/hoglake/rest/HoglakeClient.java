@@ -17,6 +17,10 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Ticker;
+import com.google.common.collect.ImmutableSet;
+import io.airlift.log.Logger;
 import io.trino.spi.StandardErrorCode;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.SchemaNotFoundException;
@@ -36,6 +40,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -45,6 +50,8 @@ import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeoutException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_NOT_FOUND;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_UNAVAILABLE;
@@ -71,13 +78,36 @@ import static java.util.stream.Collectors.joining;
 public class HoglakeClient
         implements Closeable
 {
+    private static final Logger log = Logger.get(HoglakeClient.class);
+
     public static final Duration DEFAULT_REQUEST_TIMEOUT = Duration.ofMinutes(2);
+
+    /**
+     * How long a catalog's refusal of a scan {@code include} value is
+     * trusted before planning asks for it again, so an upgraded catalog is
+     * picked up without a restart.
+     */
+    @VisibleForTesting
+    public static final Duration REJECTED_INCLUDE_RETENTION = Duration.ofMinutes(10);
+
+    private static final String COLUMN_STATS = "column_stats";
+    private static final String SPLIT_OFFSETS = "split_offsets";
+
+    // The detail of the catalog's 422 for an include value it does not
+    // know (Routes.parseScanIncludes), e.g.
+    // "include: unknown value(s) 'split_offsets'; supported: column_stats".
+    private static final String UNKNOWN_INCLUDE_PREFIX = "include: unknown value(s) ";
+    private static final String UNKNOWN_INCLUDE_SUFFIX = "; supported:";
+    private static final Pattern QUOTED_VALUE = Pattern.compile("'([^']*)'");
 
     private final HttpClient httpClient;
     private final ObjectMapper mapper;
     private final String baseUri;
     private final String catalog;
     private final Duration requestTimeout;
+    private final Ticker ticker;
+    private final ScanIncludeSupport columnStatsSupport = new ScanIncludeSupport(COLUMN_STATS);
+    private final ScanIncludeSupport splitOffsetsSupport = new ScanIncludeSupport(SPLIT_OFFSETS);
 
     public HoglakeClient(String baseUri, String catalog)
     {
@@ -86,10 +116,17 @@ public class HoglakeClient
 
     public HoglakeClient(String baseUri, String catalog, Duration requestTimeout)
     {
+        this(baseUri, catalog, requestTimeout, Ticker.systemTicker());
+    }
+
+    @VisibleForTesting
+    public HoglakeClient(String baseUri, String catalog, Duration requestTimeout, Ticker ticker)
+    {
         // Fail at construction (catalog registration), not per query.
         this.baseUri = validateBaseUri(requireNonNull(baseUri, "baseUri is null")).toString();
         this.catalog = requireNonNull(catalog, "catalog is null");
         this.requestTimeout = requireNonNull(requestTimeout, "requestTimeout is null");
+        this.ticker = requireNonNull(ticker, "ticker is null");
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
@@ -213,20 +250,100 @@ public class HoglakeClient
      * those field ids, so planning can prune files
      * ({@code include=column_stats,split_offsets&stats_fields=...}, ids
      * ascending).
+     *
+     * <p>Both parts are optional for planning, and a catalog that predates
+     * one refuses it with a 422 naming the unknown value. That refusal
+     * retries the scan without the named values, and they are left out of
+     * this client's planning scans for {@link #REJECTED_INCLUDE_RETENTION},
+     * after which they are requested again. Every other failure, including
+     * any other 422, is reported as for any request.
      */
     public List<HoglakeDtos.ScanFile> planningScan(String namespace, String table, long snapshot, Set<Long> statsFields)
     {
-        String query = "/scan?snapshot=" + snapshot;
-        if (statsFields.isEmpty()) {
-            query += "&include=split_offsets";
+        boolean columnStats = !statsFields.isEmpty() && columnStatsSupport.shouldRequest();
+        boolean splitOffsets = splitOffsetsSupport.shouldRequest();
+        while (true) {
+            URI uri = URI.create(baseUri + tablePath(namespace, table, planningQuery(snapshot, columnStats ? statsFields : Set.of(), splitOffsets)));
+            HttpResponse<String> response = fetch(uri, requestTimeout);
+            Set<String> unknown = unknownIncludes(response);
+            boolean retry = false;
+            if (columnStats && unknown.contains(COLUMN_STATS)) {
+                columnStatsSupport.markRejected();
+                columnStats = false;
+                retry = true;
+            }
+            if (splitOffsets && unknown.contains(SPLIT_OFFSETS)) {
+                splitOffsetsSupport.markRejected();
+                splitOffsets = false;
+                retry = true;
+            }
+            if (!retry) {
+                Optional<List<HoglakeDtos.ScanFile>> files = interpret(uri, response, new TypeReference<List<HoglakeDtos.ScanFile>>() {});
+                if (columnStats) {
+                    columnStatsSupport.markAccepted();
+                }
+                if (splitOffsets) {
+                    splitOffsetsSupport.markAccepted();
+                }
+                return files.orElseThrow(() -> new TableNotFoundException(new SchemaTableName(namespace, table)));
+            }
         }
-        else {
-            query += "&include=column_stats,split_offsets&stats_fields=" + statsFields.stream()
+    }
+
+    private static String planningQuery(long snapshot, Set<Long> statsFields, boolean splitOffsets)
+    {
+        List<String> includes = new ArrayList<>();
+        if (!statsFields.isEmpty()) {
+            includes.add(COLUMN_STATS);
+        }
+        if (splitOffsets) {
+            includes.add(SPLIT_OFFSETS);
+        }
+        String query = "/scan?snapshot=" + snapshot;
+        if (!includes.isEmpty()) {
+            query += "&include=" + String.join(",", includes);
+        }
+        if (!statsFields.isEmpty()) {
+            query += "&stats_fields=" + statsFields.stream()
                     .sorted()
                     .map(String::valueOf)
                     .collect(joining(","));
         }
-        return fetchScan(namespace, table, query);
+        return query;
+    }
+
+    /**
+     * The include values a scan response refuses as unknown: those named by
+     * a 422 {@code {"error": "validation", "detail": "include: unknown
+     * value(s) 'a', 'b'; supported: ..."}}, and none for any other response.
+     */
+    private Set<String> unknownIncludes(HttpResponse<String> response)
+    {
+        if (response.statusCode() != 422) {
+            return ImmutableSet.of();
+        }
+        JsonNode error;
+        try {
+            error = mapper.readTree(response.body());
+        }
+        catch (IOException ignored) {
+            // Not the catalog's error body, so not the refusal this handles.
+            return ImmutableSet.of();
+        }
+        if (error == null || !"validation".equals(error.path("error").asText())) {
+            return ImmutableSet.of();
+        }
+        String detail = error.path("detail").asText();
+        int end = detail.indexOf(UNKNOWN_INCLUDE_SUFFIX);
+        if (!detail.startsWith(UNKNOWN_INCLUDE_PREFIX) || end < 0) {
+            return ImmutableSet.of();
+        }
+        ImmutableSet.Builder<String> values = ImmutableSet.builder();
+        Matcher matcher = QUOTED_VALUE.matcher(detail.substring(UNKNOWN_INCLUDE_PREFIX.length(), end));
+        while (matcher.find()) {
+            values.add(matcher.group(1));
+        }
+        return values.build();
     }
 
     private List<HoglakeDtos.ScanFile> fetchScan(String namespace, String table, String query)
@@ -627,14 +744,22 @@ public class HoglakeClient
     private <T> Optional<T> get(String path, TypeReference<T> type, Duration timeout)
     {
         URI uri = URI.create(baseUri + path);
+        return interpret(uri, fetch(uri, timeout), type);
+    }
+
+    /**
+     * GET; coded TrinoException on transport failure, the response as
+     * received otherwise.
+     */
+    private HttpResponse<String> fetch(URI uri, Duration timeout)
+    {
         HttpRequest request = HttpRequest.newBuilder(uri)
                 .timeout(timeout)
                 .header("Accept", "application/json")
                 .GET()
                 .build();
-        HttpResponse<String> response;
         try {
-            response = send(request);
+            return send(request);
         }
         catch (IOException e) {
             // Connection refused, DNS, timeouts: the control plane (or the
@@ -648,6 +773,14 @@ public class HoglakeClient
             Thread.currentThread().interrupt();
             throw new TrinoException(GENERIC_INTERNAL_ERROR, "hoglake request interrupted: GET " + uri, e);
         }
+    }
+
+    /**
+     * A GET response parsed; empty on 404, coded TrinoException on every
+     * other failure.
+     */
+    private <T> Optional<T> interpret(URI uri, HttpResponse<String> response, TypeReference<T> type)
+    {
         int status = response.statusCode();
         if (status == 404) {
             return Optional.empty();
@@ -733,6 +866,52 @@ public class HoglakeClient
                     // Invalid hints fall back to the normal recovery backoff.
                 }
                 return Duration.ZERO;
+            }
+        }
+    }
+
+    /**
+     * Whether this client's catalog accepts one optional scan include
+     * value. A refusal is trusted for {@link #REJECTED_INCLUDE_RETENTION};
+     * each change of belief is logged once.
+     */
+    private final class ScanIncludeSupport
+    {
+        private final String value;
+        // Written under this object's lock; rejectedAt is written before
+        // rejected, so a reader seeing rejected also sees its time.
+        private volatile boolean rejected;
+        private volatile long rejectedAt;
+
+        private ScanIncludeSupport(String value)
+        {
+            this.value = requireNonNull(value, "value is null");
+        }
+
+        public boolean shouldRequest()
+        {
+            return !rejected || ticker.read() - rejectedAt >= REJECTED_INCLUDE_RETENTION.toNanos();
+        }
+
+        public synchronized void markRejected()
+        {
+            rejectedAt = ticker.read();
+            if (!rejected) {
+                rejected = true;
+                log.info("Hoglake catalog '%s' does not support scan include=%s; planning without it, and asking again after %s minutes", catalog, value, REJECTED_INCLUDE_RETENTION.toMinutes());
+            }
+        }
+
+        public void markAccepted()
+        {
+            if (!rejected) {
+                return;
+            }
+            synchronized (this) {
+                if (rejected) {
+                    rejected = false;
+                    log.info("Hoglake catalog '%s' now supports scan include=%s; planning with it again", catalog, value);
+                }
             }
         }
     }
