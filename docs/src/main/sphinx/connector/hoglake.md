@@ -181,7 +181,13 @@ and a footer larger than the whole bound is not cached. To keep a hot table's fo
 cached, size the bound to at least the sum of the `footer_size` of its data files.
 This cache is separate from
 [filesystem caching](hoglake-filesystem-caching), which caches bytes and so still
-leaves every range to decode the footer.
+leaves every range to decode the footer. The cache's request, load, hit-rate and
+miss-rate statistics are exported over JMX as
+`io.trino.plugin.hoglake:type=HoglakeParquetFooterCache,name=<catalog>`, and
+each split reports whether it hit the cache (`footerCacheHits`,
+`footerCacheMisses`) and how many row groups it read after pruning
+(`rowGroupsRead`, `rangeWithNoRowGroups`) as connector metrics, which
+`EXPLAIN ANALYZE VERBOSE` shows summed over the query.
 
 Because of the footer cache, an extra split costs little more than a cache hit
 and reader setup, so the default of `256MB` favors balance over fewer splits.

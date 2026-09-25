@@ -24,6 +24,7 @@ import io.trino.parquet.ParquetDataSourceId;
 import io.trino.parquet.ParquetReaderOptions;
 import io.trino.parquet.reader.ChunkedInputStream;
 import io.trino.parquet.writer.ParquetWriterOptions;
+import io.trino.plugin.base.metrics.LongCount;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures.FileColumn;
@@ -49,6 +50,10 @@ import java.util.OptionalLong;
 import java.util.stream.LongStream;
 
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
+import static io.trino.plugin.hoglake.HoglakePageSource.FOOTER_CACHE_HITS;
+import static io.trino.plugin.hoglake.HoglakePageSource.FOOTER_CACHE_MISSES;
+import static io.trino.plugin.hoglake.HoglakePageSource.RANGE_WITH_NO_ROW_GROUPS;
+import static io.trino.plugin.hoglake.HoglakePageSource.ROW_GROUPS_READ;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
 import static org.apache.parquet.schema.Types.optional;
@@ -124,6 +129,57 @@ class TestHoglakeRangeReads
         TailCountingProvider uncached = new TailCountingProvider(HoglakeParquetFooterCache.disabled());
         assertThat(readAllSplits(uncached, splits, List.of(VALUE))).containsExactlyElementsOf(allValues());
         assertThat(uncached.tailReads).isEqualTo(splits.size());
+    }
+
+    /**
+     * Each split reports whether it found the footer decoded and how many row
+     * groups it reads, so the query's metrics show one footer decode for the
+     * file however many ranges read it.
+     */
+    @Test
+    void rangeMetricsCountFooterCacheHitsAndRowGroups()
+    {
+        List<HoglakeSplit> splits = HoglakeSplitManager.toSplits(scan(ROW_GROUP_OFFSETS), ROW_GROUP_OFFSETS.get(1) - ROW_GROUP_OFFSETS.get(0));
+        assertThat(splits).hasSizeGreaterThan(2);
+
+        HoglakePageSourceProvider cached = new HoglakePageSourceProvider(ConnectorTestFixtures.memoryFileSystem(Map.of(PATH, FILE)), new HoglakeParquetFooterCache(DataSize.of(1, MEGABYTE)));
+        Metrics metrics = sumMetrics(cached, splits);
+        assertThat(count(metrics, FOOTER_CACHE_MISSES)).isEqualTo(1);
+        assertThat(count(metrics, FOOTER_CACHE_HITS)).isEqualTo(splits.size() - 1);
+        assertThat(count(metrics, ROW_GROUPS_READ)).isEqualTo(ROW_GROUP_OFFSETS.size());
+        assertThat(count(metrics, RANGE_WITH_NO_ROW_GROUPS)).isZero();
+
+        // A later query on the same worker decodes nothing.
+        assertThat(count(sumMetrics(cached, splits), FOOTER_CACHE_HITS)).isEqualTo(splits.size());
+
+        // Without the cache every split decodes the footer.
+        HoglakePageSourceProvider uncached = new HoglakePageSourceProvider(ConnectorTestFixtures.memoryFileSystem(Map.of(PATH, FILE)), HoglakeParquetFooterCache.disabled());
+        Metrics uncachedMetrics = sumMetrics(uncached, splits);
+        assertThat(count(uncachedMetrics, FOOTER_CACHE_MISSES)).isEqualTo(splits.size());
+        assertThat(count(uncachedMetrics, FOOTER_CACHE_HITS)).isZero();
+    }
+
+    @Test
+    void rangeHoldingNoRowGroupReportsIt()
+    {
+        long start = ROW_GROUP_OFFSETS.get(3) + 1;
+        long end = ROW_GROUP_OFFSETS.get(4);
+        HoglakePageSourceProvider provider = new HoglakePageSourceProvider(ConnectorTestFixtures.memoryFileSystem(Map.of(PATH, FILE)));
+
+        Metrics empty = readMetrics(provider, range(start, end - start), TupleDomain.all());
+        assertThat(count(empty, RANGE_WITH_NO_ROW_GROUPS)).isEqualTo(1);
+        assertThat(count(empty, ROW_GROUPS_READ)).isZero();
+
+        Metrics oneRowGroup = readMetrics(provider, range(ROW_GROUP_OFFSETS.get(3), end - ROW_GROUP_OFFSETS.get(3)), TupleDomain.all());
+        assertThat(count(oneRowGroup, RANGE_WITH_NO_ROW_GROUPS)).isZero();
+        assertThat(count(oneRowGroup, ROW_GROUPS_READ)).isEqualTo(1);
+
+        // A range whose every row group the predicate prunes also reads none.
+        TupleDomain<HoglakeColumnHandle> predicate = TupleDomain.withColumnDomains(Map.of(
+                VALUE, Domain.create(ValueSet.ofRanges(Range.range(BIGINT, 45L, true, 47L, true)), false)));
+        Metrics pruned = readMetrics(provider, range(0, ROW_GROUP_OFFSETS.get(2)), predicate);
+        assertThat(count(pruned, RANGE_WITH_NO_ROW_GROUPS)).isEqualTo(1);
+        assertThat(count(pruned, ROW_GROUPS_READ)).isZero();
     }
 
     @Test
@@ -286,6 +342,39 @@ class TestHoglakeRangeReads
         catch (IOException e) {
             throw new UncheckedIOException(e);
         }
+    }
+
+    private static Metrics sumMetrics(HoglakePageSourceProvider provider, List<HoglakeSplit> splits)
+    {
+        Metrics.Accumulator metrics = Metrics.accumulator();
+        for (HoglakeSplit split : splits) {
+            metrics.add(readMetrics(provider, split, TupleDomain.all()));
+        }
+        return metrics.get();
+    }
+
+    private static Metrics readMetrics(HoglakePageSourceProvider provider, HoglakeSplit split, TupleDomain<HoglakeColumnHandle> predicate)
+    {
+        try (ConnectorPageSource source = provider.createPageSource(
+                HoglakeTransactionHandle.INSTANCE,
+                ConnectorTestFixtures.session(),
+                split,
+                new HoglakeTableHandle("test", "ranges", 1, "synthetic-table", List.of(VALUE), predicate),
+                Optional.empty(),
+                List.of(VALUE),
+                DynamicFilter.EMPTY,
+                MemoryContext.NO_LIMIT)) {
+            ConnectorTestFixtures.readAll(source, List.of(BIGINT));
+            return source.getMetrics();
+        }
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private static long count(Metrics metrics, String name)
+    {
+        return ((LongCount) metrics.getMetrics().get(name)).getTotal();
     }
 
     private static List<Long> values(List<List<Object>> rows)

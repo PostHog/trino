@@ -19,9 +19,15 @@ import io.trino.spi.connector.ConnectorFactory;
 import io.trino.testing.TestingConnectorContext;
 import org.junit.jupiter.api.Test;
 
+import javax.management.MBeanAttributeInfo;
+import javax.management.MBeanServer;
+import javax.management.ObjectName;
+
 import java.util.Map;
 
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
+import static io.trino.testing.TestingNames.randomNameSuffix;
+import static java.lang.management.ManagementFactory.getPlatformMBeanServer;
 import static org.assertj.core.api.Assertions.assertThat;
 
 final class TestHoglakePlugin
@@ -51,6 +57,30 @@ final class TestHoglakePlugin
                     .filteredOn(property -> property.getName().equals("max_split_size"))
                     .singleElement()
                     .satisfies(property -> assertThat(property.getDefaultValue()).isEqualTo(DataSize.of(512, MEGABYTE)));
+        }
+        finally {
+            connector.shutdown();
+        }
+    }
+
+    @Test
+    void testFooterCacheStatisticsAreExportedPerCatalog()
+            throws Exception
+    {
+        String catalogName = "hoglake_jmx_" + randomNameSuffix();
+        ConnectorFactory factory = new HoglakePlugin().getConnectorFactories().iterator().next();
+        Connector connector = factory.create(catalogName, Map.of(
+                "hoglake.uri", "http://localhost:8080",
+                "hoglake.catalog", "test",
+                "hoglake.s3.region", "us-east-1"), new TestingConnectorContext());
+        try {
+            MBeanServer mbeanServer = getPlatformMBeanServer();
+            ObjectName name = new ObjectName("io.trino.plugin.hoglake:type=HoglakeParquetFooterCache,name=" + catalogName);
+            assertThat(mbeanServer.isRegistered(name)).isTrue();
+            assertThat(mbeanServer.getMBeanInfo(name).getAttributes())
+                    .extracting(MBeanAttributeInfo::getName)
+                    .contains("CacheStats.HitRate", "CacheStats.MissRate", "CacheStats.LoadCount", "CacheStats.RequestCount");
+            assertThat(mbeanServer.getAttribute(name, "CacheStats.RequestCount")).isEqualTo(0L);
         }
         finally {
             connector.shutdown();

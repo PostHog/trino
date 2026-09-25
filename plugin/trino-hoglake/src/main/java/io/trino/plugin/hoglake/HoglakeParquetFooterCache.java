@@ -19,13 +19,17 @@ import com.google.common.cache.CacheStats;
 import com.google.common.util.concurrent.ExecutionError;
 import com.google.common.util.concurrent.UncheckedExecutionException;
 import io.airlift.units.DataSize;
+import io.trino.cache.CacheStatsMBean;
 import io.trino.cache.EvictableCacheBuilder;
 import io.trino.parquet.metadata.ParquetMetadata;
 import org.apache.parquet.format.RowGroup;
+import org.weakref.jmx.Managed;
+import org.weakref.jmx.Nested;
 
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Throwables.throwIfInstanceOf;
@@ -43,6 +47,9 @@ import static java.util.Objects.requireNonNull;
  * <p>Entries are weighed by their serialized footer size. The decoded objects
  * are larger than that, so the heap they hold is a multiple of the configured
  * bound. A footer weighing more than the whole bound is never kept.
+ *
+ * <p>The cache's hit and miss statistics are exported over JMX, and each
+ * lookup reports whether it was a hit, so a split can report it too.
  */
 public final class HoglakeParquetFooterCache
 {
@@ -83,14 +90,24 @@ public final class HoglakeParquetFooterCache
      * The file's parsed footer, loaded on a miss. Concurrent lookups of one
      * file share a single load. A load that fails is not cached; its failure
      * is thrown to the callers waiting on it, and the next lookup loads again.
+     *
+     * <p>The lookup is a miss exactly when it ran the loader itself: the
+     * loader runs on the calling thread, and only for the one lookup that
+     * loads. A lookup that waits on another's load decodes nothing, so it is
+     * a hit here, although the cache's statistics count it as a miss.
      */
-    public ParsedFooter get(Key key, FooterLoader loader)
+    public Lookup get(Key key, FooterLoader loader)
             throws IOException
     {
         requireNonNull(key, "key is null");
         requireNonNull(loader, "loader is null");
+        AtomicBoolean loaded = new AtomicBoolean();
         try {
-            return cache.get(key, loader::load);
+            ParsedFooter footer = cache.get(key, () -> {
+                loaded.set(true);
+                return loader.load();
+            });
+            return new Lookup(footer, !loaded.get());
         }
         catch (ExecutionException | UncheckedExecutionException | ExecutionError e) {
             Throwable cause = e.getCause();
@@ -118,6 +135,24 @@ public final class HoglakeParquetFooterCache
     CacheStats stats()
     {
         return cache.stats();
+    }
+
+    @Managed
+    @Nested
+    public CacheStatsMBean getCacheStats()
+    {
+        return new CacheStatsMBean(cache);
+    }
+
+    /**
+     * A footer and whether this lookup found it without loading it.
+     */
+    public record Lookup(ParsedFooter footer, boolean hit)
+    {
+        public Lookup
+        {
+            requireNonNull(footer, "footer is null");
+        }
     }
 
     /**
