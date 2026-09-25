@@ -45,12 +45,12 @@ final class TestHoglakePlugin
                 "hoglake.uri", "http://localhost:8080",
                 "hoglake.catalog", "test",
                 "hoglake.s3.region", "us-east-1",
-                "hoglake.max-split-size", "256MB"), new TestingConnectorContext());
+                "hoglake.max-split-size", "512MB"), new TestingConnectorContext());
         try {
             assertThat(connector.getSessionProperties())
                     .filteredOn(property -> property.getName().equals("max_split_size"))
                     .singleElement()
-                    .satisfies(property -> assertThat(property.getDefaultValue()).isEqualTo(DataSize.of(256, MEGABYTE)));
+                    .satisfies(property -> assertThat(property.getDefaultValue()).isEqualTo(DataSize.of(512, MEGABYTE)));
         }
         finally {
             connector.shutdown();
