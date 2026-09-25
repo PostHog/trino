@@ -83,6 +83,7 @@ public class QueryManagerConfig
     private Duration minQueryExpireAge = new Duration(15, MINUTES);
     private int maxQueryHistory = 100;
     private Optional<Duration> maxQueryHistoryAge = Optional.empty();
+    private Optional<Duration> completedResultIdleTimeout = Optional.empty();
     private int maxQueryLength = 1_000_000;
     private int maxStageCount = 150;
     private int stageCountWarningThreshold = 50;
@@ -362,6 +363,21 @@ public class QueryManagerConfig
     public int getMaxQueryLength()
     {
         return maxQueryLength;
+    }
+
+    @NotNull
+    public Optional<Duration> getCompletedResultIdleTimeout()
+    {
+        return completedResultIdleTimeout;
+    }
+
+    @Config("query.completed-result-idle-timeout")
+    @ConfigDescription("Idle retention for completed results; protects active requests and open transactions instead of count or age eviction")
+    public QueryManagerConfig setCompletedResultIdleTimeout(Duration completedResultIdleTimeout)
+    {
+        checkArgument(completedResultIdleTimeout == null || completedResultIdleTimeout.toMillis() > 0, "completedResultIdleTimeout must be positive");
+        this.completedResultIdleTimeout = Optional.ofNullable(completedResultIdleTimeout);
+        return this;
     }
 
     @Config("query.max-length")

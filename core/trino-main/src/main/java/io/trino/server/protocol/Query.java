@@ -311,6 +311,11 @@ class Query
         return this.slug.isValid(EXECUTING_QUERY, slug, token);
     }
 
+    public synchronized boolean isResultTokenValid(long token)
+    {
+        return (lastResult != null && token == lastToken) || (nextToken.isPresent() && token == nextToken.orElseThrow());
+    }
+
     public QueryInfo getQueryInfo()
     {
         return queryManager.getFullQueryInfo(queryId);

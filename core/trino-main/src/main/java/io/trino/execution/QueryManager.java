@@ -90,7 +90,7 @@ public class QueryManager
     private final ThreadPoolExecutorMBean queryManagementExecutorMBean;
 
     @Inject
-    public QueryManager(ClusterMemoryManager memoryManager, Tracer tracer, QueryManagerConfig queryManagerConfig)
+    public QueryManager(ClusterMemoryManager memoryManager, Tracer tracer, QueryManagerConfig queryManagerConfig, QueryResultRetention resultRetention)
     {
         this.memoryManager = requireNonNull(memoryManager, "memoryManager is null");
         this.tracer = requireNonNull(tracer, "tracer is null");
@@ -106,7 +106,7 @@ public class QueryManager
         this.queryManagementExecutor = newScheduledThreadPool(queryManagerConfig.getQueryManagerExecutorPoolSize(), threadsNamed("query-management-%s"));
         this.queryManagementExecutorMBean = new ThreadPoolExecutorMBean((ThreadPoolExecutor) queryManagementExecutor);
 
-        this.queryTracker = new QueryTracker<>(queryManagerConfig, queryManagementExecutor);
+        this.queryTracker = new QueryTracker<>(queryManagerConfig, queryManagementExecutor, resultRetention);
     }
 
     @PostConstruct

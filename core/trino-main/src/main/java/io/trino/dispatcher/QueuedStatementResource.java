@@ -30,6 +30,7 @@ import io.trino.client.QueryResults;
 import io.trino.client.StatementStats;
 import io.trino.execution.ExecutionFailureInfo;
 import io.trino.execution.QueryManagerConfig;
+import io.trino.execution.QueryResultRetention;
 import io.trino.execution.QueryState;
 import io.trino.server.ExternalUriInfo;
 import io.trino.server.GoneException;
@@ -60,6 +61,7 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.container.AsyncResponse;
+import jakarta.ws.rs.container.CompletionCallback;
 import jakarta.ws.rs.container.Suspended;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
@@ -116,6 +118,7 @@ public class QueuedStatementResource
 
     private final HttpRequestSessionContextFactory sessionContextFactory;
     private final DispatchManager dispatchManager;
+    private final QueryResultRetention resultRetention;
     private final Tracer tracer;
 
     private final QueryInfoUrlFactory queryInfoUrlFactory;
@@ -134,10 +137,12 @@ public class QueuedStatementResource
             DispatchExecutor executor,
             QueryInfoUrlFactory queryInfoUrlTemplate,
             ServerConfig serverConfig,
-            QueryManagerConfig queryManagerConfig)
+            QueryManagerConfig queryManagerConfig,
+            QueryResultRetention resultRetention)
     {
         this.sessionContextFactory = requireNonNull(sessionContextFactory, "sessionContextFactory is null");
         this.dispatchManager = requireNonNull(dispatchManager, "dispatchManager is null");
+        this.resultRetention = requireNonNull(resultRetention, "resultRetention is null");
         this.tracer = requireNonNull(tracer, "tracer is null");
         this.responseExecutor = executor.getExecutor();
         this.timeoutExecutor = executor.getScheduledExecutor();
@@ -216,8 +221,21 @@ public class QueuedStatementResource
     {
         Query query = getQuery(queryId, slug, token);
 
-        ListenableFuture<Response> future = getStatus(query, token, externalUriInfo);
-        bindAsyncResponse(asyncResponse, future, responseExecutor);
+        QueryResultRetention.Request request = resultRetention.beginRequest(queryId, true)
+                .orElseThrow(() -> new NotFoundException("Query results expired"));
+        try {
+            asyncResponse.register((CompletionCallback) _ -> request.close());
+            ListenableFuture<Response> future = FluentFuture.from(getStatus(query, token, externalUriInfo))
+                    .transform(response -> {
+                        request.accepted();
+                        return response;
+                    }, directExecutor());
+            bindAsyncResponse(asyncResponse, future, responseExecutor);
+        }
+        catch (RuntimeException | Error e) {
+            request.close();
+            throw e;
+        }
     }
 
     private ListenableFuture<Response> getStatus(Query query, long token, ExternalUriInfo externalUriInfo)

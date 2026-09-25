@@ -31,6 +31,7 @@ import io.trino.spi.QueryId;
 import io.trino.sql.planner.Plan;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.Statement;
+import io.trino.transaction.TransactionId;
 import jakarta.annotation.Nullable;
 
 import java.time.Instant;
@@ -124,6 +125,12 @@ public class DataDefinitionExecution<T extends Statement>
     public Optional<Instant> getEndTime()
     {
         return stateMachine.getEndTime();
+    }
+
+    @Override
+    public Optional<TransactionId> getStartedTransactionId()
+    {
+        return stateMachine.getStartedTransactionId();
     }
 
     @Override

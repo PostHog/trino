@@ -31,6 +31,7 @@ import io.trino.execution.QueryManagerConfig;
 import io.trino.execution.QueryManagerStats;
 import io.trino.execution.QueryPreparer;
 import io.trino.execution.QueryPreparer.PreparedQuery;
+import io.trino.execution.QueryResultRetention;
 import io.trino.execution.QueryTracker;
 import io.trino.execution.resourcegroups.ResourceGroupManager;
 import io.trino.metadata.SessionPropertyManager;
@@ -110,6 +111,7 @@ public class DispatchManager
             SessionPropertyManager sessionPropertyManager,
             Tracer tracer,
             QueryManagerConfig queryManagerConfig,
+            QueryResultRetention resultRetention,
             DispatchExecutor dispatchExecutor,
             QueryMonitor queryMonitor)
     {
@@ -128,7 +130,7 @@ public class DispatchManager
 
         this.dispatchExecutor = new BoundedExecutor(dispatchExecutor.getExecutor(), queryManagerConfig.getDispatcherQueryPoolSize());
 
-        this.queryTracker = new QueryTracker<>(queryManagerConfig, dispatchExecutor.getScheduledExecutor());
+        this.queryTracker = new QueryTracker<>(queryManagerConfig, dispatchExecutor.getScheduledExecutor(), resultRetention);
         this.queryMonitor = requireNonNull(queryMonitor, "queryMonitor is null");
         this.statsUpdaterExecutor = newSingleThreadScheduledExecutor(daemonThreadsNamed("dispatch-manager-stats-%s"));
     }

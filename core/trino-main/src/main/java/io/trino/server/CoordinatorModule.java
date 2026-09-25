@@ -60,6 +60,7 @@ import io.trino.execution.QueryManager;
 import io.trino.execution.QueryManagerConfig;
 import io.trino.execution.QueryPerformanceFetcher;
 import io.trino.execution.QueryPreparer;
+import io.trino.execution.QueryResultRetention;
 import io.trino.execution.RemoteTaskFactory;
 import io.trino.execution.SessionPropertyEvaluator;
 import io.trino.execution.StageInfo;
@@ -204,6 +205,7 @@ public class CoordinatorModule
         jaxrsBinder(binder).bind(ResourceGroupStateInfoResource.class);
         binder.bind(QueryIdGenerator.class).in(Scopes.SINGLETON);
         binder.bind(QueryManager.class).in(Scopes.SINGLETON);
+        binder.bind(QueryResultRetention.class).in(Scopes.SINGLETON);
         newExporter(binder).export(QueryManager.class).as(generator -> generator.generatedNameOf(QueryManager.class)
                 // For backward compatibility
                 .replaceFirst("QueryManager", "SqlQueryManager"));
