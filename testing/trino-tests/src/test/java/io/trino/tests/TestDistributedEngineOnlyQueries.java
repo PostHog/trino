@@ -62,7 +62,6 @@ public class TestDistributedEngineOnlyQueries
                     GROUP BY z % 2
                 ) AS s
                 GROUP BY s.k
-                ORDER BY s.k
                 """))
                 .matches("VALUES (BIGINT '0', BIGINT '10000'), (BIGINT '1', BIGINT '10000')");
     }
