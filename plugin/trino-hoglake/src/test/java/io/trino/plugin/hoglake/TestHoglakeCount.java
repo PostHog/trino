@@ -314,7 +314,7 @@ final class TestHoglakeCount
         // Every file excluded: no split, so no object storage at all.
         assertThat(queryRunner.execute("SELECT count(*) FROM bounded WHERE value > 1000").getOnlyValue()).isEqualTo(0L);
         assertThat(scanQueries.get("/v1/catalogs/lake/namespaces/test/tables/bounded/scan"))
-                .isEqualTo("snapshot=7&include=column_stats&stats_fields=1");
+                .isEqualTo("snapshot=7&include=column_stats,split_offsets&stats_fields=1");
         assertThat(queryRunner.execute("SELECT count(*) FROM bounded WHERE value IS NULL AND value > 1000").getOnlyValue()).isEqualTo(0L);
 
         storageAllowed.set(true);
@@ -329,10 +329,10 @@ final class TestHoglakeCount
         finally {
             storageAllowed.set(false);
         }
-        // A read with no prunable predicate requests no statistics.
+        // A read with no prunable predicate requests no statistics, only row-group offsets.
         assertThatThrownBy(() -> queryRunner.execute("SELECT count(value) FROM bounded"))
                 .hasStackTraceContaining("Object storage must not be accessed for catalog counts");
-        assertThat(scanQueries.get("/v1/catalogs/lake/namespaces/test/tables/bounded/scan")).isEqualTo("snapshot=7");
+        assertThat(scanQueries.get("/v1/catalogs/lake/namespaces/test/tables/bounded/scan")).isEqualTo("snapshot=7&include=split_offsets");
     }
 
     /**
@@ -350,7 +350,7 @@ final class TestHoglakeCount
         // zoneless literal is Los Angeles time, 2026-03-02T07:00Z.
         assertThat(queryRunner.execute(losAngeles, "SELECT count(*) FROM instants WHERE at >= TIMESTAMP '2026-03-01 23:00:00'").getOnlyValue()).isEqualTo(0L);
         assertThat(scanQueries.get("/v1/catalogs/lake/namespaces/test/tables/instants/scan"))
-                .isEqualTo("snapshot=7&include=column_stats&stats_fields=1");
+                .isEqualTo("snapshot=7&include=column_stats,split_offsets&stats_fields=1");
 
         storageAllowed.set(true);
         try {

@@ -30,7 +30,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 
-import static io.airlift.units.DataSize.Unit.GIGABYTE;
+import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -178,9 +178,9 @@ class TestHoglakeSplits
         assertThat(splits.getFirst().footerSize()).isEqualTo(OptionalLong.of(321));
         assertThat(HoglakeSplitManager.toSplits(List.of(new HoglakeDtos.ScanFile(DELETED_FROM, DELETE_FILE))).getFirst().footerSize()).isEmpty();
 
-        // The default target is 1GB: a file of exactly that size stays whole, one byte more is cut in two.
+        // The default target is 256MB: a file of exactly that size stays whole, one byte more is cut in two.
         long target = HoglakeConfig.DEFAULT_MAX_SPLIT_SIZE.toBytes();
-        assertThat(target).isEqualTo(DataSize.of(1, GIGABYTE).toBytes());
+        assertThat(target).isEqualTo(DataSize.of(256, MEGABYTE).toBytes());
         assertThat(HoglakeSplitManager.toSplits(List.of(new HoglakeDtos.ScanFile(largeFile(target, List.of()), null))))
                 .singleElement()
                 .satisfies(split -> assertThat(split.wholeFile()).isTrue());

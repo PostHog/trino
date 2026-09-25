@@ -13,9 +13,11 @@
  */
 package io.trino.plugin.hoglake;
 
+import com.google.common.collect.ImmutableMap;
 import io.trino.parquet.ParquetCorruptionException;
 import io.trino.parquet.ParquetDataSourceId;
 import io.trino.parquet.reader.ParquetReader;
+import io.trino.plugin.base.metrics.LongCount;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
@@ -23,6 +25,7 @@ import io.trino.spi.block.RowBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.SourcePage;
+import io.trino.spi.metrics.Metric;
 import io.trino.spi.metrics.Metrics;
 import io.trino.spi.type.Type;
 
@@ -49,10 +52,34 @@ import static java.util.Objects.requireNonNull;
  * the vector by its original, file-relative position. That position is
  * unaffected by projected columns, page and batch boundaries, and pruned
  * earlier row groups — unlike a page-local index.
+ *
+ * <p>Besides the Parquet reader's own metrics, each split reports whether it
+ * found its file's footer already decoded in the footer cache, and how many
+ * row groups it reads after pruning. The engine sums these over the query's
+ * splits.
  */
 public class HoglakePageSource
         implements ConnectorPageSource
 {
+    /**
+     * 1 when the split found its footer decoded in the footer cache, else 0.
+     */
+    public static final String FOOTER_CACHE_HITS = "footerCacheHits";
+    /**
+     * 1 when the split decoded its footer itself, else 0.
+     */
+    public static final String FOOTER_CACHE_MISSES = "footerCacheMisses";
+    /**
+     * The row groups the split reads: those starting in its byte range that
+     * the predicate does not prune.
+     */
+    public static final String ROW_GROUPS_READ = "rowGroupsRead";
+    /**
+     * 1 when the split reads no row group, because none starts in its byte
+     * range or the predicate prunes all of them, else 0.
+     */
+    public static final String RANGE_WITH_NO_ROW_GROUPS = "rangeWithNoRowGroups";
+
     /**
      * Either "channel i of the reader page" or "all nulls of this type".
      */
@@ -89,6 +116,7 @@ public class HoglakePageSource
      * vector bitmap are charged in the same aggregation.
      */
     private final HoglakeSplitResources resources;
+    private final Metrics splitMetrics;
 
     private boolean closed;
     private long completedPositions;
@@ -97,12 +125,14 @@ public class HoglakePageSource
             ParquetReader parquetReader,
             List<ColumnAdaptation> columns,
             HoglakeDeletionVector deletionVector,
-            HoglakeSplitResources resources)
+            HoglakeSplitResources resources,
+            Metrics splitMetrics)
     {
         this.parquetReader = requireNonNull(parquetReader, "parquetReader is null");
         this.columns = List.copyOf(columns);
         this.deletionVector = deletionVector;
         this.resources = requireNonNull(resources, "resources is null");
+        this.splitMetrics = requireNonNull(splitMetrics, "splitMetrics is null");
         this.nullBlocks = new ArrayList<>(columns.size());
         for (ColumnAdaptation column : columns) {
             nullBlocks.add(column instanceof NullColumn(Type type)
@@ -228,7 +258,16 @@ public class HoglakePageSource
     @Override
     public Metrics getMetrics()
     {
-        return parquetReader.getMetrics();
+        return splitMetrics.mergeWith(parquetReader.getMetrics());
+    }
+
+    static Metrics splitMetrics(boolean footerCacheHit, int rowGroupsRead)
+    {
+        return new Metrics(ImmutableMap.<String, Metric<?>>of(
+                FOOTER_CACHE_HITS, new LongCount(footerCacheHit ? 1 : 0),
+                FOOTER_CACHE_MISSES, new LongCount(footerCacheHit ? 0 : 1),
+                ROW_GROUPS_READ, new LongCount(rowGroupsRead),
+                RANGE_WITH_NO_ROW_GROUPS, new LongCount(rowGroupsRead == 0 ? 1 : 0)));
     }
 
     @Override

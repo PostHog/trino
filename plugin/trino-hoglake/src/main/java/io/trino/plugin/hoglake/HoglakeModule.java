@@ -15,6 +15,7 @@ package io.trino.plugin.hoglake;
 
 import com.google.inject.Binder;
 import com.google.inject.Module;
+import com.google.inject.Provider;
 import com.google.inject.Provides;
 import com.google.inject.Scopes;
 import com.google.inject.Singleton;
@@ -24,6 +25,7 @@ import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.spi.NodeVersion;
 import io.trino.spi.PageSorter;
+import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSplitManager;
@@ -31,6 +33,7 @@ import io.trino.spi.connector.ConnectorSplitManager;
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static io.airlift.bootstrap.ClosingBinder.closingBinder;
 import static io.airlift.configuration.ConfigBinder.configBinder;
+import static org.weakref.jmx.guice.ExportBinder.newExporter;
 
 public class HoglakeModule
         implements Module
@@ -41,6 +44,10 @@ public class HoglakeModule
         configBinder(binder).bindConfig(HoglakeConfig.class);
         closingBinder(binder).registerCloseable(HoglakeClient.class);
         newSetBinder(binder, SessionPropertiesProvider.class).addBinding().to(HoglakeSessionProperties.class).in(Scopes.SINGLETON);
+
+        Provider<CatalogName> catalogName = binder.getProvider(CatalogName.class);
+        newExporter(binder).export(HoglakeParquetFooterCache.class)
+                .as(generator -> generator.generatedNameOf(HoglakeParquetFooterCache.class, catalogName.get().toString()));
     }
 
     @Provides
@@ -69,10 +76,17 @@ public class HoglakeModule
 
     @Provides
     @Singleton
-    public static ConnectorPageSourceProvider createPageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeConfig config)
+    public static HoglakeParquetFooterCache createParquetFooterCache(HoglakeConfig config)
     {
         // One cache per catalog on each node, shared by every split the node reads.
-        return new HoglakePageSourceProvider(fileSystemFactory, new HoglakeParquetFooterCache(config.getParquetFooterCacheMaxSize()));
+        return new HoglakeParquetFooterCache(config.getParquetFooterCacheMaxSize());
+    }
+
+    @Provides
+    @Singleton
+    public static ConnectorPageSourceProvider createPageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache)
+    {
+        return new HoglakePageSourceProvider(fileSystemFactory, footerCache);
     }
 
     @Provides

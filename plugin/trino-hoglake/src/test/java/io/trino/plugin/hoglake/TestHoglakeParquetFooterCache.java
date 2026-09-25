@@ -15,11 +15,13 @@ package io.trino.plugin.hoglake;
 
 import io.airlift.slice.Slices;
 import io.airlift.units.DataSize;
+import io.trino.cache.CacheStatsMBean;
 import io.trino.parquet.ParquetDataSourceId;
 import io.trino.parquet.metadata.ParquetMetadata;
 import io.trino.parquet.reader.MetadataReader;
 import io.trino.parquet.writer.ParquetWriterOptions;
 import io.trino.plugin.hoglake.HoglakeParquetFooterCache.Key;
+import io.trino.plugin.hoglake.HoglakeParquetFooterCache.Lookup;
 import io.trino.plugin.hoglake.HoglakeParquetFooterCache.ParsedFooter;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures.FileColumn;
@@ -69,12 +71,51 @@ class TestHoglakeParquetFooterCache
         AtomicInteger loads = new AtomicInteger();
         Key key = new Key("memory:///a.parquet", FILE.length);
 
-        ParsedFooter first = cache.get(key, () -> footer(loads, 100));
-        ParsedFooter second = cache.get(key, () -> footer(loads, 100));
+        Lookup first = cache.get(key, () -> footer(loads, 100));
+        Lookup second = cache.get(key, () -> footer(loads, 100));
 
         assertThat(loads).hasValue(1);
-        assertThat(second).isSameAs(first);
+        assertThat(second.footer()).isSameAs(first.footer());
         assertThat(cache.stats().hitCount()).isEqualTo(1);
+    }
+
+    @Test
+    void eachLookupReportsWhetherItLoaded()
+            throws IOException
+    {
+        HoglakeParquetFooterCache cache = new HoglakeParquetFooterCache(DataSize.ofBytes(1000));
+        AtomicInteger loads = new AtomicInteger();
+        Key a = new Key("memory:///a.parquet", FILE.length);
+        Key b = new Key("memory:///b.parquet", FILE.length);
+
+        assertThat(cache.get(a, () -> footer(loads, 100)).hit()).isFalse();
+        assertThat(cache.get(a, () -> footer(loads, 100)).hit()).isTrue();
+        assertThat(cache.get(a, () -> footer(loads, 100)).hit()).isTrue();
+        assertThat(cache.get(b, () -> footer(loads, 100)).hit()).isFalse();
+
+        assertThat(loads).hasValue(2);
+        assertThat(cache.stats().hitCount()).isEqualTo(2);
+        assertThat(cache.stats().missCount()).isEqualTo(2);
+        assertThat(cache.stats().loadSuccessCount()).isEqualTo(2);
+    }
+
+    @Test
+    void exportedStatisticsCountHitsAndLoads()
+            throws IOException
+    {
+        HoglakeParquetFooterCache cache = new HoglakeParquetFooterCache(DataSize.ofBytes(1000));
+        AtomicInteger loads = new AtomicInteger();
+        Key key = new Key("memory:///a.parquet", FILE.length);
+        for (int lookup = 0; lookup < 4; lookup++) {
+            cache.get(key, () -> footer(loads, 100));
+        }
+
+        CacheStatsMBean stats = cache.getCacheStats();
+        assertThat(stats.getRequestCount()).isEqualTo(4);
+        assertThat(stats.getLoadCount()).isEqualTo(1);
+        assertThat(stats.getHitRate()).isEqualTo(0.75);
+        assertThat(stats.getMissRate()).isEqualTo(0.25);
+        assertThat(stats.size()).isEqualTo(1);
     }
 
     @Test
@@ -99,10 +140,12 @@ class TestHoglakeParquetFooterCache
         AtomicInteger loads = new AtomicInteger();
         Key key = new Key("memory:///a.parquet", FILE.length);
 
-        cache.get(key, () -> footer(loads, 100));
-        cache.get(key, () -> footer(loads, 100));
+        assertThat(cache.get(key, () -> footer(loads, 100)).hit()).isFalse();
+        assertThat(cache.get(key, () -> footer(loads, 100)).hit()).isFalse();
 
         assertThat(loads).hasValue(2);
+        assertThat(cache.stats().missCount()).isEqualTo(2);
+        assertThat(cache.stats().hitCount()).isZero();
         assertThat(cache.contains(key)).isFalse();
         assertThat(cache.totalWeight()).isZero();
     }
@@ -141,7 +184,7 @@ class TestHoglakeParquetFooterCache
         Key oversized = new Key("memory:///oversized.parquet", 1);
 
         cache.get(small, () -> footer(loads, 1));
-        ParsedFooter loaded = cache.get(oversized, () -> footer(loads, 1001));
+        ParsedFooter loaded = cache.get(oversized, () -> footer(loads, 1001)).footer();
 
         // The caller still gets the footer it loaded; the cache does not keep it,
         // and keeping out an oversized footer does not evict the others.
@@ -182,7 +225,7 @@ class TestHoglakeParquetFooterCache
         CountDownLatch loading = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
 
-        AtomicReference<ParsedFooter> firstResult = new AtomicReference<>();
+        AtomicReference<Lookup> firstResult = new AtomicReference<>();
         Thread first = new Thread(() -> {
             try {
                 firstResult.set(cache.get(key, () -> {
@@ -198,7 +241,7 @@ class TestHoglakeParquetFooterCache
         first.start();
         loading.await();
 
-        AtomicReference<ParsedFooter> secondResult = new AtomicReference<>();
+        AtomicReference<Lookup> secondResult = new AtomicReference<>();
         Thread second = new Thread(() -> {
             try {
                 secondResult.set(cache.get(key, () -> footer(loads, 100)));
@@ -221,7 +264,10 @@ class TestHoglakeParquetFooterCache
         second.join();
 
         assertThat(loads).hasValue(1);
-        assertThat(secondResult.get()).isSameAs(firstResult.get());
+        assertThat(secondResult.get().footer()).isSameAs(firstResult.get().footer());
+        // Only the lookup that loaded is a miss; the one that waited decoded nothing.
+        assertThat(firstResult.get().hit()).isFalse();
+        assertThat(secondResult.get().hit()).isTrue();
     }
 
     private static ParsedFooter footer(AtomicInteger loads, int weight)

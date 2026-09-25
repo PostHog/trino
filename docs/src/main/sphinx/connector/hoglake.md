@@ -24,7 +24,7 @@ the catalog's files.
 | `hoglake.uri` | Hoglake REST base URI; required. | None |
 | `hoglake.catalog` | Hoglake catalog to expose. | `hoglake` |
 | `hoglake.client.request-timeout` | Positive request timeout, with `ms`, `s`, `m`, `h`, or `d` suffix. | `2m` |
-| `hoglake.max-split-size` | Largest byte range of one Parquet file assigned to a single split; at least `1MB`. See [](hoglake-split-planning). Use the `max_split_size` catalog session property to change it for a session. | `1GB` |
+| `hoglake.max-split-size` | Largest byte range of one Parquet file assigned to a single split; at least `1MB`. See [](hoglake-split-planning). Use the `max_split_size` catalog session property to change it for a session. | `256MB` |
 | `hoglake.parquet-footer-cache.max-size` | Serialized size of the parsed Parquet footers each worker keeps for the catalog; `0B` disables the cache. See [](hoglake-split-planning). | `64MB` |
 | `fs.s3.enabled` | Enable the native S3 filesystem. | `true` |
 | `s3.endpoint` | Optional S3-compatible endpoint. | AWS endpoint resolution |
@@ -162,13 +162,16 @@ once. Splits are planned from the file sizes in the catalog's scan response, wit
 opening any file, so planning costs the same single REST call however large the
 files are.
 
-When the scan response lists a file's row-group start offsets in `split_offsets`,
-ranges are cut on those offsets: consecutive row groups are packed into one range
-while they fit within `hoglake.max-split-size`, and a row group larger than that is a
-range of its own. Without usable offsets, a file is cut into equal ranges of
+The connector requests the catalog's row-group start offsets on every read scan
+(`include=split_offsets`). When the scan response lists a file's offsets in
+`split_offsets`, ranges are cut on those offsets: consecutive row groups are packed
+into one range while they fit within `hoglake.max-split-size`, and a row group larger
+than that is a range of its own. Without usable offsets, a file is cut into equal ranges of
 `hoglake.max-split-size`, the last one shorter; a range that holds no row-group start
 reads only the footer and returns no rows. The catalog's `footer_size`, when known,
-lets each split fetch the Parquet footer in a single request.
+lets each split fetch the Parquet footer in a single request. A catalog too old to
+serve row-group offsets or per-file column bounds is detected, and planning proceeds
+without them.
 
 Every range of a file that reads data needs the file's whole Parquet footer, which for a file with
 many row groups is megabytes of metadata that is costly to decode. Each worker keeps
@@ -181,12 +184,22 @@ and a footer larger than the whole bound is not cached. To keep a hot table's fo
 cached, size the bound to at least the sum of the `footer_size` of its data files.
 This cache is separate from
 [filesystem caching](hoglake-filesystem-caching), which caches bytes and so still
-leaves every range to decode the footer.
+leaves every range to decode the footer. The cache's request, load, hit-rate and
+miss-rate statistics are exported over JMX as
+`io.trino.plugin.hoglake:type=HoglakeParquetFooterCache,name=<catalog>`, and
+each split reports whether it hit the cache (`footerCacheHits`,
+`footerCacheMisses`) and how many row groups it read after pruning
+(`rowGroupsRead`, `rangeWithNoRowGroups`) as connector metrics, which
+`EXPLAIN ANALYZE VERBOSE` shows summed over the query.
 
-The default of `1GB` suits Hoglake's large files: their row groups average around
-150 MiB, so a smaller range often holds no row-group start while still costing a
-split and reader setup. A 1 GB range packs several row groups and still leaves
-ample parallelism; a scan of about 170 GiB is planned as about 170 splits.
+Because of the footer cache, an extra split costs little more than a cache hit
+and reader setup, so the default of `256MB` favors balance over fewer splits.
+Hoglake's row groups average around 150 MiB, so a 256 MB range holds about two
+of them. A large file is then read as many short splits, which threads pick up
+as they become free, rather than a few long ones that the query must wait for.
+If a table's row groups are much larger than that, raise
+`hoglake.max-split-size`, since a range smaller than a row group often holds no
+row-group start and returns no rows.
 
 Splits are weighted by the share of `hoglake.max-split-size` they cover, so the
 scheduler assigns more short ranges than full ones to each worker.

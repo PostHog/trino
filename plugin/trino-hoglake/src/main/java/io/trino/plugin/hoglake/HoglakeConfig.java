@@ -24,13 +24,14 @@ import java.time.Duration;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import static io.airlift.units.DataSize.Unit.GIGABYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 
 public class HoglakeConfig
 {
-    // Hoglake row groups average about 150 MiB, so a range this size holds several of them.
-    public static final DataSize DEFAULT_MAX_SPLIT_SIZE = DataSize.of(1, GIGABYTE);
+    // With the footer cache, a split costs a cache hit plus reader setup, so a smaller
+    // target buys balance across drivers and work stealing at little cost. Hoglake row
+    // groups average about 150 MiB, so a range this size holds about two of them.
+    public static final DataSize DEFAULT_MAX_SPLIT_SIZE = DataSize.of(256, MEGABYTE);
 
     private static final Pattern DURATION = Pattern.compile("\\s*(\\d+(?:\\.\\d+)?)\\s*(ms|s|m|h|d)\\s*");
 

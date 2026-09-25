@@ -31,6 +31,7 @@ import io.trino.parquet.predicate.TupleDomainParquetPredicate;
 import io.trino.parquet.reader.MetadataReader;
 import io.trino.parquet.reader.ParquetReader;
 import io.trino.parquet.reader.RowGroupInfo;
+import io.trino.plugin.hoglake.HoglakeParquetFooterCache.Lookup;
 import io.trino.plugin.hoglake.HoglakeParquetFooterCache.ParsedFooter;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
@@ -167,7 +168,8 @@ public class HoglakePageSourceProvider
         ConnectorPageSource pageSource = null;
         try {
             dataSource = createDataSource(inputFile, hoglakeSplit.fileSizeBytes(), options);
-            ParsedFooter footer = readFooter(dataSource, hoglakeSplit, options);
+            Lookup footerLookup = readFooter(dataSource, hoglakeSplit, options);
+            ParsedFooter footer = footerLookup.footer();
             // Every range of a file with a deletion vector loads the whole vector:
             // its positions are file row ordinals, and the reader numbers a range's
             // rows from the file's first row, so the vector applies unchanged.
@@ -175,6 +177,7 @@ public class HoglakePageSourceProvider
             pageSource = createParquetPageSource(
                     dataSource,
                     footer.metadata(),
+                    footerLookup.hit(),
                     deletionVector,
                     hoglakeSplit,
                     hoglakeColumns,
@@ -258,9 +261,11 @@ public class HoglakePageSourceProvider
      * The split's parsed footer. Every range of a file needs the whole footer,
      * so the ranges a worker reads share one parse through the footer cache;
      * a hit reads nothing from the file. A miss fetches the footer in a single
-     * tail request sized from the catalog's {@code footer_size}.
+     * tail request sized from the catalog's {@code footer_size}. The lookup
+     * also says whether this split found the footer already decoded, which
+     * the split reports in its metrics.
      */
-    private ParsedFooter readFooter(ParquetDataSource dataSource, HoglakeSplit split, ParquetReaderOptions options)
+    private Lookup readFooter(ParquetDataSource dataSource, HoglakeSplit split, ParquetReaderOptions options)
             throws IOException
     {
         // The decoded footer is shared read-only between splits, which is safe
@@ -349,6 +354,7 @@ public class HoglakePageSourceProvider
     private static ConnectorPageSource createParquetPageSource(
             ParquetDataSource dataSource,
             ParquetMetadata parquetMetadata,
+            boolean footerCacheHit,
             HoglakeDeletionVector deletionVector,
             HoglakeSplit split,
             List<HoglakeColumnHandle> columns,
@@ -435,7 +441,7 @@ public class HoglakePageSourceProvider
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty());
-        return new HoglakePageSource(parquetReader, adaptations, deletionVector, resources);
+        return new HoglakePageSource(parquetReader, adaptations, deletionVector, resources, HoglakePageSource.splitMetrics(footerCacheHit, rowGroups.size()));
     }
 
     /**

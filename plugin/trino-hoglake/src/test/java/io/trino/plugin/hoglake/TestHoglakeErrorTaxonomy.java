@@ -30,8 +30,11 @@ import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_NOT_FOUND;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_UNAVAILABLE;
@@ -50,6 +53,8 @@ import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
  * <ul>
  * <li>unreachable control plane / 5xx -> HOGLAKE_CATALOG_UNAVAILABLE (EXTERNAL)</li>
  * <li>410 Gone -> HOGLAKE_SNAPSHOT_EXPIRED (the typed expiry signal)</li>
+ * <li>a 422 other than the planning scan's unknown-include refusal ->
+ *     HOGLAKE_INVALID_RESPONSE, not retried</li>
  * <li>malformed 200 body -> HOGLAKE_INVALID_RESPONSE, never a bare
  *     UncheckedIOException</li>
  * <li>configured catalog missing -> HOGLAKE_CATALOG_NOT_FOUND (USER_ERROR)</li>
@@ -65,6 +70,7 @@ class TestHoglakeErrorTaxonomy
     private record CannedResponse(int status, String body) {}
 
     private static final ConcurrentMap<String, CannedResponse> RESPONSES = new ConcurrentHashMap<>();
+    private static final List<String> REQUESTS = new CopyOnWriteArrayList<>();
     private static HttpServer server;
     private static HoglakeClient client;
 
@@ -76,6 +82,9 @@ class TestHoglakeErrorTaxonomy
     {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", exchange -> {
+            if (exchange.getRequestURI().getPath().equals(SCAN_PATH)) {
+                REQUESTS.add(exchange.getRequestURI().getRawQuery());
+            }
             CannedResponse response = RESPONSES.getOrDefault(
                     exchange.getRequestURI().getPath(),
                     new CannedResponse(404, "{\"error\":\"not_found\"}"));
@@ -100,6 +109,7 @@ class TestHoglakeErrorTaxonomy
     void reset()
     {
         RESPONSES.clear();
+        REQUESTS.clear();
     }
 
     @Test
@@ -132,6 +142,47 @@ class TestHoglakeErrorTaxonomy
                         assertThat(e.getErrorCode()).isEqualTo(HOGLAKE_SNAPSHOT_EXPIRED.toErrorCode()))
                 .hasMessageContaining("snapshot expired")
                 .hasMessageContaining("HTTP 410");
+    }
+
+    @Test
+    void otherPlanningScan422_surfacesAsInvalidResponseWithoutRetry()
+    {
+        // Only the catalog's unknown-include refusal is retried without the
+        // optional parts; every other 422 is reported as before, from the
+        // single request that drew it.
+        for (String body : List.of(
+                "{\"error\": \"validation\", \"detail\": \"stats_fields requires include=column_stats\"}",
+                "{\"error\": \"validation\", \"detail\": \"column_stats would return more than 1000000 entries\"}",
+                // Names only a value this scan did not send.
+                "{\"error\": \"validation\", \"detail\": \"include: unknown value(s) 'column_stats'; supported: split_offsets\"}",
+                "{\"error\": \"conflict\", \"detail\": \"include: unknown value(s) 'split_offsets'; supported: column_stats\"}",
+                "include: unknown value(s) 'split_offsets'; supported: column_stats")) {
+            RESPONSES.put(SCAN_PATH, new CannedResponse(422, body));
+            REQUESTS.clear();
+
+            assertThatThrownBy(() -> client.planningScan("analytics", "events", 3, Set.of()))
+                    .isInstanceOfSatisfying(TrinoException.class, e ->
+                            assertThat(e.getErrorCode()).isEqualTo(HOGLAKE_INVALID_RESPONSE.toErrorCode()))
+                    .hasMessageContaining("HTTP 422");
+            assertThat(REQUESTS).containsExactly("snapshot=3&include=split_offsets");
+        }
+    }
+
+    @Test
+    void planningScanNotFoundAndGone_keepTheirTypedErrorsWithoutRetry()
+    {
+        assertThatThrownBy(() -> client.planningScan("analytics", "events", 3, Set.of(1L)))
+                .isInstanceOf(TableNotFoundException.class)
+                .hasMessageContaining("analytics.events");
+        assertThat(REQUESTS).containsExactly("snapshot=3&include=column_stats,split_offsets&stats_fields=1");
+
+        RESPONSES.put(SCAN_PATH, new CannedResponse(410, "{\"error\":\"expired\"}"));
+        REQUESTS.clear();
+        assertThatThrownBy(() -> client.planningScan("analytics", "events", 3, Set.of(1L)))
+                .isInstanceOfSatisfying(TrinoException.class, e ->
+                        assertThat(e.getErrorCode()).isEqualTo(HOGLAKE_SNAPSHOT_EXPIRED.toErrorCode()))
+                .hasMessageContaining("HTTP 410");
+        assertThat(REQUESTS).containsExactly("snapshot=3&include=column_stats,split_offsets&stats_fields=1");
     }
 
     @Test
