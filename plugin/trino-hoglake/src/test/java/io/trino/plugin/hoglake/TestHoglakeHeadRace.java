@@ -148,7 +148,7 @@ class TestHoglakeHeadRace
         // Head at snapshot 4, incarnation 1 visible at it.
         RESPONSES.put(CATALOG_PATH, ok(catalogJson(4)));
         RESPONSES.put(TABLE_PATH + "?snapshot=4", ok(tableJson("uuid-incarnation-1", "total")));
-        RESPONSES.put(SCAN_PATH + "?snapshot=4", ok(scanJson(V1_FILE, v1Parquet.length, 2)));
+        RESPONSES.put(planningScanKey(4), ok(scanJson(V1_FILE, v1Parquet.length, 2)));
     }
 
     /**
@@ -161,7 +161,7 @@ class TestHoglakeHeadRace
     {
         RESPONSES.put(CATALOG_PATH, ok(catalogJson(9)));
         RESPONSES.put(TABLE_PATH + "?snapshot=9", ok(tableJson("uuid-incarnation-2", "user_id")));
-        RESPONSES.put(SCAN_PATH + "?snapshot=9", ok(scanJson(V2_FILE, v2Parquet.length, 3)));
+        RESPONSES.put(planningScanKey(9), ok(scanJson(V2_FILE, v2Parquet.length, 3)));
     }
 
     // ---- the verdict -------------------------------------------------------
@@ -266,7 +266,7 @@ class TestHoglakeHeadRace
 
         // Retention expires snapshot 4 while the query is between analysis
         // and execution: the pinned scan is now below the expiry floor.
-        RESPONSES.put(SCAN_PATH + "?snapshot=4", new CannedResponse(410, "{\"error\":\"gone\"}"));
+        RESPONSES.put(planningScanKey(4), new CannedResponse(410, "{\"error\":\"gone\"}"));
 
         // Regression (S1/S3): the typed "snapshot expired during query"
         // failure — never silently-wrong rows, never a generic internal
@@ -297,9 +297,9 @@ class TestHoglakeHeadRace
                     "delete_count": 1, "file_size_bytes": 64, "begin_snapshot": %d}}
                 ]
                 """;
-        RESPONSES.put(SCAN_PATH + "?snapshot=3", ok(scan.formatted(
+        RESPONSES.put(planningScanKey(3), ok(scan.formatted(
                 V1_FILE, v1Parquet.length, 7, "memory:///metrics-at-3.dv", 3)));
-        RESPONSES.put(SCAN_PATH + "?snapshot=4", ok(scan.formatted(
+        RESPONSES.put(planningScanKey(4), ok(scan.formatted(
                 V1_FILE, v1Parquet.length, 8, "memory:///metrics-at-4.dv", 4)));
 
         for (long snapshot : new long[] {3, 4}) {
@@ -323,7 +323,7 @@ class TestHoglakeHeadRace
         // about that file at the pinned snapshot, so it must ride the split
         // that the pinned scan produced -- never be re-resolved later, when
         // head may already have superseded it.
-        RESPONSES.put(SCAN_PATH + "?snapshot=4", ok(
+        RESPONSES.put(planningScanKey(4), ok(
                 """
                 [
                   {"data_file": {"data_file_id": 1, "path": "%s", "file_format": "parquet",
@@ -367,7 +367,7 @@ class TestHoglakeHeadRace
         // still serves the analyzed single file.
         RESPONSES.put(CATALOG_PATH, ok(catalogJson(5)));
         RESPONSES.put(TABLE_PATH + "?snapshot=5", ok(tableJson("uuid-incarnation-1", "total")));
-        RESPONSES.put(SCAN_PATH + "?snapshot=5", ok(
+        RESPONSES.put(planningScanKey(5), ok(
                 """
                 [
                   {"data_file": {"data_file_id": 1, "path": "%s", "file_format": "parquet",
@@ -464,5 +464,14 @@ class TestHoglakeHeadRace
                    "stats_state": "provided", "begin_snapshot": 1}}
                ]
                """.formatted(path, recordCount, fileSize);
+    }
+
+    /**
+     * The canned-response key of the scan split planning sends at a
+     * snapshot: a read always asks for row-group offsets.
+     */
+    private static String planningScanKey(long snapshot)
+    {
+        return SCAN_PATH + "?snapshot=" + snapshot + "&include=split_offsets";
     }
 }

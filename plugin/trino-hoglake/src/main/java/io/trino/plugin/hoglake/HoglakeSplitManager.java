@@ -149,7 +149,8 @@ public class HoglakeSplitManager
     /**
      * Every file visible to the handle: the catalog's scan at the pinned
      * snapshot plus the files and deletes this transaction staged. Nothing
-     * is pruned; writers need the whole set.
+     * is pruned; writers need the whole set, and no statistics or row-group
+     * offsets are requested.
      */
     static List<HoglakeDtos.ScanFile> scan(HoglakeClient client, HoglakeTableHandle handle)
     {
@@ -157,19 +158,20 @@ public class HoglakeSplitManager
     }
 
     /**
-     * The files a read must plan: the catalog's scan, requesting bounds for
-     * the predicate's prunable columns and dropping files those bounds
-     * exclude, plus every staged file.
+     * The files a read must plan: the catalog's planning scan, carrying
+     * row-group offsets to cut splits on and bounds for the predicate's
+     * prunable columns, dropping files those bounds exclude, plus every
+     * staged file.
      */
     static List<HoglakeDtos.ScanFile> prunedScan(HoglakeClient client, HoglakeTableHandle handle)
     {
         Set<Long> statsFields = HoglakeFilePruner.prunableFieldIds(handle.constraint());
-        if (statsFields.isEmpty()) {
-            return scan(client, handle);
+        List<HoglakeDtos.ScanFile> catalogFiles = client.planningScan(handle.schemaName(), handle.tableName(), handle.snapshotId(), statsFields);
+        if (!statsFields.isEmpty()) {
+            catalogFiles = catalogFiles.stream()
+                    .filter(file -> file.dataFile() == null || HoglakeFilePruner.mayContain(handle.constraint(), file.dataFile()))
+                    .toList();
         }
-        List<HoglakeDtos.ScanFile> catalogFiles = client.scan(handle.schemaName(), handle.tableName(), handle.snapshotId(), statsFields).stream()
-                .filter(file -> file.dataFile() == null || HoglakeFilePruner.mayContain(handle.constraint(), file.dataFile()))
-                .toList();
         return withStaged(handle, catalogFiles);
     }
 

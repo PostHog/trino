@@ -162,10 +162,11 @@ once. Splits are planned from the file sizes in the catalog's scan response, wit
 opening any file, so planning costs the same single REST call however large the
 files are.
 
-When the scan response lists a file's row-group start offsets in `split_offsets`,
-ranges are cut on those offsets: consecutive row groups are packed into one range
-while they fit within `hoglake.max-split-size`, and a row group larger than that is a
-range of its own. Without usable offsets, a file is cut into equal ranges of
+The connector requests the catalog's row-group start offsets on every read scan
+(`include=split_offsets`). When the scan response lists a file's offsets in
+`split_offsets`, ranges are cut on those offsets: consecutive row groups are packed
+into one range while they fit within `hoglake.max-split-size`, and a row group larger
+than that is a range of its own. Without usable offsets, a file is cut into equal ranges of
 `hoglake.max-split-size`, the last one shorter; a range that holds no row-group start
 reads only the footer and returns no rows. The catalog's `footer_size`, when known,
 lets each split fetch the Parquet footer in a single request.

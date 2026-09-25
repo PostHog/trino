@@ -196,27 +196,41 @@ public class HoglakeClient
     }
 
     /**
-     * The split source: data files paired with live DVs at the pinned snapshot.
+     * Every data file paired with its live DV at the pinned snapshot, with no
+     * optional parts ({@code snapshot=N} only): the writer's view, which
+     * needs neither statistics nor row-group offsets.
      */
     public List<HoglakeDtos.ScanFile> scan(String namespace, String table, long snapshot)
     {
-        return scan(namespace, table, snapshot, Set.of());
+        return fetchScan(namespace, table, "/scan?snapshot=" + snapshot);
     }
 
     /**
-     * The split source, with each provided file's statistics for the given
-     * field ids ({@code include=column_stats&stats_fields=...}), so planning
-     * can prune files. An empty set requests no statistics.
+     * The split source for a read: {@link #scan(String, String, long)} plus
+     * each file's row-group start offsets ({@code include=split_offsets}),
+     * which split planning cuts on when present. A non-empty
+     * {@code statsFields} also requests each provided file's statistics for
+     * those field ids, so planning can prune files
+     * ({@code include=column_stats,split_offsets&stats_fields=...}, ids
+     * ascending).
      */
-    public List<HoglakeDtos.ScanFile> scan(String namespace, String table, long snapshot, Set<Long> statsFields)
+    public List<HoglakeDtos.ScanFile> planningScan(String namespace, String table, long snapshot, Set<Long> statsFields)
     {
         String query = "/scan?snapshot=" + snapshot;
-        if (!statsFields.isEmpty()) {
-            query += "&include=column_stats&stats_fields=" + statsFields.stream()
+        if (statsFields.isEmpty()) {
+            query += "&include=split_offsets";
+        }
+        else {
+            query += "&include=column_stats,split_offsets&stats_fields=" + statsFields.stream()
                     .sorted()
                     .map(String::valueOf)
                     .collect(joining(","));
         }
+        return fetchScan(namespace, table, query);
+    }
+
+    private List<HoglakeDtos.ScanFile> fetchScan(String namespace, String table, String query)
+    {
         return get(tablePath(namespace, table, query),
                 new TypeReference<List<HoglakeDtos.ScanFile>>() {})
                 .orElseThrow(() -> new TableNotFoundException(new SchemaTableName(namespace, table)));

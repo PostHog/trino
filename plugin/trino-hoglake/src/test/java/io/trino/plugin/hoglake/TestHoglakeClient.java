@@ -126,6 +126,7 @@ class TestHoglakeClient
                     "column_stats": []}},
                   {"data_file": {"data_file_id": 22, "path": "s3://lake/stats/full.parquet", "file_format": "parquet",
                     "record_count": 5, "file_size_bytes": 512, "row_id_start": 10, "stats_state": "provided", "begin_snapshot": 3,
+                    "split_offsets": [4, 200],
                     "column_stats": [
                       {"field_id": 1, "value_count": 5, "null_count": 0, "lower_bound": 9007199254740993, "upper_bound": 9223372036854775807},
                       {"field_id": 7, "value_count": 5, "null_count": 5, "nan_count": 0, "lower_bound": null, "upper_bound": null}]}}
@@ -244,25 +245,45 @@ class TestHoglakeClient
     }
 
     @Test
-    void scanRequestsStatisticsOnlyForTheGivenFields()
+    void planningScanRequestsOffsetsAndStatisticsOnlyForTheGivenFields()
+    {
+        String scanPath = "/v1/catalogs/lake/namespaces/analytics/tables/stats/scan";
+        client.planningScan("analytics", "stats", 6, Set.of());
+        assertThat(QUERIES.get(scanPath)).isEqualTo("snapshot=6&include=split_offsets");
+        client.planningScan("analytics", "stats", 6, Set.of(7L, 1L));
+        assertThat(QUERIES.get(scanPath)).isEqualTo("snapshot=6&include=column_stats,split_offsets&stats_fields=1,7");
+    }
+
+    @Test
+    void writerScanRequestsNoOptionalParts()
     {
         String scanPath = "/v1/catalogs/lake/namespaces/analytics/tables/stats/scan";
         client.scan("analytics", "stats", 6);
         assertThat(QUERIES.get(scanPath)).isEqualTo("snapshot=6");
-        client.scan("analytics", "stats", 6, Set.of());
+    }
+
+    @Test
+    void readPlanningAndWriterScansUseTheirOwnRequests()
+    {
+        String scanPath = "/v1/catalogs/lake/namespaces/analytics/tables/stats/scan";
+        HoglakeTableHandle handle = new HoglakeTableHandle("analytics", "stats", 6, "uuid-stats", List.of());
+        HoglakeSplitManager.prunedScan(client, handle);
+        assertThat(QUERIES.get(scanPath)).isEqualTo("snapshot=6&include=split_offsets");
+        // HoglakeDeletePublisher reads the table through this scan.
+        HoglakeSplitManager.scan(client, handle);
         assertThat(QUERIES.get(scanPath)).isEqualTo("snapshot=6");
-        client.scan("analytics", "stats", 6, Set.of(7L, 1L));
-        assertThat(QUERIES.get(scanPath)).isEqualTo("snapshot=6&include=column_stats&stats_fields=1,7");
     }
 
     @Test
     void parsesAbsentEmptyAndPresentColumnStatistics()
             throws Exception
     {
-        List<HoglakeDtos.ScanFile> scan = client.scan("analytics", "stats", 6, Set.of(1L, 7L));
+        List<HoglakeDtos.ScanFile> scan = client.planningScan("analytics", "stats", 6, Set.of(1L, 7L));
         assertThat(scan).hasSize(3);
         assertThat(scan.get(0).dataFile().columnStats()).isNull();
         assertThat(scan.get(1).dataFile().columnStats()).isEmpty();
+        assertThat(scan.get(0).dataFile().splitOffsets()).isEmpty();
+        assertThat(scan.get(2).dataFile().splitOffsets()).containsExactly(4L, 200L);
 
         List<HoglakeDtos.ScanColumnStats> stats = scan.get(2).dataFile().columnStats();
         assertThat(stats).extracting(HoglakeDtos.ScanColumnStats::fieldId).containsExactly(1L, 7L);
