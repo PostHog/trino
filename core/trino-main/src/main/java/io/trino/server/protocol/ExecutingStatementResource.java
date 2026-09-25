@@ -23,6 +23,7 @@ import io.trino.Session;
 import io.trino.client.ProtocolHeaders;
 import io.trino.exchange.ExchangeManagerRegistry;
 import io.trino.execution.QueryManager;
+import io.trino.execution.QueryResultRetention;
 import io.trino.operator.DirectExchangeClientSupplier;
 import io.trino.server.ExternalUriInfo;
 import io.trino.server.ForStatementResource;
@@ -40,6 +41,7 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.container.AsyncResponse;
+import jakarta.ws.rs.container.CompletionCallback;
 import jakarta.ws.rs.container.Suspended;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
@@ -71,6 +73,7 @@ public class ExecutingStatementResource
     private static final Logger log = Logger.get(ExecutingStatementResource.class);
     private static final Duration MAX_WAIT_TIME = new Duration(1, SECONDS);
     private final QueryManager queryManager;
+    private final QueryResultRetention resultRetention;
     private final DirectExchangeClientSupplier directExchangeClientSupplier;
     private final ExchangeManagerRegistry exchangeManagerRegistry;
     private final BlockEncodingSerde blockEncodingSerde;
@@ -86,6 +89,7 @@ public class ExecutingStatementResource
     @Inject
     public ExecutingStatementResource(
             QueryManager queryManager,
+            QueryResultRetention resultRetention,
             DirectExchangeClientSupplier directExchangeClientSupplier,
             ExchangeManagerRegistry exchangeManagerRegistry,
             BlockEncodingSerde blockEncodingSerde,
@@ -96,6 +100,7 @@ public class ExecutingStatementResource
             ServerConfig serverConfig)
     {
         this.queryManager = requireNonNull(queryManager, "queryManager is null");
+        this.resultRetention = requireNonNull(resultRetention, "resultRetention is null");
         this.directExchangeClientSupplier = requireNonNull(directExchangeClientSupplier, "directExchangeClientSupplier is null");
         this.exchangeManagerRegistry = requireNonNull(exchangeManagerRegistry, "exchangeManagerRegistry is null");
         this.blockEncodingSerde = requireNonNull(blockEncodingSerde, "blockEncodingSerde is null");
@@ -153,7 +158,15 @@ public class ExecutingStatementResource
             @Suspended AsyncResponse asyncResponse)
     {
         Query query = getQuery(queryId, slug, token);
-        asyncQueryResults(query, token, externalUriInfo, asyncResponse);
+        QueryResultRetention.Request request = resultRetention.beginRequest(queryId, false);
+        try {
+            asyncResponse.register((CompletionCallback) _ -> request.close());
+            asyncQueryResults(query, token, externalUriInfo, asyncResponse, request);
+        }
+        catch (RuntimeException | Error e) {
+            request.close();
+            throw e;
+        }
     }
 
     @HEAD
@@ -163,8 +176,14 @@ public class ExecutingStatementResource
     {
         Query query = queries.get(queryId);
         if (query != null && query.isSlugValid(slug, token)) {
-            queryManager.recordHeartbeat(queryId);
-            return Response.ok().build();
+            try (QueryResultRetention.Request request = resultRetention.beginRequest(queryId, false)) {
+                if (resultRetention.isEnabled() && !query.isResultTokenValid(token)) {
+                    throw new NotFoundException("Query result not found");
+                }
+                queryManager.recordHeartbeat(queryId);
+                request.accepted();
+                return Response.ok().build();
+            }
         }
         throw new NotFoundException("Query not found");
     }
@@ -215,11 +234,15 @@ public class ExecutingStatementResource
             Query query,
             long token,
             ExternalUriInfo externalUriInfo,
-            AsyncResponse asyncResponse)
+            AsyncResponse asyncResponse,
+            QueryResultRetention.Request request)
     {
         ListenableFuture<QueryResultsResponse> queryResultsFuture = query.waitForResults(token, externalUriInfo, MAX_WAIT_TIME);
 
-        ListenableFuture<Response> response = Futures.transform(queryResultsFuture, this::toResponse, directExecutor());
+        ListenableFuture<Response> response = Futures.transform(queryResultsFuture, results -> {
+            request.accepted();
+            return toResponse(results);
+        }, directExecutor());
 
         bindAsyncResponse(asyncResponse, response, responseExecutor);
     }

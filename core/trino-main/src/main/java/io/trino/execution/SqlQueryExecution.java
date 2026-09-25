@@ -79,6 +79,7 @@ import io.trino.sql.planner.plan.OutputNode;
 import io.trino.sql.tree.ExplainAnalyze;
 import io.trino.sql.tree.Query;
 import io.trino.sql.tree.Statement;
+import io.trino.transaction.TransactionId;
 
 import java.time.Instant;
 import java.util.Collection;
@@ -369,6 +370,12 @@ public class SqlQueryExecution
     public Optional<Instant> getEndTime()
     {
         return stateMachine.getEndTime();
+    }
+
+    @Override
+    public Optional<TransactionId> getStartedTransactionId()
+    {
+        return stateMachine.getStartedTransactionId();
     }
 
     @Override

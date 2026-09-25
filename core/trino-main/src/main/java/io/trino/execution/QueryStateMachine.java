@@ -1205,6 +1205,11 @@ public class QueryStateMachine
         this.startedTransactionId.set(startedTransactionId);
     }
 
+    public Optional<TransactionId> getStartedTransactionId()
+    {
+        return Optional.ofNullable(startedTransactionId.get());
+    }
+
     public void clearTransactionId()
     {
         checkArgument(startedTransactionId.get() == null, "Cannot start and clear transaction ID in the same request");

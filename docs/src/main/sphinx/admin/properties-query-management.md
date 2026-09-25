@@ -193,6 +193,45 @@ to get killed with `REMOTE_TASK_ERROR` and the message
 `Max requests queued per destination exceeded for HttpDestination ...`
 :::
 
+## `query.completed-result-idle-timeout`
+
+- **Type:** {ref}`prop-type-duration`
+- **Default value:** none
+- **Minimum value:** `1ms`
+
+Enables sliding idle retention for completed query results and their history.
+For example, `query.completed-result-idle-timeout=15m` retains completed results
+until the client has not accessed them for 15 minutes. The window starts at the
+later of query completion or the last successful result request. Successful
+requests extend it through completion of the HTTP response. A valid `HEAD`
+request for the current or next result also renews retention.
+
+Result requests use the existing secret result-URL capability. This setting does
+not require additional authentication headers on those URLs. Invalid capabilities,
+unavailable result tokens, query-information requests, and management drain probes
+do not renew retention.
+
+The coordinator does not evict running queries, results with an in-flight HTTP
+request, or results belonging to an open transaction. This includes the result
+that starts a transaction. Once the transaction ends or expires, the original idle
+deadline applies; ending a transaction does not start another retention window.
+Transaction idle timeouts remain independent of this property.
+
+When enabled, this policy replaces both `query.max-history-age` and history-count
+eviction. The `query.min-expire-age` floor still applies. Query-information pruning
+still uses `query.max-history`. Without this setting, all existing history-eviction
+behavior remains unchanged.
+
+Idle expiry removes the result retry opportunity as well as query history. A client
+that resumes fetching after expiry receives a not-found response; the coordinator
+does not rerun its query. Existing lifecycle probes report absence after the normal
+result-cache cleanup finishes. Gateway reconciliation can then proceed unchanged.
+
+Retention increases with request rate and idle duration. Active clients and open
+transactions can retain results longer than the configured duration. Budget
+coordinator memory accordingly; this setting does not impose a finite drain
+deadline on running work or open transactions.
+
 ## `query.max-history`
 
 - **Type:** {ref}`prop-type-integer`
@@ -212,6 +251,7 @@ external system you must use [an event listener](admin-event-listeners).
 - **Default value:** none
 
 The maximum age of completed query history, measured from query completion.
+This property does not apply when `query.completed-result-idle-timeout` is set.
 When set, completed queries expire after this age even when fewer than
 `query.max-history` queries remain.
 The `query.min-expire-age` minimum still applies, so the effective age limit is

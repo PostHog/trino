@@ -31,6 +31,7 @@ import io.trino.server.BasicQueryInfo;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.QueryId;
 import io.trino.spi.TrinoException;
+import io.trino.transaction.TransactionId;
 
 import java.time.Instant;
 import java.util.Optional;
@@ -175,6 +176,12 @@ public class LocalDispatchQuery
     public Instant getLastHeartbeat()
     {
         return stateMachine.getLastHeartbeat();
+    }
+
+    @Override
+    public Optional<TransactionId> getStartedTransactionId()
+    {
+        return stateMachine.getStartedTransactionId();
     }
 
     @Override

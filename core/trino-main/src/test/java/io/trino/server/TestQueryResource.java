@@ -202,6 +202,34 @@ public class TestQueryResource
     }
 
     @Test
+    public void testCompletedResultsRemainAvailableWhilePolling()
+            throws Exception
+    {
+        server.close();
+        server = TestingTrinoServer.builder()
+                .setProperties(Map.of("query.max-history-age", "1s", "query.max-history", "0", "query.completed-result-idle-timeout", "1s"))
+                .build();
+
+        QueryResults results = client.execute(
+                preparePost()
+                        .setHeader(REQUEST_USER_HEADER, "user")
+                        .setUri(server.resolve("/v1/statement"))
+                        .setBodyGenerator(createStaticBodyGenerator("SELECT 1", UTF_8))
+                        .build(),
+                createJsonResponseHandler(QUERY_RESULTS_JSON_CODEC));
+        URI resultUri = null;
+        while (results.getNextUri() != null) {
+            resultUri = results.getNextUri();
+            results = client.execute(prepareGet().setUri(resultUri).build(), createJsonResponseHandler(QUERY_RESULTS_JSON_CODEC));
+        }
+        URI retainedUri = resultUri;
+        assertConsistently(new Duration(8, SECONDS), new Duration(100, MILLISECONDS), () -> {
+            QueryResults retry = client.execute(prepareGet().setUri(retainedUri).build(), createJsonResponseHandler(QUERY_RESULTS_JSON_CODEC));
+            assertThat(retry.getNextUri()).isNull();
+        });
+    }
+
+    @Test
     public void testIdempotentResults()
     {
         String sql = "SELECT * FROM tpch.tiny.lineitem";

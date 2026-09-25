@@ -21,6 +21,7 @@ import io.trino.Session;
 import io.trino.execution.QueryTracker.TrackedQuery;
 import io.trino.spi.QueryId;
 import io.trino.spi.TrinoException;
+import io.trino.transaction.TransactionId;
 import org.weakref.jmx.Managed;
 
 import java.time.Instant;
@@ -55,6 +56,7 @@ public class QueryTracker<T extends TrackedQuery>
     private final int maxQueryHistory;
     private final Duration minQueryExpireAge;
     private final Optional<Duration> maxQueryHistoryAge;
+    private final QueryResultRetention resultRetention;
 
     private final ConcurrentMap<QueryId, T> queries = new ConcurrentHashMap<>();
     private final Queue<T> expirationQueue = new LinkedBlockingQueue<>();
@@ -67,12 +69,13 @@ public class QueryTracker<T extends TrackedQuery>
     @GuardedBy("this")
     private ScheduledFuture<?> backgroundTask;
 
-    public QueryTracker(QueryManagerConfig queryManagerConfig, ScheduledExecutorService queryManagementExecutor)
+    public QueryTracker(QueryManagerConfig queryManagerConfig, ScheduledExecutorService queryManagementExecutor, QueryResultRetention resultRetention)
     {
         this.minQueryExpireAge = queryManagerConfig.getMinQueryExpireAge();
         this.maxQueryHistory = queryManagerConfig.getMaxQueryHistory();
         this.maxQueryHistoryAge = queryManagerConfig.getMaxQueryHistoryAge();
         this.clientTimeout = queryManagerConfig.getClientTimeout();
+        this.resultRetention = requireNonNull(resultRetention, "resultRetention is null");
 
         this.queryManagementExecutor = requireNonNull(queryManagementExecutor, "queryManagementExecutor is null");
     }
@@ -165,7 +168,7 @@ public class QueryTracker<T extends TrackedQuery>
 
     public boolean addQuery(T execution)
     {
-        return queries.putIfAbsent(execution.getQueryId(), execution) == null;
+        return resultRetention.register(execution.getQueryId(), () -> queries.putIfAbsent(execution.getQueryId(), execution) == null);
     }
 
     /**
@@ -237,6 +240,18 @@ public class QueryTracker<T extends TrackedQuery>
     {
         Instant now = Instant.now();
         Instant timeHorizon = now.minusMillis(minQueryExpireAge.toMillis());
+        if (resultRetention.isEnabled()) {
+            // A protected query must not prevent later idle queries from expiring.
+            int remaining = expirationQueue.size();
+            var iterator = expirationQueue.iterator();
+            while (remaining-- > 0 && iterator.hasNext()) {
+                T query = iterator.next();
+                if (resultRetention.tryExpire(query, timeHorizon, () -> queries.remove(query.getQueryId(), query))) {
+                    iterator.remove();
+                }
+            }
+            return;
+        }
         Optional<Instant> maxAgeHorizon = maxQueryHistoryAge.map(age -> now.minusMillis(age.toMillis()));
 
         while (!expirationQueue.isEmpty()) {
@@ -335,6 +350,11 @@ public class QueryTracker<T extends TrackedQuery>
         Instant getLastHeartbeat();
 
         Optional<Instant> getEndTime();
+
+        default Optional<TransactionId> getStartedTransactionId()
+        {
+            return Optional.empty();
+        }
 
         void fail(Throwable cause);
 
