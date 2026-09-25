@@ -221,7 +221,8 @@ public class QueuedStatementResource
     {
         Query query = getQuery(queryId, slug, token);
 
-        QueryResultRetention.Request request = resultRetention.beginRequest(queryId, true);
+        QueryResultRetention.Request request = resultRetention.beginRequest(queryId, true)
+                .orElseThrow(() -> new NotFoundException("Query results expired"));
         try {
             asyncResponse.register((CompletionCallback) _ -> request.close());
             ListenableFuture<Response> future = FluentFuture.from(getStatus(query, token, externalUriInfo))

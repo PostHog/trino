@@ -313,7 +313,7 @@ class Query
 
     public synchronized boolean isResultTokenValid(long token)
     {
-        return (lastResult != null && token == lastToken) || (nextToken.isPresent() && token == nextToken.getAsLong());
+        return (lastResult != null && token == lastToken) || (nextToken.isPresent() && token == nextToken.orElseThrow());
     }
 
     public QueryInfo getQueryInfo()

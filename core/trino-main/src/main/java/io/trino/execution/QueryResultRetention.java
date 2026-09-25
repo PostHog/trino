@@ -19,7 +19,6 @@ import io.trino.execution.QueryTracker.TrackedQuery;
 import io.trino.spi.QueryId;
 import io.trino.transaction.TransactionId;
 import io.trino.transaction.TransactionManager;
-import jakarta.ws.rs.NotFoundException;
 
 import java.time.Instant;
 import java.util.Optional;
@@ -79,10 +78,10 @@ public class QueryResultRetention
         return registered.get();
     }
 
-    public Request beginRequest(QueryId queryId, boolean allowUnregistered)
+    public Optional<Request> beginRequest(QueryId queryId, boolean allowUnregistered)
     {
         if (!isEnabled()) {
-            return new Request(queryId, null);
+            return Optional.of(new Request(queryId, null));
         }
         AtomicReference<Entry> acquired = new AtomicReference<>();
         entries.compute(queryId, (_, existing) -> {
@@ -97,9 +96,9 @@ public class QueryResultRetention
             return entry;
         });
         if (acquired.get() == null) {
-            throw new NotFoundException("Query results expired");
+            return Optional.empty();
         }
-        return new Request(queryId, acquired.get());
+        return Optional.of(new Request(queryId, acquired.get()));
     }
 
     public boolean tryExpire(TrackedQuery query, Instant minimumEndTime, BooleanSupplier removal)

@@ -205,6 +205,9 @@ until the client has not accessed them for 15 minutes. The window starts at the
 later of query completion or the last successful result request. Successful
 requests extend it through completion of the HTTP response. A valid `HEAD`
 request for the current or next result also renews retention.
+A capability-valid `HEAD` for an older result token still records a client
+heartbeat and returns success while the query remains available. It does not
+renew completed-result retention. Liveness and result retention are independent.
 
 Result requests use the existing secret result-URL capability. This setting does
 not require additional authentication headers on those URLs. Invalid capabilities,
@@ -231,6 +234,10 @@ Retention increases with request rate and idle duration. Active clients and open
 transactions can retain results longer than the configured duration. Budget
 coordinator memory accordingly; this setting does not impose a finite drain
 deadline on running work or open transactions.
+The existing query-tracker JMX `ExpiredQueriesCount` attribute reports completed
+queries still retained in history, despite its name. Inspect it on both the
+dispatch and execution trackers to monitor the backlog; do not sum the two
+counts because a query can appear in both trackers.
 
 ## `query.max-history`
 

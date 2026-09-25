@@ -18,7 +18,6 @@ import io.trino.Session;
 import io.trino.execution.QueryTracker.TrackedQuery;
 import io.trino.spi.QueryId;
 import io.trino.transaction.TransactionId;
-import jakarta.ws.rs.NotFoundException;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -26,7 +25,6 @@ import java.util.HashSet;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.trino.testing.TestingSession.testSessionBuilder;
@@ -48,7 +46,7 @@ public class TestQueryResultRetention
     {
         QueryResultRetention disabled = new QueryResultRetention(Optional.empty(), _ -> true, now::get);
         assertThat(disabled.register(query.getQueryId(), () -> true)).isTrue();
-        try (var request = disabled.beginRequest(query.getQueryId(), false)) {
+        try (var request = disabled.beginRequest(query.getQueryId(), false).orElseThrow()) {
             request.accepted();
         }
         assertThat(disabled.entryCount()).isZero();
@@ -59,7 +57,7 @@ public class TestQueryResultRetention
     {
         register();
         now.set(START.plusSeconds(9));
-        try (var request = retention.beginRequest(query.getQueryId(), false)) {
+        try (var request = retention.beginRequest(query.getQueryId(), false).orElseThrow()) {
             request.accepted();
         }
         now.set(START.plusSeconds(11));
@@ -73,7 +71,7 @@ public class TestQueryResultRetention
     public void testCompletionStartsWindowAfterEarlyRequest()
     {
         register();
-        try (var request = retention.beginRequest(query.getQueryId(), false)) {
+        try (var request = retention.beginRequest(query.getQueryId(), false).orElseThrow()) {
             request.accepted();
         }
         query.end = START.plusSeconds(100);
@@ -99,7 +97,7 @@ public class TestQueryResultRetention
     public void testResponseSerializationAndIdempotentCompletion()
     {
         register();
-        var request = retention.beginRequest(query.getQueryId(), false);
+        var request = retention.beginRequest(query.getQueryId(), false).orElseThrow();
         request.accepted();
         now.set(START.plusSeconds(100));
         assertThat(expire()).isFalse();
@@ -118,7 +116,7 @@ public class TestQueryResultRetention
     {
         register();
         now.set(START.plusSeconds(9));
-        retention.beginRequest(query.getQueryId(), false).close();
+        retention.beginRequest(query.getQueryId(), false).orElseThrow().close();
         now.set(START.plusSeconds(11));
         assertThat(expire()).isTrue();
     }
@@ -131,17 +129,17 @@ public class TestQueryResultRetention
         now.set(START.plusSeconds(11));
         assertThat(expire()).isTrue();
         assertThat(retention.entryCount()).isEqualTo(1);
-        assertThatThrownBy(() -> retention.beginRequest(query.getQueryId(), false)).isInstanceOf(NotFoundException.class);
+        assertThat(retention.beginRequest(query.getQueryId(), false)).isEmpty();
         assertThat(retention.register(query.getQueryId(), () -> true)).isFalse();
         assertThat(expire()).isTrue();
         assertThat(retention.entryCount()).isZero();
-        assertThatThrownBy(() -> retention.beginRequest(query.getQueryId(), false)).isInstanceOf(NotFoundException.class);
+        assertThat(retention.beginRequest(query.getQueryId(), false)).isEmpty();
     }
 
     @Test
     public void testQueuedRequestCanRegisterBothTrackers()
     {
-        var request = retention.beginRequest(query.getQueryId(), true);
+        var request = retention.beginRequest(query.getQueryId(), true).orElseThrow();
         register();
         register();
         now.set(START.plusSeconds(100));
@@ -157,7 +155,7 @@ public class TestQueryResultRetention
     @Test
     public void testUnsubmittedAndDuplicateRegistrationDoNotLeak()
     {
-        retention.beginRequest(query.getQueryId(), true).close();
+        retention.beginRequest(query.getQueryId(), true).orElseThrow().close();
         assertThat(retention.entryCount()).isZero();
         assertThat(retention.register(query.getQueryId(), () -> false)).isFalse();
         assertThat(retention.entryCount()).isZero();
@@ -220,9 +218,7 @@ public class TestQueryResultRetention
                 await(requestStarted);
                 finishRemoval.countDown();
                 assertThat(expiration.get(10, SECONDS)).isTrue();
-                assertThatThrownBy(() -> request.get(10, SECONDS))
-                        .isInstanceOf(ExecutionException.class)
-                        .hasCauseInstanceOf(NotFoundException.class);
+                assertThat(request.get(10, SECONDS)).isEmpty();
             }
             finally {
                 finishRemoval.countDown();
@@ -242,7 +238,7 @@ public class TestQueryResultRetention
         CountDownLatch finishRequest = new CountDownLatch(1);
         try (var executor = newVirtualThreadPerTaskExecutor()) {
             var request = executor.submit(() -> {
-                try (var access = retention.beginRequest(query.getQueryId(), false)) {
+                try (var access = retention.beginRequest(query.getQueryId(), false).orElseThrow()) {
                     requestStarted.countDown();
                     await(finishRequest);
                     access.accepted();

@@ -158,7 +158,8 @@ public class ExecutingStatementResource
             @Suspended AsyncResponse asyncResponse)
     {
         Query query = getQuery(queryId, slug, token);
-        QueryResultRetention.Request request = resultRetention.beginRequest(queryId, false);
+        QueryResultRetention.Request request = resultRetention.beginRequest(queryId, false)
+                .orElseThrow(() -> new NotFoundException("Query results expired"));
         try {
             asyncResponse.register((CompletionCallback) _ -> request.close());
             asyncQueryResults(query, token, externalUriInfo, asyncResponse, request);
@@ -176,12 +177,12 @@ public class ExecutingStatementResource
     {
         Query query = queries.get(queryId);
         if (query != null && query.isSlugValid(slug, token)) {
-            try (QueryResultRetention.Request request = resultRetention.beginRequest(queryId, false)) {
-                if (resultRetention.isEnabled() && !query.isResultTokenValid(token)) {
-                    throw new NotFoundException("Query result not found");
-                }
+            try (QueryResultRetention.Request request = resultRetention.beginRequest(queryId, false)
+                    .orElseThrow(() -> new NotFoundException("Query results expired"))) {
                 queryManager.recordHeartbeat(queryId);
-                request.accepted();
+                if (query.isResultTokenValid(token)) {
+                    request.accepted();
+                }
                 return Response.ok().build();
             }
         }

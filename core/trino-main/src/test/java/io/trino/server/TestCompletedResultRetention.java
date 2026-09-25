@@ -31,6 +31,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
@@ -111,11 +112,37 @@ public class TestCompletedResultRetention
             assertThat(status(prepareHead().setUri(result.resultUri()))).isEqualTo(200);
             assertThat(absent(result.queryId())).isFalse();
         });
+        assertThat(status(prepareHead().setUri(result.previousUri()))).isEqualTo(200);
         assertEventually(new Duration(10, SECONDS), () -> {
-            assertThat(status(prepareHead().setUri(result.previousUri()))).isEqualTo(404);
+            assertThat(status(prepareHead().setUri(result.previousUri()))).isIn(200, 404);
             assertThat(status(prepareGet().setUri(result.previousUri()))).isIn(404, 410);
             assertThat(absent(result.queryId())).isTrue();
         });
+        assertThat(status(prepareHead().setUri(result.previousUri()))).isEqualTo(404);
+    }
+
+    @Test
+    public void testStaleHeadKeepsRunningQueryAlive()
+            throws Exception
+    {
+        start(Map.of("query.client.timeout", "5s"));
+        QueryResults results = submit("SELECT repeat('x', 1024) FROM UNNEST(sequence(1, 10000))", Optional.empty());
+        while (results.getNextUri().getPath().contains("/queued/")) {
+            results = fetch(results.getNextUri());
+        }
+        URI oldResult = results.getNextUri();
+        results = fetch(oldResult);
+        results = fetch(results.getNextUri());
+        QueryId queryId = new QueryId(results.getId());
+        QueryManager queryManager = server.getInstance(Key.get(QueryManager.class));
+        assertConsistently(new Duration(8, SECONDS), new Duration(100, MILLISECONDS), () -> {
+            assertThat(status(prepareHead().setUri(oldResult))).isEqualTo(200);
+            assertThat(queryManager.getQueryState(queryId).isDone()).isFalse();
+        });
+        while (results.getNextUri() != null) {
+            results = fetch(results.getNextUri());
+        }
+        assertThat(results.getError()).isNull();
     }
 
     @Test
@@ -173,7 +200,7 @@ public class TestCompletedResultRetention
 
     private void start(Map<String, String> properties)
     {
-        var config = new java.util.HashMap<>(properties);
+        var config = new HashMap<>(properties);
         config.put("query.completed-result-idle-timeout", "1s");
         config.put("query.max-history-age", "1s");
         config.put("query.max-history", "0");
