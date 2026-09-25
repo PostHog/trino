@@ -31,7 +31,7 @@ import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 
-public class TestQueryTracker
+public class TestIdleQueryTracker
 {
     private static final Instant OLD = Instant.parse("2020-01-01T00:00:00Z");
 
@@ -176,7 +176,7 @@ public class TestQueryTracker
         }
 
         @Override
-        public boolean tryExpire(TrackedQuery query, Instant minimumEndTime, BooleanSupplier removal)
+        boolean tryExpire(TrackedQuery query, Instant minimumEndTime, BooleanSupplier removal)
         {
             checkedQueries.add(query.getQueryId());
             return super.tryExpire(query, minimumEndTime, removal);

@@ -238,6 +238,12 @@ The existing query-tracker JMX `ExpiredQueriesCount` attribute reports completed
 queries still retained in history, despite its name. Inspect it on both the
 dispatch and execution trackers to monitor the backlog; do not sum the two
 counts because a query can appear in both trackers.
+With idle retention enabled, `PrunedQueriesCount` is a gauge of retained completed
+queries whose detailed information is already pruned. It includes previously
+pruned entries that remain after the history shrinks, not only entries outside
+the latest `query.max-history` window. It is not a count of pruning operations
+performed during the last sweep. The disabled policy retains the legacy
+window-based reporting behavior.
 
 ## `query.max-history`
 

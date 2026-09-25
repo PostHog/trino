@@ -50,6 +50,9 @@ public class TestQueryResultRetention
             request.accepted();
         }
         assertThat(disabled.entryCount()).isZero();
+        assertThat(disabled.tryExpire(query, START.plusSeconds(100), () -> {
+            throw new AssertionError("Disabled retention must not remove queries");
+        })).isFalse();
     }
 
     @Test

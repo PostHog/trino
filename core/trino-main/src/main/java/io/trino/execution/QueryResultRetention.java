@@ -101,8 +101,11 @@ public class QueryResultRetention
         return Optional.of(new Request(queryId, acquired.get()));
     }
 
-    public boolean tryExpire(TrackedQuery query, Instant minimumEndTime, BooleanSupplier removal)
+    boolean tryExpire(TrackedQuery query, Instant minimumEndTime, BooleanSupplier removal)
     {
+        if (!isEnabled()) {
+            return false;
+        }
         AtomicBoolean removed = new AtomicBoolean();
         entries.computeIfPresent(query.getQueryId(), (_, entry) -> {
             if (!entry.expired) {
