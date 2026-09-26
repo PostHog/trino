@@ -23,6 +23,7 @@ import io.trino.spi.type.VarcharType;
 import java.net.URI;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -43,6 +44,11 @@ public final class TestHelpers
     public static InstrumentedHttpClient createMockHttpClient(URI expectedUri, Function<JsonNode, MockResponse> handler)
     {
         return new InstrumentedHttpClient(expectedUri, "POST", JSON_UTF_8.toString(), handler);
+    }
+
+    public static InstrumentedHttpClient createMockHttpClient(URI expectedUri, Function<JsonNode, MockResponse> handler, ExecutorService executor)
+    {
+        return new InstrumentedHttpClient(expectedUri, "POST", JSON_UTF_8.toString(), handler, executor);
     }
 
     public static OpaAccessControl createOpaAuthorizer(OpaConfig config, InstrumentedHttpClient mockHttpClient)
@@ -87,7 +93,8 @@ public final class TestHelpers
                 .put("opa.policy.uri", config.getOpaUri().toString())
                 .put("opa.log-requests", String.valueOf(config.getLogRequests()))
                 .put("opa.log-responses", String.valueOf(config.getLogResponses()))
-                .put("opa.allow-permission-management-operations", String.valueOf(config.getAllowPermissionManagementOperations()));
+                .put("opa.allow-permission-management-operations", String.valueOf(config.getAllowPermissionManagementOperations()))
+                .put("opa.max-outstanding-requests", String.valueOf(config.getMaxOutstandingRequests()));
         config.getOpaBatchUri().ifPresent(batchUri -> configBuilder.put("opa.policy.batched-uri", batchUri.toString()));
         config.getOpaRowFiltersUri().ifPresent(rowFiltersUri -> configBuilder.put("opa.policy.row-filters-uri", rowFiltersUri.toString()));
         config.getOpaColumnMaskingUri().ifPresent(columnMaskingUri -> configBuilder.put("opa.policy.column-masking-uri", columnMaskingUri.toString()));
