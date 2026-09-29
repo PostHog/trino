@@ -15,7 +15,6 @@ package io.trino.plugin.hoglake;
 
 import io.trino.parquet.Field;
 import io.trino.parquet.GroupField;
-import io.trino.parquet.PrimitiveField;
 import io.trino.parquet.VariantField;
 import io.trino.spi.TrinoException;
 import io.trino.spi.type.ArrayType;
@@ -51,20 +50,22 @@ final class HoglakeParquetFields
         }
         if (column.type().equals(VARIANT)) {
             GroupColumnIO group = (GroupColumnIO) physical;
-            if (group.getChildrenCount() != 2 || group.getChild("metadata") == null || group.getChild("value") == null ||
-                    group.getChild("metadata").getType().getRepetition() != REQUIRED ||
-                    group.getChild("value").getType().getRepetition() != REQUIRED) {
+            ColumnIO metadata = group.getChild("metadata");
+            ColumnIO value = group.getChild("value");
+            if (group.getChildrenCount() != 2 || metadata == null || value == null ||
+                    metadata.getType().getRepetition() != REQUIRED ||
+                    value.getType().getRepetition() != REQUIRED) {
                 throw new TrinoException(NOT_SUPPORTED, "Hoglake supports only unshredded native VARIANT files");
             }
-            PrimitiveField value = (PrimitiveField) constructField(VARBINARY, group.getChild("value")).orElseThrow();
-            PrimitiveField metadata = (PrimitiveField) constructField(VARBINARY, group.getChild("metadata")).orElseThrow();
+            // The leaves must stay required: the reader then returns one entry per non-null
+            // variant, the null-suppressed layout ParquetReader.readVariant expects.
             return Optional.of(new VariantField(
                     column.type(),
                     physical.getRepetitionLevel(),
                     physical.getDefinitionLevel(),
                     physical.getType().getRepetition() != OPTIONAL,
-                    new PrimitiveField(value.getType(), false, value.getDescriptor(), value.getId()),
-                    new PrimitiveField(metadata.getType(), false, metadata.getDescriptor(), metadata.getId())));
+                    constructField(VARBINARY, value).orElseThrow(),
+                    constructField(VARBINARY, metadata).orElseThrow()));
         }
         List<Optional<Field>> children = new ArrayList<>();
         if (column.type() instanceof RowType) {
