@@ -13,8 +13,6 @@
  */
 package io.trino.plugin.hoglake.testing;
 
-import io.airlift.slice.Slice;
-import io.airlift.slice.Slices;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.filesystem.memory.MemoryFileSystemFactory;
@@ -27,6 +25,7 @@ import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.SourcePage;
 import io.trino.spi.security.ConnectorIdentity;
+import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.TimeZoneKey;
@@ -52,6 +51,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
+import static io.trino.spi.type.VariantType.VARIANT;
+import static io.trino.util.StructuralTestUtil.appendToBlockBuilder;
 import static java.lang.Math.toIntExact;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
 
@@ -67,7 +68,8 @@ public final class ConnectorTestFixtures
     private ConnectorTestFixtures() {}
 
     /**
-     * A file column: parquet schema field + the Trino type the writer encodes it as + values (null = SQL null).
+     * A file column: parquet schema field + the Trino type the writer encodes it as + values (null = SQL null,
+     * arrays and rows as lists).
      */
     public record FileColumn(org.apache.parquet.schema.Type field, Type writeType, List<Object> values) {}
 
@@ -210,30 +212,7 @@ public final class ConnectorTestFixtures
     {
         BlockBuilder builder = type.createBlockBuilder(null, values.size());
         for (Object value : values) {
-            if (value == null) {
-                builder.appendNull();
-            }
-            else if (type.getJavaType() == long.class) {
-                type.writeLong(builder, ((Number) value).longValue());
-            }
-            else if (type.getJavaType() == int.class) {
-                type.writeLong(builder, ((Number) value).longValue());
-            }
-            else if (type.getJavaType() == double.class) {
-                type.writeDouble(builder, ((Number) value).doubleValue());
-            }
-            else if (type.getJavaType() == boolean.class) {
-                type.writeBoolean(builder, (Boolean) value);
-            }
-            else if (type.getJavaType() == Slice.class) {
-                type.writeSlice(builder, Slices.utf8Slice((String) value));
-            }
-            else if (type.getJavaType() == LongTimestampWithTimeZone.class) {
-                type.writeObject(builder, value);
-            }
-            else {
-                throw new IllegalArgumentException("Unsupported test value type for " + type);
-            }
+            appendToBlockBuilder(type, value, builder);
         }
         return builder.build();
     }
@@ -259,7 +238,8 @@ public final class ConnectorTestFixtures
 
     /**
      * Drain a page source into row-major values (VARCHAR as String,
-     * integral types as Long, null as null).
+     * integral types as Long, VARIANT as Variant, arrays and rows as lists,
+     * null as null).
      */
     public static List<List<Object>> readAll(ConnectorPageSource pageSource, List<Type> types)
     {
@@ -300,7 +280,7 @@ public final class ConnectorTestFixtures
         if (type.getJavaType() == LongTimestampWithTimeZone.class) {
             return type.getObject(block, position);
         }
-        if (type instanceof RowType) {
+        if (type instanceof RowType || type instanceof ArrayType || type.equals(VARIANT)) {
             return type.getObjectValue(block, position);
         }
         throw new IllegalArgumentException("Unsupported test read type: " + type);

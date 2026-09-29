@@ -491,6 +491,9 @@ final class TestHoglakeWrites
                 .hasMessageContaining("cannot be represented losslessly");
         runner.execute("CREATE TABLE variants AS SELECT CAST(42 AS variant) AS v");
         assertThat(runner.execute("SELECT CAST(v AS integer) FROM variants").getOnlyValue()).isEqualTo(42);
+        runner.execute("CREATE TABLE nullable_variants AS SELECT n, CAST(IF(n % 3 = 0, NULL, n) AS variant) AS v FROM UNNEST(sequence(1, 20)) AS t(n)");
+        // A CAST alone maps a variant null to NULL too, so check SQL nullness separately.
+        assertQuery("SELECT n, v IS NULL, CAST(v AS bigint) FROM nullable_variants", "SELECT n, n % 3 = 0, IF(n % 3 = 0, NULL, n) FROM UNNEST(sequence(1, 20)) AS t(n)");
         runner.execute("CREATE TABLE nested_temporal AS SELECT ARRAY[TIMESTAMP '2020-01-01 01:02:03.123'] AS a");
         assertThat(runner.execute("SELECT CAST(a[1] AS varchar) FROM nested_temporal").getOnlyValue()).isEqualTo("2020-01-01 01:02:03.123000");
         recursiveWriteSchema = false;

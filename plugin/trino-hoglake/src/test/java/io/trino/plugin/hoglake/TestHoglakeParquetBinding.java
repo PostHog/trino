@@ -22,7 +22,9 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.MemoryContext;
+import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.RowType;
+import io.trino.spi.variant.Variant;
 import org.apache.parquet.io.ColumnIOFactory;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
@@ -31,14 +33,20 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.IntStream;
 
+import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.spi.type.VariantType.VARIANT;
+import static java.util.Collections.singletonList;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -281,6 +289,95 @@ class TestHoglakeParquetBinding
                         Arrays.asList((Object) null));
     }
 
+    // ---- VARIANT -----------------------------------------------------------
+    //
+    // Each case has 15 rows, which the reader reads in batches of 1, 2, 4,
+    // and 8 rows; the nullable cases put NULLs at the start, middle, and end
+    // of a batch. Object variants carry per-row metadata, so a misaligned
+    // metadata leaf shows up too.
+
+    @Test
+    void nullableVariantReadsEveryRow()
+    {
+        assertVariantsRoundTrip(
+                new HoglakeColumnHandle("v", 1, VARIANT, true),
+                Arrays.asList(
+                        variant(1),
+                        null,
+                        variant(2),
+                        variant(3),
+                        null,
+                        objectVariant(4),
+                        variant(5),
+                        variant(6),
+                        null,
+                        variant(7),
+                        null,
+                        null,
+                        objectVariant(8),
+                        variant(9),
+                        null));
+    }
+
+    @Test
+    void requiredVariantReadsEveryRow()
+    {
+        assertVariantsRoundTrip(
+                new HoglakeColumnHandle("v", 1, VARIANT, false),
+                IntStream.rangeClosed(1, 15)
+                        .mapToObj(value -> value % 4 == 0 ? objectVariant(value) : variant(value))
+                        .toList());
+    }
+
+    @Test
+    void variantInRowReadsEveryRow()
+    {
+        RowType rowType = RowType.from(List.of(RowType.field("v", VARIANT)));
+        HoglakeColumnHandle field = new HoglakeColumnHandle("v", 2, VARIANT, true);
+        assertVariantsRoundTrip(
+                new HoglakeColumnHandle("r", 1, rowType, true, List.of(field), "struct"),
+                Arrays.asList(
+                        List.of(variant(1)),
+                        singletonList(null),
+                        List.of(variant(2)),
+                        null,
+                        singletonList(null),
+                        List.of(variant(3)),
+                        List.of(variant(4)),
+                        List.of(variant(5)),
+                        singletonList(null),
+                        null,
+                        List.of(objectVariant(6)),
+                        singletonList(null),
+                        singletonList(null),
+                        List.of(variant(7)),
+                        null));
+    }
+
+    @Test
+    void variantInArrayReadsEveryRow()
+    {
+        HoglakeColumnHandle element = new HoglakeColumnHandle("element", 2, VARIANT, true);
+        assertVariantsRoundTrip(
+                new HoglakeColumnHandle("a", 1, new ArrayType(VARIANT), true, List.of(element), "list"),
+                Arrays.asList(
+                        Arrays.asList(variant(1), null),
+                        null,
+                        List.of(variant(2)),
+                        List.of(),
+                        singletonList(null),
+                        Arrays.asList(null, variant(3), null),
+                        List.of(variant(4), variant(5)),
+                        Arrays.asList(variant(6), null, objectVariant(7)),
+                        null,
+                        List.of(),
+                        Arrays.asList(null, null),
+                        List.of(variant(8)),
+                        singletonList(null),
+                        List.of(variant(9)),
+                        Arrays.asList(null, variant(10))));
+    }
+
     // ---- resource behavior through the same path ---------------------------
 
     @Test
@@ -315,6 +412,43 @@ class TestHoglakeParquetBinding
         finally {
             close(pageSource);
         }
+    }
+
+    private static void assertVariantsRoundTrip(HoglakeColumnHandle column, List<?> values)
+    {
+        byte[] file = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(
+                HoglakeParquetSchema.create(List.of(column)).messageType().getType(0),
+                column.type(),
+                new ArrayList<>(values))));
+        List<Object> actual = read(file, List.of(column), values.size()).stream()
+                .map(row -> variantBytes(row.getFirst()))
+                .toList();
+        assertThat(actual).containsExactlyElementsOf(values.stream().map(TestHoglakeParquetBinding::variantBytes).toList());
+    }
+
+    private static Variant variant(int value)
+    {
+        return Variant.ofInt(value);
+    }
+
+    private static Variant objectVariant(int value)
+    {
+        return Variant.ofObject(Map.of(utf8Slice("key_" + value), variant(value)));
+    }
+
+    /**
+     * Replaces each variant with its encoded metadata and value bytes: SQL
+     * equality would treat, for example, an int8 5 and an int64 5 as the same
+     * value.
+     */
+    private static Object variantBytes(Object value)
+    {
+        return switch (value) {
+            case null -> null;
+            case Variant variant -> HexFormat.of().formatHex(variant.metadata().toSlice().getBytes()) + ":" + HexFormat.of().formatHex(variant.data().getBytes());
+            case List<?> list -> list.stream().map(TestHoglakeParquetBinding::variantBytes).toList();
+            default -> throw new IllegalArgumentException("Unexpected value: " + value);
+        };
     }
 
     private static void close(ConnectorPageSource pageSource)
