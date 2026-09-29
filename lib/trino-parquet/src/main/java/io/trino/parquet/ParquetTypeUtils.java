@@ -300,13 +300,17 @@ public final class ParquetTypeUtils
             }
             PrimitiveField valueField = (PrimitiveField) constructField(VARBINARY, groupColumnIo.getChild("value"), false).orElseThrow();
             PrimitiveField metadataField = (PrimitiveField) constructField(VARBINARY, groupColumnIo.getChild("metadata"), false).orElseThrow();
+            if (type == VARIANT) {
+                // Like row fields, the leaves are read null-suppressed and expanded to the variant positions in ParquetReader.readVariant
+                return Optional.of(new VariantField(type, repetitionLevel, definitionLevel, required, valueField, metadataField));
+            }
             return Optional.of(new VariantField(
                     type,
                     repetitionLevel,
                     definitionLevel,
                     required,
+                    // Mark the leaves as optional, so that reading variant as JSON gets an empty entry when the variant value is null
                     new PrimitiveField(valueField.getType(), false, valueField.getDescriptor(), valueField.getId()),
-                    // Mark the metadata field as optional, this is because the metadata field is not present when the actual Variant value is null
                     new PrimitiveField(metadataField.getType(), false, metadataField.getDescriptor(), metadataField.getId())));
         }
         if (type instanceof RowType rowType) {
