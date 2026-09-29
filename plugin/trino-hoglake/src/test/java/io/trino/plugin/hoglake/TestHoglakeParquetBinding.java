@@ -23,7 +23,9 @@ import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.TypeOperators;
 import io.trino.spi.variant.Variant;
 import org.apache.parquet.io.ColumnIOFactory;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
@@ -35,7 +37,9 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -47,6 +51,7 @@ import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VariantType.VARIANT;
 import static java.util.Collections.singletonList;
+import static java.util.Collections.singletonMap;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -378,6 +383,31 @@ class TestHoglakeParquetBinding
                         Arrays.asList(null, variant(10))));
     }
 
+    @Test
+    void variantInMapReadsEveryRow()
+    {
+        HoglakeColumnHandle key = new HoglakeColumnHandle("key", 2, VARCHAR, false);
+        HoglakeColumnHandle value = new HoglakeColumnHandle("value", 3, VARIANT, true);
+        assertVariantsRoundTrip(
+                new HoglakeColumnHandle("m", 1, new MapType(VARCHAR, VARIANT, new TypeOperators()), true, List.of(key, value), "map"),
+                Arrays.asList(
+                        variantMap("a", variant(1), "b", null),
+                        null,
+                        variantMap("a", null, "b", variant(2)),
+                        Map.of(),
+                        singletonMap("a", null),
+                        variantMap("a", variant(3), "b", objectVariant(4)),
+                        Map.of("a", variant(5)),
+                        variantMap("a", null, "b", null),
+                        null,
+                        Map.of("a", variant(6)),
+                        Map.of(),
+                        variantMap("a", objectVariant(7), "b", null),
+                        singletonMap("a", null),
+                        Map.of("a", variant(8)),
+                        variantMap("a", variant(9), "b", null)));
+    }
+
     // ---- resource behavior through the same path ---------------------------
 
     @Test
@@ -416,10 +446,12 @@ class TestHoglakeParquetBinding
 
     private static void assertVariantsRoundTrip(HoglakeColumnHandle column, List<?> values)
     {
+        HoglakeParquetSchema schema = HoglakeParquetSchema.create(List.of(column));
         byte[] file = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(
-                HoglakeParquetSchema.create(List.of(column)).messageType().getType(0),
+                schema.messageType().getType(0),
                 column.type(),
-                new ArrayList<>(values))));
+                new ArrayList<>(values),
+                schema.primitiveTypes())));
         List<Object> actual = read(file, List.of(column), values.size()).stream()
                 .map(row -> variantBytes(row.getFirst()))
                 .toList();
@@ -437,6 +469,17 @@ class TestHoglakeParquetBinding
     }
 
     /**
+     * A two-entry map that, unlike {@link Map#of}, allows null values.
+     */
+    private static Map<String, Variant> variantMap(String firstKey, Variant firstValue, String secondKey, Variant secondValue)
+    {
+        Map<String, Variant> map = new LinkedHashMap<>();
+        map.put(firstKey, firstValue);
+        map.put(secondKey, secondValue);
+        return map;
+    }
+
+    /**
      * Replaces each variant with its encoded metadata and value bytes: SQL
      * equality would treat, for example, an int8 5 and an int64 5 as the same
      * value.
@@ -447,6 +490,11 @@ class TestHoglakeParquetBinding
             case null -> null;
             case Variant variant -> HexFormat.of().formatHex(variant.metadata().toSlice().getBytes()) + ":" + HexFormat.of().formatHex(variant.data().getBytes());
             case List<?> list -> list.stream().map(TestHoglakeParquetBinding::variantBytes).toList();
+            case Map<?, ?> map -> {
+                Map<Object, Object> bytes = new HashMap<>();
+                map.forEach((key, entry) -> bytes.put(key, variantBytes(entry)));
+                yield bytes;
+            }
             default -> throw new IllegalArgumentException("Unexpected value: " + value);
         };
     }

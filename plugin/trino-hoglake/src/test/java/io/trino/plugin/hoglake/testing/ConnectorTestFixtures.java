@@ -27,6 +27,7 @@ import io.trino.spi.connector.SourcePage;
 import io.trino.spi.security.ConnectorIdentity;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.LongTimestampWithTimeZone;
+import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.Type;
@@ -69,9 +70,16 @@ public final class ConnectorTestFixtures
 
     /**
      * A file column: parquet schema field + the Trino type the writer encodes it as + values (null = SQL null,
-     * arrays and rows as lists).
+     * arrays and rows as lists, maps as maps) + the Trino types of primitive leaves nested in the field, by path.
+     * Only fields with primitive leaves other than VARIANT leaves, such as a map key, need nested types.
      */
-    public record FileColumn(org.apache.parquet.schema.Type field, Type writeType, List<Object> values) {}
+    public record FileColumn(org.apache.parquet.schema.Type field, Type writeType, List<Object> values, Map<List<String>, Type> nestedTypes)
+    {
+        public FileColumn(org.apache.parquet.schema.Type field, Type writeType, List<Object> values)
+        {
+            this(field, writeType, values, Map.of());
+        }
+    }
 
     public static ConnectorSession session()
     {
@@ -143,6 +151,7 @@ public final class ConnectorTestFixtures
         Map<List<String>, Type> primitiveTypes = new HashMap<>();
         for (FileColumn column : columns) {
             primitiveTypes.put(List.of(column.field().getName()), column.writeType());
+            primitiveTypes.putAll(column.nestedTypes());
         }
         int positions = columns.get(0).values().size();
         Block[] blocks = new Block[columns.size()];
@@ -239,7 +248,7 @@ public final class ConnectorTestFixtures
     /**
      * Drain a page source into row-major values (VARCHAR as String,
      * integral types as Long, VARIANT as Variant, arrays and rows as lists,
-     * null as null).
+     * maps as maps, null as null).
      */
     public static List<List<Object>> readAll(ConnectorPageSource pageSource, List<Type> types)
     {
@@ -280,7 +289,7 @@ public final class ConnectorTestFixtures
         if (type.getJavaType() == LongTimestampWithTimeZone.class) {
             return type.getObject(block, position);
         }
-        if (type instanceof RowType || type instanceof ArrayType || type.equals(VARIANT)) {
+        if (type instanceof RowType || type instanceof ArrayType || type instanceof MapType || type.equals(VARIANT)) {
             return type.getObjectValue(block, position);
         }
         throw new IllegalArgumentException("Unsupported test read type: " + type);
