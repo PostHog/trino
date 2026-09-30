@@ -22,6 +22,7 @@ import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
 import org.apache.parquet.io.ColumnIO;
 import org.apache.parquet.io.GroupColumnIO;
+import org.apache.parquet.io.PrimitiveColumnIO;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -33,6 +34,7 @@ import static io.trino.parquet.ParquetTypeUtils.getMapKeyValueColumn;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VariantType.VARIANT;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.BINARY;
 import static org.apache.parquet.schema.Type.Repetition.OPTIONAL;
 import static org.apache.parquet.schema.Type.Repetition.REQUIRED;
 
@@ -49,14 +51,12 @@ final class HoglakeParquetFields
             return Optional.empty();
         }
         if (column.type().equals(VARIANT)) {
-            GroupColumnIO group = (GroupColumnIO) physical;
-            ColumnIO metadata = group.getChild("metadata");
-            ColumnIO value = group.getChild("value");
-            if (group.getChildrenCount() != 2 || metadata == null || value == null ||
-                    metadata.getType().getRepetition() != REQUIRED ||
-                    value.getType().getRepetition() != REQUIRED) {
-                throw new TrinoException(NOT_SUPPORTED, "Hoglake supports only unshredded native VARIANT files");
+            // Another tool can store the column as a primitive, such as a JSON string
+            if (!(physical instanceof GroupColumnIO group) || group.getChildrenCount() != 2) {
+                throw unsupportedVariant(column);
             }
+            PrimitiveColumnIO metadata = variantLeaf(column, group, "metadata");
+            PrimitiveColumnIO value = variantLeaf(column, group, "value");
             // The leaves must stay required: the reader then returns one entry per non-null
             // variant, the null-suppressed layout ParquetReader.readVariant expects.
             return Optional.of(new VariantField(
@@ -95,6 +95,21 @@ final class HoglakeParquetFields
                 physical.getDefinitionLevel(),
                 physical.getType().getRepetition() != OPTIONAL,
                 List.copyOf(children)));
+    }
+
+    private static PrimitiveColumnIO variantLeaf(HoglakeColumnHandle column, GroupColumnIO variant, String name)
+    {
+        if (!(variant.getChild(name) instanceof PrimitiveColumnIO leaf) ||
+                leaf.getPrimitive() != BINARY ||
+                leaf.getType().getRepetition() != REQUIRED) {
+            throw unsupportedVariant(column);
+        }
+        return leaf;
+    }
+
+    private static TrinoException unsupportedVariant(HoglakeColumnHandle column)
+    {
+        return new TrinoException(NOT_SUPPORTED, "Hoglake supports only unshredded native VARIANT files: " + column.name());
     }
 
     private static ColumnIO bind(GroupColumnIO group, HoglakeColumnHandle column)

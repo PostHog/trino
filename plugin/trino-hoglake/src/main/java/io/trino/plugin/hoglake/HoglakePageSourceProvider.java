@@ -52,6 +52,7 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import org.apache.parquet.column.ColumnDescriptor;
+import org.apache.parquet.io.ColumnIO;
 import org.apache.parquet.io.MessageColumnIO;
 import org.apache.parquet.schema.LogicalTypeAnnotation.TimestampLogicalTypeAnnotation;
 import org.apache.parquet.schema.MessageType;
@@ -388,7 +389,7 @@ public class HoglakePageSourceProvider
                 continue;
             }
             Optional<Field> field = bindings.get(i).flatMap(parquetField ->
-                    HoglakeParquetFields.construct(column, lookupColumnByName(messageColumn, parquetField.getName())));
+                    readerField(column, lookupColumnByName(messageColumn, parquetField.getName()), split.path()));
             if (field.isPresent()) {
                 adaptations.add(HoglakeUnsigned.needsConversion(column)
                         ? new HoglakePageSource.UnsignedColumn(parquetColumns.size(), column)
@@ -442,6 +443,21 @@ public class HoglakePageSourceProvider
                 Optional.empty(),
                 Optional.empty());
         return new HoglakePageSource(parquetReader, adaptations, deletionVector, resources, HoglakePageSource.splitMetrics(footerCacheHit, rowGroups.size()));
+    }
+
+    /**
+     * The reader field for a bound file column. A column whose shape cannot be
+     * read fails with its error code, naming the column and the data file:
+     * other files of the same table may store that column correctly.
+     */
+    private static Optional<Field> readerField(HoglakeColumnHandle column, ColumnIO physical, String path)
+    {
+        try {
+            return HoglakeParquetFields.construct(column, physical);
+        }
+        catch (TrinoException e) {
+            throw new TrinoException(e::getErrorCode, "Cannot read column %s from data file %s: %s".formatted(column.name(), path, e.getRawMessage()), e);
+        }
     }
 
     /**

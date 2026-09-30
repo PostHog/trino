@@ -18,6 +18,7 @@ import io.trino.parquet.GroupField;
 import io.trino.parquet.PrimitiveField;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures.FileColumn;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.DynamicFilter;
@@ -29,6 +30,7 @@ import io.trino.spi.type.TypeOperators;
 import io.trino.spi.variant.Variant;
 import org.apache.parquet.io.ColumnIOFactory;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
+import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
 import org.apache.parquet.schema.Types;
 import org.junit.jupiter.api.Test;
@@ -46,6 +48,7 @@ import java.util.Optional;
 import java.util.stream.IntStream;
 
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -408,6 +411,89 @@ class TestHoglakeParquetBinding
                         variantMap("a", variant(9), "b", null)));
     }
 
+    @Test
+    void variantStoredAsBinaryIsNotSupported()
+    {
+        // Another tool wrote the column as a JSON string
+        assertUnsupportedVariant(Types.buildMessage()
+                .optional(PrimitiveTypeName.BINARY).as(LogicalTypeAnnotation.jsonType()).named("v")
+                .named("test"));
+    }
+
+    @Test
+    void variantValueGroupIsNotSupported()
+    {
+        assertUnsupportedVariant(Types.buildMessage()
+                .optionalGroup().as(LogicalTypeAnnotation.variantType((byte) 1))
+                .required(PrimitiveTypeName.BINARY).named("metadata")
+                .requiredGroup()
+                .required(PrimitiveTypeName.BINARY).named("bytes")
+                .named("value")
+                .named("v")
+                .named("test"));
+    }
+
+    @Test
+    void variantInt64ValueIsNotSupported()
+    {
+        assertUnsupportedVariant(Types.buildMessage()
+                .optionalGroup().as(LogicalTypeAnnotation.variantType((byte) 1))
+                .required(PrimitiveTypeName.BINARY).named("metadata")
+                .required(PrimitiveTypeName.INT64).named("value")
+                .named("v")
+                .named("test"));
+    }
+
+    @Test
+    void variantInt64MetadataIsNotSupported()
+    {
+        assertUnsupportedVariant(Types.buildMessage()
+                .optionalGroup().as(LogicalTypeAnnotation.variantType((byte) 1))
+                .required(PrimitiveTypeName.INT64).named("metadata")
+                .required(PrimitiveTypeName.BINARY).named("value")
+                .named("v")
+                .named("test"));
+    }
+
+    @Test
+    void shreddedVariantIsNotSupported()
+    {
+        assertUnsupportedVariant(Types.buildMessage()
+                .optionalGroup().as(LogicalTypeAnnotation.variantType((byte) 1))
+                .required(PrimitiveTypeName.BINARY).named("metadata")
+                .optional(PrimitiveTypeName.BINARY).named("value")
+                .optional(PrimitiveTypeName.INT64).named("typed_value")
+                .named("v")
+                .named("test"));
+    }
+
+    @Test
+    void variantOptionalValueIsNotSupported()
+    {
+        assertUnsupportedVariant(Types.buildMessage()
+                .optionalGroup().as(LogicalTypeAnnotation.variantType((byte) 1))
+                .required(PrimitiveTypeName.BINARY).named("metadata")
+                .optional(PrimitiveTypeName.BINARY).named("value")
+                .named("v")
+                .named("test"));
+    }
+
+    @Test
+    void variantStoredAsStringFailsNamingTheDataFile()
+    {
+        // Another tool wrote the column as a JSON string
+        byte[] file = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(
+                Types.optional(PrimitiveTypeName.BINARY).as(LogicalTypeAnnotation.stringType()).id(1).named("v"),
+                VARCHAR,
+                Arrays.asList("{\"a\": 1}", null))));
+        HoglakeColumnHandle column = new HoglakeColumnHandle("v", 1, VARIANT, true);
+
+        assertThatThrownBy(() -> read(file, List.of(column), 2))
+                .isInstanceOfSatisfying(TrinoException.class, e ->
+                        assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                .hasMessage("Cannot read column v from data file %s: Hoglake supports only unshredded native VARIANT files: v".formatted(PATH));
+    }
+
     // ---- resource behavior through the same path ---------------------------
 
     @Test
@@ -442,6 +528,16 @@ class TestHoglakeParquetBinding
         finally {
             close(pageSource);
         }
+    }
+
+    private static void assertUnsupportedVariant(MessageType schema)
+    {
+        HoglakeColumnHandle column = new HoglakeColumnHandle("v", 1, VARIANT, true);
+        var physical = new ColumnIOFactory().getColumnIO(schema).getChild("v");
+        assertThatThrownBy(() -> HoglakeParquetFields.construct(column, physical))
+                .isInstanceOfSatisfying(TrinoException.class, e ->
+                        assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                .hasMessage("Hoglake supports only unshredded native VARIANT files: v");
     }
 
     private static void assertVariantsRoundTrip(HoglakeColumnHandle column, List<?> values)
