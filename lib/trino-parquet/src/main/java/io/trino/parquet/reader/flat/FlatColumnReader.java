@@ -40,7 +40,9 @@ import java.util.OptionalLong;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static io.trino.parquet.ParquetEncoding.PLAIN_DICTIONARY;
 import static io.trino.parquet.ParquetEncoding.RLE;
+import static io.trino.parquet.ParquetEncoding.RLE_DICTIONARY;
 import static io.trino.parquet.reader.flat.RowRangesIterator.ALL_ROW_RANGES_ITERATOR;
 import static io.trino.spi.block.Bitmap.setBits;
 import static io.trino.spi.block.Bitmap.wordsForBits;
@@ -57,6 +59,8 @@ public class FlatColumnReader<BufferType>
     private static final int[] EMPTY_DEFINITION_LEVELS = new int[0];
     private static final int[] EMPTY_REPETITION_LEVELS = new int[0];
     private static final int MAX_PAGE_LOOKAHEAD = 8;
+    // Temporary, opt-in diagnostic switch for the controlled dictionary benchmark.
+    private static final boolean DICTIONARY_PROBE_ENABLED = Boolean.getBoolean("trino.parquet.dictionary-probe.enabled");
 
     private final DefinitionLevelDecoderProvider definitionLevelDecoderProvider;
     private final LocalMemoryContext memoryContext;
@@ -308,7 +312,9 @@ public class FlatColumnReader<BufferType>
     ColumnChunk readNullable()
     {
         log.debug("readNullable field %s, nextBatchSize %d, remainingPageValueCount %d", field, nextBatchSize, remainingPageValueCount);
-        NullableValuesBuffer<BufferType> valuesBuffer = createNullableValuesBuffer(nextBatchSize);
+        NullableValuesBuffer<BufferType> valuesBuffer = canPreserveDictionaryForBatch()
+                ? new DictionaryValuesBuffer<>(field, dictionaryDecoder, nextBatchSize)
+                : createNullableValuesBuffer(nextBatchSize);
         long[] valueIsValid = new long[wordsForBits(nextBatchSize)];
         int remainingInBatch = nextBatchSize;
         int offset = 0;
@@ -355,7 +361,9 @@ public class FlatColumnReader<BufferType>
     ColumnChunk readNonNull()
     {
         log.debug("readNonNull field %s, nextBatchSize %d, remainingPageValueCount %d", field, nextBatchSize, remainingPageValueCount);
-        NonNullValuesBuffer<BufferType> valuesBuffer = createNonNullValuesBuffer(nextBatchSize);
+        NonNullValuesBuffer<BufferType> valuesBuffer = canPreserveDictionaryForBatch()
+                ? new DictionaryValuesBuffer<>(field, dictionaryDecoder, nextBatchSize)
+                : createNonNullValuesBuffer(nextBatchSize);
         readNonNullRows(valuesBuffer, 0, nextBatchSize);
         return valuesBuffer.createNonNullBlock(field.getType());
     }
@@ -577,6 +585,29 @@ public class FlatColumnReader<BufferType>
         definitionLevelDecoder = definitionLevelDecoderProvider.create(field.getDescriptor().getMaxDefinitionLevel());
         definitionLevelDecoder.init(page.getDefinitionLevels());
         valueDecoder = createValueDecoder(decodersProvider, page.getDataEncoding(), page.getSlice());
+    }
+
+    private boolean canPreserveDictionaryForBatch()
+    {
+        if (!DICTIONARY_PROBE_ENABLED || produceDictionaryBlock() || dictionaryDecoder == null ||
+                !shouldProduceDictionaryForType(field.getType()) || rowRanges != ALL_ROW_RANGES_ITERATOR) {
+            return false;
+        }
+        // Never infer whole-chunk eligibility: it also controls dictionary predicate pruning.
+        // Restrict this probe to an unfiltered batch wholly contained in one known dictionary page.
+        if (remainingPageValueCount > 0) {
+            return nextBatchSize <= remainingPageValueCount && valueDecoder == dictionaryDecoder;
+        }
+        if (!pageReader.hasNext()) {
+            return false;
+        }
+        DataPage page = pageReader.getNextPage();
+        ParquetEncoding encoding = switch (page) {
+            case DataPageV1 dataPage -> dataPage.getValueEncoding();
+            case DataPageV2 dataPage -> dataPage.getDataEncoding();
+        };
+        return nextBatchSize <= page.getValueCount() - deferredPageValueCount &&
+                (encoding == PLAIN_DICTIONARY || encoding == RLE_DICTIONARY);
     }
 
     private NonNullValuesBuffer<BufferType> createNonNullValuesBuffer(int batchSize)

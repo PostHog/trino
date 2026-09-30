@@ -35,6 +35,7 @@ import static io.airlift.slice.SizeOf.sizeOf;
 import static io.trino.operator.FlatHash.sumExact;
 import static java.lang.Math.min;
 import static java.lang.Math.multiplyExact;
+import static java.util.Objects.requireNonNull;
 
 // This implementation assumes arrays used in the hash are always a power of 2
 public class FlatGroupByHash
@@ -52,6 +53,7 @@ public class FlatGroupByHash
     private final boolean processDictionary;
 
     private DictionaryLookBack dictionaryLookBack;
+    private AggregationMetrics dictionaryProbeMetrics;
 
     private long currentPageSizeInBytes;
 
@@ -89,6 +91,7 @@ public class FlatGroupByHash
         groupByChannelCount = other.groupByChannelCount;
         processDictionary = other.processDictionary;
         dictionaryLookBack = other.dictionaryLookBack == null ? null : other.dictionaryLookBack.copy();
+        dictionaryProbeMetrics = other.dictionaryProbeMetrics;
         currentPageSizeInBytes = other.currentPageSizeInBytes;
         currentBlocks = Arrays.copyOf(other.currentBlocks, other.currentBlocks.length);
         currentBlockBuilders = Arrays.stream(other.currentBlockBuilders)
@@ -109,6 +112,11 @@ public class FlatGroupByHash
     public long getRawHash(int groupId)
     {
         return flatHash.hashPosition(groupId);
+    }
+
+    public void setDictionaryProbeMetrics(AggregationMetrics metrics)
+    {
+        dictionaryProbeMetrics = requireNonNull(metrics, "metrics is null");
     }
 
     @Override
@@ -277,10 +285,16 @@ public class FlatGroupByHash
     private int registerGroupId(Block[] dictionaries, int positionInDictionary)
     {
         if (dictionaryLookBack.isProcessed(positionInDictionary)) {
+            if (dictionaryProbeMetrics != null) {
+                dictionaryProbeMetrics.recordDictionaryLookup(true);
+            }
             return dictionaryLookBack.getGroupId(positionInDictionary);
         }
 
         int groupId = putIfAbsent(dictionaries, positionInDictionary);
+        if (dictionaryProbeMetrics != null) {
+            dictionaryProbeMetrics.recordDictionaryLookup(false);
+        }
         dictionaryLookBack.setProcessed(positionInDictionary, groupId);
         return groupId;
     }

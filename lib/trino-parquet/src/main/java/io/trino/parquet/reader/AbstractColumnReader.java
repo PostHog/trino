@@ -211,7 +211,7 @@ public abstract class AbstractColumnReader<BufferType>
         return false;
     }
 
-    static boolean shouldProduceDictionaryForType(Type type)
+    protected static boolean shouldProduceDictionaryForType(Type type)
     {
         // TODO: DictionaryBlocks are currently restricted to variable width and date types where dictionary processing is most beneficial.
         //   Dictionary processing for other data types can be enabled after validating improvements on benchmarks.

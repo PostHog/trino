@@ -30,6 +30,7 @@ import io.trino.parquet.reader.PageReader;
 import io.trino.parquet.reader.TestingColumnReader.ColumnReaderFormat;
 import io.trino.parquet.reader.TestingColumnReader.DataPageVersion;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.DictionaryBlock;
 import org.apache.parquet.bytes.HeapByteBufferAllocator;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.column.values.ValuesWriter;
@@ -37,6 +38,7 @@ import org.apache.parquet.column.values.dictionary.DictionaryValuesWriter;
 import org.apache.parquet.column.values.rle.RunLengthBitPackingHybridValuesWriter;
 import org.apache.parquet.schema.PrimitiveType;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
@@ -58,6 +60,7 @@ import static io.trino.parquet.reader.TestingColumnReader.DataPageVersion.V1;
 import static io.trino.parquet.reader.TestingColumnReader.getDictionaryPage;
 import static io.trino.parquet.reader.TestingValuesWriters.getValuesWriter;
 import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.VarcharType.VARCHAR;
 import static org.apache.parquet.format.CompressionCodec.UNCOMPRESSED;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT32;
 import static org.apache.parquet.schema.Type.Repetition.OPTIONAL;
@@ -85,6 +88,49 @@ public class TestFlatColumnReader
         ColumnReader columnReader = columnReaderFactory.create(field, newSimpleAggregatedMemoryContext());
         assertThat(columnReader).isInstanceOf(FlatColumnReader.class);
         return columnReader;
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.trino.parquet.reader.TestingColumnReader#dictionaryReadersWithPageVersions")
+    @EnabledIfSystemProperty(named = "trino.parquet.dictionary-probe.enabled", matches = "true")
+    public <T> void testPageLocalDictionaryProbe(DataPageVersion version, ColumnReaderFormat<T> format)
+            throws IOException
+    {
+        if (!format.getTrinoType().equals(VARCHAR)) {
+            return;
+        }
+        for (boolean required : List.of(true, false)) {
+            for (boolean crossing : List.of(true, false)) {
+                PrimitiveField field = createField(format, required);
+                DictionaryValuesWriter dictionaryWriter = format.getDictionaryWriter();
+                T[] dictionaryValues = format.write(dictionaryWriter, new Integer[] {1, 2, 1, 2, 1, 2});
+                DataPage dictionaryData = createNullableDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, false, false, false, false, false, false);
+                DictionaryPage dictionary = getDictionaryPage(dictionaryWriter);
+                ValuesWriter plainWriter = format.getValuesWriter(version);
+                T[] plainValues = format.write(plainWriter, new Integer[] {3, 4, 5});
+                DataPage plainData = createNullableDataPage(version, plainWriter, field, false, false, false);
+                ColumnReader columnReader = createColumnReader(field);
+                columnReader.setPageReader(getPageReaderMock(List.of(dictionaryData, plainData), dictionary), Optional.empty());
+                Block first = readBlock(columnReader, 4, 4);
+                assertThat(first).isInstanceOf(DictionaryBlock.class);
+                format.assertBlock(dictionaryValues, first, 0, 0, 4);
+                if (crossing) {
+                    Block mixed = readBlock(columnReader, 4, 4);
+                    assertThat(mixed).isNotInstanceOf(DictionaryBlock.class);
+                    format.assertBlock(dictionaryValues, mixed, 4, 0, 2);
+                    format.assertBlock(plainValues, mixed, 0, 2, 2);
+                    format.assertBlock(plainValues, readBlock(columnReader, 1, 1), 2, 0, 1);
+                }
+                else {
+                    Block second = readBlock(columnReader, 2, 2);
+                    assertThat(second).isInstanceOf(DictionaryBlock.class);
+                    assertThat(((DictionaryBlock) second).getDictionary()).isSameAs(((DictionaryBlock) first).getDictionary());
+                    format.assertBlock(dictionaryValues, second, 4, 0, 2);
+                    format.assertBlock(plainValues, readBlock(columnReader, 3, 3));
+                }
+                columnReader.close();
+            }
+        }
     }
 
     @Test

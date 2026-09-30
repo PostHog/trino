@@ -180,6 +180,8 @@ public class ParquetReader
     private int selectedPositionsPushdownCount;
 
     private long columnIndexRowsFiltered = -1;
+    private long decodedDictionaryPositions;
+    private long decodedOtherPositions;
     private final Optional<FileDecryptionContext> decryptionContext;
     private final boolean forceSelectedPositionsPushdown;
 
@@ -447,6 +449,12 @@ public class ParquetReader
                     }
                 }
                 blocks[channel] = block;
+                if (block instanceof DictionaryBlock) {
+                    decodedDictionaryPositions += block.getPositionCount();
+                }
+                else {
+                    decodedOtherPositions += block.getPositionCount();
+                }
                 sizeInBytes += block.getSizeInBytes();
                 retainedSizeInBytes += block.getRetainedSizeInBytes();
             }
@@ -1345,6 +1353,8 @@ public class ParquetReader
     public Metrics getMetrics()
     {
         ImmutableMap.Builder<String, Metric<?>> metrics = ImmutableMap.<String, Metric<?>>builder()
+                .put("Decoded dictionary positions", new LongCount(decodedDictionaryPositions))
+                .put("Decoded other positions", new LongCount(decodedOtherPositions))
                 .putAll(codecMetrics)
                 .put(SELECTED_POSITIONS_PUSHDOWNS, new LongCount(selectedPositionsPushdownCount));
         if (columnIndexRowsFiltered >= 0) {

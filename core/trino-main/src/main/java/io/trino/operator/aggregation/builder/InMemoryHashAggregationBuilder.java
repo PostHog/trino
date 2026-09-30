@@ -20,6 +20,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.units.DataSize;
 import io.trino.array.IntBigArray;
 import io.trino.operator.AggregationMetrics;
+import io.trino.operator.FlatGroupByHash;
 import io.trino.operator.FlatHashStrategyCompiler;
 import io.trino.operator.GroupByHash;
 import io.trino.operator.MeasuredGroupByHashWork;
@@ -132,6 +133,9 @@ public class InMemoryHashAggregationBuilder
         }
         groupedAggregators = builder.build();
         this.aggregationMetrics = requireNonNull(aggregationMetrics, "aggregationMetrics is null");
+        if (groupByHash instanceof FlatGroupByHash flatGroupByHash) {
+            flatGroupByHash.setDictionaryProbeMetrics(aggregationMetrics);
+        }
     }
 
     @Override

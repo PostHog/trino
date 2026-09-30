@@ -35,6 +35,18 @@ public class AggregationMetrics
     private long accumulatorTimeNanos;
     private long groupByHashTimeNanos;
     private long inputRowsProcessedWithPartialAggregationDisabled;
+    private long dictionaryEntriesHashed;
+    private long dictionaryGroupIdsReused;
+
+    public void recordDictionaryLookup(boolean reused)
+    {
+        if (reused) {
+            dictionaryGroupIdsReused++;
+        }
+        else {
+            dictionaryEntriesHashed++;
+        }
+    }
 
     public void recordAccumulatorUpdateTimeSince(long startNanos)
     {
@@ -64,6 +76,8 @@ public class AggregationMetrics
     public Metrics getMetrics()
     {
         return new Metrics(ImmutableMap.<String, Metric<?>>builder()
+                .put("Dictionary entries hashed", new LongCount(dictionaryEntriesHashed))
+                .put("Dictionary group IDs reused", new LongCount(dictionaryGroupIdsReused))
                 .put(INPUT_ROWS_WITH_PARTIAL_AGGREGATION_DISABLED_METRIC_NAME, new LongCount(inputRowsProcessedWithPartialAggregationDisabled))
                 .put(ACCUMULATOR_TIME_METRIC_NAME, new DurationTiming(new Duration(accumulatorTimeNanos, NANOSECONDS)))
                 .put(GROUP_BY_HASH_TIME_METRIC_NAME, new DurationTiming(new Duration(groupByHashTimeNanos, NANOSECONDS)))

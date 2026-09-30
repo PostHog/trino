@@ -160,6 +160,22 @@ public class TestGroupByHash
     }
 
     @Test
+    public void testDictionaryProbeCounters()
+    {
+        FlatGroupByHash hash = (FlatGroupByHash) GroupByHashType.FLAT.createGroupByHash();
+        AggregationMetrics metrics = new AggregationMetrics();
+        hash.setDictionaryProbeMetrics(metrics);
+        Block dictionary = createLongsBlock(1L, 2L);
+        Page page = new Page(DictionaryBlock.create(4, dictionary, new int[] {0, 1, 0, 1}));
+        assertThat(hash.addPage(page).process()).isTrue();
+        assertThat(hash.addPage(page).process()).isTrue();
+        assertThat(metrics.getMetrics().getMetrics().get("Dictionary entries hashed"))
+                .isEqualTo(new io.trino.plugin.base.metrics.LongCount(2));
+        assertThat(metrics.getMetrics().getMetrics().get("Dictionary group IDs reused"))
+                .isEqualTo(new io.trino.plugin.base.metrics.LongCount(6));
+    }
+
+    @Test
     public void testNullGroup()
     {
         for (GroupByHashType groupByHashType : GroupByHashType.values()) {
