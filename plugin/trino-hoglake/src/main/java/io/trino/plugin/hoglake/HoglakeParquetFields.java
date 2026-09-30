@@ -15,6 +15,7 @@ package io.trino.plugin.hoglake;
 
 import io.trino.parquet.Field;
 import io.trino.parquet.GroupField;
+import io.trino.parquet.PrimitiveField;
 import io.trino.parquet.VariantField;
 import io.trino.spi.TrinoException;
 import io.trino.spi.type.ArrayType;
@@ -36,6 +37,7 @@ import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VariantType.VARIANT;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.BINARY;
 import static org.apache.parquet.schema.Type.Repetition.OPTIONAL;
+import static org.apache.parquet.schema.Type.Repetition.REPEATED;
 import static org.apache.parquet.schema.Type.Repetition.REQUIRED;
 
 /**
@@ -47,8 +49,23 @@ final class HoglakeParquetFields
 
     public static Optional<Field> construct(HoglakeColumnHandle column, ColumnIO physical)
     {
+        return construct(column, physical, false);
+    }
+
+    /**
+     * @param mayRepeat whether the field may be repeated, which only the element of a legacy
+     *         2-level list is: that list has no element field, so each element is the list's
+     *         repeated field itself
+     */
+    private static Optional<Field> construct(HoglakeColumnHandle column, ColumnIO physical, boolean mayRepeat)
+    {
         if (physical == null) {
             return Optional.empty();
+        }
+        // A repeated field holds any number of values per row. Read as anything but a list
+        // element, it returns one value per element instead of one per row.
+        if (physical.getType().isRepetition(REPEATED) && !mayRepeat) {
+            throw unsupportedField(column, physical, "repeated");
         }
         if (column.type().equals(VARIANT)) {
             // Another tool can store the column as a primitive, such as a JSON string
@@ -69,25 +86,35 @@ final class HoglakeParquetFields
         }
         List<Optional<Field>> children = new ArrayList<>();
         if (column.type() instanceof RowType) {
-            GroupColumnIO group = (GroupColumnIO) physical;
+            GroupColumnIO group = asGroup(column, physical);
             for (HoglakeColumnHandle child : column.children()) {
-                children.add(construct(child, bind(group, child)));
+                children.add(construct(child, bind(group, child), false));
             }
             if (children.stream().allMatch(Optional::isEmpty)) {
                 throw new TrinoException(NOT_SUPPORTED, "Cannot recover nested row nullability when every historical field is absent: " + column.name());
             }
         }
         else if (column.type() instanceof ArrayType) {
-            GroupColumnIO group = (GroupColumnIO) physical;
-            children.add(construct(column.children().getFirst(), getArrayElementColumn(group.getChild(0))));
+            ColumnIO element = getArrayElementColumn(asGroup(column, physical).getChild(0));
+            // Inside the repeated field, as in a 3-level list, a repeated element is a nested list
+            children.add(construct(column.children().getFirst(), element, !element.getParent().getType().isRepetition(REPEATED)));
         }
         else if (column.type() instanceof MapType) {
-            GroupColumnIO entries = getMapKeyValueColumn((GroupColumnIO) physical);
-            children.add(construct(column.children().get(0), entries.getChild(0)));
-            children.add(construct(column.children().get(1), entries.getChild(1)));
+            GroupColumnIO entries = getMapKeyValueColumn(asGroup(column, physical));
+            children.add(construct(column.children().get(0), entries.getChild(0), false));
+            children.add(construct(column.children().get(1), entries.getChild(1), false));
         }
         else {
-            return constructField(HoglakeUnsigned.physicalType(column), physical);
+            if (!(physical instanceof PrimitiveColumnIO primitive)) {
+                throw unsupportedField(column, physical, "group");
+            }
+            // ParquetTypeUtils.constructField assumes a top-level field, so it would reject the
+            // repeated element of a legacy 2-level list
+            return Optional.of(new PrimitiveField(
+                    HoglakeUnsigned.physicalType(column),
+                    primitive.getType().getRepetition() != OPTIONAL,
+                    primitive.getColumnDescriptor(),
+                    primitive.getId()));
         }
         return Optional.of(new GroupField(
                 column.type(),
@@ -110,6 +137,27 @@ final class HoglakeParquetFields
     private static TrinoException unsupportedVariant(HoglakeColumnHandle column)
     {
         return new TrinoException(NOT_SUPPORTED, "Hoglake supports only unshredded native VARIANT files: " + column.name());
+    }
+
+    private static GroupColumnIO asGroup(HoglakeColumnHandle column, ColumnIO physical)
+    {
+        if (physical instanceof GroupColumnIO group) {
+            return group;
+        }
+        throw unsupportedField(column, physical, "primitive");
+    }
+
+    /**
+     * A file field whose shape the column's type cannot be read from, such as a primitive
+     * for a row, or a repeated field for anything but a list element.
+     */
+    private static TrinoException unsupportedField(HoglakeColumnHandle column, ColumnIO physical, String shape)
+    {
+        return new TrinoException(NOT_SUPPORTED, "Unsupported %s Parquet field %s for column %s of type %s".formatted(
+                shape,
+                String.join(".", physical.getFieldPath()),
+                column.name(),
+                column.type().getDisplayName()));
     }
 
     private static ColumnIO bind(GroupColumnIO group, HoglakeColumnHandle column)

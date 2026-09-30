@@ -28,6 +28,8 @@ import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.TypeOperators;
 import io.trino.spi.variant.Variant;
+import org.apache.parquet.format.FieldRepetitionType;
+import org.apache.parquet.format.SchemaElement;
 import org.apache.parquet.io.ColumnIOFactory;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.MessageType;
@@ -39,6 +41,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -51,6 +54,7 @@ import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VariantType.VARIANT;
 import static java.util.Collections.singletonList;
@@ -70,6 +74,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class TestHoglakeParquetBinding
 {
     private static final String PATH = "memory:///binding-test.parquet";
+    private static final HoglakeColumnHandle ID = new HoglakeColumnHandle("id", 1, BIGINT, true);
+    private static final RowType X_ROW = RowType.from(List.of(RowType.field("x", BIGINT)));
 
     @Test
     void nestedIdlessFieldsPreferExactName()
@@ -494,6 +500,205 @@ class TestHoglakeParquetBinding
                 .hasMessage("Cannot read column v from data file %s: Hoglake supports only unshredded native VARIANT files: v".formatted(PATH));
     }
 
+    // ---- repeated and mismatched fields -------------------------------------
+    //
+    // A repeated field holds any number of values per row, and a NULL row
+    // holds none. Read as anything but a list element, it returns one value
+    // per element, so the column no longer lines up with the rows of the page.
+    // The files keep an id column next to the repeated field, so a read that
+    // binds it anyway fails instead of passing on a single column.
+
+    @Test
+    void repeatedVariantGroupIsRejected()
+    {
+        RowType variantGroup = RowType.from(List.of(RowType.field("metadata", VARBINARY), RowType.field("value", VARBINARY)));
+        byte[] file = ConnectorTestFixtures.writeParquet(List.of(
+                idColumn(),
+                new FileColumn(
+                        Types.repeatedGroup()
+                                .required(PrimitiveTypeName.BINARY).named("metadata")
+                                .required(PrimitiveTypeName.BINARY).named("value")
+                                .id(2).named("v"),
+                        variantGroup,
+                        Arrays.asList(variantGroup(10), null, variantGroup(12), variantGroup(13)),
+                        Map.of(List.of("v", "metadata"), VARBINARY, List.of("v", "value"), VARBINARY))));
+
+        assertThatThrownBy(() -> read(file, List.of(ID, new HoglakeColumnHandle("v", 2, VARIANT, true)), 4))
+                .isInstanceOfSatisfying(TrinoException.class, e ->
+                        assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                .hasMessage("Cannot read column v from data file %s: Unsupported repeated Parquet field v for column v of type variant".formatted(PATH));
+    }
+
+    @Test
+    void repeatedRowGroupIsRejected()
+    {
+        byte[] file = ConnectorTestFixtures.writeParquet(List.of(
+                idColumn(),
+                new FileColumn(
+                        Types.repeatedGroup().optional(PrimitiveTypeName.INT64).id(3).named("x").id(2).named("r"),
+                        X_ROW,
+                        Arrays.asList(List.of(10L), null, List.of(12L), List.of(13L)),
+                        Map.of(List.of("r", "x"), BIGINT))));
+
+        assertThatThrownBy(() -> read(file, List.of(ID, xRow("r", 2)), 4))
+                .isInstanceOfSatisfying(TrinoException.class, e ->
+                        assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                .hasMessage("Cannot read column r from data file %s: Unsupported repeated Parquet field r for column r of type row(\"x\" bigint)".formatted(PATH));
+    }
+
+    @Test
+    void repeatedPrimitiveInRowIsRejected()
+    {
+        byte[] file = ConnectorTestFixtures.writeParquet(List.of(
+                idColumn(),
+                new FileColumn(
+                        Types.optionalGroup().repeated(PrimitiveTypeName.INT64).id(3).named("x").id(2).named("r"),
+                        X_ROW,
+                        Arrays.asList(List.of(10L), singletonList(null), List.of(12L), List.of(13L)),
+                        Map.of(List.of("r", "x"), BIGINT))));
+
+        assertThatThrownBy(() -> read(file, List.of(ID, xRow("r", 2)), 4))
+                .isInstanceOfSatisfying(TrinoException.class, e ->
+                        assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                .hasMessage("Cannot read column r from data file %s: Unsupported repeated Parquet field r.x for column x of type bigint".formatted(PATH));
+    }
+
+    @Test
+    void repeatedGroupInRowIsRejected()
+    {
+        RowType rowType = RowType.from(List.of(RowType.field("s", X_ROW)));
+        byte[] file = ConnectorTestFixtures.writeParquet(List.of(
+                idColumn(),
+                new FileColumn(
+                        Types.optionalGroup()
+                                .repeatedGroup().optional(PrimitiveTypeName.INT64).id(4).named("x").id(3).named("s")
+                                .id(2).named("r"),
+                        rowType,
+                        Arrays.asList(List.of(List.of(10L)), singletonList(null), List.of(List.of(12L)), List.of(List.of(13L))),
+                        Map.of(List.of("r", "s", "x"), BIGINT))));
+        HoglakeColumnHandle column = new HoglakeColumnHandle("r", 2, rowType, true, List.of(xRow("s", 3)), "struct");
+
+        assertThatThrownBy(() -> read(file, List.of(ID, column), 4))
+                .isInstanceOfSatisfying(TrinoException.class, e ->
+                        assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                .hasMessage("Cannot read column r from data file %s: Unsupported repeated Parquet field r.s for column s of type row(\"x\" bigint)".formatted(PATH));
+    }
+
+    @Test
+    void repeatedElementInsideListIsRejected()
+    {
+        // The element of a 3-level list sits inside the repeated field, so
+        // a repeated element is a nested list, not a legacy 2-level list
+        var schema = Types.buildMessage()
+                .optionalGroup().as(LogicalTypeAnnotation.listType())
+                .repeatedGroup().repeated(PrimitiveTypeName.INT64).named("element").named("list")
+                .named("a")
+                .named("test");
+        HoglakeColumnHandle element = new HoglakeColumnHandle("element", 2, BIGINT, true);
+        HoglakeColumnHandle column = new HoglakeColumnHandle("a", 1, new ArrayType(BIGINT), true, List.of(element), "list");
+
+        assertThatThrownBy(() -> HoglakeParquetFields.construct(column, new ColumnIOFactory().getColumnIO(schema).getChild("a")))
+                .isInstanceOfSatisfying(TrinoException.class, e ->
+                        assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                .hasMessage("Unsupported repeated Parquet field a.list.element for column element of type bigint");
+    }
+
+    @Test
+    void legacyVariantListReadsEveryRow()
+    {
+        HoglakeColumnHandle element = new HoglakeColumnHandle("element", 2, VARIANT, false);
+        HoglakeColumnHandle column = new HoglakeColumnHandle("a", 1, new ArrayType(VARIANT), true, List.of(element), "list");
+        List<?> values = Arrays.asList(
+                List.of(variant(1), variant(2)),
+                null,
+                List.of(variant(3)),
+                List.of(),
+                List.of(objectVariant(4), variant(5), variant(6)),
+                null,
+                List.of(variant(7)),
+                List.of(),
+                List.of(objectVariant(8)),
+                List.of(variant(9), objectVariant(10)),
+                null,
+                List.of(variant(11)),
+                List.of(),
+                List.of(variant(12), variant(13)),
+                List.of(variant(14)));
+
+        assertVariantsRead(legacyList(write(column, values)), column, values);
+    }
+
+    @Test
+    void legacyRowListReadsEveryRow()
+    {
+        RowType rowType = RowType.from(List.of(RowType.field("x", BIGINT), RowType.field("y", VARCHAR)));
+        HoglakeColumnHandle element = new HoglakeColumnHandle("element", 2, rowType, false, List.of(
+                new HoglakeColumnHandle("x", 3, BIGINT, true),
+                new HoglakeColumnHandle("y", 4, VARCHAR, true)), "struct");
+        HoglakeColumnHandle column = new HoglakeColumnHandle("a", 1, new ArrayType(rowType), true, List.of(element), "list");
+        List<Object> values = Arrays.asList(
+                List.of(List.of(1L, "a"), Arrays.asList(2L, null)),
+                null,
+                List.of(),
+                List.of(Arrays.asList(null, "b")),
+                List.of(List.of(3L, "c"), List.of(4L, "d"), Arrays.asList(null, null)),
+                null,
+                List.of(List.of(5L, "e")));
+
+        assertThat(read(legacyList(write(column, values)), List.of(column), values.size()))
+                .containsExactlyElementsOf(values.stream().map(Collections::singletonList).toList());
+    }
+
+    @Test
+    void legacyPrimitiveListReadsEveryRow()
+    {
+        HoglakeColumnHandle element = new HoglakeColumnHandle("element", 2, BIGINT, false);
+        HoglakeColumnHandle column = new HoglakeColumnHandle("a", 1, new ArrayType(BIGINT), true, List.of(element), "list");
+        List<Object> values = Arrays.asList(List.of(1L, 2L), null, List.of(), List.of(3L), List.of(4L, 5L, 6L), null, List.of(7L));
+
+        assertThat(read(legacyList(write(column, values)), List.of(column), values.size()))
+                .containsExactlyElementsOf(values.stream().map(Collections::singletonList).toList());
+    }
+
+    @Test
+    void mismatchedFieldKindsAreRejected()
+    {
+        byte[] primitive = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(
+                Types.optional(PrimitiveTypeName.INT64).id(1).named("n"),
+                BIGINT,
+                Arrays.asList(1L, 2L))));
+        assertThatThrownBy(() -> read(primitive, List.of(xRow("n", 1)), 2))
+                .isInstanceOfSatisfying(TrinoException.class, e ->
+                        assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                .hasMessage("Cannot read column n from data file %s: Unsupported primitive Parquet field n for column n of type row(\"x\" bigint)".formatted(PATH));
+        HoglakeColumnHandle list = new HoglakeColumnHandle("n", 1, new ArrayType(BIGINT), true, List.of(new HoglakeColumnHandle("element", 2, BIGINT, true)), "list");
+        assertThatThrownBy(() -> read(primitive, List.of(list), 2))
+                .isInstanceOfSatisfying(TrinoException.class, e ->
+                        assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                .hasMessage("Cannot read column n from data file %s: Unsupported primitive Parquet field n for column n of type array(bigint)".formatted(PATH));
+        HoglakeColumnHandle map = new HoglakeColumnHandle(
+                "n",
+                1,
+                new MapType(VARCHAR, BIGINT, new TypeOperators()),
+                true,
+                List.of(new HoglakeColumnHandle("key", 2, VARCHAR, false), new HoglakeColumnHandle("value", 3, BIGINT, true)),
+                "map");
+        assertThatThrownBy(() -> read(primitive, List.of(map), 2))
+                .isInstanceOfSatisfying(TrinoException.class, e ->
+                        assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                .hasMessage("Cannot read column n from data file %s: Unsupported primitive Parquet field n for column n of type map(varchar, bigint)".formatted(PATH));
+
+        byte[] group = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(
+                Types.optionalGroup().optional(PrimitiveTypeName.INT64).id(2).named("x").id(1).named("n"),
+                X_ROW,
+                Arrays.asList(List.of(1L), List.of(2L)),
+                Map.of(List.of("n", "x"), BIGINT))));
+        assertThatThrownBy(() -> read(group, List.of(new HoglakeColumnHandle("n", 1, BIGINT, true)), 2))
+                .isInstanceOfSatisfying(TrinoException.class, e ->
+                        assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                .hasMessage("Cannot read column n from data file %s: Unsupported group Parquet field n for column n of type bigint".formatted(PATH));
+    }
+
     // ---- resource behavior through the same path ---------------------------
 
     @Test
@@ -542,16 +747,73 @@ class TestHoglakeParquetBinding
 
     private static void assertVariantsRoundTrip(HoglakeColumnHandle column, List<?> values)
     {
-        HoglakeParquetSchema schema = HoglakeParquetSchema.create(List.of(column));
-        byte[] file = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(
-                schema.messageType().getType(0),
-                column.type(),
-                new ArrayList<>(values),
-                schema.primitiveTypes())));
+        assertVariantsRead(write(column, values), column, values);
+    }
+
+    private static void assertVariantsRead(byte[] file, HoglakeColumnHandle column, List<?> values)
+    {
         List<Object> actual = read(file, List.of(column), values.size()).stream()
                 .map(row -> variantBytes(row.getFirst()))
                 .toList();
         assertThat(actual).containsExactlyElementsOf(values.stream().map(TestHoglakeParquetBinding::variantBytes).toList());
+    }
+
+    /**
+     * A file with one column, laid out the way Hoglake writes it.
+     */
+    private static byte[] write(HoglakeColumnHandle column, List<?> values)
+    {
+        HoglakeParquetSchema schema = HoglakeParquetSchema.create(List.of(column));
+        return ConnectorTestFixtures.writeParquet(List.of(new FileColumn(
+                schema.messageType().getType(0),
+                column.type(),
+                new ArrayList<>(values),
+                schema.primitiveTypes())));
+    }
+
+    /**
+     * Rewrites a file whose only column is a 3-level list of required
+     * elements to the legacy 2-level form, in which the repeated field is
+     * the element itself. The Trino writer cannot write that form, but both
+     * forms have the same repetition and definition levels, so only the
+     * footer changes.
+     */
+    private static byte[] legacyList(byte[] file)
+    {
+        return ConnectorTestFixtures.rewriteFooter(file, metadata -> {
+            // The schema lists the nodes depth first: the message, the list,
+            // its repeated field, and then the element.
+            List<SchemaElement> schema = metadata.getSchema();
+            SchemaElement repeated = schema.remove(2);
+            SchemaElement element = schema.get(2);
+            assertThat(element.getRepetition_type()).isEqualTo(FieldRepetitionType.REQUIRED);
+            element.setName(repeated.getName());
+            element.setRepetition_type(FieldRepetitionType.REPEATED);
+            metadata.getRow_groups().forEach(rowGroup -> rowGroup.getColumns().forEach(chunk ->
+                    chunk.getMeta_data().getPath_in_schema().remove(2)));
+        });
+    }
+
+    private static FileColumn idColumn()
+    {
+        return new FileColumn(Types.optional(PrimitiveTypeName.INT64).id(1).named("id"), BIGINT, Arrays.asList(0L, 1L, 2L, 3L));
+    }
+
+    /**
+     * A row(x bigint) column, whose field x has the next field id.
+     */
+    private static HoglakeColumnHandle xRow(String name, long fieldId)
+    {
+        return new HoglakeColumnHandle(name, fieldId, X_ROW, true, List.of(new HoglakeColumnHandle("x", fieldId + 1, BIGINT, true)), "struct");
+    }
+
+    /**
+     * The metadata and value of a variant, as a row of an unannotated group.
+     */
+    private static List<Object> variantGroup(int value)
+    {
+        Variant variant = variant(value);
+        return List.of(variant.metadata().toSlice(), variant.data());
     }
 
     private static Variant variant(int value)

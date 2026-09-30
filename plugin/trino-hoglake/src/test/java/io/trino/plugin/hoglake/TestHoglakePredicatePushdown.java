@@ -39,12 +39,9 @@ import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.Type;
 import io.trino.type.TypeDeserializer;
-import org.apache.parquet.format.FileMetaData;
-import org.apache.parquet.format.Util;
 import org.apache.parquet.schema.MessageType;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -52,7 +49,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.Consumer;
 
 import static io.trino.parquet.ParquetTypeUtils.getDescriptors;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -64,7 +60,6 @@ import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_NANOS;
 import static io.trino.spi.type.UuidType.UUID;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
-import static java.lang.Math.toIntExact;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MICROS;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MILLIS;
@@ -279,10 +274,10 @@ class TestHoglakePredicatePushdown
             throws IOException
     {
         byte[] file = numbers(optional(INT64).id(1).named("number"), Arrays.asList(10L, 20L, 30L, 40L));
-        byte[] missing = rewriteFooter(file, metadata -> metadata.getRow_groups().forEach(group ->
+        byte[] missing = ConnectorTestFixtures.rewriteFooter(file, metadata -> metadata.getRow_groups().forEach(group ->
                 group.getColumns().forEach(column -> column.getMeta_data().unsetStatistics())));
         assertThat(read(missing, List.of(NUMBER), NUMBER, range(BIGINT, 10, 41))).hasSize(4);
-        byte[] corrupt = rewriteFooter(file, metadata -> metadata.getRow_groups().forEach(group ->
+        byte[] corrupt = ConnectorTestFixtures.rewriteFooter(file, metadata -> metadata.getRow_groups().forEach(group ->
                 group.getColumns().forEach(column -> {
                     column.getMeta_data().getStatistics().setMin_value(littleEndianLong(100));
                     column.getMeta_data().getStatistics().setMax_value(littleEndianLong(-100));
@@ -295,7 +290,7 @@ class TestHoglakePredicatePushdown
             throws IOException
     {
         byte[] file = numbers(optional(INT64).id(1).named("number"), Arrays.asList(null, 20L, 30L, 40L));
-        byte[] missingNullCounts = rewriteFooter(file, metadata -> metadata.getRow_groups().forEach(group ->
+        byte[] missingNullCounts = ConnectorTestFixtures.rewriteFooter(file, metadata -> metadata.getRow_groups().forEach(group ->
                 group.getColumns().forEach(column -> column.getMeta_data().getStatistics().unsetNull_count())));
         assertThat(read(missingNullCounts, List.of(NUMBER), NUMBER, Domain.onlyNull(BIGINT)))
                 .contains(Arrays.asList((Object) null));
@@ -362,22 +357,6 @@ class TestHoglakePredicatePushdown
                 MemoryContext.NO_LIMIT)) {
             return ConnectorTestFixtures.readAll(source, columns.stream().map(HoglakeColumnHandle::type).toList());
         }
-    }
-
-    private static byte[] rewriteFooter(byte[] file, Consumer<FileMetaData> mutation)
-            throws IOException
-    {
-        int footerOffset = file.length - 8 - toIntExact(ConnectorTestFixtures.footerSize(file));
-        FileMetaData metadata = ConnectorTestFixtures.fileMetaData(file);
-        mutation.accept(metadata);
-        ByteArrayOutputStream footer = new ByteArrayOutputStream();
-        Util.writeFileMetaData(metadata, footer);
-        ByteArrayOutputStream result = new ByteArrayOutputStream();
-        result.write(file, 0, footerOffset);
-        footer.writeTo(result);
-        result.write(ByteBuffer.allocate(4).order(LITTLE_ENDIAN).putInt(footer.size()).array());
-        result.write(file, file.length - 4, 4);
-        return result.toByteArray();
     }
 
     private static byte[] littleEndianLong(long value)

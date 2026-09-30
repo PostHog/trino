@@ -51,6 +51,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Consumer;
 
 import static io.trino.spi.type.VariantType.VARIANT;
 import static io.trino.util.StructuralTestUtil.appendToBlockBuilder;
@@ -217,6 +218,30 @@ public final class ConnectorTestFixtures
         int footerOffset = file.length - 8 - footerLength;
         try {
             return Util.readFileMetaData(new ByteArrayInputStream(file, footerOffset, footerLength));
+        }
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /**
+     * A copy of a Parquet file with its Thrift footer changed by the mutation. The pages
+     * stay as they are, so the footer must still describe them.
+     */
+    public static byte[] rewriteFooter(byte[] file, Consumer<FileMetaData> mutation)
+    {
+        int footerOffset = file.length - 8 - toIntExact(footerSize(file));
+        FileMetaData metadata = fileMetaData(file);
+        mutation.accept(metadata);
+        try {
+            ByteArrayOutputStream footer = new ByteArrayOutputStream();
+            Util.writeFileMetaData(metadata, footer);
+            ByteArrayOutputStream result = new ByteArrayOutputStream();
+            result.write(file, 0, footerOffset);
+            footer.writeTo(result);
+            result.write(ByteBuffer.allocate(4).order(LITTLE_ENDIAN).putInt(footer.size()).array());
+            result.write(file, file.length - 4, 4);
+            return result.toByteArray();
         }
         catch (IOException e) {
             throw new UncheckedIOException(e);
