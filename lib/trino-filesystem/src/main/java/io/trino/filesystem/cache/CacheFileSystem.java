@@ -22,6 +22,7 @@ import io.trino.filesystem.TrinoOutputFile;
 import io.trino.filesystem.UriLocation;
 import io.trino.filesystem.encryption.EncryptionKey;
 import io.trino.spi.cache.BlobCache;
+import io.trino.spi.cache.CacheKey;
 
 import java.io.IOException;
 import java.time.Instant;
@@ -62,6 +63,20 @@ public final class CacheFileSystem
     public TrinoInputFile newInputFile(Location location, long length)
     {
         return new CacheInputFile(delegate.newInputFile(location, length), cache, keyProvider, OptionalLong.of(length), Optional.empty());
+    }
+
+    /**
+     * Opens a file whose immutable version is supplied by the caller's catalog.
+     * The version is scoped beneath the provider's invalidation prefix so ordinary
+     * file and directory invalidation still targets every cached version. If no
+     * prefix is available, caching is bypassed. No remote metadata is fetched
+     * to build this key.
+     */
+    public TrinoInputFile newInputFile(Location location, long length, CacheKey version)
+    {
+        requireNonNull(version, "version is null");
+        Optional<CacheKey> key = keyProvider.getCacheKeyPrefix(location).map(prefix -> prefix.append(version));
+        return new CacheInputFile(delegate.newInputFile(location, length), cache, _ -> key, OptionalLong.of(length), Optional.empty());
     }
 
     @Override

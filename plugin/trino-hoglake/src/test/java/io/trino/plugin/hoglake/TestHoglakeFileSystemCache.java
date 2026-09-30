@@ -31,11 +31,13 @@ import io.trino.spi.cache.ConnectorCacheFactory;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorContext;
 import io.trino.spi.connector.ConnectorPageSource;
+import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.connector.MetadataProvider;
 import io.trino.spi.type.TypeManager;
 import io.trino.testing.TestingConnectorContext;
+import io.trino.testing.TestingConnectorSession;
 import org.apache.parquet.schema.Types;
 import org.junit.jupiter.api.Test;
 
@@ -64,6 +66,14 @@ class TestHoglakeFileSystemCache
     void testCachedAndUncachedReads()
             throws IOException
     {
+        verifyCachedAndUncachedReads(0);
+        verifyCachedAndUncachedReads(-2);
+        verifyCachedAndUncachedReads(1);
+    }
+
+    private static void verifyCachedAndUncachedReads(long dataFileId)
+            throws IOException
+    {
         for (boolean enabled : List.of(false, true)) {
             try (S3ObjectServer server = new S3ObjectServer()) {
                 // The test supplies an in-process cache; production capability selection is
@@ -84,31 +94,81 @@ class TestHoglakeFileSystemCache
                         "s3.max-error-retries", "1",
                         "fs.cache.enabled", Boolean.toString(enabled)), context);
                 try {
-                    assertThat(read(connector, server.data.length)).containsExactly(List.of(11L), List.of(22L));
+                    ConnectorSession session = TestingConnectorSession.builder().build();
+                    assertThat(read(connector, session, server.data.length, dataFileId)).containsExactly(List.of(11L), List.of(22L));
                     int coldReads = server.dataReads.get();
                     assertThat(coldReads).isPositive();
-                    assertThat(read(connector, server.data.length)).containsExactly(List.of(11L), List.of(22L));
+                    assertThat(read(connector, session, server.data.length, dataFileId)).containsExactly(List.of(11L), List.of(22L));
                     if (enabled) {
                         assertThat(server.dataReads.get()).isEqualTo(coldReads);
                         assertThat(cacheRequests.get()).isEqualTo(1);
+                        assertThat(server.metadataReads.get()).isEqualTo(dataFileId > 0 ? 0 : 2);
                     }
                     else {
                         assertThat(server.dataReads.get()).isGreaterThan(coldReads);
                         assertThat(cacheRequests.get()).isZero();
+                        assertThat(server.metadataReads.get()).isZero();
                     }
 
-                    // Same location and file size, different modification time and content.
+                    // Another query can reuse the same registered file without validation.
+                    assertThat(read(connector, TestingConnectorSession.builder().build(), server.data.length, dataFileId))
+                            .containsExactly(List.of(11L), List.of(22L));
+                    if (enabled) {
+                        assertThat(server.dataReads.get()).isEqualTo(coldReads);
+                    }
+
+                    // A new registration must not reuse old bytes even with identical size and timestamp.
                     int previousReads = server.dataReads.get();
                     int previousLength = server.data.length;
                     server.data = parquet(33L, 44L);
-                    server.lastModified = server.lastModified.plusSeconds(1);
+                    if (dataFileId <= 0) {
+                        server.lastModified = server.lastModified.plusSeconds(1);
+                    }
                     assertThat(server.data.length).isEqualTo(previousLength);
-                    assertThat(read(connector, server.data.length)).containsExactly(List.of(33L), List.of(44L));
+                    assertThat(read(connector, TestingConnectorSession.builder().build(), server.data.length, dataFileId > 0 ? 2 : dataFileId))
+                            .containsExactly(List.of(33L), List.of(44L));
+                    if (enabled) {
+                        assertThat(server.metadataReads.get()).isEqualTo(dataFileId > 0 ? 0 : 4);
+                    }
                     assertThat(server.dataReads.get()).isGreaterThan(previousReads);
                 }
                 finally {
                     connector.shutdown();
                 }
+            }
+        }
+    }
+
+    @Test
+    void testCatalogIdentitySeparatesSharedCacheEntries()
+            throws IOException
+    {
+        try (S3ObjectServer server = new S3ObjectServer()) {
+            BlobCache cache = new MemoryBlobCache(new MemoryBlobCacheConfig());
+            ConnectorContext context = new CacheContext(_ -> Optional.of(cache));
+            long value = 10;
+            for (List<String> identity : List.of(
+                    List.of("http://localhost:8080", "first"),
+                    List.of("http://localhost:8080", "second"),
+                    List.of("http://localhost:8081", "second"))) {
+                server.data = parquet(value, value + 1);
+                Connector connector = new HoglakeConnectorFactory().create("identity_test", Map.of(
+                        "hoglake.uri", identity.get(0),
+                        "hoglake.catalog", identity.get(1),
+                        "hoglake.s3.endpoint", server.endpoint(),
+                        "hoglake.s3.access-key", "test-access",
+                        "hoglake.s3.secret-key", "test-secret",
+                        "hoglake.s3.path-style", "true",
+                        "fs.cache.enabled", "true"), context);
+                try {
+                    assertThat(read(connector, TestingConnectorSession.builder().build(), server.data.length, 1))
+                            .containsExactly(List.of(value), List.of(value + 1));
+                    assertThat(server.metadataReads).hasValue(0);
+                }
+                finally {
+                    connector.shutdown();
+                }
+                value += 10;
             }
         }
     }
@@ -172,10 +232,16 @@ class TestHoglakeFileSystemCache
     private static List<List<Object>> read(Connector connector, int fileSize)
             throws IOException
     {
+        return read(connector, TestingConnectorSession.builder().build(), fileSize, 0);
+    }
+
+    private static List<List<Object>> read(Connector connector, ConnectorSession session, int fileSize, long dataFileId)
+            throws IOException
+    {
         try (ConnectorPageSource source = connector.getPageSourceProvider().createPageSource(
                 HoglakeTransactionHandle.INSTANCE,
-                ConnectorTestFixtures.session(),
-                new HoglakeSplit("s3://test-bucket/data.parquet", fileSize, 2, Optional.empty(), 0),
+                session,
+                new HoglakeSplit(dataFileId, "s3://test-bucket/data.parquet", fileSize, 2, Optional.empty(), 0, Optional.empty()),
                 new HoglakeTableHandle("test", "table", 1, "test-table", List.of()),
                 Optional.empty(),
                 List.of(new HoglakeColumnHandle("value", 1, BIGINT, true)),
@@ -196,6 +262,7 @@ class TestHoglakeFileSystemCache
     {
         private final HttpServer server;
         private final AtomicInteger dataReads = new AtomicInteger();
+        private final AtomicInteger metadataReads = new AtomicInteger();
         private volatile byte[] data = parquet(11L, 22L);
         private volatile Instant lastModified = Instant.parse("2026-01-01T00:00:00Z");
 
@@ -208,6 +275,7 @@ class TestHoglakeFileSystemCache
                     byte[] content = data;
                     exchange.getResponseHeaders().set("Last-Modified", DateTimeFormatter.RFC_1123_DATE_TIME.format(lastModified.atZone(ZoneOffset.UTC)));
                     if (exchange.getRequestMethod().equals("HEAD")) {
+                        metadataReads.incrementAndGet();
                         exchange.getResponseHeaders().set("Content-Length", Integer.toString(content.length));
                         exchange.sendResponseHeaders(200, -1);
                         return;
