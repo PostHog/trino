@@ -19,6 +19,7 @@ import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.filesystem.TrinoInputFile;
+import io.trino.filesystem.cache.CacheFileSystem;
 import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.parquet.Column;
 import io.trino.parquet.Field;
@@ -34,6 +35,7 @@ import io.trino.parquet.reader.RowGroupInfo;
 import io.trino.plugin.hoglake.HoglakeParquetFooterCache.Lookup;
 import io.trino.plugin.hoglake.HoglakeParquetFooterCache.ParsedFooter;
 import io.trino.spi.TrinoException;
+import io.trino.spi.cache.CacheKey;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
@@ -108,6 +110,7 @@ public class HoglakePageSourceProvider
 
     private final TrinoFileSystemFactory fileSystemFactory;
     private final HoglakeParquetFooterCache footerCache;
+    private final Optional<CacheKey> catalogCacheKey;
 
     public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory)
     {
@@ -116,6 +119,12 @@ public class HoglakePageSourceProvider
 
     public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache)
     {
+        this(fileSystemFactory, footerCache, Optional.empty());
+    }
+
+    public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache, Optional<CacheKey> catalogCacheKey)
+    {
+        this.catalogCacheKey = requireNonNull(catalogCacheKey, "catalogCacheKey is null");
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.footerCache = requireNonNull(footerCache, "footerCache is null");
     }
@@ -158,7 +167,18 @@ public class HoglakePageSourceProvider
                 .toList();
 
         TrinoFileSystem fileSystem = fileSystemFactory.create(session);
-        TrinoInputFile inputFile = fileSystem.newInputFile(Location.of(hoglakeSplit.path()), hoglakeSplit.fileSizeBytes());
+        TrinoInputFile inputFile;
+        if (fileSystem instanceof CacheFileSystem cacheFileSystem && catalogCacheKey.isPresent() && hoglakeSplit.dataFileId() > 0) {
+            // Registered data files are immutable. Re-registration gets a new ID,
+            // so the catalog supplies the version without an S3 modification-time lookup.
+            CacheKey version = catalogCacheKey.orElseThrow()
+                    .append(Long.toString(hoglakeSplit.dataFileId()))
+                    .append(Long.toString(hoglakeSplit.fileSizeBytes()));
+            inputFile = cacheFileSystem.newInputFile(Location.of(hoglakeSplit.path()), hoglakeSplit.fileSizeBytes(), version);
+        }
+        else {
+            inputFile = fileSystem.newInputFile(Location.of(hoglakeSplit.path()), hoglakeSplit.fileSizeBytes());
+        }
 
         ParquetReaderOptions options = readerOptions(ParquetReaderOptions.defaultOptions(), hoglakeSplit);
         ParquetDataSource dataSource = null;
@@ -272,7 +292,7 @@ public class HoglakePageSourceProvider
         // only because no decryption properties are passed: the metadata then
         // holds no per-reader decryption state. If file decryption is ever
         // added, encrypted files must bypass this cache.
-        return footerCache.get(new HoglakeParquetFooterCache.Key(split.path(), split.fileSizeBytes()), () -> {
+        return footerCache.get(new HoglakeParquetFooterCache.Key(split.path(), split.fileSizeBytes(), split.dataFileId()), () -> {
             Slice footerBytes = MetadataReader.readFooterBytes(dataSource, options);
             ParquetMetadata metadata = MetadataReader.parseFooter(dataSource.getId(), dataSource.getEstimatedSize(), footerBytes, Optional.empty(), Optional.empty());
             return ParsedFooter.of(metadata, footerBytes.length());

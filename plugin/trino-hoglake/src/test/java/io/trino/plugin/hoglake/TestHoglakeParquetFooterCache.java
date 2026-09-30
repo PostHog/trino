@@ -80,6 +80,20 @@ class TestHoglakeParquetFooterCache
     }
 
     @Test
+    void aNewRegistrationDoesNotReuseTheFooter()
+            throws IOException
+    {
+        HoglakeParquetFooterCache cache = new HoglakeParquetFooterCache(DataSize.ofBytes(1000));
+        AtomicInteger loads = new AtomicInteger();
+        Key first = new Key("memory:///a.parquet", FILE.length, 1);
+        Key replacement = new Key("memory:///a.parquet", FILE.length, 2);
+        assertThat(cache.get(first, () -> footer(loads, 100)).hit()).isFalse();
+        assertThat(cache.get(first, () -> footer(loads, 100)).hit()).isTrue();
+        assertThat(cache.get(replacement, () -> footer(loads, 100)).hit()).isFalse();
+        assertThat(loads).hasValue(2);
+    }
+
+    @Test
     void eachLookupReportsWhetherItLoaded()
             throws IOException
     {

@@ -156,11 +156,17 @@ public final class HoglakeParquetFooterCache
     }
 
     /**
-     * A data file's path is immutable per data file, but the size is part of
-     * the key too, so a footer is never served for a file of another length.
+     * A registered data file is immutable. Its ID distinguishes a later
+     * registration at the same path; size also separates files of different lengths.
+     * The enclosing cache is scoped to one catalog.
      */
-    public record Key(String path, long fileSizeBytes)
+    public record Key(String path, long fileSizeBytes, long dataFileId)
     {
+        public Key(String path, long fileSizeBytes)
+        {
+            this(path, fileSizeBytes, 0);
+        }
+
         public Key
         {
             requireNonNull(path, "path is null");

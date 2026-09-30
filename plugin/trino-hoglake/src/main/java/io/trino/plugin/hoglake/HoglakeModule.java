@@ -25,10 +25,13 @@ import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.spi.NodeVersion;
 import io.trino.spi.PageSorter;
+import io.trino.spi.cache.CacheKey;
 import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSplitManager;
+
+import java.util.Optional;
 
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static io.airlift.bootstrap.ClosingBinder.closingBinder;
@@ -84,9 +87,9 @@ public class HoglakeModule
 
     @Provides
     @Singleton
-    public static ConnectorPageSourceProvider createPageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache)
+    public static ConnectorPageSourceProvider createPageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache, HoglakeConfig config)
     {
-        return new HoglakePageSourceProvider(fileSystemFactory, footerCache);
+        return new HoglakePageSourceProvider(fileSystemFactory, footerCache, Optional.of(CacheKey.of("hoglake-data-v1", config.getUri(), config.getCatalog())));
     }
 
     @Provides
