@@ -112,6 +112,7 @@ public class HoglakePageSourceProvider
     private final TrinoFileSystemFactory fileSystemFactory;
     private final HoglakeParquetFooterCache footerCache;
     private final Optional<CacheKey> catalogCacheKey;
+    private final boolean s3SecurityMappingEnabled;
 
     public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory)
     {
@@ -120,12 +121,13 @@ public class HoglakePageSourceProvider
 
     public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache)
     {
-        this(fileSystemFactory, footerCache, Optional.empty());
+        this(fileSystemFactory, footerCache, Optional.empty(), false);
     }
 
-    public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache, Optional<CacheKey> catalogCacheKey)
+    public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache, Optional<CacheKey> catalogCacheKey, boolean s3SecurityMappingEnabled)
     {
         this.catalogCacheKey = requireNonNull(catalogCacheKey, "catalogCacheKey is null");
+        this.s3SecurityMappingEnabled = s3SecurityMappingEnabled;
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.footerCache = requireNonNull(footerCache, "footerCache is null");
     }
@@ -169,6 +171,7 @@ public class HoglakePageSourceProvider
 
         TrinoFileSystem fileSystem = fileSystemFactory.create(session);
         TrinoInputFile inputFile;
+        boolean validateFileAccess = false;
         if (fileSystem instanceof CacheFileSystem cacheFileSystem && catalogCacheKey.isPresent() && hoglakeSplit.dataFileId() > 0) {
             // Registered data files are immutable. Re-registration gets a new ID,
             // so the catalog supplies the version without an S3 modification-time lookup.
@@ -176,6 +179,7 @@ public class HoglakePageSourceProvider
                     .append(Long.toString(hoglakeSplit.dataFileId()))
                     .append(Long.toString(hoglakeSplit.fileSizeBytes()));
             inputFile = cacheFileSystem.newInputFile(Location.of(hoglakeSplit.path()), hoglakeSplit.fileSizeBytes(), version);
+            validateFileAccess = s3SecurityMappingEnabled || !session.getIdentity().getExtraCredentials().isEmpty();
         }
         else {
             inputFile = fileSystem.newInputFile(Location.of(hoglakeSplit.path()), hoglakeSplit.fileSizeBytes());
@@ -188,6 +192,12 @@ public class HoglakePageSourceProvider
         HoglakeSplitResources resources = new HoglakeSplitResources(memoryContext);
         ConnectorPageSource pageSource = null;
         try {
+            if (validateFileAccess) {
+                // A shared cache hit must not bypass storage authorization for the current
+                // identity. Keep the metadata request when credentials can vary by session,
+                // while retaining the registered identity for byte and footer cache entries.
+                inputFile.lastModified();
+            }
             dataSource = createDataSource(inputFile, hoglakeSplit.fileSizeBytes(), options);
             Lookup footerLookup = readFooter(dataSource, hoglakeSplit, options);
             ParsedFooter footer = footerLookup.footer();

@@ -21,6 +21,7 @@ import com.google.inject.Scopes;
 import com.google.inject.Singleton;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.filesystem.cache.SplitAffinityProvider;
+import io.trino.filesystem.s3.S3SecurityMappingEnabledConfig;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.spi.NodeVersion;
@@ -45,6 +46,7 @@ public class HoglakeModule
     public void configure(Binder binder)
     {
         configBinder(binder).bindConfig(HoglakeConfig.class);
+        configBinder(binder).bindConfig(S3SecurityMappingEnabledConfig.class);
         closingBinder(binder).registerCloseable(HoglakeClient.class);
         newSetBinder(binder, SessionPropertiesProvider.class).addBinding().to(HoglakeSessionProperties.class).in(Scopes.SINGLETON);
 
@@ -87,9 +89,9 @@ public class HoglakeModule
 
     @Provides
     @Singleton
-    public static ConnectorPageSourceProvider createPageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache, HoglakeConfig config)
+    public static ConnectorPageSourceProvider createPageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache, HoglakeConfig config, S3SecurityMappingEnabledConfig securityMappingConfig)
     {
-        return new HoglakePageSourceProvider(fileSystemFactory, footerCache, Optional.of(CacheKey.of("hoglake-data-v1", config.getUri(), config.getCatalog())));
+        return new HoglakePageSourceProvider(fileSystemFactory, footerCache, Optional.of(CacheKey.of("hoglake-data-v1", config.getUri(), config.getCatalog())), securityMappingConfig.isEnabled());
     }
 
     @Provides

@@ -71,6 +71,8 @@ public final class CacheFileSystem
      * file and directory invalidation still targets every cached version. If no
      * prefix is available, caching is bypassed. No remote metadata is fetched
      * to build this key.
+     * The caller must validate access separately when storage authorization varies
+     * by identity, since a cache hit need not access the underlying file at all.
      */
     public TrinoInputFile newInputFile(Location location, long length, CacheKey version)
     {

@@ -72,8 +72,11 @@ initialization.
 
 The engine manages cache resources and scopes entries by Trino catalog and cache
 usage. Registered data-file keys include the Hoglake endpoint and catalog, location,
-data-file ID, and size. Registered files are immutable, so cached reads do not fetch
-S3 modification times. Re-registering a path assigns a new ID and cache entry.
+data-file ID, and size. Registered files are immutable, so cached reads with
+catalog-wide credentials do not fetch S3 modification times. When S3 security
+mapping is enabled or a session supplies extra credentials, registered reads still
+fetch metadata before using the shared cache to check storage access with the
+current credentials. Re-registering a path assigns a new ID and cache entry.
 Files without a positive ID and deletion vectors retain default filesystem validation.
 Keys are not per-user partitions; overwriting a registered object violates the contract.
 
