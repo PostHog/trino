@@ -39,6 +39,7 @@ import io.trino.spi.security.ConnectorIdentity;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.StandaloneQueryRunner;
+import org.apache.parquet.format.LogicalTypes;
 import org.apache.parquet.schema.Types;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -482,6 +483,7 @@ final class TestHoglakeWrites
 
     @Test
     void testRecursiveWrites()
+            throws IOException
     {
         runner.execute("CREATE TABLE nested_values (a array(bigint), m map(varchar, array(integer)), r row(x tinyint, y smallint), ts timestamp(9))");
         runner.execute("INSERT INTO nested_values VALUES (ARRAY[1, NULL, 3], MAP(ARRAY['k'], ARRAY[ARRAY[4, NULL]]), ROW(TINYINT '-128', SMALLINT '32767'), TIMESTAMP '1969-12-31 23:59:59.999999999'), (ARRAY[], MAP(), NULL, NULL), (NULL, NULL, ROW(NULL, NULL), NULL)");
@@ -489,8 +491,19 @@ final class TestHoglakeWrites
                 .containsExactlyInAnyOrderElementsOf(runner.execute("VALUES (ARRAY[BIGINT '1', NULL, BIGINT '3'], MAP(ARRAY['k'], ARRAY[ARRAY[4, NULL]]), CAST(ROW(TINYINT '-128', SMALLINT '32767') AS row(x tinyint, y smallint)), TIMESTAMP '1969-12-31 23:59:59.999999999'), (CAST(ARRAY[] AS array(bigint)), CAST(MAP() AS map(varchar,array(integer))), NULL, NULL), (NULL, NULL, CAST(ROW(NULL, NULL) AS row(x tinyint, y smallint)), NULL)").getMaterializedRows());
         assertThatThrownBy(() -> runner.execute("INSERT INTO nested_values (ts) VALUES TIMESTAMP '3000-01-01 00:00:00.000000001'"))
                 .hasMessageContaining("cannot be represented losslessly");
-        runner.execute("CREATE TABLE variants AS SELECT CAST(42 AS variant) AS v");
+        runner.execute("CREATE TABLE variants AS SELECT CAST(42 AS variant) AS v, CAST(ROW(CAST(7 AS variant)) AS row(x variant)) AS r");
         assertThat(runner.execute("SELECT CAST(v AS integer) FROM variants").getOnlyValue()).isEqualTo(42);
+        assertThat(runner.execute("SELECT CAST(r.x AS integer) FROM variants").getOnlyValue()).isEqualTo(7);
+        // Readers that infer the schema from the footer see a plain struct without the VARIANT annotation
+        assertThat(files.get("variants")).isNotEmpty();
+        for (HoglakeDtos.ScanFile file : files.get("variants")) {
+            try (var input = storage.create(ConnectorIdentity.ofUser("test")).newInputFile(Location.of(file.dataFile().path())).newStream()) {
+                assertThat(ConnectorTestFixtures.fileMetaData(input.readAllBytes()).getSchema())
+                        .filteredOn(element -> element.getName().equals("v") || element.getName().equals("x"))
+                        .hasSize(2)
+                        .allSatisfy(element -> assertThat(element.getLogicalType()).isEqualTo(LogicalTypes.VARIANT((byte) 1)));
+            }
+        }
         runner.execute("CREATE TABLE nullable_variants AS SELECT n, CAST(IF(n % 3 = 0, NULL, n) AS variant) AS v FROM UNNEST(sequence(1, 20)) AS t(n)");
         // A CAST alone maps a variant null to NULL too, so check SQL nullness separately.
         assertQuery("SELECT n, v IS NULL, CAST(v AS bigint) FROM nullable_variants", "SELECT n, n % 3 = 0, IF(n % 3 = 0, NULL, n) FROM UNNEST(sequence(1, 20)) AS t(n)");

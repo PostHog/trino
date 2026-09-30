@@ -44,7 +44,6 @@ import org.apache.parquet.format.Util;
 import org.apache.parquet.schema.MessageType;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -65,6 +64,7 @@ import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_NANOS;
 import static io.trino.spi.type.UuidType.UUID;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
+import static java.lang.Math.toIntExact;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MICROS;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MILLIS;
@@ -367,9 +367,8 @@ class TestHoglakePredicatePushdown
     private static byte[] rewriteFooter(byte[] file, Consumer<FileMetaData> mutation)
             throws IOException
     {
-        int footerLength = ByteBuffer.wrap(file, file.length - 8, 4).order(LITTLE_ENDIAN).getInt();
-        int footerOffset = file.length - 8 - footerLength;
-        FileMetaData metadata = Util.readFileMetaData(new ByteArrayInputStream(file, footerOffset, footerLength));
+        int footerOffset = file.length - 8 - toIntExact(ConnectorTestFixtures.footerSize(file));
+        FileMetaData metadata = ConnectorTestFixtures.fileMetaData(file);
         mutation.accept(metadata);
         ByteArrayOutputStream footer = new ByteArrayOutputStream();
         Util.writeFileMetaData(metadata, footer);

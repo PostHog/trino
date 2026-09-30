@@ -193,17 +193,8 @@ public final class ConnectorTestFixtures
      */
     public static List<Long> rowGroupOffsets(byte[] file)
     {
-        int footerLength = toIntExact(footerSize(file));
-        int footerOffset = file.length - 8 - footerLength;
-        FileMetaData metadata;
-        try {
-            metadata = Util.readFileMetaData(new ByteArrayInputStream(file, footerOffset, footerLength));
-        }
-        catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
         List<Long> offsets = new ArrayList<>();
-        for (RowGroup rowGroup : metadata.getRow_groups()) {
+        for (RowGroup rowGroup : fileMetaData(file).getRow_groups()) {
             ColumnMetaData column = rowGroup.getColumns().getFirst().getMeta_data();
             long dataPageOffset = column.getData_page_offset();
             long dictionaryPageOffset = column.getDictionary_page_offset();
@@ -215,6 +206,21 @@ public final class ConnectorTestFixtures
             }
         }
         return List.copyOf(offsets);
+    }
+
+    /**
+     * The decoded Thrift footer of a Parquet file.
+     */
+    public static FileMetaData fileMetaData(byte[] file)
+    {
+        int footerLength = toIntExact(footerSize(file));
+        int footerOffset = file.length - 8 - footerLength;
+        try {
+            return Util.readFileMetaData(new ByteArrayInputStream(file, footerOffset, footerLength));
+        }
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
     private static Block buildBlock(Type type, List<Object> values)
