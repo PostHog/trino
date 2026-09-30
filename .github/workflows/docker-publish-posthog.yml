@@ -1,200 +1,53 @@
 name: docker-publish-posthog
 
-# Builds the PostHog fork's Trino server image (with the ducklake connector)
-# for linux/arm64 and publishes the same digest to ECR and GHCR.
-# The managed-warehouse trino Karpenter
-# node pool is arm64-only, so amd64 is skipped to keep CI fast.
-#
-# Every run also tells PostHog/charts what it built. Charts records the image
-# in state/trino.yaml and rolls the dev cell; the prod cell moves only when
-# somebody runs promote-to-prod, which the prod-promote-managed-warehouse
-# environment gates. See the deploy job at the end of this file.
-
+# Temporary diagnostic branch workflow. It never publishes release aliases or deploys.
 on:
-  # Only the deployment branch publishes. Manual runs can add readable aliases.
-  push:
-    branches:
-      - master
-  pull_request:
-    paths:
-      - .github/workflows/docker-publish-posthog.yml
-      - .github/bin/trino-release.sh
-      - .github/bin/test_trino_release.py
-      - core/docker/build.sh
   workflow_dispatch:
     inputs:
       tag:
-        description: "Image tag to publish, e.g. 484-ducklake.1"
-        required: true
-        default: "484-ducklake.1"
-
-# packages: write belongs to the job that pushes, not to every job in the file.
+        description: Unused compatibility input; image tag is derived from the commit
+        required: false
+        type: string
 permissions:
   contents: read
-
 concurrency:
-  group: trino-image-publisher-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'master' }}
+  group: trino-metadata-benchmark-${{ github.ref }}
   cancel-in-progress: false
-
 jobs:
-  test-release-contract:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - run: python3 .github/bin/test_trino_release.py
-
-  build-and-push:
-    needs: test-release-contract
-    if: >-
-      github.repository == 'PostHog/trino'
-      && github.ref == 'refs/heads/master'
-      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+  build:
+    if: github.repository == 'PostHog/trino' && github.ref == 'refs/heads/codex/distinct-metadata-benchmark'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 150
     permissions:
       contents: read
-      id-token: write
       packages: write
-    outputs:
-      digest: ${{ steps.release.outputs.digest }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-          fetch-depth: 0
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
         with:
-          role-to-assume: ${{ secrets.AWS_ECR_PUBLISH_IAM_ROLE }}
-          aws-region: us-east-1
-          mask-aws-account-id: true
-
-      - name: Log in to ECR
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2.0.1
-
+          distribution: temurin
+          java-version: 25
+      - name: Build server and CLI from this revision
+        run: |
+          ./mvnw clean install -pl core/trino-server-posthog,client/trino-cli -am \
+            -T 1C -DskipTests -Dmaven.javadoc.skip=true -Dair.check.skip-all=true
+      - name: Test changed modules against the built reactor
+        run: ./mvnw -pl lib/trino-filesystem,plugin/trino-hoglake test
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
       - name: Log in to GHCR
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
         run: echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
-
-      - name: Resolve source-ordered release
-        id: metadata
+      - name: Publish diagnostic image
         env:
-          ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/posthog-trino
-        run: bash .github/bin/trino-release.sh prepare
-
-      - name: Set up OCI registry exporter
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-        if: steps.metadata.outputs.digest == '' && steps.metadata.outputs.build-digest == ''
-        with:
-          driver: docker-container
-
-      # No Maven cache here on purpose. This job publishes an image and any
-      # branch build can write that cache, so reading it would let a branch
-      # decide what goes into a published artifact.
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
-        if: steps.metadata.outputs.digest == '' && steps.metadata.outputs.build-digest == ''
-        with:
-          distribution: temurin
-          java-version: 25
-
-      - name: Build trino-server-posthog tarball (skip tests and checks)
-        if: steps.metadata.outputs.digest == '' && steps.metadata.outputs.build-digest == ''
-        # Only what the image needs. trino-server-posthog is the fork's server
-        # package (core/trino-server-posthog); unlike trino-server it declares its
-        # plugin zips as dependencies, so -am builds exactly the plugins that end
-        # up in the image and nothing else. build.sh reads two artifacts,
-        # core/<package>/target/*.tar.gz and client/trino-cli/target/*-executable.jar,
-        # hence the second -pl entry.
-        run: |
-          ./mvnw clean install \
-            -pl core/trino-server-posthog,client/trino-cli -am \
-            -T 1C -DskipTests -Dmaven.javadoc.skip=true -Dair.check.skip-all=true
-
-      - name: Build and push arm64 OCI image
-        id: push
-        if: steps.metadata.outputs.digest == '' && steps.metadata.outputs.build-digest == ''
-        env:
-          ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/posthog-trino
           OCI_SOURCE: https://github.com/PostHog/trino
           OCI_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
-          staging_image="${ECR_REPOSITORY}:build-${GITHUB_SHA}"
-          core/docker/build.sh -a arm64 -p trino-server-posthog -x -o "$staging_image"
-          digest="$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "$staging_image" | jq -er 'select(test("^sha256:[0-9a-f]{64}$"))')"
-          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve image tag
-        id: tag
-        # Legacy consumers use the commit alias. Manual runs can add another alias.
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          INPUT_TAG: ${{ inputs.tag }}
-        run: |
-          case "${EVENT_NAME}" in
-            workflow_dispatch) tag="${INPUT_TAG}" ;;
-            *) tag="${GITHUB_SHA}" ;;
-          esac
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-
-      - name: Publish verified release aliases
-        id: release
-        env:
-          ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/posthog-trino
-          BUILD_DIGEST: ${{ steps.push.outputs.digest || steps.metadata.outputs.build-digest }}
-          READABLE_TAG: ${{ steps.tag.outputs.tag }}
-        run: bash .github/bin/trino-release.sh publish
-
-  deploy:
-    # Tells charts what to run. Charts writes state/trino.yaml and rolls the
-    # dev cell; the prod cell waits for promote-to-prod, which the
-    # prod-promote-managed-warehouse environment gates.
-    #
-    # A fork must not deploy PostHog's cells, and a build of some other branch
-    # is not what dev should follow. Only a push carries head_commit, which the
-    # payload below reads; a manual run of this same branch would send a null
-    # commit and charts would record a deploy it cannot attribute.
-    needs: build-and-push
-    if: >-
-      github.repository == 'PostHog/trino'
-      && github.event_name == 'push'
-      && github.ref == 'refs/heads/master'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Get deployer token
-        id: deployer
-        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
-        with:
-          app-id: ${{ secrets.GH_APP_CHARTS_DEPLOYER_APP_ID }}
-          private-key: ${{ secrets.GH_APP_CHARTS_DEPLOYER_PRIVATE_KEY }}
-          owner: PostHog
-          repositories: charts
-          permission-contents: write
-
-      - name: Record the build in charts
-        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
-        with:
-          token: ${{ steps.deployer.outputs.token }}
-          repository: PostHog/charts
-          event-type: commit_state_update
-          client-payload: |
-            {
-              "values": {
-                "image": {
-                  "sha": "${{ github.sha }}@${{ needs.build-and-push.outputs.digest }}"
-                }
-              },
-              "release": "trino",
-              "commit": ${{ toJson(github.event.head_commit) }},
-              "repository": ${{ toJson(github.repository) }},
-              "labels": [],
-              "timestamp": "${{ github.event.head_commit.timestamp }}"
-            }
+          image="ghcr.io/posthog/trino:distinct-metadata-${GITHUB_SHA}"
+          core/docker/build.sh -a arm64 -p trino-server-posthog -x -o "$image"
+          digest="$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "$image" | jq -er 'select(test("^sha256:[0-9a-f]{64}$"))')"
+          echo "${image}@${digest}" >> "$GITHUB_STEP_SUMMARY"
