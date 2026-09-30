@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.hoglake;
 
+import com.google.common.collect.ImmutableMap;
 import com.sun.net.httpserver.HttpServer;
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.trace.Tracer;
@@ -24,6 +25,7 @@ import io.trino.spi.BlocksHashFactory;
 import io.trino.spi.NodeManager;
 import io.trino.spi.PageIndexerFactory;
 import io.trino.spi.PageSorter;
+import io.trino.spi.TrinoException;
 import io.trino.spi.VersionEmbedder;
 import io.trino.spi.cache.BlobCache;
 import io.trino.spi.cache.CacheRequirements;
@@ -31,17 +33,23 @@ import io.trino.spi.cache.ConnectorCacheFactory;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorContext;
 import io.trino.spi.connector.ConnectorPageSource;
+import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.connector.MetadataProvider;
+import io.trino.spi.security.ConnectorIdentity;
 import io.trino.spi.type.TypeManager;
 import io.trino.testing.TestingConnectorContext;
+import io.trino.testing.TestingConnectorSession;
 import org.apache.parquet.schema.Types;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -52,6 +60,9 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static io.trino.filesystem.s3.S3FileSystemConstants.EXTRA_CREDENTIALS_ACCESS_KEY_PROPERTY;
+import static io.trino.filesystem.s3.S3FileSystemConstants.EXTRA_CREDENTIALS_SECRET_KEY_PROPERTY;
+import static io.trino.filesystem.s3.S3FileSystemConstants.EXTRA_CREDENTIALS_SESSION_TOKEN_PROPERTY;
 import static io.trino.spi.cache.CacheCapability.CAN_EXCEED_HEAP_SIZE;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
@@ -61,7 +72,93 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class TestHoglakeFileSystemCache
 {
     @Test
+    void testRegisteredReadsValidateStorageAuthorization(@TempDir Path temporaryDirectory)
+            throws IOException
+    {
+        Path mapping = temporaryDirectory.resolve("s3-mapping.json");
+        Files.writeString(mapping,
+                """
+                {"mappings": [
+                  {"user": "denied-user", "accessKey": "denied-access", "secretKey": "test-secret"},
+                  {"accessKey": "test-access", "secretKey": "test-secret"}
+                ]}
+                """);
+        for (boolean securityMapping : List.of(false, true)) {
+            try (S3ObjectServer server = new S3ObjectServer()) {
+                server.deniedAccessKeys = Set.of("denied-access");
+                BlobCache cache = new MemoryBlobCache(new MemoryBlobCacheConfig());
+                ImmutableMap.Builder<String, String> properties = ImmutableMap.<String, String>builder()
+                        .put("hoglake.uri", "http://localhost:8080")
+                        .put("hoglake.s3.endpoint", server.endpoint())
+                        .put("hoglake.s3.access-key", "test-access")
+                        .put("hoglake.s3.secret-key", "test-secret")
+                        .put("hoglake.s3.path-style", "true")
+                        .put("s3.max-error-retries", "1")
+                        .put("fs.cache.enabled", "true");
+                if (securityMapping) {
+                    properties.put("s3.security-mapping.enabled", "true")
+                            .put("s3.security-mapping.config-file", mapping.toString());
+                }
+                Connector connector = new HoglakeConnectorFactory().create("authorization_test", properties.buildOrThrow(), new CacheContext(_ -> Optional.of(cache)));
+                try {
+                    ConnectorSession allowed = storageSession("allowed-user", "test-access", securityMapping);
+                    ConnectorSession denied = storageSession("denied-user", "denied-access", securityMapping);
+                    assertThat(read(connector, allowed, server.data.length, 1)).containsExactly(List.of(11L), List.of(22L));
+                    int coldReads = server.dataReads.get();
+                    assertThat(coldReads).isPositive();
+                    assertThat(read(connector, allowed, server.data.length, 1)).containsExactly(List.of(11L), List.of(22L));
+                    assertThat(server.dataReads).hasValue(coldReads);
+                    assertThat(server.metadataReads).hasValue(2);
+
+                    assertThatThrownBy(() -> read(connector, denied, server.data.length, 1))
+                            .isInstanceOf(TrinoException.class)
+                            .hasStackTraceContaining("Status Code: 403");
+                    assertThat(server.metadataReads).hasValue(3);
+                    assertThat(server.dataReads).hasValue(coldReads);
+
+                    // Authorization checks must not discard the registration-based identity.
+                    int previousLength = server.data.length;
+                    server.data = parquet(33L, 44L);
+                    assertThat(server.data.length).isEqualTo(previousLength);
+                    assertThat(read(connector, allowed, server.data.length, 2)).containsExactly(List.of(33L), List.of(44L));
+                    assertThat(server.metadataReads).hasValue(4);
+
+                    // Even the previously allowed session must be checked again after revocation.
+                    server.deniedAccessKeys = Set.of("test-access", "denied-access");
+                    assertThatThrownBy(() -> read(connector, allowed, server.data.length, 2))
+                            .isInstanceOf(TrinoException.class)
+                            .hasStackTraceContaining("Status Code: 403");
+                    assertThat(server.metadataReads).hasValue(5);
+                }
+                finally {
+                    connector.shutdown();
+                }
+            }
+        }
+    }
+
+    private static ConnectorSession storageSession(String user, String accessKey, boolean securityMapping)
+    {
+        ConnectorIdentity.Builder identity = ConnectorIdentity.forUser(user);
+        if (!securityMapping) {
+            identity.withExtraCredentials(ImmutableMap.of(
+                    EXTRA_CREDENTIALS_ACCESS_KEY_PROPERTY, accessKey,
+                    EXTRA_CREDENTIALS_SECRET_KEY_PROPERTY, "test-secret",
+                    EXTRA_CREDENTIALS_SESSION_TOKEN_PROPERTY, "test-token"));
+        }
+        return TestingConnectorSession.builder().setIdentity(identity.build()).build();
+    }
+
+    @Test
     void testCachedAndUncachedReads()
+            throws IOException
+    {
+        verifyCachedAndUncachedReads(0);
+        verifyCachedAndUncachedReads(-2);
+        verifyCachedAndUncachedReads(1);
+    }
+
+    private static void verifyCachedAndUncachedReads(long dataFileId)
             throws IOException
     {
         for (boolean enabled : List.of(false, true)) {
@@ -84,31 +181,81 @@ class TestHoglakeFileSystemCache
                         "s3.max-error-retries", "1",
                         "fs.cache.enabled", Boolean.toString(enabled)), context);
                 try {
-                    assertThat(read(connector, server.data.length)).containsExactly(List.of(11L), List.of(22L));
+                    ConnectorSession session = TestingConnectorSession.builder().build();
+                    assertThat(read(connector, session, server.data.length, dataFileId)).containsExactly(List.of(11L), List.of(22L));
                     int coldReads = server.dataReads.get();
                     assertThat(coldReads).isPositive();
-                    assertThat(read(connector, server.data.length)).containsExactly(List.of(11L), List.of(22L));
+                    assertThat(read(connector, session, server.data.length, dataFileId)).containsExactly(List.of(11L), List.of(22L));
                     if (enabled) {
                         assertThat(server.dataReads.get()).isEqualTo(coldReads);
                         assertThat(cacheRequests.get()).isEqualTo(1);
+                        assertThat(server.metadataReads.get()).isEqualTo(dataFileId > 0 ? 0 : 2);
                     }
                     else {
                         assertThat(server.dataReads.get()).isGreaterThan(coldReads);
                         assertThat(cacheRequests.get()).isZero();
+                        assertThat(server.metadataReads.get()).isZero();
                     }
 
-                    // Same location and file size, different modification time and content.
+                    // Another query can reuse the same registered file without validation.
+                    assertThat(read(connector, TestingConnectorSession.builder().build(), server.data.length, dataFileId))
+                            .containsExactly(List.of(11L), List.of(22L));
+                    if (enabled) {
+                        assertThat(server.dataReads.get()).isEqualTo(coldReads);
+                    }
+
+                    // A new registration must not reuse old bytes even with identical size and timestamp.
                     int previousReads = server.dataReads.get();
                     int previousLength = server.data.length;
                     server.data = parquet(33L, 44L);
-                    server.lastModified = server.lastModified.plusSeconds(1);
+                    if (dataFileId <= 0) {
+                        server.lastModified = server.lastModified.plusSeconds(1);
+                    }
                     assertThat(server.data.length).isEqualTo(previousLength);
-                    assertThat(read(connector, server.data.length)).containsExactly(List.of(33L), List.of(44L));
+                    assertThat(read(connector, TestingConnectorSession.builder().build(), server.data.length, dataFileId > 0 ? 2 : dataFileId))
+                            .containsExactly(List.of(33L), List.of(44L));
+                    if (enabled) {
+                        assertThat(server.metadataReads.get()).isEqualTo(dataFileId > 0 ? 0 : 4);
+                    }
                     assertThat(server.dataReads.get()).isGreaterThan(previousReads);
                 }
                 finally {
                     connector.shutdown();
                 }
+            }
+        }
+    }
+
+    @Test
+    void testCatalogIdentitySeparatesSharedCacheEntries()
+            throws IOException
+    {
+        try (S3ObjectServer server = new S3ObjectServer()) {
+            BlobCache cache = new MemoryBlobCache(new MemoryBlobCacheConfig());
+            ConnectorContext context = new CacheContext(_ -> Optional.of(cache));
+            long value = 10;
+            for (List<String> identity : List.of(
+                    List.of("http://localhost:8080", "first"),
+                    List.of("http://localhost:8080", "second"),
+                    List.of("http://localhost:8081", "second"))) {
+                server.data = parquet(value, value + 1);
+                Connector connector = new HoglakeConnectorFactory().create("identity_test", Map.of(
+                        "hoglake.uri", identity.get(0),
+                        "hoglake.catalog", identity.get(1),
+                        "hoglake.s3.endpoint", server.endpoint(),
+                        "hoglake.s3.access-key", "test-access",
+                        "hoglake.s3.secret-key", "test-secret",
+                        "hoglake.s3.path-style", "true",
+                        "fs.cache.enabled", "true"), context);
+                try {
+                    assertThat(read(connector, TestingConnectorSession.builder().build(), server.data.length, 1))
+                            .containsExactly(List.of(value), List.of(value + 1));
+                    assertThat(server.metadataReads).hasValue(0);
+                }
+                finally {
+                    connector.shutdown();
+                }
+                value += 10;
             }
         }
     }
@@ -172,10 +319,16 @@ class TestHoglakeFileSystemCache
     private static List<List<Object>> read(Connector connector, int fileSize)
             throws IOException
     {
+        return read(connector, TestingConnectorSession.builder().build(), fileSize, 0);
+    }
+
+    private static List<List<Object>> read(Connector connector, ConnectorSession session, int fileSize, long dataFileId)
+            throws IOException
+    {
         try (ConnectorPageSource source = connector.getPageSourceProvider().createPageSource(
                 HoglakeTransactionHandle.INSTANCE,
-                ConnectorTestFixtures.session(),
-                new HoglakeSplit("s3://test-bucket/data.parquet", fileSize, 2, Optional.empty(), 0),
+                session,
+                new HoglakeSplit(dataFileId, "s3://test-bucket/data.parquet", fileSize, 2, Optional.empty(), 0, Optional.empty()),
                 new HoglakeTableHandle("test", "table", 1, "test-table", List.of()),
                 Optional.empty(),
                 List.of(new HoglakeColumnHandle("value", 1, BIGINT, true)),
@@ -196,6 +349,8 @@ class TestHoglakeFileSystemCache
     {
         private final HttpServer server;
         private final AtomicInteger dataReads = new AtomicInteger();
+        private final AtomicInteger metadataReads = new AtomicInteger();
+        private volatile Set<String> deniedAccessKeys = Set.of();
         private volatile byte[] data = parquet(11L, 22L);
         private volatile Instant lastModified = Instant.parse("2026-01-01T00:00:00Z");
 
@@ -205,6 +360,14 @@ class TestHoglakeFileSystemCache
             server = HttpServer.create(new InetSocketAddress(InetAddress.getByAddress(new byte[] {127, 0, 0, 1}), 0), 0);
             server.createContext("/test-bucket/data.parquet", exchange -> {
                 try (exchange) {
+                    if (exchange.getRequestMethod().equals("HEAD")) {
+                        metadataReads.incrementAndGet();
+                    }
+                    String authorization = exchange.getRequestHeaders().getFirst("Authorization");
+                    if (authorization != null && deniedAccessKeys.stream().anyMatch(key -> authorization.contains("Credential=" + key + "/"))) {
+                        exchange.sendResponseHeaders(403, -1);
+                        return;
+                    }
                     byte[] content = data;
                     exchange.getResponseHeaders().set("Last-Modified", DateTimeFormatter.RFC_1123_DATE_TIME.format(lastModified.atZone(ZoneOffset.UTC)));
                     if (exchange.getRequestMethod().equals("HEAD")) {

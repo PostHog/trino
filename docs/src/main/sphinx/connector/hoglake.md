@@ -71,11 +71,14 @@ is insufficient; enabling data caching without a suitable manager fails catalog
 initialization.
 
 The engine manages cache resources and scopes entries by Trino catalog and cache
-usage. Hoglake uses the default file keys: location, last-modified time, and length.
-Warm reads can still issue S3 HEAD requests to determine file identity. These keys
-are not Hoglake snapshot identifiers or per-user cache partitions. Published data
-files should remain immutable; changing content while retaining the same location,
-modification time, and length cannot be detected by this key scheme.
+usage. Registered data-file keys include the Hoglake endpoint and catalog, location,
+data-file ID, and size. Registered files are immutable, so cached reads with
+catalog-wide credentials do not fetch S3 modification times. When S3 security
+mapping is enabled or a session supplies extra credentials, registered reads still
+fetch metadata before using the shared cache to check storage access with the
+current credentials. Re-registering a path assigns a new ID and cache entry.
+Files without a positive ID and deletion vectors retain default filesystem validation.
+Keys are not per-user partitions; overwriting a registered object violates the contract.
 
 This caches filesystem data only, not Hoglake REST metadata. When caching is
 enabled, each split carries the filesystem's scheduling affinity key for its file
@@ -178,8 +181,9 @@ many row groups is megabytes of metadata that is costly to decode. Each worker k
 the decoded footers of the files it has recently read, so the ranges of a file read
 by one worker decode its footer once between them, and later queries reading the
 same file on that worker do not read or decode it again. Footers are keyed by file
-location and length. `hoglake.parquet-footer-cache.max-size` bounds the cache by the
-footers' serialized size; decoded footers occupy more heap memory than that,
+location, registered data-file ID, and length.
+`hoglake.parquet-footer-cache.max-size` bounds the cache by the footers' serialized
+size; decoded footers occupy more heap memory than that,
 and a footer larger than the whole bound is not cached. To keep a hot table's footers
 cached, size the bound to at least the sum of the `footer_size` of its data files.
 This cache is separate from

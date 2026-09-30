@@ -72,6 +72,16 @@
         </dependency>
         <dependency>
             <groupId>io.trino</groupId>
+            <artifactId>trino-filesystem-s3</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>io.trino</groupId>
+                    <artifactId>trino-spi</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>io.trino</groupId>
             <artifactId>trino-memory-context</artifactId>
             <exclusions>
                 <exclusion>
@@ -187,19 +197,6 @@
             <groupId>io.trino</groupId>
             <artifactId>trino-client</artifactId>
             <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>io.trino</groupId>
-            <artifactId>trino-filesystem-s3</artifactId>
-            <scope>test</scope>
-            <!-- The plugin packager resolves the runtime closure separately;
-                 the SPI is supplied by Trino's parent classloader. -->
-            <exclusions>
-                <exclusion>
-                    <groupId>io.trino</groupId>
-                    <artifactId>trino-spi</artifactId>
-                </exclusion>
-            </exclusions>
         </dependency>
         <dependency>
             <groupId>io.trino</groupId>

@@ -120,7 +120,7 @@ class TestHoglakeRangeReads
         TailCountingProvider cached = new TailCountingProvider(footerCache);
         assertThat(readAllSplits(cached, splits, List.of(VALUE))).containsExactlyElementsOf(allValues());
         assertThat(cached.tailReads).isEqualTo(1);
-        assertThat(footerCache.contains(new HoglakeParquetFooterCache.Key(PATH, FILE.length))).isTrue();
+        assertThat(footerCache.contains(new HoglakeParquetFooterCache.Key(PATH, FILE.length, splits.getFirst().dataFileId()))).isTrue();
 
         // Reading the file again reads no footer at all.
         assertThat(readAllSplits(cached, splits, List.of(VALUE))).containsExactlyElementsOf(allValues());
