@@ -78,6 +78,14 @@ public final class DictionaryDecoder<T>
         dictionaryIdsReader.read(ids, offset, length);
     }
 
+    /**
+     * Writes the dictionary values of the first {@code length} ids to {@code values} starting at {@code offset}
+     */
+    public void decodeDictionaryIds(int[] ids, T values, int offset, int length)
+    {
+        columnAdapter.decodeDictionaryIds(values, offset, length, ids, dictionary);
+    }
+
     public Block getDictionaryBlock()
     {
         if (dictionaryBlock == null) {

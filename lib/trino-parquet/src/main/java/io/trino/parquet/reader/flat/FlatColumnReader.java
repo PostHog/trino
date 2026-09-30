@@ -33,6 +33,7 @@ import io.trino.parquet.reader.flat.FlatDefinitionLevelDecoder.DefinitionLevelDe
 import io.trino.spi.block.Block;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.type.Type;
+import jakarta.annotation.Nullable;
 
 import java.util.Arrays;
 import java.util.Optional;
@@ -308,7 +309,7 @@ public class FlatColumnReader<BufferType>
     ColumnChunk readNullable()
     {
         log.debug("readNullable field %s, nextBatchSize %d, remainingPageValueCount %d", field, nextBatchSize, remainingPageValueCount);
-        NullableValuesBuffer<BufferType> valuesBuffer = createNullableValuesBuffer(nextBatchSize);
+        NullableValuesBuffer<BufferType> valuesBuffer = createValuesBuffer(nextBatchSize);
         long[] valueIsValid = new long[wordsForBits(nextBatchSize)];
         int remainingInBatch = nextBatchSize;
         int offset = 0;
@@ -345,7 +346,7 @@ public class FlatColumnReader<BufferType>
     private ColumnChunk readNullable(int[] positions, int offset, int positionCount)
     {
         log.debug("readNullable selected field %s, nextBatchSize %d, positionCount %d, remainingPageValueCount %d", field, nextBatchSize, positionCount, remainingPageValueCount);
-        NullableValuesBuffer<BufferType> valuesBuffer = createNullableValuesBuffer(positionCount);
+        NullableValuesBuffer<BufferType> valuesBuffer = createValuesBuffer(positionCount);
         long[] valueIsValid = new long[wordsForBits(positionCount)];
         readSelectedPositions(positions, offset, positionCount, (outputOffset, runLength) -> readNullableRows(valuesBuffer, valueIsValid, outputOffset, runLength));
         return valuesBuffer.createNullableBlock(valueIsValid, field.getType());
@@ -355,7 +356,7 @@ public class FlatColumnReader<BufferType>
     ColumnChunk readNonNull()
     {
         log.debug("readNonNull field %s, nextBatchSize %d, remainingPageValueCount %d", field, nextBatchSize, remainingPageValueCount);
-        NonNullValuesBuffer<BufferType> valuesBuffer = createNonNullValuesBuffer(nextBatchSize);
+        NonNullValuesBuffer<BufferType> valuesBuffer = createValuesBuffer(nextBatchSize);
         readNonNullRows(valuesBuffer, 0, nextBatchSize);
         return valuesBuffer.createNonNullBlock(field.getType());
     }
@@ -363,7 +364,7 @@ public class FlatColumnReader<BufferType>
     private ColumnChunk readNonNull(int[] positions, int offset, int positionCount)
     {
         log.debug("readNonNull selected field %s, nextBatchSize %d, positionCount %d, remainingPageValueCount %d", field, nextBatchSize, positionCount, remainingPageValueCount);
-        NonNullValuesBuffer<BufferType> valuesBuffer = createNonNullValuesBuffer(positionCount);
+        NonNullValuesBuffer<BufferType> valuesBuffer = createValuesBuffer(positionCount);
         readSelectedPositions(positions, offset, positionCount, (outputOffset, runLength) -> readNonNullRows(valuesBuffer, outputOffset, runLength));
         return valuesBuffer.createNonNullBlock(field.getType());
     }
@@ -579,18 +580,13 @@ public class FlatColumnReader<BufferType>
         valueDecoder = createValueDecoder(decodersProvider, page.getDataEncoding(), page.getSlice());
     }
 
-    private NonNullValuesBuffer<BufferType> createNonNullValuesBuffer(int batchSize)
+    private ValuesBuffer<BufferType> createValuesBuffer(int batchSize)
     {
         if (produceDictionaryBlock()) {
             return new DictionaryValuesBuffer<>(field, dictionaryDecoder, batchSize);
         }
-        return new DataValuesBuffer<>(field, columnAdapter, batchSize);
-    }
-
-    private NullableValuesBuffer<BufferType> createNullableValuesBuffer(int batchSize)
-    {
-        if (produceDictionaryBlock()) {
-            return new DictionaryValuesBuffer<>(field, dictionaryDecoder, batchSize);
+        if (dictionaryBlockAllowed()) {
+            return new DictionaryFallbackValuesBuffer<>(field, columnAdapter, dictionaryDecoder, batchSize);
         }
         return new DataValuesBuffer<>(field, columnAdapter, batchSize);
     }
@@ -609,8 +605,11 @@ public class FlatColumnReader<BufferType>
         ColumnChunk createNullableBlock(long[] valueIsValid, Type type);
     }
 
+    private interface ValuesBuffer<T>
+            extends NonNullValuesBuffer<T>, NullableValuesBuffer<T> {}
+
     private static final class DataValuesBuffer<T>
-            implements NonNullValuesBuffer<T>, NullableValuesBuffer<T>
+            implements ValuesBuffer<T>
     {
         private final PrimitiveField field;
         private final ColumnAdapter<T> columnAdapter;
@@ -655,6 +654,32 @@ public class FlatColumnReader<BufferType>
             totalNullsCount += valuesCount - nonNullCount;
         }
 
+        /**
+         * Writes values of the given dictionary ids to the first {@code valuesCount} positions of an empty buffer.
+         * Ids equal to the dictionary size denote nulls, and {@code valueIsValid} must be populated when there are any.
+         */
+        public void decodeDictionaryIds(DictionaryDecoder<T> dictionaryDecoder, int[] ids, @Nullable long[] valueIsValid, int nullsCount, int valuesCount)
+        {
+            if (nullsCount == 0) {
+                dictionaryDecoder.decodeDictionaryIds(ids, values, 0, valuesCount);
+                return;
+            }
+            int nullId = dictionaryDecoder.getDictionarySize();
+            int nonNullCount = valuesCount - nullsCount;
+            int[] nonNullIds = new int[nonNullCount];
+            int nonNullIndex = 0;
+            for (int position = 0; position < valuesCount; position++) {
+                if (ids[position] != nullId) {
+                    nonNullIds[nonNullIndex++] = ids[position];
+                }
+            }
+            checkState(nonNullIndex == nonNullCount, "Unexpected non-null values count %s, expected %s", nonNullIndex, nonNullCount);
+            T tmpBuffer = columnAdapter.createTemporaryBuffer(0, nonNullCount, values);
+            dictionaryDecoder.decodeDictionaryIds(nonNullIds, tmpBuffer, 0, nonNullCount);
+            columnAdapter.unpackNullValues(tmpBuffer, values, valueIsValid, 0, nonNullCount, valuesCount);
+            totalNullsCount = nullsCount;
+        }
+
         @Override
         public ColumnChunk createNonNullBlock(Type type)
         {
@@ -681,7 +706,7 @@ public class FlatColumnReader<BufferType>
     }
 
     private static final class DictionaryValuesBuffer<T>
-            implements NonNullValuesBuffer<T>, NullableValuesBuffer<T>
+            implements ValuesBuffer<T>
     {
         private final PrimitiveField field;
         private final DictionaryDecoder<T> decoder;
@@ -725,6 +750,16 @@ public class FlatColumnReader<BufferType>
             totalNullsCount += valuesCount - nonNullCount;
         }
 
+        /**
+         * Converts the first {@code valuesCount} dictionary ids read into this buffer to values
+         */
+        public DataValuesBuffer<T> toDataValuesBuffer(ColumnAdapter<T> columnAdapter, @Nullable long[] valueIsValid, int valuesCount)
+        {
+            DataValuesBuffer<T> dataValues = new DataValuesBuffer<>(field, columnAdapter, batchSize);
+            dataValues.decodeDictionaryIds(decoder, ids, valueIsValid, totalNullsCount, valuesCount);
+            return dataValues;
+        }
+
         @Override
         public ColumnChunk createNonNullBlock(Type type)
         {
@@ -747,6 +782,91 @@ public class FlatColumnReader<BufferType>
                 return new ColumnChunk(RunLengthEncodedBlock.create(type, null, batchSize), EMPTY_DEFINITION_LEVELS, EMPTY_REPETITION_LEVELS);
             }
             return createDictionaryBlock(ids, decoder.getDictionaryBlock(), EMPTY_DEFINITION_LEVELS, EMPTY_REPETITION_LEVELS);
+        }
+    }
+
+    /**
+     * Reads dictionary ids and produces a dictionary block as long as the values of a batch come from
+     * dictionary encoded data pages. The column chunk may also contain data pages with a different encoding,
+     * for example after the Parquet writer fell back from dictionary encoding. When the batch reaches such
+     * a page, the dictionary ids read so far are decoded and the rest of the batch is read as values.
+     */
+    private static final class DictionaryFallbackValuesBuffer<T>
+            implements ValuesBuffer<T>
+    {
+        private final PrimitiveField field;
+        private final ColumnAdapter<T> columnAdapter;
+        private final DictionaryDecoder<T> dictionaryDecoder;
+        private final int batchSize;
+        @Nullable
+        private DictionaryValuesBuffer<T> dictionaryValues;
+        @Nullable
+        private DataValuesBuffer<T> dataValues;
+
+        private DictionaryFallbackValuesBuffer(PrimitiveField field, ColumnAdapter<T> columnAdapter, DictionaryDecoder<T> dictionaryDecoder, int batchSize)
+        {
+            this.field = field;
+            this.columnAdapter = columnAdapter;
+            this.dictionaryDecoder = requireNonNull(dictionaryDecoder, "dictionaryDecoder is null");
+            this.batchSize = batchSize;
+        }
+
+        @Override
+        public void readNonNullValues(ValueDecoder<T> valueDecoder, int offset, int valuesCount)
+        {
+            selectBuffer(valueDecoder, null, offset).readNonNullValues(valueDecoder, offset, valuesCount);
+        }
+
+        @Override
+        public void readNullableValues(ValueDecoder<T> valueDecoder, long[] valueIsValid, int offset, int nonNullCount, int valuesCount)
+        {
+            selectBuffer(valueDecoder, valueIsValid, offset).readNullableValues(valueDecoder, valueIsValid, offset, nonNullCount, valuesCount);
+        }
+
+        @Override
+        public ColumnChunk createNonNullBlock(Type type)
+        {
+            return currentBuffer().createNonNullBlock(type);
+        }
+
+        @Override
+        public ColumnChunk createNullableBlock(long[] valueIsValid, Type type)
+        {
+            return currentBuffer().createNullableBlock(valueIsValid, type);
+        }
+
+        private ValuesBuffer<T> selectBuffer(ValueDecoder<T> valueDecoder, @Nullable long[] valueIsValid, int offset)
+        {
+            if (dataValues != null) {
+                return dataValues;
+            }
+            // Dictionary encoded data pages share the dictionary decoder of the column chunk
+            if (valueDecoder == dictionaryDecoder) {
+                if (dictionaryValues == null) {
+                    dictionaryValues = new DictionaryValuesBuffer<>(field, dictionaryDecoder, batchSize);
+                }
+                return dictionaryValues;
+            }
+            if (dictionaryValues == null) {
+                dataValues = new DataValuesBuffer<>(field, columnAdapter, batchSize);
+            }
+            else {
+                log.debug("DictionaryFallbackValuesBuffer decoding %d dictionary ids of field %s", offset, field);
+                dataValues = dictionaryValues.toDataValuesBuffer(columnAdapter, valueIsValid, offset);
+                dictionaryValues = null;
+            }
+            return dataValues;
+        }
+
+        private ValuesBuffer<T> currentBuffer()
+        {
+            if (dictionaryValues != null) {
+                return dictionaryValues;
+            }
+            if (dataValues == null) {
+                dataValues = new DataValuesBuffer<>(field, columnAdapter, batchSize);
+            }
+            return dataValues;
         }
     }
 }
