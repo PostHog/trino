@@ -14,15 +14,19 @@
 package io.trino.plugin.hoglake;
 
 import io.airlift.slice.Slice;
+import io.airlift.units.DataSize;
 import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.parquet.ParquetReaderOptions;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures.FileColumn;
 import io.trino.plugin.hoglake.testing.PuffinDeletionVectorFixtures;
 import io.trino.spi.TrinoException;
+import io.trino.spi.block.Block;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.MemoryContext;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.type.RowType;
 import io.trino.spi.variant.Metadata;
 import io.trino.spi.variant.Variant;
@@ -47,8 +51,10 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.LongStream;
 
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.airlift.units.DataSize.Unit.KILOBYTE;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -230,6 +236,54 @@ class TestHoglakeShreddedVariant
         assertThatThrownBy(() -> readVariantBytes(extra, 1))
                 .isInstanceOfSatisfying(TrinoException.class, e -> assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
                 .hasMessageContaining("Unexpected field extra in shredded VARIANT group v");
+    }
+
+    @Test
+    void largeValuesAreSplitIntoPages()
+            throws IOException
+    {
+        // The writer stores the repeated value once in a dictionary, so the reader sizes its
+        // pages by that one copy. Assembly copies the value into every row.
+        String browser = "x".repeat(16 * 1024);
+        List<List<Object>> rows = new ArrayList<>();
+        for (long a = 0; a < 64; a++) {
+            rows.add(row(METADATA, null, typedValue(Variant.ofLong(a), browser)));
+        }
+        byte[] file = write(rows, Optional.empty());
+        DataSize maxPageSize = DataSize.of(64, KILOBYTE);
+        HoglakePageSourceProvider provider = new HoglakePageSourceProvider(
+                ConnectorTestFixtures.memoryFileSystem(Map.of(PATH, file)),
+                ParquetReaderOptions.builder().withMaxReadBlockSize(maxPageSize).build());
+
+        ConnectorPageSource pageSource = provider.createPageSource(
+                HoglakeTransactionHandle.INSTANCE,
+                ConnectorTestFixtures.session(),
+                new HoglakeSplit(PATH, file.length, 64, Optional.empty(), 0),
+                new HoglakeTableHandle("analytics", "shredded_variant_test", 1, "uuid-shredded-variant-test", List.of()),
+                Optional.empty(),
+                List.of((ColumnHandle) COLUMN),
+                DynamicFilter.EMPTY,
+                MemoryContext.NO_LIMIT);
+        List<Object> values = new ArrayList<>();
+        int pages = 0;
+        try {
+            for (SourcePage page = pageSource.getNextSourcePage(); page != null; page = pageSource.getNextSourcePage()) {
+                Block variants = page.getBlock(0);
+                // A page ends with the first value that reaches the limit
+                assertThat(variants.getSizeInBytes()).isLessThan(maxPageSize.toBytes() + 2L * browser.length());
+                for (int position = 0; position < variants.getPositionCount(); position++) {
+                    values.add(variantBytes(VARIANT.getObject(variants, position)));
+                }
+                pages++;
+            }
+        }
+        finally {
+            pageSource.close();
+        }
+        assertThat(pages).isGreaterThanOrEqualTo(16);
+        assertThat(values).containsExactlyElementsOf(LongStream.range(0, 64)
+                .mapToObj(a -> variantBytes(Variant.ofObject(Map.of(utf8Slice("a"), Variant.ofLong(a), utf8Slice("$Browser"), Variant.ofString(browser)))))
+                .toList());
     }
 
     @Test

@@ -38,9 +38,11 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VariantType.VARIANT;
+import static java.lang.Math.min;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -118,10 +120,14 @@ public class HoglakePageSource
             requireNonNull(assembler, "assembler is null");
         }
 
-        public Block read(Block shredded)
+        /**
+         * The VARIANT values of up to {@code maxPositions} rows from
+         * {@code start}, stopping once they reach {@code maxSizeInBytes}.
+         */
+        public Block read(Block shredded, int start, int maxPositions, long maxSizeInBytes)
                 throws ParquetCorruptionException
         {
-            Block variants = assembler.assemble(shredded);
+            Block variants = assembler.assemble(shredded, start, maxPositions, maxSizeInBytes);
             if (variantNullIsSqlNull) {
                 return variantNullsToSqlNulls(variants);
             }
@@ -163,6 +169,14 @@ public class HoglakePageSource
 
     private final ParquetReader parquetReader;
     private final List<ColumnAdaptation> columns;
+    private final boolean hasShreddedColumns;
+    /**
+     * Assembling a shredded VARIANT copies every value, so the reader cannot
+     * size a page by its columns. A page of assembled values ends once it
+     * reaches this size, and the rest of the reader page follows in the next
+     * pages.
+     */
+    private final long maxShreddedPageSizeInBytes;
     private final List<Block> nullBlocks;
     /**
      * Null when the split has no deletion vector, in which case the reader
@@ -180,16 +194,27 @@ public class HoglakePageSource
 
     private boolean closed;
     private long completedPositions;
+    /**
+     * A reader page with the deletion vector applied, whose shredded VARIANT
+     * channels still hold the rows the reader returned, and the position of
+     * its first row that is not returned yet.
+     */
+    private Page pendingPage;
+    private int pendingPosition;
 
     public HoglakePageSource(
             ParquetReader parquetReader,
             List<ColumnAdaptation> columns,
             HoglakeDeletionVector deletionVector,
             HoglakeSplitResources resources,
-            Metrics splitMetrics)
+            Metrics splitMetrics,
+            long maxShreddedPageSizeInBytes)
     {
         this.parquetReader = requireNonNull(parquetReader, "parquetReader is null");
         this.columns = List.copyOf(columns);
+        this.hasShreddedColumns = columns.stream().anyMatch(ShreddedVariantColumn.class::isInstance);
+        checkArgument(maxShreddedPageSizeInBytes > 0, "maxShreddedPageSizeInBytes must be positive");
+        this.maxShreddedPageSizeInBytes = maxShreddedPageSizeInBytes;
         this.deletionVector = deletionVector;
         this.resources = requireNonNull(resources, "resources is null");
         this.splitMetrics = requireNonNull(splitMetrics, "splitMetrics is null");
@@ -204,32 +229,77 @@ public class HoglakePageSource
     @Override
     public SourcePage getNextSourcePage()
     {
-        SourcePage page;
+        if (pendingPage == null) {
+            SourcePage page;
+            try {
+                page = parquetReader.nextPage();
+            }
+            catch (IOException | RuntimeException e) {
+                close();
+                throw handleException(parquetReader.getDataSource().getId(), e);
+            }
+            if (page == null) {
+                close();
+                return null;
+            }
+            try {
+                pendingPage = adapt(page);
+            }
+            catch (RuntimeException e) {
+                close();
+                throw handleException(parquetReader.getDataSource().getId(), e);
+            }
+            pendingPosition = 0;
+        }
+        Page next;
         try {
-            page = parquetReader.nextPage();
+            next = nextPendingRows();
         }
         catch (IOException | RuntimeException e) {
             close();
             throw handleException(parquetReader.getDataSource().getId(), e);
         }
-        if (page == null) {
-            close();
-            return null;
+        completedPositions += next.getPositionCount();
+        return SourcePage.create(next);
+    }
+
+    /**
+     * The next rows of the pending page, with assembled VARIANT values for
+     * its shredded channels.
+     */
+    private Page nextPendingRows()
+            throws ParquetCorruptionException
+    {
+        if (!hasShreddedColumns) {
+            Page page = pendingPage;
+            pendingPage = null;
+            return page;
         }
-        Page adapted;
-        try {
-            adapted = adapt(page);
+        int positions = pendingPage.getPositionCount() - pendingPosition;
+        Block[] blocks = new Block[columns.size()];
+        for (int channel = 0; channel < columns.size(); channel++) {
+            if (columns.get(channel) instanceof ShreddedVariantColumn column) {
+                blocks[channel] = column.read(pendingPage.getBlock(channel), pendingPosition, positions, maxShreddedPageSizeInBytes);
+                positions = min(positions, blocks[channel].getPositionCount());
+            }
         }
-        catch (IOException | RuntimeException e) {
-            close();
-            throw handleException(parquetReader.getDataSource().getId(), e);
+        for (int channel = 0; channel < columns.size(); channel++) {
+            if (blocks[channel] == null) {
+                blocks[channel] = pendingPage.getBlock(channel).getRegion(pendingPosition, positions);
+            }
+            else if (blocks[channel].getPositionCount() > positions) {
+                // Another shredded channel reached the size limit in fewer rows
+                blocks[channel] = blocks[channel].getRegion(0, positions);
+            }
         }
-        completedPositions += adapted.getPositionCount();
-        return SourcePage.create(adapted);
+        pendingPosition += positions;
+        if (pendingPosition == pendingPage.getPositionCount()) {
+            pendingPage = null;
+        }
+        return new Page(positions, blocks);
     }
 
     private Page adapt(SourcePage page)
-            throws ParquetCorruptionException
     {
         if (deletionVector == null) {
             return passThrough(page);
@@ -255,7 +325,7 @@ public class HoglakePageSource
                 case UnsignedColumn(int sourceChannel, HoglakeColumnHandle column) -> HoglakeUnsigned.convert(column, page.getBlock(sourceChannel).getPositions(retained, 0, survivors), false);
                 case NullColumn _ -> RunLengthEncodedBlock.create(nullBlocks.get(channel), survivors);
                 case RowIdColumn(long fileId) -> rowIds(fileId, page).getPositions(retained, 0, survivors);
-                case ShreddedVariantColumn column -> column.read(page.getBlock(column.sourceChannel()).getPositions(retained, 0, survivors));
+                case ShreddedVariantColumn column -> page.getBlock(column.sourceChannel()).getPositions(retained, 0, survivors);
                 case VariantNullAsSqlNullColumn(int sourceChannel) -> variantNullsToSqlNulls(page.getBlock(sourceChannel).getPositions(retained, 0, survivors));
             };
         }
@@ -263,7 +333,6 @@ public class HoglakePageSource
     }
 
     private Page passThrough(SourcePage page)
-            throws ParquetCorruptionException
     {
         Block[] blocks = new Block[columns.size()];
         for (int channel = 0; channel < columns.size(); channel++) {
@@ -272,7 +341,7 @@ public class HoglakePageSource
                 case UnsignedColumn(int sourceChannel, HoglakeColumnHandle column) -> HoglakeUnsigned.convert(column, page.getBlock(sourceChannel), false);
                 case NullColumn _ -> RunLengthEncodedBlock.create(nullBlocks.get(channel), page.getPositionCount());
                 case RowIdColumn(long fileId) -> rowIds(fileId, page);
-                case ShreddedVariantColumn column -> column.read(page.getBlock(column.sourceChannel()));
+                case ShreddedVariantColumn column -> page.getBlock(column.sourceChannel());
                 case VariantNullAsSqlNullColumn(int sourceChannel) -> variantNullsToSqlNulls(page.getBlock(sourceChannel));
             };
         }

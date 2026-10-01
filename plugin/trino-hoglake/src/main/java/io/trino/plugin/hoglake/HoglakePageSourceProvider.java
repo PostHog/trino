@@ -121,6 +121,7 @@ public class HoglakePageSourceProvider
     private final HoglakeParquetFooterCache footerCache;
     private final Optional<CacheKey> catalogCacheKey;
     private final boolean s3SecurityMappingEnabled;
+    private final ParquetReaderOptions readerOptions;
 
     public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory)
     {
@@ -134,6 +135,23 @@ public class HoglakePageSourceProvider
 
     public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache, Optional<CacheKey> catalogCacheKey, boolean s3SecurityMappingEnabled)
     {
+        this(fileSystemFactory, footerCache, catalogCacheKey, s3SecurityMappingEnabled, ParquetReaderOptions.defaultOptions());
+    }
+
+    @VisibleForTesting
+    HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, ParquetReaderOptions readerOptions)
+    {
+        this(fileSystemFactory, HoglakeParquetFooterCache.disabled(), Optional.empty(), false, readerOptions);
+    }
+
+    private HoglakePageSourceProvider(
+            TrinoFileSystemFactory fileSystemFactory,
+            HoglakeParquetFooterCache footerCache,
+            Optional<CacheKey> catalogCacheKey,
+            boolean s3SecurityMappingEnabled,
+            ParquetReaderOptions readerOptions)
+    {
+        this.readerOptions = requireNonNull(readerOptions, "readerOptions is null");
         this.catalogCacheKey = requireNonNull(catalogCacheKey, "catalogCacheKey is null");
         this.s3SecurityMappingEnabled = s3SecurityMappingEnabled;
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
@@ -193,7 +211,7 @@ public class HoglakePageSourceProvider
             inputFile = fileSystem.newInputFile(Location.of(hoglakeSplit.path()), hoglakeSplit.fileSizeBytes());
         }
 
-        ParquetReaderOptions options = readerOptions(ParquetReaderOptions.defaultOptions(), hoglakeSplit);
+        ParquetReaderOptions options = readerOptions(readerOptions, hoglakeSplit);
         ParquetDataSource dataSource = null;
         // The split's scope exists before any allocation on its behalf, and
         // owns everything until a page source adopts it.
@@ -513,7 +531,13 @@ public class HoglakePageSourceProvider
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty());
-        return new HoglakePageSource(parquetReader, adaptations, deletionVector, resources, HoglakePageSource.splitMetrics(footerCacheHit, rowGroups.size()));
+        return new HoglakePageSource(
+                parquetReader,
+                adaptations,
+                deletionVector,
+                resources,
+                HoglakePageSource.splitMetrics(footerCacheHit, rowGroups.size()),
+                options.getMaxReadBlockSize().toBytes());
     }
 
     /**
