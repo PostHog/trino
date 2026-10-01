@@ -17,10 +17,12 @@ import com.google.common.collect.ImmutableMap;
 import io.trino.parquet.ParquetCorruptionException;
 import io.trino.parquet.ParquetDataSourceId;
 import io.trino.parquet.reader.ParquetReader;
+import io.trino.parquet.variant.ShreddedVariantAssembler;
 import io.trino.plugin.base.metrics.LongCount;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.RowBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.connector.ConnectorPageSource;
@@ -38,6 +40,7 @@ import java.util.OptionalLong;
 
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.VariantType.VARIANT;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -86,6 +89,7 @@ public class HoglakePageSource
     sealed interface ColumnAdaptation
             permits NullColumn,
                     RowIdColumn,
+                    ShreddedVariantColumn,
                     SourceColumn,
                     UnsignedColumn {}
 
@@ -97,6 +101,54 @@ public class HoglakePageSource
 
     record RowIdColumn(long fileId)
             implements ColumnAdaptation {}
+
+    /**
+     * A shredded VARIANT column, which the reader returns as the row of its
+     * {@code value} and {@code typed_value} columns.
+     *
+     * @param variantNullIsSqlNull whether the file's writer stores a SQL NULL
+     *         as a variant null
+     */
+    record ShreddedVariantColumn(int sourceChannel, ShreddedVariantAssembler assembler, boolean variantNullIsSqlNull)
+            implements ColumnAdaptation
+    {
+        public ShreddedVariantColumn
+        {
+            requireNonNull(assembler, "assembler is null");
+        }
+
+        public Block read(Block shredded)
+                throws ParquetCorruptionException
+        {
+            Block variants = assembler.assemble(shredded);
+            if (variantNullIsSqlNull) {
+                return variantNullsToSqlNulls(variants);
+            }
+            return variants;
+        }
+
+        private static Block variantNullsToSqlNulls(Block variants)
+        {
+            int positionCount = variants.getPositionCount();
+            boolean hasVariantNull = false;
+            for (int position = 0; position < positionCount && !hasVariantNull; position++) {
+                hasVariantNull = !variants.isNull(position) && VARIANT.getObject(variants, position).isNull();
+            }
+            if (!hasVariantNull) {
+                return variants;
+            }
+            BlockBuilder builder = VARIANT.createBlockBuilder(null, positionCount);
+            for (int position = 0; position < positionCount; position++) {
+                if (variants.isNull(position) || VARIANT.getObject(variants, position).isNull()) {
+                    builder.appendNull();
+                }
+                else {
+                    VARIANT.writeObject(builder, VARIANT.getObject(variants, position));
+                }
+            }
+            return builder.build();
+        }
+    }
 
     record NullColumn(Type type)
             implements ColumnAdaptation {}
@@ -160,7 +212,7 @@ public class HoglakePageSource
         try {
             adapted = adapt(page);
         }
-        catch (RuntimeException e) {
+        catch (IOException | RuntimeException e) {
             close();
             throw handleException(parquetReader.getDataSource().getId(), e);
         }
@@ -169,6 +221,7 @@ public class HoglakePageSource
     }
 
     private Page adapt(SourcePage page)
+            throws ParquetCorruptionException
     {
         if (deletionVector == null) {
             return passThrough(page);
@@ -194,12 +247,14 @@ public class HoglakePageSource
                 case UnsignedColumn(int sourceChannel, HoglakeColumnHandle column) -> HoglakeUnsigned.convert(column, page.getBlock(sourceChannel).getPositions(retained, 0, survivors), false);
                 case NullColumn _ -> RunLengthEncodedBlock.create(nullBlocks.get(channel), survivors);
                 case RowIdColumn(long fileId) -> rowIds(fileId, page).getPositions(retained, 0, survivors);
+                case ShreddedVariantColumn column -> column.read(page.getBlock(column.sourceChannel()).getPositions(retained, 0, survivors));
             };
         }
         return new Page(survivors, blocks);
     }
 
     private Page passThrough(SourcePage page)
+            throws ParquetCorruptionException
     {
         Block[] blocks = new Block[columns.size()];
         for (int channel = 0; channel < columns.size(); channel++) {
@@ -208,6 +263,7 @@ public class HoglakePageSource
                 case UnsignedColumn(int sourceChannel, HoglakeColumnHandle column) -> HoglakeUnsigned.convert(column, page.getBlock(sourceChannel), false);
                 case NullColumn _ -> RunLengthEncodedBlock.create(nullBlocks.get(channel), page.getPositionCount());
                 case RowIdColumn(long fileId) -> rowIds(fileId, page);
+                case ShreddedVariantColumn column -> column.read(page.getBlock(column.sourceChannel()));
             };
         }
         return new Page(page.getPositionCount(), blocks);

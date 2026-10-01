@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.hoglake;
 
+import com.google.common.annotations.VisibleForTesting;
 import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
 import io.trino.filesystem.Location;
@@ -32,6 +33,9 @@ import io.trino.parquet.predicate.TupleDomainParquetPredicate;
 import io.trino.parquet.reader.MetadataReader;
 import io.trino.parquet.reader.ParquetReader;
 import io.trino.parquet.reader.RowGroupInfo;
+import io.trino.parquet.variant.ParquetOriginalFieldNames;
+import io.trino.parquet.variant.ShreddedVariantAssembler;
+import io.trino.parquet.variant.VariantShreddingSchema;
 import io.trino.plugin.hoglake.HoglakeParquetFooterCache.Lookup;
 import io.trino.plugin.hoglake.HoglakeParquetFooterCache.ParsedFooter;
 import io.trino.spi.TrinoException;
@@ -67,8 +71,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
+import static io.trino.parquet.ParquetTypeUtils.constructField;
 import static io.trino.parquet.ParquetTypeUtils.getColumnIO;
 import static io.trino.parquet.ParquetTypeUtils.getDescriptors;
 import static io.trino.parquet.ParquetTypeUtils.lookupColumnByName;
@@ -402,6 +408,22 @@ public class HoglakePageSourceProvider
                 .map(column -> bindColumn(fileSchema, column))
                 .toList();
 
+        // Parse shredded VARIANT columns first. Shredded object fields that differ only by
+        // case have the same lowercase name, which building the column IO below rejects.
+        List<Optional<VariantShreddingSchema>> shreddings = new ArrayList<>();
+        Optional<ParquetOriginalFieldNames> originalNames = Optional.empty();
+        for (int i = 0; i < columns.size(); i++) {
+            Optional<VariantShreddingSchema> shredding = Optional.empty();
+            if (bindings.get(i).isPresent() && HoglakeParquetFields.isShreddedVariant(columns.get(i), bindings.get(i).get())) {
+                // Shredded object keys are case-sensitive, and only the Thrift schema keeps their case
+                if (originalNames.isEmpty()) {
+                    originalNames = Optional.of(ParquetOriginalFieldNames.fromSchema(parquetMetadata.getParquetMetadata().getSchema()));
+                }
+                shredding = Optional.of(shreddingSchema(columns.get(i), bindings.get(i).get(), fileSchema, originalNames.get(), dataSource, split.path()));
+            }
+            shreddings.add(shredding);
+        }
+
         // The projected file schema contains only the bound fields.
         List<org.apache.parquet.schema.Type> boundFields = bindings.stream()
                 .flatMap(Optional::stream)
@@ -416,6 +438,16 @@ public class HoglakePageSourceProvider
             HoglakeColumnHandle column = columns.get(i);
             if (column.equals(HoglakeColumnHandle.ROW_ID)) {
                 adaptations.add(new HoglakePageSource.RowIdColumn(split.dataFileId()));
+                continue;
+            }
+            if (shreddings.get(i).isPresent()) {
+                VariantShreddingSchema shredding = shreddings.get(i).get();
+                Field field = constructField(shredding.physicalType(), lookupColumnByName(messageColumn, bindings.get(i).get().getName())).orElseThrow();
+                adaptations.add(new HoglakePageSource.ShreddedVariantColumn(
+                        parquetColumns.size(),
+                        new ShreddedVariantAssembler(shredding, dataSource.getId()),
+                        writesSqlNullAsVariantNull(fileMetadata.getCreatedBy())));
+                parquetColumns.add(new Column(column.name(), field));
                 continue;
             }
             Optional<Field> field = bindings.get(i).flatMap(parquetField ->
@@ -473,6 +505,42 @@ public class HoglakePageSourceProvider
                 Optional.empty(),
                 Optional.empty());
         return new HoglakePageSource(parquetReader, adaptations, deletionVector, resources, HoglakePageSource.splitMetrics(footerCacheHit, rowGroups.size()));
+    }
+
+    /**
+     * The layout of a shredded top-level VARIANT column. Like {@link #readerField},
+     * an unsupported layout fails naming the column and the data file.
+     */
+    private static VariantShreddingSchema shreddingSchema(
+            HoglakeColumnHandle column,
+            org.apache.parquet.schema.Type parquetField,
+            MessageType fileSchema,
+            ParquetOriginalFieldNames originalNames,
+            ParquetDataSource dataSource,
+            String path)
+            throws ParquetCorruptionException
+    {
+        // The binding is one of the file schema's own fields, which have the same order as the Thrift schema
+        int index = IntStream.range(0, fileSchema.getFieldCount())
+                .filter(field -> fileSchema.getType(field) == parquetField)
+                .findFirst()
+                .orElseThrow();
+        try {
+            return VariantShreddingSchema.fromParquet(parquetField.asGroupType(), originalNames.children().get(index), dataSource.getId());
+        }
+        catch (TrinoException e) {
+            throw new TrinoException(e::getErrorCode, "Cannot read column %s from data file %s: %s".formatted(column.name(), path, e.getRawMessage()), e);
+        }
+    }
+
+    /**
+     * DuckDB writes a SQL NULL VARIANT as a variant null, and reads a variant null
+     * back as SQL NULL, so a top-level variant null in its files is SQL NULL.
+     */
+    @VisibleForTesting
+    static boolean writesSqlNullAsVariantNull(String createdBy)
+    {
+        return createdBy != null && createdBy.startsWith("DuckDB");
     }
 
     /**
