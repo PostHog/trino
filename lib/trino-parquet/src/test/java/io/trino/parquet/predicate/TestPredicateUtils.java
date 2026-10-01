@@ -120,6 +120,15 @@ public class TestPredicateUtils
         assertThat(isOnlyDictionaryEncodingPages(createColumnMetaDataV2(RLE_DICTIONARY, PLAIN))).isFalse();
     }
 
+    @Test
+    public void testDictionaryEncodingWithoutEncodingStats()
+    {
+        // PLAIN may be the encoding of the dictionary page or of data pages written after falling back from dictionary
+        // encoding, so the encodings alone cannot prove that the dictionary contains every value of the column chunk
+        assertThat(isOnlyDictionaryEncodingPages(createColumnMetaDataV1(ImmutableSet.of(PLAIN, RLE_DICTIONARY, RLE)))).isFalse();
+        assertThat(isOnlyDictionaryEncodingPages(createColumnMetaDataV1(ImmutableSet.of(RLE_DICTIONARY, RLE)))).isFalse();
+    }
+
     private ColumnChunkMetadata createColumnMetaDataV2(Encoding... dataEncodings)
     {
         EncodingStats encodingStats = new EncodingStats.Builder()

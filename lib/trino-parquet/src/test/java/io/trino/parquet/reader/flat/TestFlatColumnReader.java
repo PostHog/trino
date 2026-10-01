@@ -18,6 +18,7 @@ import io.airlift.slice.Slices;
 import io.trino.parquet.DataPage;
 import io.trino.parquet.DataPageV1;
 import io.trino.parquet.DictionaryPage;
+import io.trino.parquet.Page;
 import io.trino.parquet.ParquetDataSourceId;
 import io.trino.parquet.ParquetEncoding;
 import io.trino.parquet.ParquetReaderOptions;
@@ -30,6 +31,7 @@ import io.trino.parquet.reader.PageReader;
 import io.trino.parquet.reader.TestingColumnReader.ColumnReaderFormat;
 import io.trino.parquet.reader.TestingColumnReader.DataPageVersion;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.DictionaryBlock;
 import org.apache.parquet.bytes.HeapByteBufferAllocator;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.column.values.ValuesWriter;
@@ -85,6 +87,186 @@ public class TestFlatColumnReader
         ColumnReader columnReader = columnReaderFactory.create(field, newSimpleAggregatedMemoryContext());
         assertThat(columnReader).isInstanceOf(FlatColumnReader.class);
         return columnReader;
+    }
+
+    @Override
+    protected boolean producesDictionaryBlocksForMixedEncodings()
+    {
+        return true;
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.trino.parquet.reader.TestingColumnReader#dictionaryReadersWithPageVersions")
+    public <T> void testDictionaryPagesWithoutEncodingStats(DataPageVersion version, ColumnReaderFormat<T> format)
+            throws IOException
+    {
+        PrimitiveField field = createField(format, true);
+        ColumnReader reader = createColumnReader(field);
+        DictionaryValuesWriter dictionaryWriter = format.getDictionaryWriter();
+        T[] values1 = format.write(dictionaryWriter, new Integer[] {1, 2, 3});
+        DataPage page1 = createNullableDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, false, false, false);
+        T[] values2 = format.resetAndWrite(dictionaryWriter, new Integer[] {2, 3, 1});
+        DataPage page2 = createNullableDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, false, false, false);
+        T[] values3 = format.resetAndWrite(dictionaryWriter, new Integer[] {4, 1});
+        DataPage page3 = createNullableDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, false, false);
+        DictionaryPage dictionaryPage = getDictionaryPage(dictionaryWriter);
+
+        reader.setPageReader(getPageReaderWithoutEncodingStats(List.of(page1, page2, page3), dictionaryPage), Optional.empty());
+        Block actual1 = readBlock(reader, 2, 2); // Within a single page
+        Block actual2 = readBlock(reader, 3, 3); // Crosses a page boundary
+        Block actual3 = readBlock(reader, 3, 3); // Crosses a page boundary and reaches the end of the column chunk
+
+        assertDictionaryBlocks(format, actual1, actual2, actual3);
+        format.assertBlock(values1, actual1, 0, 0, 2);
+        format.assertBlock(values1, actual2, 2, 0, 1);
+        format.assertBlock(values2, actual2, 0, 1, 2);
+        format.assertBlock(values2, actual3, 2, 0, 1);
+        format.assertBlock(values3, actual3, 0, 1, 2);
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.trino.parquet.reader.TestingColumnReader#dictionaryReadersWithPageVersions")
+    public <T> void testNullableDictionaryPagesWithoutEncodingStats(DataPageVersion version, ColumnReaderFormat<T> format)
+            throws IOException
+    {
+        PrimitiveField field = createField(format, false);
+        ColumnReader reader = createColumnReader(field);
+        DictionaryValuesWriter dictionaryWriter = format.getDictionaryWriter();
+        T[] values1 = format.write(dictionaryWriter, new Integer[] {1, null, 2});
+        DataPage page1 = createNullableDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, false, true, false);
+        T[] values2 = format.resetAndWrite(dictionaryWriter, new Integer[] {null, null, null});
+        DataPage page2 = createNullableDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, true, true, true);
+        T[] values3 = format.resetAndWrite(dictionaryWriter, new Integer[] {3, null});
+        DataPage page3 = createNullableDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, false, true);
+        DictionaryPage dictionaryPage = getDictionaryPage(dictionaryWriter);
+
+        reader.setPageReader(getPageReaderWithoutEncodingStats(List.of(page1, page2, page3), dictionaryPage), Optional.empty());
+        Block actual1 = readBlock(reader, 2, 2); // Within a single page
+        Block actual2 = readBlock(reader, 3, 3); // Crosses into a page with only nulls
+        Block actual3 = readBlock(reader, 3, 3); // Crosses from a page with only nulls
+
+        assertDictionaryBlocks(format, actual1, actual2, actual3);
+        format.assertBlock(values1, actual1, 0, 0, 2);
+        format.assertBlock(values1, actual2, 2, 0, 1);
+        format.assertBlock(values2, actual2, 0, 1, 2);
+        format.assertBlock(values2, actual3, 2, 0, 1);
+        format.assertBlock(values3, actual3, 0, 1, 2);
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.trino.parquet.reader.TestingColumnReader#dictionaryReadersWithPageVersions")
+    public <T> void testDictionaryAndNonDictionaryPageTransitions(DataPageVersion version, ColumnReaderFormat<T> format)
+            throws IOException
+    {
+        PrimitiveField field = createField(format, true);
+        ColumnReader reader = createColumnReader(field);
+        DictionaryValuesWriter dictionaryWriter = format.getDictionaryWriter();
+        ValuesWriter writer = format.getValuesWriter(version);
+        T[] values1 = format.write(dictionaryWriter, new Integer[] {1, 2, 3});
+        DataPage page1 = createNullableDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, false, false, false);
+        T[] values2 = format.write(writer, new Integer[] {4, 5});
+        DataPage page2 = createNullableDataPage(version, writer, field, false, false);
+        T[] values3 = format.resetAndWrite(dictionaryWriter, new Integer[] {3, 2, 1});
+        DataPage page3 = createNullableDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, false, false, false);
+        DictionaryPage dictionaryPage = getDictionaryPage(dictionaryWriter);
+
+        reader.setPageReader(getPageReaderWithoutEncodingStats(List.of(page1, page2, page3), dictionaryPage), Optional.empty());
+        Block actual1 = readBlock(reader, 2, 2); // Dictionary page
+        Block actual2 = readBlock(reader, 2, 2); // Dictionary page followed by non-dictionary page
+        Block actual3 = readBlock(reader, 2, 2); // Non-dictionary page followed by dictionary page
+        Block actual4 = readBlock(reader, 2, 2); // Dictionary page
+
+        assertDictionaryBlocks(format, actual1, actual4);
+        assertThat(actual2).isNotInstanceOf(DictionaryBlock.class);
+        assertThat(actual3).isNotInstanceOf(DictionaryBlock.class);
+        format.assertBlock(values1, actual1, 0, 0, 2);
+        format.assertBlock(values1, actual2, 2, 0, 1);
+        format.assertBlock(values2, actual2, 0, 1, 1);
+        format.assertBlock(values2, actual3, 1, 0, 1);
+        format.assertBlock(values3, actual3, 0, 1, 1);
+        format.assertBlock(values3, actual4, 1, 0, 2);
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.trino.parquet.reader.TestingColumnReader#dictionaryReadersWithPageVersions")
+    public <T> void testNullableDictionaryAndNonDictionaryPageTransitions(DataPageVersion version, ColumnReaderFormat<T> format)
+            throws IOException
+    {
+        PrimitiveField field = createField(format, false);
+        ColumnReader reader = createColumnReader(field);
+        DictionaryValuesWriter dictionaryWriter = format.getDictionaryWriter();
+        ValuesWriter writer = format.getValuesWriter(version);
+        T[] values1 = format.write(dictionaryWriter, new Integer[] {1, null});
+        DataPage page1 = createNullableDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, false, true);
+        T[] values2 = format.write(writer, new Integer[] {2, null});
+        DataPage page2 = createNullableDataPage(version, writer, field, false, true);
+        T[] values3 = format.resetAndWrite(dictionaryWriter, new Integer[] {null, null});
+        DataPage page3 = createNullableDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, true, true);
+        T[] values4 = format.resetAndWrite(writer, new Integer[] {3, 4});
+        DataPage page4 = createNullableDataPage(version, writer, field, false, false);
+        T[] values5 = format.resetAndWrite(dictionaryWriter, new Integer[] {5, 6, 1, 2});
+        DataPage page5 = createNullableDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, false, false, false, false);
+        T[] values6 = format.resetAndWrite(writer, new Integer[] {null, 7});
+        DataPage page6 = createNullableDataPage(version, writer, field, true, false);
+        DictionaryPage dictionaryPage = getDictionaryPage(dictionaryWriter);
+
+        reader.setPageReader(getPageReaderWithoutEncodingStats(List.of(page1, page2, page3, page4, page5, page6), dictionaryPage), Optional.empty());
+        Block actual1 = readBlock(reader, 3, 3); // Dictionary values with nulls followed by non-dictionary values
+        Block actual2 = readBlock(reader, 1, 1); // Only nulls from a non-dictionary page
+        Block actual3 = readBlock(reader, 3, 3); // Only nulls from a dictionary page followed by non-dictionary values
+        Block actual4 = readBlock(reader, 2, 2); // Non-dictionary page followed by dictionary page
+        Block actual5 = readBlock(reader, 2, 2); // Dictionary page
+        Block actual6 = readBlock(reader, 3, 3); // Dictionary values without nulls followed by non-dictionary values with nulls
+
+        assertDictionaryBlocks(format, actual5);
+        assertThat(actual1).isNotInstanceOf(DictionaryBlock.class);
+        assertThat(actual3).isNotInstanceOf(DictionaryBlock.class);
+        assertThat(actual4).isNotInstanceOf(DictionaryBlock.class);
+        assertThat(actual6).isNotInstanceOf(DictionaryBlock.class);
+        format.assertBlock(values1, actual1, 0, 0, 2);
+        format.assertBlock(values2, actual1, 0, 2, 1);
+        format.assertBlock(values2, actual2, 1, 0, 1);
+        format.assertBlock(values3, actual3, 0, 0, 2);
+        format.assertBlock(values4, actual3, 0, 2, 1);
+        format.assertBlock(values4, actual4, 1, 0, 1);
+        format.assertBlock(values5, actual4, 0, 1, 1);
+        format.assertBlock(values5, actual5, 1, 0, 2);
+        format.assertBlock(values5, actual6, 3, 0, 1);
+        format.assertBlock(values6, actual6, 0, 1, 2);
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.trino.parquet.reader.TestingColumnReader#dictionaryReadersWithPageVersions")
+    public <T> void testReadSelectedPositionsWithDictionaryAndNonDictionaryPages(DataPageVersion version, ColumnReaderFormat<T> format)
+            throws IOException
+    {
+        PrimitiveField field = createField(format, false);
+        ColumnReader reader = createColumnReader(field);
+        DictionaryValuesWriter dictionaryWriter = format.getDictionaryWriter();
+        ValuesWriter writer = format.getValuesWriter(version);
+        T[] values1 = format.write(dictionaryWriter, new Integer[] {0, null, 2, 3, 4});
+        DataPage page1 = createNullableDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, false, true, false, false, false);
+        T[] values2 = format.resetAndWrite(dictionaryWriter, new Integer[] {5, 6, null, 8, 9});
+        DataPage page2 = createNullableDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, false, false, true, false, false);
+        T[] values3 = format.write(writer, new Integer[] {10, null, 12, 13, 14});
+        DataPage page3 = createNullableDataPage(version, writer, field, false, true, false, false, false);
+        DictionaryPage dictionaryPage = getDictionaryPage(dictionaryWriter);
+
+        reader.setPageReader(getPageReaderWithoutEncodingStats(List.of(page1, page2, page3), dictionaryPage), Optional.empty());
+        // Positions from both dictionary pages
+        reader.prepareNextRead(8);
+        Block actual1 = reader.readPrimitive(new int[] {1, 3, 6}, 0, 3).getBlock();
+        // Positions from a dictionary page followed by positions from a non-dictionary page
+        reader.prepareNextRead(7);
+        Block actual2 = reader.readPrimitive(new int[] {0, 1, 3, 4}, 0, 4).getBlock();
+
+        assertDictionaryBlocks(format, actual1);
+        assertThat(actual2).isNotInstanceOf(DictionaryBlock.class);
+        format.assertBlock(values1, actual1, 1, 0, 1);
+        format.assertBlock(values1, actual1, 3, 1, 1);
+        format.assertBlock(values2, actual1, 1, 2, 1);
+        format.assertBlock(values2, actual2, 3, 0, 2);
+        format.assertBlock(values3, actual2, 1, 2, 2);
     }
 
     @Test
@@ -500,6 +682,31 @@ public class TestFlatColumnReader
             }
         }
         return createNullableDataPage(V1, writer, OPTIONAL_FIELD, isNull);
+    }
+
+    /**
+     * Creates a page reader for a column chunk whose metadata cannot prove that all data pages are dictionary encoded,
+     * for example because encoding stats are missing
+     */
+    private static PageReader getPageReaderWithoutEncodingStats(List<DataPage> dataPages, DictionaryPage dictionaryPage)
+    {
+        List<Page> pages = ImmutableList.<Page>builder()
+                .add(dictionaryPage)
+                .addAll(dataPages)
+                .build();
+        return new PageReader(new ParquetDataSourceId("test"), UNCOMPRESSED, pages.iterator(), false, false, Optional.empty(), -1, -1);
+    }
+
+    private static void assertDictionaryBlocks(ColumnReaderFormat<?> format, Block... blocks)
+    {
+        if (!producesDictionaryBlocks(format)) {
+            assertThat(blocks).noneMatch(DictionaryBlock.class::isInstance);
+            return;
+        }
+        assertThat(blocks).allMatch(DictionaryBlock.class::isInstance);
+        // The engine relies on dictionary identity to reuse work across batches
+        Block dictionary = ((DictionaryBlock) blocks[0]).getDictionary();
+        assertThat(blocks).allMatch(block -> ((DictionaryBlock) block).getDictionary() == dictionary);
     }
 
     private static PageReader getPlainPageReaderMock(DataPage... pages)

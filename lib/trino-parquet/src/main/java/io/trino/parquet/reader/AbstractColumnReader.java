@@ -58,6 +58,7 @@ public abstract class AbstractColumnReader<BufferType>
     protected RowRangesIterator rowRanges;
     @Nullable
     protected DictionaryDecoder<BufferType> dictionaryDecoder;
+    private boolean dictionaryBlockAllowed;
     private boolean produceDictionaryBlock;
 
     public AbstractColumnReader(
@@ -86,7 +87,13 @@ public abstract class AbstractColumnReader<BufferType>
             log.debug("field %s, readDictionaryPage %s", field, dictionaryPage);
             try {
                 dictionaryDecoder = dictionaryDecoderProvider.create(dictionaryPage, isNonNull());
-                produceDictionaryBlock = shouldProduceDictionaryBlock(rowRanges);
+                dictionaryBlockAllowed = isDictionaryBlockAllowed(rowRanges);
+                // Parquet writer may choose to fall back to a non-dictionary encoding after starting with dictionary encoding if
+                //   1. If the size of the dictionary exceeds a threshold (1MB for parquet-mr by default).
+                //   2. Number of dictionary entries exceeds a threshold (Integer.MAX_VALUE for parquet-mr by default).
+                // Column chunk metadata can prove that the entire column chunk is dictionary encoded. When it cannot,
+                // readers may still produce dictionary blocks based on the encodings of the data pages they read.
+                produceDictionaryBlock = dictionaryBlockAllowed && pageReader.hasOnlyDictionaryEncodedPages();
             }
             finally {
                 pageReader.releaseCurrentPage();
@@ -105,9 +112,21 @@ public abstract class AbstractColumnReader<BufferType>
 
     protected abstract boolean isNonNull();
 
+    /**
+     * Whether all data pages of the column chunk are known to be dictionary encoded and should be read as dictionary blocks.
+     */
     protected boolean produceDictionaryBlock()
     {
         return produceDictionaryBlock;
+    }
+
+    /**
+     * Whether values read from dictionary encoded data pages of the column chunk may be returned as dictionary blocks.
+     * Unlike {@link #produceDictionaryBlock()}, this does not imply that all data pages are dictionary encoded.
+     */
+    protected boolean dictionaryBlockAllowed()
+    {
+        return dictionaryBlockAllowed;
     }
 
     protected ValueDecoder<BufferType> createValueDecoder(ValueDecodersProvider<BufferType> decodersProvider, ParquetEncoding encoding, Slice data)
@@ -192,23 +211,16 @@ public abstract class AbstractColumnReader<BufferType>
                 OptionalLong.of(getMaxDictionaryBlockSize(dictionary, positionsCount)));
     }
 
-    private boolean shouldProduceDictionaryBlock(Optional<FilteredRowRanges> filteredRowRanges)
+    private boolean isDictionaryBlockAllowed(Optional<FilteredRowRanges> filteredRowRanges)
     {
-        // Parquet writer may choose to fall back to a non-dictionary encoding after starting with dictionary encoding if
-        //   1. If the size of the dictionary exceeds a threshold (1MB for parquet-mr by default).
-        //   2. Number of dictionary entries exceeds a threshold (Integer.MAX_VALUE for parquet-mr by default).
-        // Trino dictionary blocks are produced only when the entire column chunk is dictionary encoded
-        if (pageReader.hasOnlyDictionaryEncodedPages()) {
-            if (!shouldProduceDictionaryForType(field.getType())) {
-                return false;
-            }
-            requireNonNull(dictionaryDecoder, "dictionaryDecoder is null");
-            // Filtering of parquet pages using column indexes may result in the total number of values read from the
-            // column chunk being lower than the size of the dictionary
-            return filteredRowRanges.map(rowRanges -> rowRanges.getRowCount() > dictionaryDecoder.getDictionarySize())
-                    .orElse(true);
+        if (!shouldProduceDictionaryForType(field.getType())) {
+            return false;
         }
-        return false;
+        requireNonNull(dictionaryDecoder, "dictionaryDecoder is null");
+        // Filtering of parquet pages using column indexes may result in the total number of values read from the
+        // column chunk being lower than the size of the dictionary
+        return filteredRowRanges.map(rowRanges -> rowRanges.getRowCount() > dictionaryDecoder.getDictionarySize())
+                .orElse(true);
     }
 
     static boolean shouldProduceDictionaryForType(Type type)

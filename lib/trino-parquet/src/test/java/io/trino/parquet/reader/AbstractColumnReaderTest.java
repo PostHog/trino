@@ -70,6 +70,20 @@ public abstract class AbstractColumnReaderTest
 {
     protected abstract ColumnReader createColumnReader(PrimitiveField field);
 
+    /**
+     * Whether the reader returns dictionary blocks for batches read from dictionary encoded data pages
+     * when the column chunk also contains data pages with other encodings
+     */
+    protected boolean producesDictionaryBlocksForMixedEncodings()
+    {
+        return false;
+    }
+
+    protected static boolean producesDictionaryBlocks(ColumnReaderFormat<?> format)
+    {
+        return shouldProduceDictionaryForType(format.getTrinoType());
+    }
+
     @ParameterizedTest
     @MethodSource("io.trino.parquet.reader.TestingColumnReader#dictionaryReadersWithPageVersions")
     public <T> void testSingleValueDictionary(DataPageVersion version, ColumnReaderFormat<T> format)
@@ -455,8 +469,13 @@ public abstract class AbstractColumnReaderTest
         Block actual2 = readBlock(reader, 2); // Mixed
         Block actual3 = readBlock(reader, 2); // Only non-dictionary
 
-        // When there is mix of dictionary and non-dictionary pages, we don't produce DictionaryBlock
-        assertThat(actual1).isNotInstanceOf(DictionaryBlock.class);
+        if (producesDictionaryBlocksForMixedEncodings() && producesDictionaryBlocks(format)) {
+            assertThat(actual1).isInstanceOf(DictionaryBlock.class);
+        }
+        else {
+            assertThat(actual1).isNotInstanceOf(DictionaryBlock.class);
+        }
+        // Batches which include values from non-dictionary pages are never DictionaryBlocks
         assertThat(actual2).isNotInstanceOf(DictionaryBlock.class);
         assertThat(actual3).isNotInstanceOf(DictionaryBlock.class);
 
