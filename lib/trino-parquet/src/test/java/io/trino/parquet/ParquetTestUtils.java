@@ -169,6 +169,21 @@ public class ParquetTestUtils
             boolean forceSelectedPositionsPushdown)
             throws IOException
     {
+        return createParquetReader(input, parquetMetadata, options, memoryContext, types, columnNames, predicate, forceSelectedPositionsPushdown, UTC);
+    }
+
+    public static ParquetReader createParquetReader(
+            ParquetDataSource input,
+            ParquetMetadata parquetMetadata,
+            ParquetReaderOptions options,
+            AggregatedMemoryContext memoryContext,
+            List<Type> types,
+            List<String> columnNames,
+            TupleDomain<String> predicate,
+            boolean forceSelectedPositionsPushdown,
+            DateTimeZone timeZone)
+            throws IOException
+    {
         FileMetadata fileMetaData = parquetMetadata.getFileMetaData();
         MessageType fileSchema = fileMetaData.getSchema();
         MessageColumnIO messageColumnIO = getColumnIO(fileSchema, fileSchema);
@@ -184,7 +199,7 @@ public class ParquetTestUtils
         Map<List<String>, ColumnDescriptor> descriptorsByPath = getDescriptors(fileSchema, fileSchema);
         TupleDomain<ColumnDescriptor> parquetTupleDomain = predicate.transformKeys(
                 columnName -> descriptorsByPath.get(ImmutableList.of(columnName.toLowerCase(ENGLISH))));
-        TupleDomainParquetPredicate parquetPredicate = buildPredicate(fileSchema, parquetTupleDomain, descriptorsByPath, UTC);
+        TupleDomainParquetPredicate parquetPredicate = buildPredicate(fileSchema, parquetTupleDomain, descriptorsByPath, timeZone);
         List<RowGroupInfo> rowGroups = getFilteredRowGroups(
                 0,
                 input.getEstimatedSize(),
@@ -193,7 +208,7 @@ public class ParquetTestUtils
                 ImmutableList.of(parquetTupleDomain),
                 ImmutableList.of(parquetPredicate),
                 descriptorsByPath,
-                UTC,
+                timeZone,
                 1000,
                 options);
         return new ParquetReader(
@@ -202,7 +217,7 @@ public class ParquetTestUtils
                 false,
                 rowGroups,
                 input,
-                UTC,
+                timeZone,
                 memoryContext,
                 options,
                 exception -> {
