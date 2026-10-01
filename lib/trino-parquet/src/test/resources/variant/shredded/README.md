@@ -87,20 +87,25 @@ handle them.
    `io.trino.spi.variant.Metadata.id` binary-searches dictionaries of 64 or more
    strings, and finds 1 of the 70 keys of that dictionary. DuckDB PR
    duckdb/duckdb#23496 proposed a fix and was closed without merging.
-5. Integers that come from JSON are written to `value` as INT64, also where
+5. The fields of an object in `value` are in field id order, which is the order
+   of the dictionary, not in field name order as the specification requires
+   (row 3 of `wide-object-unshredded.parquet`). `io.trino.spi.variant.Variant`
+   binary-searches the fields of objects with more than 64 fields by name, so it
+   does not find most fields of that object.
+6. Integers that come from JSON are written to `value` as INT64, also where
    `typed_value` is INT64 (`age` in rows 1, 3, and 8 of `objects.parquet`, the
    integer elements of rows 1 and 3 of `arrays.parquet`, all fields in
    `wide-object.parquet`). Typed
    BIGINT values are written to `typed_value` (row 9 of `objects.parquet`, rows 9
    and 10 of `arrays.parquet`). An INTEGER is written to `value` as INT32 when
    `typed_value` is INT64 (row 10 of `objects.parquet`).
-6. An empty object is written as a partially shredded object: `value` is an
+7. An empty object is written as a partially shredded object: `value` is an
    empty object, and `typed_value` is not null with all of its fields missing
    (rows 3 and 7 of `nulls.parquet`). This is valid. Compare with error case
    128 in `parquet-testing/`, where `value` is variant null.
-7. In these files, every object key is in `typed_value`. A row has a top-level
+8. In these files, every object key is in `typed_value`. A row has a top-level
    `value` only if it is not an object or it is an empty object.
-8. If keys differ only by case, DuckDB shreds the first spelling that it finds.
+9. If keys differ only by case, DuckDB shreds the first spelling that it finds.
    It drops the values of all other spellings from both `value` and
    `typed_value`, in all rows, at all levels. The metadata of a row still
    contains the dropped spelling. In `case-variant-keys.parquet` these input
@@ -109,5 +114,5 @@ handle them.
    (row 3), and `$Browser` = `"Edge2"` (row 4). See duckdb/duckdb#24297. Because
    DuckDB never writes two shredded fields whose names differ only by case,
    this file does not contain such sibling fields.
-9. The order of the fields in `typed_value` is not the order of the metadata
+10. The order of the fields in `typed_value` is not the order of the metadata
    dictionary and is not alphabetical.
