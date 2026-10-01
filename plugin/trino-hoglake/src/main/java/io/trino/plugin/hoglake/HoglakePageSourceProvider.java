@@ -81,11 +81,13 @@ import static io.trino.parquet.ParquetTypeUtils.lookupColumnByName;
 import static io.trino.parquet.predicate.PredicateUtils.buildPredicate;
 import static io.trino.parquet.predicate.PredicateUtils.getFilteredRowGroups;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.spi.type.UuidType.UUID;
+import static io.trino.spi.type.VariantType.VARIANT;
 import static java.lang.Math.min;
 import static java.util.Objects.requireNonNull;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MICROS;
@@ -408,8 +410,9 @@ public class HoglakePageSourceProvider
                 .map(column -> bindColumn(fileSchema, column))
                 .toList();
 
-        // Parse shredded VARIANT columns first. Shredded object fields that differ only by
-        // case have the same lowercase name, which building the column IO below rejects.
+        // Parse shredded VARIANT columns first, which rejects shredded object fields that differ
+        // only by case. They have the same lowercase name, so the column IO and the reader below
+        // cannot tell them apart, and fail with errors that do not name the column.
         List<Optional<VariantShreddingSchema>> shreddings = new ArrayList<>();
         Optional<ParquetOriginalFieldNames> originalNames = Optional.empty();
         for (int i = 0; i < columns.size(); i++) {
@@ -453,9 +456,15 @@ public class HoglakePageSourceProvider
             Optional<Field> field = bindings.get(i).flatMap(parquetField ->
                     readerField(column, lookupColumnByName(messageColumn, parquetField.getName()), split.path()));
             if (field.isPresent()) {
-                adaptations.add(HoglakeUnsigned.needsConversion(column)
-                        ? new HoglakePageSource.UnsignedColumn(parquetColumns.size(), column)
-                        : new HoglakePageSource.SourceColumn(parquetColumns.size()));
+                if (HoglakeUnsigned.needsConversion(column)) {
+                    adaptations.add(new HoglakePageSource.UnsignedColumn(parquetColumns.size(), column));
+                }
+                else if (column.type().equals(VARIANT) && writesSqlNullAsVariantNull(fileMetadata.getCreatedBy())) {
+                    adaptations.add(new HoglakePageSource.VariantNullAsSqlNullColumn(parquetColumns.size()));
+                }
+                else {
+                    adaptations.add(new HoglakePageSource.SourceColumn(parquetColumns.size()));
+                }
                 parquetColumns.add(new Column(column.name(), field.get()));
             }
             else {
@@ -518,7 +527,6 @@ public class HoglakePageSourceProvider
             ParquetOriginalFieldNames originalNames,
             ParquetDataSource dataSource,
             String path)
-            throws ParquetCorruptionException
     {
         // The binding is one of the file schema's own fields, which have the same order as the Thrift schema
         int index = IntStream.range(0, fileSchema.getFieldCount())
@@ -530,6 +538,10 @@ public class HoglakePageSourceProvider
         }
         catch (TrinoException e) {
             throw new TrinoException(e::getErrorCode, "Cannot read column %s from data file %s: %s".formatted(column.name(), path, e.getRawMessage()), e);
+        }
+        catch (ParquetCorruptionException e) {
+            // Like an unshredded VARIANT group with an unexpected shape
+            throw new TrinoException(NOT_SUPPORTED, "Cannot read column %s from data file %s: %s".formatted(column.name(), path, e.getMessage()), e);
         }
     }
 

@@ -26,6 +26,7 @@ import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.type.RowType;
 import io.trino.spi.variant.Metadata;
 import io.trino.spi.variant.Variant;
+import org.apache.parquet.format.FieldRepetitionType;
 import org.apache.parquet.format.LogicalType;
 import org.apache.parquet.format.SchemaElement;
 import org.apache.parquet.format.VariantType;
@@ -33,6 +34,7 @@ import org.apache.parquet.io.ColumnIOFactory;
 import org.apache.parquet.schema.GroupType;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.MessageType;
+import org.apache.parquet.schema.PrimitiveType;
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
 import org.apache.parquet.schema.Types;
 import org.junit.jupiter.api.Test;
@@ -45,7 +47,6 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.stream.LongStream;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
@@ -139,19 +140,96 @@ class TestHoglakeShreddedVariant
     void deletionVectorAppliesToShreddedColumn()
     {
         // The reader's first pages hold rows 0, then 1 to 2, then 3 to 6, so rows 1 and 5
-        // are deleted from pages that keep other rows
-        List<List<Object>> rows = new ArrayList<>();
-        for (long a = 0; a < 8; a++) {
-            rows.add(row(METADATA, null, typedValue(Variant.ofLong(a), null)));
-        }
+        // are deleted from pages that keep other rows. Null rows make the reader return
+        // dictionary blocks for the fields of the row.
+        List<List<Object>> rows = Arrays.asList(
+                row(METADATA, null, typedValue(Variant.ofLong(0), null)),
+                row(METADATA, null, typedValue(Variant.ofLong(1), null)),
+                row(METADATA, null, typedValue(Variant.ofLong(2), null)),
+                null,
+                row(METADATA, Variant.ofInt(4).data(), null),
+                row(METADATA, null, typedValue(Variant.ofLong(5), null)),
+                null,
+                row(METADATA, null, typedValue(Variant.ofLong(7), null)));
         byte[] file = write(rows, Optional.empty());
         byte[] deletionVector = PuffinDeletionVectorFixtures.deletionVector(PATH, 1, 5);
         TrinoFileSystemFactory fileSystem = ConnectorTestFixtures.memoryFileSystem(Map.of(PATH, file, DELETION_VECTOR_PATH, deletionVector));
         HoglakeSplit split = new HoglakeSplit(PATH, file.length, 8, Optional.of(DELETION_VECTOR_PATH), 2, Optional.of("puffin-dv"));
 
-        assertThat(read(fileSystem, split)).containsExactlyElementsOf(LongStream.of(0, 2, 3, 4, 6, 7)
-                .mapToObj(a -> variantBytes(Variant.ofObject(Map.of(utf8Slice("a"), Variant.ofLong(a)))))
-                .toList());
+        assertThat(read(fileSystem, split, List.of(COLUMN))).containsExactly(
+                List.of(variantBytes(objectWithA(0))),
+                List.of(variantBytes(objectWithA(2))),
+                Arrays.asList((Object) null),
+                List.of(variantBytes(Variant.ofInt(4))),
+                Arrays.asList((Object) null),
+                List.of(variantBytes(objectWithA(7))));
+    }
+
+    @Test
+    void shreddedColumnIsBoundByFieldId()
+    {
+        // The catalog renamed the column, and the file has another column before it
+        FileColumn id = new FileColumn(Types.optional(PrimitiveTypeName.INT64).id(2).named("id"), BIGINT, Arrays.asList(10L, 11L));
+        byte[] file = write(
+                List.of(id),
+                List.of(row(METADATA, null, typedValue(Variant.ofLong(0), null)), row(METADATA, null, typedValue(Variant.ofLong(1), "Firefox"))),
+                Optional.empty());
+        HoglakeColumnHandle renamed = new HoglakeColumnHandle("renamed", 1, VARIANT, true);
+        HoglakeColumnHandle idColumn = new HoglakeColumnHandle("id", 2, BIGINT, true);
+        TrinoFileSystemFactory fileSystem = ConnectorTestFixtures.memoryFileSystem(Map.of(PATH, file));
+
+        assertThat(read(fileSystem, new HoglakeSplit(PATH, file.length, 2, Optional.empty(), 0), List.of(renamed, idColumn))).containsExactly(
+                List.of(variantBytes(objectWithA(0)), 10L),
+                List.of(variantBytes(Variant.ofObject(Map.of(utf8Slice("a"), Variant.ofLong(1), utf8Slice("$Browser"), Variant.ofString("Firefox")))), 11L));
+    }
+
+    @Test
+    void duckDbVariantNullIsSqlNullInUnshreddedColumn()
+    {
+        // The same rule applies when DuckDB stores the column unshredded
+        HoglakeParquetSchema schema = HoglakeParquetSchema.create(List.of(COLUMN));
+        byte[] unshredded = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(
+                schema.messageType().getType(0),
+                VARIANT,
+                Arrays.asList(Variant.NULL_VALUE, Variant.ofInt(1), null),
+                schema.primitiveTypes())));
+        byte[] duckDb = ConnectorTestFixtures.rewriteFooter(unshredded, metadata -> metadata.setCreated_by(DUCKDB_CREATED_BY));
+
+        assertThat(readVariantBytes(duckDb, 3)).containsExactly(null, variantBytes(Variant.ofInt(1)), null);
+        assertThat(readVariantBytes(unshredded, 3)).containsExactly(variantBytes(Variant.NULL_VALUE), variantBytes(Variant.ofInt(1)), null);
+    }
+
+    @Test
+    void invalidShreddedLayoutFailsNamingTheDataFile()
+    {
+        // A repeated VARIANT group holds any number of values per row
+        byte[] repeated = ConnectorTestFixtures.rewriteFooter(
+                write(List.of(row(METADATA, null, null)), Optional.empty()),
+                metadata -> metadata.getSchema().stream()
+                        .filter(element -> element.getName().equals("v"))
+                        .forEach(element -> element.setRepetition_type(FieldRepetitionType.REPEATED)));
+        assertThatThrownBy(() -> readVariantBytes(repeated, 1))
+                .isInstanceOfSatisfying(TrinoException.class, e -> assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                .hasMessageStartingWith("Cannot read column v from data file %s: ".formatted(PATH))
+                .hasMessageContaining("Shredded VARIANT group v is repeated");
+
+        // A VARIANT group has only metadata, value, and typed_value fields
+        GroupType extraField = Types.optionalGroup()
+                .id(1)
+                .required(PrimitiveTypeName.BINARY).named("metadata")
+                .optional(PrimitiveTypeName.BINARY).named("value")
+                .optional(PrimitiveTypeName.INT64).named("typed_value")
+                .optional(PrimitiveTypeName.INT64).named("extra")
+                .named("v");
+        RowType extraFieldType = RowType.from(List.of(field("metadata", VARBINARY), field("value", VARBINARY), field("typed_value", BIGINT), field("extra", BIGINT)));
+        byte[] extra = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(
+                extraField,
+                extraFieldType,
+                new ArrayList<>(List.of(Arrays.asList(METADATA, null, 1L, 2L))),
+                Map.of(List.of("v", "metadata"), VARBINARY, List.of("v", "value"), VARBINARY, List.of("v", "typed_value"), BIGINT, List.of("v", "extra"), BIGINT))));
+        assertThatThrownBy(() -> readVariantBytes(extra, 1))
+                .isInstanceOfSatisfying(TrinoException.class, e -> assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                .hasMessageContaining("Unexpected field extra in shredded VARIANT group v");
     }
 
     @Test
@@ -170,20 +248,42 @@ class TestHoglakeShreddedVariant
     @Test
     void fieldNamesThatDifferOnlyByCaseFailNamingTheDataFile()
     {
-        GroupType variant = Types.optionalGroup()
-                .id(1)
-                .required(PrimitiveTypeName.BINARY).named("metadata")
-                .optional(PrimitiveTypeName.BINARY).named("value")
-                .optionalGroup()
-                .requiredGroup().optional(PrimitiveTypeName.BINARY).named("value").optional(PrimitiveTypeName.INT64).named("typed_value").named("Plan")
-                .requiredGroup().optional(PrimitiveTypeName.BINARY).named("value").optional(PrimitiveTypeName.BINARY).as(LogicalTypeAnnotation.stringType()).named("typed_value").named("plan")
-                .named("typed_value")
-                .named("v");
-        byte[] file = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(variant, SHREDDED, new ArrayList<>(List.of(row(METADATA, null, null))), primitiveTypes("Plan", "plan"))));
+        // Without the check, fields of different types fail when the column IO is built, and
+        // fields of the same type fail while reading
+        for (boolean sameType : new boolean[] {true, false}) {
+            PrimitiveType planType = Types.optional(PrimitiveTypeName.INT64).named("typed_value");
+            io.trino.spi.type.Type planTrinoType = BIGINT;
+            if (sameType) {
+                planType = Types.optional(PrimitiveTypeName.BINARY).as(LogicalTypeAnnotation.stringType()).named("typed_value");
+                planTrinoType = VARCHAR;
+            }
+            GroupType variant = Types.optionalGroup()
+                    .id(1)
+                    .required(PrimitiveTypeName.BINARY).named("metadata")
+                    .optional(PrimitiveTypeName.BINARY).named("value")
+                    .optionalGroup()
+                    .requiredGroup().optional(PrimitiveTypeName.BINARY).named("value").addField(planType).named("Plan")
+                    .requiredGroup().optional(PrimitiveTypeName.BINARY).named("value").optional(PrimitiveTypeName.BINARY).as(LogicalTypeAnnotation.stringType()).named("typed_value").named("plan")
+                    .named("typed_value")
+                    .named("v");
+            RowType planField = RowType.from(List.of(field("value", VARBINARY), field("typed_value", planTrinoType)));
+            RowType type = RowType.from(List.of(
+                    field("metadata", VARBINARY),
+                    field("value", VARBINARY),
+                    field("typed_value", RowType.from(List.of(field("first", planField), field("second", FIELD_BROWSER))))));
+            Map<List<String>, io.trino.spi.type.Type> primitiveTypes = Map.of(
+                    List.of("v", "metadata"), VARBINARY,
+                    List.of("v", "value"), VARBINARY,
+                    List.of("v", "typed_value", "Plan", "value"), VARBINARY,
+                    List.of("v", "typed_value", "Plan", "typed_value"), planTrinoType,
+                    List.of("v", "typed_value", "plan", "value"), VARBINARY,
+                    List.of("v", "typed_value", "plan", "typed_value"), VARCHAR);
+            byte[] file = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(variant, type, new ArrayList<>(List.of(row(METADATA, null, null))), primitiveTypes)));
 
-        assertThatThrownBy(() -> readVariantBytes(file, 1))
-                .isInstanceOfSatisfying(TrinoException.class, e -> assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
-                .hasMessage("Cannot read column v from data file %s: Shredded VARIANT object fields that differ only by case are not supported: plan in v.typed_value".formatted(PATH));
+            assertThatThrownBy(() -> readVariantBytes(file, 1))
+                    .isInstanceOfSatisfying(TrinoException.class, e -> assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                    .hasMessage("Cannot read column v from data file %s: Shredded VARIANT object fields that differ only by case are not supported: plan in v.typed_value".formatted(PATH));
+        }
     }
 
     @Test
@@ -212,6 +312,11 @@ class TestHoglakeShreddedVariant
      */
     private static byte[] write(List<List<Object>> rows, Optional<String> createdBy)
     {
+        return write(List.of(), rows, createdBy);
+    }
+
+    private static byte[] write(List<FileColumn> leadingColumns, List<List<Object>> rows, Optional<String> createdBy)
+    {
         GroupType variant = Types.optionalGroup()
                 .id(1)
                 .required(PrimitiveTypeName.BINARY).named("metadata")
@@ -221,7 +326,9 @@ class TestHoglakeShreddedVariant
                 .requiredGroup().optional(PrimitiveTypeName.BINARY).named("value").optional(PrimitiveTypeName.BINARY).as(LogicalTypeAnnotation.stringType()).named("typed_value").named("$Browser")
                 .named("typed_value")
                 .named("v");
-        byte[] file = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(variant, SHREDDED, new ArrayList<>(rows), primitiveTypes("a", "$Browser"))));
+        List<FileColumn> columns = new ArrayList<>(leadingColumns);
+        columns.add(new FileColumn(variant, SHREDDED, new ArrayList<>(rows), primitiveTypes("a", "$Browser")));
+        byte[] file = ConnectorTestFixtures.writeParquet(columns);
         return ConnectorTestFixtures.rewriteFooter(file, metadata -> {
             for (SchemaElement element : metadata.getSchema()) {
                 if (element.getName().equals("v")) {
@@ -264,13 +371,23 @@ class TestHoglakeShreddedVariant
         return Arrays.asList(fieldA, Arrays.asList(null, browser));
     }
 
+    private static Variant objectWithA(long a)
+    {
+        return Variant.ofObject(Map.of(utf8Slice("a"), Variant.ofLong(a)));
+    }
+
     private static List<Object> readVariantBytes(byte[] file, long recordCount)
     {
         TrinoFileSystemFactory fileSystem = ConnectorTestFixtures.memoryFileSystem(Map.of(PATH, file));
-        return read(fileSystem, new HoglakeSplit(PATH, file.length, recordCount, Optional.empty(), 0));
+        return read(fileSystem, new HoglakeSplit(PATH, file.length, recordCount, Optional.empty(), 0), List.of(COLUMN)).stream()
+                .map(List::getFirst)
+                .toList();
     }
 
-    private static List<Object> read(TrinoFileSystemFactory fileSystem, HoglakeSplit split)
+    /**
+     * The rows of the columns, with each variant as its encoded bytes.
+     */
+    private static List<List<Object>> read(TrinoFileSystemFactory fileSystem, HoglakeSplit split, List<HoglakeColumnHandle> columns)
     {
         ConnectorPageSource pageSource = new HoglakePageSourceProvider(fileSystem).createPageSource(
                 HoglakeTransactionHandle.INSTANCE,
@@ -278,12 +395,12 @@ class TestHoglakeShreddedVariant
                 split,
                 new HoglakeTableHandle("analytics", "shredded_variant_test", 1, "uuid-shredded-variant-test", List.of()),
                 Optional.empty(),
-                List.of((ColumnHandle) COLUMN),
+                columns.stream().map(ColumnHandle.class::cast).toList(),
                 DynamicFilter.EMPTY,
                 MemoryContext.NO_LIMIT);
         try {
-            return ConnectorTestFixtures.readAll(pageSource, List.of(VARIANT)).stream()
-                    .map(row -> variantBytes((Variant) row.getFirst()))
+            return ConnectorTestFixtures.readAll(pageSource, columns.stream().map(HoglakeColumnHandle::type).toList()).stream()
+                    .map(row -> row.stream().map(TestHoglakeShreddedVariant::comparable).toList())
                     .toList();
         }
         finally {
@@ -294,6 +411,14 @@ class TestHoglakeShreddedVariant
                 throw new UncheckedIOException(e);
             }
         }
+    }
+
+    private static Object comparable(Object value)
+    {
+        if (value instanceof Variant variant) {
+            return variantBytes(variant);
+        }
+        return value;
     }
 
     /**

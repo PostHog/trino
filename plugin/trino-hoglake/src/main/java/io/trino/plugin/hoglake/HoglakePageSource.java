@@ -91,7 +91,8 @@ public class HoglakePageSource
                     RowIdColumn,
                     ShreddedVariantColumn,
                     SourceColumn,
-                    UnsignedColumn {}
+                    UnsignedColumn,
+                    VariantNullAsSqlNullColumn {}
 
     record SourceColumn(int sourceChannel)
             implements ColumnAdaptation {}
@@ -126,28 +127,35 @@ public class HoglakePageSource
             }
             return variants;
         }
+    }
 
-        private static Block variantNullsToSqlNulls(Block variants)
-        {
-            int positionCount = variants.getPositionCount();
-            boolean hasVariantNull = false;
-            for (int position = 0; position < positionCount && !hasVariantNull; position++) {
-                hasVariantNull = !variants.isNull(position) && VARIANT.getObject(variants, position).isNull();
-            }
-            if (!hasVariantNull) {
-                return variants;
-            }
-            BlockBuilder builder = VARIANT.createBlockBuilder(null, positionCount);
-            for (int position = 0; position < positionCount; position++) {
-                if (variants.isNull(position) || VARIANT.getObject(variants, position).isNull()) {
-                    builder.appendNull();
-                }
-                else {
-                    VARIANT.writeObject(builder, VARIANT.getObject(variants, position));
-                }
-            }
-            return builder.build();
+    /**
+     * An unshredded VARIANT column from a writer that stores a SQL NULL as a
+     * variant null.
+     */
+    record VariantNullAsSqlNullColumn(int sourceChannel)
+            implements ColumnAdaptation {}
+
+    private static Block variantNullsToSqlNulls(Block variants)
+    {
+        int positionCount = variants.getPositionCount();
+        boolean hasVariantNull = false;
+        for (int position = 0; position < positionCount && !hasVariantNull; position++) {
+            hasVariantNull = !variants.isNull(position) && VARIANT.getObject(variants, position).isNull();
         }
+        if (!hasVariantNull) {
+            return variants;
+        }
+        BlockBuilder builder = VARIANT.createBlockBuilder(null, positionCount);
+        for (int position = 0; position < positionCount; position++) {
+            if (variants.isNull(position) || VARIANT.getObject(variants, position).isNull()) {
+                builder.appendNull();
+            }
+            else {
+                VARIANT.writeObject(builder, VARIANT.getObject(variants, position));
+            }
+        }
+        return builder.build();
     }
 
     record NullColumn(Type type)
@@ -248,6 +256,7 @@ public class HoglakePageSource
                 case NullColumn _ -> RunLengthEncodedBlock.create(nullBlocks.get(channel), survivors);
                 case RowIdColumn(long fileId) -> rowIds(fileId, page).getPositions(retained, 0, survivors);
                 case ShreddedVariantColumn column -> column.read(page.getBlock(column.sourceChannel()).getPositions(retained, 0, survivors));
+                case VariantNullAsSqlNullColumn(int sourceChannel) -> variantNullsToSqlNulls(page.getBlock(sourceChannel).getPositions(retained, 0, survivors));
             };
         }
         return new Page(survivors, blocks);
@@ -264,6 +273,7 @@ public class HoglakePageSource
                 case NullColumn _ -> RunLengthEncodedBlock.create(nullBlocks.get(channel), page.getPositionCount());
                 case RowIdColumn(long fileId) -> rowIds(fileId, page);
                 case ShreddedVariantColumn column -> column.read(page.getBlock(column.sourceChannel()));
+                case VariantNullAsSqlNullColumn(int sourceChannel) -> variantNullsToSqlNulls(page.getBlock(sourceChannel));
             };
         }
         return new Page(page.getPositionCount(), blocks);
