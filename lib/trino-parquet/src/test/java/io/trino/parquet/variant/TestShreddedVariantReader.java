@@ -398,6 +398,30 @@ public class TestShreddedVariantReader
         return new TestingParquetDataSource(file, ParquetReaderOptions.defaultOptions());
     }
 
+    @Test
+    public void testAssembleWithLimits()
+            throws IOException
+    {
+        PhysicalColumn column = readPhysicalColumn(DUCKDB.resolve("objects.parquet"), "v", ParquetReaderOptions.defaultOptions());
+        for (Block block : column.blocks()) {
+            List<Optional<Variant>> expected = toVariants(column.assembler().assemble(block));
+            int positionCount = block.getPositionCount();
+
+            // Each value reaches a size limit of one byte, so each call assembles one position
+            ImmutableList.Builder<Optional<Variant>> oneAtATime = ImmutableList.builder();
+            for (int start = 0; start < positionCount; start++) {
+                Block variants = column.assembler().assemble(block, start, positionCount - start, 1);
+                assertThat(variants.getPositionCount()).isEqualTo(1);
+                oneAtATime.addAll(toVariants(variants));
+            }
+            assertSameVariants(oneAtATime.build(), expected, "size limit");
+
+            int limit = Math.min(2, positionCount);
+            assertSameVariants(toVariants(column.assembler().assemble(block, 0, limit, Long.MAX_VALUE)), expected.subList(0, limit), "position limit");
+            assertThat(column.assembler().assemble(block, positionCount, 0, 1).getPositionCount()).isEqualTo(0);
+        }
+    }
+
     private static void assertSchemaError(MessageType schema, Map<List<String>, Type> primitiveTypes, String message)
             throws IOException
     {
