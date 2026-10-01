@@ -1,0 +1,4 @@
+{"id":1,"v":{"$browser":"Chrome","$os":"Mac","props":{"Plan":"free"}}}
+{"id":2,"v":{"$browser":"Firefox","$os":"Linux","props":{}}}
+{"id":3,"v":{"$os":"iOS","props":{}}}
+{"id":4,"v":{"$browser":"Edge"}}
