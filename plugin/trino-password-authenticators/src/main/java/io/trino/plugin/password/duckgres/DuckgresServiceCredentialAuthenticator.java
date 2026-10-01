@@ -24,6 +24,7 @@ import io.airlift.json.JsonCodec;
 import io.trino.spi.security.AccessDeniedException;
 import io.trino.spi.security.BasicPrincipal;
 import io.trino.spi.security.Identity;
+import io.trino.spi.security.LoadedConfiguration;
 import io.trino.spi.security.PasswordAuthenticator;
 
 import java.io.IOException;
@@ -39,8 +40,10 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.hash.Hashing.sha256;
 import static io.airlift.http.client.HeaderNames.AUTHORIZATION;
 import static io.airlift.http.client.HeaderNames.CONTENT_TYPE;
+import static io.airlift.http.client.Request.Builder.prepareGet;
 import static io.airlift.http.client.Request.Builder.preparePost;
 import static io.airlift.http.client.StaticBodyGenerator.createStaticBodyGenerator;
 import static io.airlift.json.JsonCodec.jsonCodec;
@@ -48,13 +51,14 @@ import static io.airlift.units.DataSize.ofBytes;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 public class DuckgresServiceCredentialAuthenticator
-        implements PasswordAuthenticator
+        implements PasswordAuthenticator, LoadedConfiguration
 {
     private static final Pattern SERVICE_USERNAME = Pattern.compile("[a-z0-9][a-z0-9_-]{0,62}\\.svc_[a-f0-9]{24}");
     private static final int MAX_RESPONSE_BYTES = 64 * 1024;
     private static final int MAX_TOKEN_BYTES = 8192;
     private static final JsonCodec<CredentialRequest> REQUEST_CODEC = jsonCodec(CredentialRequest.class);
     private static final JsonCodec<CredentialResponse> RESPONSE_CODEC = jsonCodec(CredentialResponse.class);
+    private static final JsonCodec<ReadinessResponse> READINESS_CODEC = jsonCodec(ReadinessResponse.class);
 
     private final URI endpoint;
     private final Path tokenFile;
@@ -111,6 +115,28 @@ public class DuckgresServiceCredentialAuthenticator
         }
     }
 
+    @Override
+    public String loadedRevision()
+    {
+        try {
+            Request request = prepareGet()
+                    .setUri(endpoint)
+                    .setFollowRedirects(false)
+                    .setMaxResponseContentLength(ofBytes(MAX_RESPONSE_BYTES))
+                    .setHeader(AUTHORIZATION, "Bearer " + readToken())
+                    .build();
+            ReadinessResponse response = httpClient.execute(request, new ReadinessResponseHandler());
+            if (response.cellId() == null || response.cellId().isBlank()) {
+                throw unavailable();
+            }
+            // Fingerprint the authenticated binding, never the callback token or its hash.
+            return "service-auth-v1:sha256:" + sha256().hashString("duckgres-service-credential-v1\n" + endpoint.toASCIIString() + "\n" + response.cellId(), UTF_8);
+        }
+        catch (IOException | RuntimeException _) {
+            throw unavailable();
+        }
+    }
+
     private String readToken()
             throws IOException
     {
@@ -127,6 +153,39 @@ public class DuckgresServiceCredentialAuthenticator
     private static AccessDeniedException denied()
     {
         return new AccessDeniedException("Invalid service credential");
+    }
+
+    private static IllegalStateException unavailable()
+    {
+        return new IllegalStateException("Service credential configuration is unavailable");
+    }
+
+    private static class ReadinessResponseHandler
+            implements ResponseHandler<ReadinessResponse, RuntimeException>
+    {
+        @Override
+        public ReadinessResponse handleException(Request request, Exception exception)
+        {
+            throw unavailable();
+        }
+
+        @Override
+        public ReadinessResponse handle(Request request, Response response)
+        {
+            if (response.getStatusCode() != 200) {
+                throw unavailable();
+            }
+            try {
+                byte[] bytes = response.getInputStream().readNBytes(MAX_RESPONSE_BYTES + 1);
+                if (bytes.length > MAX_RESPONSE_BYTES) {
+                    throw unavailable();
+                }
+                return READINESS_CODEC.fromJson(bytes);
+            }
+            catch (IOException | RuntimeException _) {
+                throw unavailable();
+            }
+        }
     }
 
     private static class CredentialResponseHandler
@@ -167,4 +226,6 @@ public class DuckgresServiceCredentialAuthenticator
     }
 
     public record CredentialResponse(String user, List<String> groups, @JsonProperty("expires_at") String expiresAt) {}
+
+    public record ReadinessResponse(@JsonProperty("cell_id") String cellId) {}
 }
