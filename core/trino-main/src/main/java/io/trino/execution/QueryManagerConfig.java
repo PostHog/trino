@@ -82,6 +82,7 @@ public class QueryManagerConfig
     private int maxWriterTaskCount = 100;
     private Duration minQueryExpireAge = new Duration(15, MINUTES);
     private int maxQueryHistory = 100;
+    private int maxInfrastructureFailureSeries = 4096;
     private Optional<Duration> maxQueryHistoryAge = Optional.empty();
     private Optional<Duration> completedResultIdleTimeout = Optional.empty();
     private int maxQueryLength = 1_000_000;
@@ -340,6 +341,20 @@ public class QueryManagerConfig
     public QueryManagerConfig setMaxQueryHistory(int maxQueryHistory)
     {
         this.maxQueryHistory = maxQueryHistory;
+        return this;
+    }
+
+    public int getMaxInfrastructureFailureSeries()
+    {
+        return maxInfrastructureFailureSeries;
+    }
+
+    @Config("query.max-infrastructure-failure-series")
+    @ConfigDescription("Maximum attributed infrastructure failure counters per coordinator before overflow")
+    public QueryManagerConfig setMaxInfrastructureFailureSeries(int maxInfrastructureFailureSeries)
+    {
+        checkArgument(maxInfrastructureFailureSeries > 0, "maxInfrastructureFailureSeries must be positive");
+        this.maxInfrastructureFailureSeries = maxInfrastructureFailureSeries;
         return this;
     }
 

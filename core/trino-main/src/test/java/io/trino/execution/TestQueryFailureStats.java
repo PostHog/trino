@@ -49,7 +49,7 @@ class TestQueryFailureStats
             throws Exception
     {
         MBeanServer server = newMBeanServer();
-        var stats = new QueryFailureStats(new MBeanExporter(server));
+        var stats = new QueryFailureStats(new MBeanExporter(server), new QueryManagerConfig());
         try {
             stats.recordFailure("tenant_alpha.reader", STORAGE_ERROR);
             stats.recordFailure("tenant_alpha.reader", STORAGE_ERROR);
@@ -79,7 +79,7 @@ class TestQueryFailureStats
             throws Exception
     {
         MBeanServer server = newMBeanServer();
-        var stats = new QueryFailureStats(new MBeanExporter(server), 1);
+        var stats = new QueryFailureStats(new MBeanExporter(server), new QueryManagerConfig().setMaxInfrastructureFailureSeries(1));
         try {
             stats.recordFailure("tenant_alpha.reader", STORAGE_ERROR);
             stats.recordFailure("tenant_beta.reader", STORAGE_ERROR);
@@ -104,7 +104,7 @@ class TestQueryFailureStats
             throws Exception
     {
         MBeanServer server = newMBeanServer();
-        var stats = new QueryFailureStats(new MBeanExporter(server));
+        var stats = new QueryFailureStats(new MBeanExporter(server), new QueryManagerConfig());
         try {
             String user = "tenant_alpha,reader=\"*?\\\n";
             stats.recordFailure(user, STORAGE_ERROR);
@@ -120,7 +120,7 @@ class TestQueryFailureStats
             throws Exception
     {
         MBeanServer server = newMBeanServer();
-        var stats = new QueryFailureStats(new MBeanExporter(server));
+        var stats = new QueryFailureStats(new MBeanExporter(server), new QueryManagerConfig());
         try (var executor = Executors.newFixedThreadPool(4)) {
             for (int index = 0; index < 1000; index++) {
                 executor.submit(() -> stats.recordFailure("tenant_alpha.reader", STORAGE_ERROR));
@@ -139,7 +139,7 @@ class TestQueryFailureStats
             throws Exception
     {
         MBeanServer server = newMBeanServer();
-        var failureStats = new QueryFailureStats(new MBeanExporter(server));
+        var failureStats = new QueryFailureStats(new MBeanExporter(server), new QueryManagerConfig());
         var stats = new QueryManagerStats(failureStats);
         var identity = Identity.ofUser("tenant_alpha.reader");
         var session = testSessionBuilder().setIdentity(identity).setOriginalIdentity(identity).build();
@@ -182,7 +182,7 @@ class TestQueryFailureStats
                 "errorCode", "TEST_STORAGE_ERROR",
                 "errorType", "EXTERNAL",
                 "overflow", "false"));
-        var failureStats = new QueryFailureStats(exporter);
+        var failureStats = new QueryFailureStats(exporter, new QueryManagerConfig());
         var stats = new QueryManagerStats(failureStats);
         var identity = Identity.ofUser("tenant_alpha.reader");
         var query = new FailedDispatchQuery(

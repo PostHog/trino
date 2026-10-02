@@ -279,6 +279,23 @@ without waiting for more queries to replace its history.
 Expired query history is no longer available through the web interface or result
 retry endpoints.
 
+## `query.max-infrastructure-failure-series`
+
+- **Type:** {ref}`prop-type-integer`
+- **Minimum value:** `1`
+- **Default value:** `4096`
+
+Maximum distinct session-user/error-code/error-type combinations for the
+coordinator's infrastructure failure JMX counters. Each additional combination
+increments an overflow counter for its error type. Existing combinations retain
+their attribution. Up to three overflow counters are additional to this limit.
+
+Slots remain allocated until the coordinator restarts. Increase the limit if
+expected tenant churn over a coordinator's lifetime would exhaust it, accounting
+for the extra memory and metric cardinality. Aggregate failure alerts must
+include overflow counters. See {doc}`jmx` for the counter properties and
+identity requirements.
+
 ## `query.min-expire-age`
 
 - **Type:** {ref}`prop-type-duration`

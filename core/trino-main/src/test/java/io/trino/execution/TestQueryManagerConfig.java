@@ -40,6 +40,7 @@ import static java.util.concurrent.TimeUnit.DAYS;
 import static java.util.concurrent.TimeUnit.HOURS;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestQueryManagerConfig
 {
@@ -49,6 +50,7 @@ public class TestQueryManagerConfig
         assertRecordedDefaults(recordDefaults(QueryManagerConfig.class)
                 .setMinQueryExpireAge(new Duration(15, MINUTES))
                 .setMaxQueryHistory(100)
+                .setMaxInfrastructureFailureSeries(4096)
                 .setMaxQueryHistoryAge(null)
                 .setCompletedResultIdleTimeout(null)
                 .setMaxQueryLength(1_000_000)
@@ -140,6 +142,7 @@ public class TestQueryManagerConfig
                 .put("query.client.timeout", "10s")
                 .put("query.min-expire-age", "30s")
                 .put("query.max-history", "10")
+                .put("query.max-infrastructure-failure-series", "8192")
                 .put("query.max-history-age", "1h")
                 .put("query.completed-result-idle-timeout", "15m")
                 .put("query.max-length", "10000")
@@ -226,6 +229,7 @@ public class TestQueryManagerConfig
         QueryManagerConfig expected = new QueryManagerConfig()
                 .setMinQueryExpireAge(new Duration(30, SECONDS))
                 .setMaxQueryHistory(10)
+                .setMaxInfrastructureFailureSeries(8192)
                 .setMaxQueryHistoryAge(new Duration(1, HOURS))
                 .setCompletedResultIdleTimeout(new Duration(15, MINUTES))
                 .setMaxQueryLength(10000)
@@ -310,6 +314,17 @@ public class TestQueryManagerConfig
                 .setSourcePagesValidationEnabled(false);
 
         assertFullMapping(properties, expected);
+    }
+
+    @Test
+    public void testInfrastructureFailureSeriesMustBePositive()
+    {
+        assertThatThrownBy(() -> new QueryManagerConfig().setMaxInfrastructureFailureSeries(0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("maxInfrastructureFailureSeries must be positive");
+        assertThatThrownBy(() -> new QueryManagerConfig().setMaxInfrastructureFailureSeries(-1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("maxInfrastructureFailureSeries must be positive");
     }
 
     @Test

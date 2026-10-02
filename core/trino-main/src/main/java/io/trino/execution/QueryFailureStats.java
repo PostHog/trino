@@ -37,7 +37,6 @@ import static java.util.Objects.requireNonNull;
 public final class QueryFailureStats
 {
     private static final Logger log = Logger.get(QueryFailureStats.class);
-    private static final int MAX_FAILURE_SERIES = 4096;
 
     private final MBeanExporter exporter;
     private final int maxFailureSeries;
@@ -51,9 +50,9 @@ public final class QueryFailureStats
     private boolean destroyed;
 
     @Inject
-    public QueryFailureStats(MBeanExporter exporter)
+    public QueryFailureStats(MBeanExporter exporter, QueryManagerConfig config)
     {
-        this(exporter, MAX_FAILURE_SERIES);
+        this(exporter, requireNonNull(config, "config is null").getMaxInfrastructureFailureSeries());
     }
 
     QueryFailureStats(MBeanExporter exporter, int maxFailureSeries)
