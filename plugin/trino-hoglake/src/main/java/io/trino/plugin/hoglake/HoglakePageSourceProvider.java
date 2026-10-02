@@ -60,6 +60,7 @@ import io.trino.spi.type.TimestampWithTimeZoneType;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.io.ColumnIO;
 import org.apache.parquet.io.MessageColumnIO;
+import org.apache.parquet.schema.GroupType;
 import org.apache.parquet.schema.LogicalTypeAnnotation.TimestampLogicalTypeAnnotation;
 import org.apache.parquet.schema.MessageType;
 import org.joda.time.DateTimeZone;
@@ -67,13 +68,16 @@ import org.joda.time.DateTimeZone;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.parquet.ParquetTypeUtils.constructField;
 import static io.trino.parquet.ParquetTypeUtils.getColumnIO;
 import static io.trino.parquet.ParquetTypeUtils.getDescriptors;
@@ -89,6 +93,7 @@ import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.spi.type.UuidType.UUID;
 import static io.trino.spi.type.VariantType.VARIANT;
 import static java.lang.Math.min;
+import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MICROS;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.FLOAT;
@@ -427,6 +432,7 @@ public class HoglakePageSourceProvider
         List<Optional<org.apache.parquet.schema.Type>> bindings = columns.stream()
                 .map(column -> bindColumn(fileSchema, column))
                 .toList();
+        checkNoCaseCollision(fileSchema, parquetMetadata, Stream.concat(columns.stream(), predicate.getDomains().orElseThrow().keySet().stream()).toList(), split.path());
 
         // Parse shredded VARIANT columns first, which rejects shredded object fields that differ
         // only by case. They have the same lowercase name, so the column IO and the reader below
@@ -712,6 +718,80 @@ public class HoglakePageSourceProvider
             throw new ArithmeticException("Timestamp bound is not an exact microsecond");
         }
         return Math.addExact(Math.multiplyExact(value.getEpochMillis(), 1_000), value.getPicosOfMilli() / 1_000_000);
+    }
+
+    /**
+     * Fails if a column binds to a file column whose name, or the name of one of
+     * its fields, differs from another one's only by case. The footer reader
+     * lowercases names, so the reader cannot tell such columns or fields apart: it
+     * reads the values of the other one, or fails with an error that does not name
+     * the column. A VARIANT column checks its shredded fields when it is parsed.
+     */
+    private static void checkNoCaseCollision(MessageType fileSchema, ParquetMetadata parquetMetadata, List<HoglakeColumnHandle> columns, String path)
+    {
+        // The names are lowercase, so names that differ only by case are repeated
+        if (!hasRepeatedName(fileSchema)) {
+            return;
+        }
+        // Only the Thrift schema keeps the original case of the names
+        ParquetOriginalFieldNames originalNames = ParquetOriginalFieldNames.fromSchema(parquetMetadata.getParquetMetadata().getSchema());
+        for (HoglakeColumnHandle column : columns) {
+            Optional<org.apache.parquet.schema.Type> binding = bindColumn(fileSchema, column);
+            if (binding.isEmpty()) {
+                continue;
+            }
+            List<String> collidingNames = originalNames.children().stream()
+                    .filter(field -> field.name().toLowerCase(ENGLISH).equals(binding.get().getName()))
+                    .map(ParquetOriginalFieldNames::path)
+                    .toList();
+            if (collidingNames.size() == 1 && !column.type().equals(VARIANT)) {
+                int index = IntStream.range(0, fileSchema.getFieldCount())
+                        .filter(field -> fileSchema.getType(field) == binding.get())
+                        .findFirst()
+                        .orElseThrow();
+                collidingNames = collidingFieldNames(binding.get(), originalNames.children().get(index));
+            }
+            if (collidingNames.size() > 1) {
+                throw new TrinoException(NOT_SUPPORTED, "Cannot read column %s from data file %s: Names that differ only by case are not supported: %s".formatted(column.name(), path, String.join(", ", collidingNames)));
+            }
+        }
+    }
+
+    private static boolean hasRepeatedName(GroupType group)
+    {
+        Set<String> names = new HashSet<>();
+        return group.getFields().stream().anyMatch(field ->
+                !names.add(field.getName()) || (!field.isPrimitive() && hasRepeatedName(field.asGroupType())));
+    }
+
+    /**
+     * The original paths of the first fields of a group, at any depth, whose
+     * names differ only by case, or an empty list.
+     */
+    private static List<String> collidingFieldNames(org.apache.parquet.schema.Type field, ParquetOriginalFieldNames originalNames)
+    {
+        if (field.isPrimitive()) {
+            return List.of();
+        }
+        GroupType group = field.asGroupType();
+        Set<String> names = new HashSet<>();
+        Set<String> repeatedNames = group.getFields().stream()
+                .map(org.apache.parquet.schema.Type::getName)
+                .filter(name -> !names.add(name))
+                .collect(toImmutableSet());
+        if (!repeatedNames.isEmpty()) {
+            return originalNames.children().stream()
+                    .filter(child -> repeatedNames.contains(child.name().toLowerCase(ENGLISH)))
+                    .map(ParquetOriginalFieldNames::path)
+                    .toList();
+        }
+        for (int i = 0; i < group.getFieldCount(); i++) {
+            List<String> collidingNames = collidingFieldNames(group.getType(i), originalNames.children().get(i));
+            if (!collidingNames.isEmpty()) {
+                return collidingNames;
+            }
+        }
+        return List.of();
     }
 
     /**

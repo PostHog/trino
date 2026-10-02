@@ -249,6 +249,66 @@ class TestHoglakeParquetBinding
                 .isInstanceOf(Exception.class);
     }
 
+    // ---- names that differ only by case -------------------------------------
+    //
+    // Parquet names are case-sensitive, but the footer reader lowercases them,
+    // so it cannot tell apart top-level columns that differ only by case.
+
+    @Test
+    void caseCollidingColumnsAreRejected()
+    {
+        byte[] file = caseCollidingFile();
+        HoglakeColumnHandle lower = new HoglakeColumnHandle("a", 2, BIGINT, true);
+        HoglakeColumnHandle upper = new HoglakeColumnHandle("a_upper", 1, BIGINT, true);
+
+        // Binding by field id finds the right column, but without the check the reader reads
+        // column A for column a, and fails when it reads both
+        for (List<HoglakeColumnHandle> columns : List.of(List.of(lower), List.of(upper), List.of(upper, lower))) {
+            assertThatThrownBy(() -> read(file, columns, 2))
+                    .isInstanceOfSatisfying(TrinoException.class, e ->
+                            assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                    .hasMessage("Cannot read column %s from data file %s: Names that differ only by case are not supported: A, a".formatted(columns.getFirst().name(), PATH));
+        }
+    }
+
+    @Test
+    void caseCollidingFieldsAreRejected()
+    {
+        byte[] file = ConnectorTestFixtures.writeParquet(List.of(new FileColumn(
+                Types.optionalGroup().id(1)
+                        .optional(PrimitiveTypeName.INT64).id(2).named("A")
+                        .optional(PrimitiveTypeName.INT64).id(3).named("a")
+                        .named("r"),
+                RowType.from(List.of(RowType.field("A", BIGINT), RowType.field("a", BIGINT))),
+                Arrays.asList(Arrays.asList(10L, 100L), Arrays.asList(20L, 200L)),
+                Map.of(List.of("r", "A"), BIGINT, List.of("r", "a"), BIGINT))));
+        HoglakeColumnHandle child = new HoglakeColumnHandle("a", 3, BIGINT, true);
+        HoglakeColumnHandle row = new HoglakeColumnHandle("r", 1, RowType.from(List.of(RowType.field("a", BIGINT))), true, List.of(child), "struct");
+
+        // Without the check, field a reads the values of field A
+        assertThatThrownBy(() -> read(file, List.of(row), 2))
+                .isInstanceOfSatisfying(TrinoException.class, e ->
+                        assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                .hasMessage("Cannot read column r from data file %s: Names that differ only by case are not supported: r.A, r.a".formatted(PATH));
+    }
+
+    @Test
+    void columnBesideCaseCollidingColumnsIsRead()
+    {
+        HoglakeColumnHandle other = new HoglakeColumnHandle("other", 3, BIGINT, true);
+
+        assertThat(read(caseCollidingFile(), List.of(other), 2))
+                .containsExactly(List.of(1L), List.of(2L));
+    }
+
+    private static byte[] caseCollidingFile()
+    {
+        return ConnectorTestFixtures.writeParquet(List.of(
+                new FileColumn(Types.optional(PrimitiveTypeName.INT64).id(1).named("A"), BIGINT, Arrays.asList(10L, 20L)),
+                new FileColumn(Types.optional(PrimitiveTypeName.INT64).id(2).named("a"), BIGINT, Arrays.asList(100L, 200L)),
+                new FileColumn(Types.optional(PrimitiveTypeName.INT64).id(3).named("other"), BIGINT, Arrays.asList(1L, 2L))));
+    }
+
     // ---- presence/absence --------------------------------------------------
 
     @Test
