@@ -179,6 +179,10 @@ values. Typical usage does not require you to configure them.
   - Target maximum size of written files; the actual size could be larger. The
     equivalent catalog session property is `target_max_file_size`.
   - `1GB`
+* - `delta.object-store-layout.enabled`
+  - Default value of the `object_store_layout_enabled` table property for new
+    tables.
+  - `false`
 * - `delta.unique-table-location`
   - Use randomized, unique table locations.
   - `true`
@@ -597,6 +601,9 @@ measure to ensure that files are retained as expected. The minimum value for
 this property is `0s`. There is a minimum retention session property as well,
 `vacuum_min_retention`.
 
+Tables that use deletion vectors are supported. Deletion vector files are kept
+and removed under the same rules as data files.
+
 (delta-lake-data-management)=
 ### Data management
 
@@ -788,6 +795,14 @@ The following table properties are available for use:
     Defaults to `NONE`.
 * - `deletion_vectors_enabled`
   - Enables deletion vectors.
+* - `object_store_layout_enabled`
+  - Writes data and change data files under deterministic binary hash
+    directory prefixes instead of partition directories. The hash uses 20 bits
+    split into `4/4/4/8` directories. Deletion vector files get a random
+    prefix of `delta.randomPrefixLength` characters, `2` by default. The value
+    is stored as `delta.randomizeFilePrefixes` in Delta Lake metadata, and
+    later writes follow it. Defaults to the `delta.object-store-layout.enabled`
+    catalog configuration property.
 :::
 
 The following example uses all available table properties:
@@ -800,7 +815,8 @@ WITH (
   checkpoint_interval = 5,
   change_data_feed_enabled = false,
   column_mapping_mode = 'name',
-  deletion_vectors_enabled = false
+  deletion_vectors_enabled = false,
+  object_store_layout_enabled = true
 )
 AS SELECT name, comment, regionkey FROM tpch.tiny.nation;
 ```

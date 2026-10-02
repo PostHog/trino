@@ -18,6 +18,7 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoOutputFile;
+import io.trino.filesystem.TrinoOutputStream;
 import io.trino.filesystem.memory.MemoryFileSystem;
 import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
@@ -26,7 +27,6 @@ import io.trino.spi.TrinoException;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
-import java.io.OutputStream;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
@@ -112,7 +112,7 @@ class TestHoglakeDeletePublisher
                         }
 
                         @Override
-                        public OutputStream create(AggregatedMemoryContext memoryContext)
+                        public TrinoOutputStream create(AggregatedMemoryContext memoryContext)
                                 throws IOException
                         {
                             return delegate.create(memoryContext);
