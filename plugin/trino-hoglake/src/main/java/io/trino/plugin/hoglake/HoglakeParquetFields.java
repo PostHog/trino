@@ -52,6 +52,17 @@ final class HoglakeParquetFields
     }
 
     /**
+     * Whether the file stores a VARIANT column in shredded form, with a
+     * {@code typed_value} field. {@link HoglakePageSourceProvider} reads
+     * shredded top-level columns; {@link #construct} rejects shredded
+     * VARIANT fields inside rows, lists, and maps.
+     */
+    public static boolean isShreddedVariant(HoglakeColumnHandle column, org.apache.parquet.schema.Type physical)
+    {
+        return column.type().equals(VARIANT) && !physical.isPrimitive() && physical.asGroupType().containsField("typed_value");
+    }
+
+    /**
      * @param mayRepeat whether the field may be repeated, as the element of a legacy 2-level
      *         list is: that list has no element field, so each element is the list's repeated
      *         field itself
@@ -67,6 +78,9 @@ final class HoglakeParquetFields
             throw unsupportedField(column, physical, "the field is repeated");
         }
         if (column.type().equals(VARIANT)) {
+            if (physical instanceof GroupColumnIO group && group.getChild("typed_value") != null) {
+                throw new TrinoException(NOT_SUPPORTED, "Hoglake supports shredded VARIANT files only in top-level columns: " + column.name());
+            }
             // Another tool can store the column as a primitive, such as a JSON string
             if (!(physical instanceof GroupColumnIO group) || group.getChildrenCount() != 2) {
                 throw unsupportedVariant(column);

@@ -463,15 +463,21 @@ class TestHoglakeParquetBinding
     }
 
     @Test
-    void shreddedVariantIsNotSupported()
+    void shreddedVariantFieldIsNotConstructed()
     {
-        assertUnsupportedVariant(Types.buildMessage()
+        // HoglakePageSourceProvider reads shredded top-level columns, see TestHoglakeShreddedVariant
+        MessageType schema = Types.buildMessage()
                 .optionalGroup().as(LogicalTypeAnnotation.variantType((byte) 1))
                 .required(PrimitiveTypeName.BINARY).named("metadata")
                 .optional(PrimitiveTypeName.BINARY).named("value")
                 .optional(PrimitiveTypeName.INT64).named("typed_value")
                 .named("v")
-                .named("test"));
+                .named("test");
+        HoglakeColumnHandle column = new HoglakeColumnHandle("v", 1, VARIANT, true);
+        assertThatThrownBy(() -> HoglakeParquetFields.construct(column, new ColumnIOFactory().getColumnIO(schema).getChild("v")))
+                .isInstanceOfSatisfying(TrinoException.class, e ->
+                        assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                .hasMessage("Hoglake supports shredded VARIANT files only in top-level columns: v");
     }
 
     @Test

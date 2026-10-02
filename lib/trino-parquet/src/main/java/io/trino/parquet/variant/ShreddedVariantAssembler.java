@@ -85,6 +85,7 @@ import static io.trino.spi.variant.VariantEncoder.encodeDecimal4;
 import static io.trino.spi.variant.VariantEncoder.encodeDecimal8;
 import static io.trino.spi.variant.VariantUtils.readOffset;
 import static java.lang.Math.toIntExact;
+import static java.util.Objects.checkFromToIndex;
 import static java.util.Objects.requireNonNull;
 
 /// Builds VARIANT values from the columns of a shredded VARIANT group.
@@ -122,15 +123,29 @@ public final class ShreddedVariantAssembler
     public Block assemble(Block block)
             throws ParquetCorruptionException
     {
+        return assemble(block, 0, block.getPositionCount(), Long.MAX_VALUE);
+    }
+
+    /// Returns a VARIANT block for up to `maxPositions` positions of `block`, from
+    /// position `start`. It stops after the first position at which the result reaches
+    /// `maxSizeInBytes`, so it has at least one position if `maxPositions` is not zero.
+    ///
+    /// Assembly copies every value, so a block of dictionary-encoded columns can grow
+    /// much larger than the reader sized it. Callers bound the result with
+    /// `maxSizeInBytes` and assemble the rest of the block in later calls.
+    public Block assemble(Block block, int start, int maxPositions, long maxSizeInBytes)
+            throws ParquetCorruptionException
+    {
+        checkFromToIndex(start, start + maxPositions, block.getPositionCount());
+        checkArgument(maxSizeInBytes > 0, "maxSizeInBytes must be positive: %s", maxSizeInBytes);
         List<Block> fields = getRowFieldsFromBlock(block);
         Block metadataBlock = fields.get(0);
         BoundValue value = new BoundValue(
                 fields.get(1),
                 schema.value().typedValue().map(typedValue -> bindTypedValue(typedValue, fields.get(2))));
 
-        int positionCount = block.getPositionCount();
-        VariantBlockBuilder builder = VARIANT.createBlockBuilder(null, positionCount);
-        for (int position = 0; position < positionCount; position++) {
+        VariantBlockBuilder builder = VARIANT.createBlockBuilder(null, maxPositions);
+        for (int position = start; position < start + maxPositions && builder.getSizeInBytes() < maxSizeInBytes; position++) {
             if (block.isNull(position)) {
                 builder.appendNull();
                 continue;

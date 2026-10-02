@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.hoglake;
 
+import com.google.common.annotations.VisibleForTesting;
 import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
 import io.trino.filesystem.Location;
@@ -32,6 +33,9 @@ import io.trino.parquet.predicate.TupleDomainParquetPredicate;
 import io.trino.parquet.reader.MetadataReader;
 import io.trino.parquet.reader.ParquetReader;
 import io.trino.parquet.reader.RowGroupInfo;
+import io.trino.parquet.variant.ParquetOriginalFieldNames;
+import io.trino.parquet.variant.ShreddedVariantAssembler;
+import io.trino.parquet.variant.VariantShreddingSchema;
 import io.trino.plugin.hoglake.HoglakeParquetFooterCache.Lookup;
 import io.trino.plugin.hoglake.HoglakeParquetFooterCache.ParsedFooter;
 import io.trino.spi.TrinoException;
@@ -67,19 +71,23 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
+import static io.trino.parquet.ParquetTypeUtils.constructField;
 import static io.trino.parquet.ParquetTypeUtils.getColumnIO;
 import static io.trino.parquet.ParquetTypeUtils.getDescriptors;
 import static io.trino.parquet.ParquetTypeUtils.lookupColumnByName;
 import static io.trino.parquet.predicate.PredicateUtils.buildPredicate;
 import static io.trino.parquet.predicate.PredicateUtils.getFilteredRowGroups;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.spi.type.UuidType.UUID;
+import static io.trino.spi.type.VariantType.VARIANT;
 import static java.lang.Math.min;
 import static java.util.Objects.requireNonNull;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MICROS;
@@ -113,6 +121,7 @@ public class HoglakePageSourceProvider
     private final HoglakeParquetFooterCache footerCache;
     private final Optional<CacheKey> catalogCacheKey;
     private final boolean s3SecurityMappingEnabled;
+    private final ParquetReaderOptions readerOptions;
 
     public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory)
     {
@@ -126,6 +135,23 @@ public class HoglakePageSourceProvider
 
     public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache, Optional<CacheKey> catalogCacheKey, boolean s3SecurityMappingEnabled)
     {
+        this(fileSystemFactory, footerCache, catalogCacheKey, s3SecurityMappingEnabled, ParquetReaderOptions.defaultOptions());
+    }
+
+    @VisibleForTesting
+    HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, ParquetReaderOptions readerOptions)
+    {
+        this(fileSystemFactory, HoglakeParquetFooterCache.disabled(), Optional.empty(), false, readerOptions);
+    }
+
+    private HoglakePageSourceProvider(
+            TrinoFileSystemFactory fileSystemFactory,
+            HoglakeParquetFooterCache footerCache,
+            Optional<CacheKey> catalogCacheKey,
+            boolean s3SecurityMappingEnabled,
+            ParquetReaderOptions readerOptions)
+    {
+        this.readerOptions = requireNonNull(readerOptions, "readerOptions is null");
         this.catalogCacheKey = requireNonNull(catalogCacheKey, "catalogCacheKey is null");
         this.s3SecurityMappingEnabled = s3SecurityMappingEnabled;
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
@@ -185,7 +211,7 @@ public class HoglakePageSourceProvider
             inputFile = fileSystem.newInputFile(Location.of(hoglakeSplit.path()), hoglakeSplit.fileSizeBytes());
         }
 
-        ParquetReaderOptions options = readerOptions(ParquetReaderOptions.defaultOptions(), hoglakeSplit);
+        ParquetReaderOptions options = readerOptions(readerOptions, hoglakeSplit);
         ParquetDataSource dataSource = null;
         // The split's scope exists before any allocation on its behalf, and
         // owns everything until a page source adopts it.
@@ -402,6 +428,23 @@ public class HoglakePageSourceProvider
                 .map(column -> bindColumn(fileSchema, column))
                 .toList();
 
+        // Parse shredded VARIANT columns first, which rejects shredded object fields that differ
+        // only by case. They have the same lowercase name, so the column IO and the reader below
+        // cannot tell them apart, and fail with errors that do not name the column.
+        List<Optional<VariantShreddingSchema>> shreddings = new ArrayList<>();
+        Optional<ParquetOriginalFieldNames> originalNames = Optional.empty();
+        for (int i = 0; i < columns.size(); i++) {
+            Optional<VariantShreddingSchema> shredding = Optional.empty();
+            if (bindings.get(i).isPresent() && HoglakeParquetFields.isShreddedVariant(columns.get(i), bindings.get(i).get())) {
+                // Shredded object keys are case-sensitive, and only the Thrift schema keeps their case
+                if (originalNames.isEmpty()) {
+                    originalNames = Optional.of(ParquetOriginalFieldNames.fromSchema(parquetMetadata.getParquetMetadata().getSchema()));
+                }
+                shredding = Optional.of(shreddingSchema(columns.get(i), bindings.get(i).get(), fileSchema, originalNames.get(), dataSource, split.path()));
+            }
+            shreddings.add(shredding);
+        }
+
         // The projected file schema contains only the bound fields.
         List<org.apache.parquet.schema.Type> boundFields = bindings.stream()
                 .flatMap(Optional::stream)
@@ -418,12 +461,28 @@ public class HoglakePageSourceProvider
                 adaptations.add(new HoglakePageSource.RowIdColumn(split.dataFileId()));
                 continue;
             }
+            if (shreddings.get(i).isPresent()) {
+                VariantShreddingSchema shredding = shreddings.get(i).get();
+                Field field = constructField(shredding.physicalType(), lookupColumnByName(messageColumn, bindings.get(i).get().getName())).orElseThrow();
+                adaptations.add(new HoglakePageSource.ShreddedVariantColumn(
+                        parquetColumns.size(),
+                        new ShreddedVariantAssembler(shredding, dataSource.getId()),
+                        writesSqlNullAsVariantNull(fileMetadata.getCreatedBy())));
+                parquetColumns.add(new Column(column.name(), field));
+                continue;
+            }
             Optional<Field> field = bindings.get(i).flatMap(parquetField ->
                     readerField(column, lookupColumnByName(messageColumn, parquetField.getName()), split.path()));
             if (field.isPresent()) {
-                adaptations.add(HoglakeUnsigned.needsConversion(column)
-                        ? new HoglakePageSource.UnsignedColumn(parquetColumns.size(), column)
-                        : new HoglakePageSource.SourceColumn(parquetColumns.size()));
+                if (HoglakeUnsigned.needsConversion(column)) {
+                    adaptations.add(new HoglakePageSource.UnsignedColumn(parquetColumns.size(), column));
+                }
+                else if (column.type().equals(VARIANT) && writesSqlNullAsVariantNull(fileMetadata.getCreatedBy())) {
+                    adaptations.add(new HoglakePageSource.VariantNullAsSqlNullColumn(parquetColumns.size()));
+                }
+                else {
+                    adaptations.add(new HoglakePageSource.SourceColumn(parquetColumns.size()));
+                }
                 parquetColumns.add(new Column(column.name(), field.get()));
             }
             else {
@@ -472,7 +531,52 @@ public class HoglakePageSourceProvider
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty());
-        return new HoglakePageSource(parquetReader, adaptations, deletionVector, resources, HoglakePageSource.splitMetrics(footerCacheHit, rowGroups.size()));
+        return new HoglakePageSource(
+                parquetReader,
+                adaptations,
+                deletionVector,
+                resources,
+                HoglakePageSource.splitMetrics(footerCacheHit, rowGroups.size()),
+                options.getMaxReadBlockSize().toBytes());
+    }
+
+    /**
+     * The layout of a shredded top-level VARIANT column. Like {@link #readerField},
+     * an unsupported layout fails naming the column and the data file.
+     */
+    private static VariantShreddingSchema shreddingSchema(
+            HoglakeColumnHandle column,
+            org.apache.parquet.schema.Type parquetField,
+            MessageType fileSchema,
+            ParquetOriginalFieldNames originalNames,
+            ParquetDataSource dataSource,
+            String path)
+    {
+        // The binding is one of the file schema's own fields, which have the same order as the Thrift schema
+        int index = IntStream.range(0, fileSchema.getFieldCount())
+                .filter(field -> fileSchema.getType(field) == parquetField)
+                .findFirst()
+                .orElseThrow();
+        try {
+            return VariantShreddingSchema.fromParquet(parquetField.asGroupType(), originalNames.children().get(index), dataSource.getId());
+        }
+        catch (TrinoException e) {
+            throw new TrinoException(e::getErrorCode, "Cannot read column %s from data file %s: %s".formatted(column.name(), path, e.getRawMessage()), e);
+        }
+        catch (ParquetCorruptionException e) {
+            // Like an unshredded VARIANT group with an unexpected shape
+            throw new TrinoException(NOT_SUPPORTED, "Cannot read column %s from data file %s: %s".formatted(column.name(), path, e.getMessage()), e);
+        }
+    }
+
+    /**
+     * DuckDB writes a SQL NULL VARIANT as a variant null, and reads a variant null
+     * back as SQL NULL, so a top-level variant null in its files is SQL NULL.
+     */
+    @VisibleForTesting
+    static boolean writesSqlNullAsVariantNull(String createdBy)
+    {
+        return createdBy != null && createdBy.startsWith("DuckDB");
     }
 
     /**
