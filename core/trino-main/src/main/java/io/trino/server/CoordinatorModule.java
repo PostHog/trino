@@ -55,6 +55,7 @@ import io.trino.execution.NodeTaskMap;
 import io.trino.execution.QueryExecution;
 import io.trino.execution.QueryExecutionMBean;
 import io.trino.execution.QueryExecutorInternal;
+import io.trino.execution.QueryFailureStats;
 import io.trino.execution.QueryIdGenerator;
 import io.trino.execution.QueryManager;
 import io.trino.execution.QueryManagerConfig;
@@ -219,6 +220,7 @@ public class CoordinatorModule
 
         // dispatcher
         binder.bind(DispatchManager.class).in(Scopes.SINGLETON);
+        binder.bind(QueryFailureStats.class).in(Scopes.SINGLETON);
         // WITH SESSION interpreter
         binder.bind(SessionPropertyResolver.class).in(Scopes.SINGLETON);
         // export under the old name, for backwards compatibility

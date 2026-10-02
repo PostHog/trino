@@ -25,6 +25,7 @@ import io.opentelemetry.api.trace.Tracer;
 import io.opentelemetry.context.Context;
 import io.trino.Session;
 import io.trino.event.QueryMonitor;
+import io.trino.execution.QueryFailureStats;
 import io.trino.execution.QueryIdGenerator;
 import io.trino.execution.QueryInfo;
 import io.trino.execution.QueryManagerConfig;
@@ -94,7 +95,7 @@ public class DispatchManager
 
     private final QueryTracker<DispatchQuery> queryTracker;
 
-    private final QueryManagerStats stats = new QueryManagerStats();
+    private final QueryManagerStats stats;
     private final QueryMonitor queryMonitor;
     private final ScheduledExecutorService statsUpdaterExecutor;
 
@@ -113,8 +114,10 @@ public class DispatchManager
             QueryManagerConfig queryManagerConfig,
             QueryResultRetention resultRetention,
             DispatchExecutor dispatchExecutor,
-            QueryMonitor queryMonitor)
+            QueryMonitor queryMonitor,
+            QueryFailureStats queryFailureStats)
     {
+        this.stats = new QueryManagerStats(queryFailureStats);
         this.queryIdGenerator = requireNonNull(queryIdGenerator, "queryIdGenerator is null");
         this.queryPreparer = requireNonNull(queryPreparer, "queryPreparer is null");
         this.resourceGroupManager = requireNonNull(resourceGroupManager, "resourceGroupManager is null");
