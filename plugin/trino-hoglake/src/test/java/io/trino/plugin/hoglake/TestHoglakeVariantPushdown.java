@@ -228,12 +228,58 @@ final class TestHoglakeVariantPushdown
     }
 
     @Test
-    void filterPreventsPushdown()
+    void subscriptsAbovePredicateArePushedDown()
     {
-        // The connector keeps the filter for the engine, so the projection is not on the table scan
+        // The connector keeps the filter for the engine, between the projection and the table scan
         String query = "SELECT CAST(v['a'] AS varchar) FROM events WHERE id > 0";
-        assertThat(explain(query)).doesNotContain("pruned to");
+        assertThat(explain(query)).contains("v:variant pruned to [['a']]");
         assertThat(rows(query)).containsExactlyInAnyOrder(List.of("one"), Arrays.asList((Object) null));
+    }
+
+    @Test
+    void subscriptsInPredicateArePushedDown()
+    {
+        String query = "SELECT id FROM events WHERE CAST(v['$Browser'] AS varchar) = 'Chrome'";
+        assertThat(explain(query)).contains("v:variant pruned to [['$Browser']]");
+        assertThat(rows(query)).containsExactly(List.of(0L));
+
+        query = "SELECT CAST(v['a'] AS varchar) FROM events WHERE CAST(v['$Browser'] AS varchar) = 'Chrome'";
+        assertThat(explain(query)).contains("pruned to").contains("['a']").contains("['$Browser']");
+        assertThat(rows(query)).containsExactly(List.of("1"));
+    }
+
+    @Test
+    void subscriptIsNotEvaluatedOnFilteredRows()
+    {
+        // The subscript fails on the second row, which the filter removes
+        String query = "SELECT CAST(v['a'] AS varchar) FROM mixed WHERE id = 0";
+        assertThat(explain(query)).contains("pruned to");
+        assertThat(rows(query)).containsExactly(List.of("1"));
+    }
+
+    @Test
+    void predicateWithLocalVariableOfEngine()
+    {
+        // The engine binds the non-trivial operand of BETWEEN SYMMETRIC to a local variable,
+        // which is not offered to the connector
+        String query = "SELECT CAST(v['a'] AS varchar) FROM events WHERE (id + 1) BETWEEN SYMMETRIC id AND 1";
+        assertThat(explain(query)).contains("v:variant pruned to [['a']]");
+        assertThat(rows(query)).containsExactly(List.of("1"));
+    }
+
+    @Test
+    void sampledSubscriptsArePushedDown()
+    {
+        // TABLESAMPLE BERNOULLI becomes a filter with random(), which stays in the engine
+        assertThat(explain("SELECT CAST(v['a'] AS varchar) FROM events TABLESAMPLE BERNOULLI (50)")).contains("v:variant pruned to [['a']]");
+    }
+
+    @Test
+    void columnUsedWholeInPredicateIsNotPruned()
+    {
+        String query = "SELECT CAST(v['a'] AS varchar) FROM events WHERE v IS NOT NULL";
+        assertThat(explain(query)).doesNotContain("pruned to");
+        assertThat(rows(query)).containsExactlyInAnyOrder(List.of("1"), List.of("one"));
     }
 
     @Test
