@@ -87,7 +87,10 @@ public final class PartialTranslator
         public Void visitBind(Bind bind, Void context)
         {
             // Bind is a function-typed expression used to model lambda captures,
-            // so it follows the same rule as Lambda.
+            // so its lambda follows the same rule as Lambda. The captured values are
+            // evaluated outside the lambda, and the caller replaces the symbols they
+            // reference, so they are extracted like any other expression.
+            bind.values().forEach(this::process);
             return null;
         }
     }

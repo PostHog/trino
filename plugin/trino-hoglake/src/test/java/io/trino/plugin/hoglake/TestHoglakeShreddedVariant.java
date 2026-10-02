@@ -13,6 +13,9 @@
  */
 package io.trino.plugin.hoglake;
 
+import io.airlift.json.JsonCodec;
+import io.airlift.json.JsonCodecFactory;
+import io.airlift.json.JsonMapperProvider;
 import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
 import io.trino.filesystem.TrinoFileSystemFactory;
@@ -30,6 +33,7 @@ import io.trino.spi.connector.SourcePage;
 import io.trino.spi.type.RowType;
 import io.trino.spi.variant.Metadata;
 import io.trino.spi.variant.Variant;
+import io.trino.type.TypeDeserializer;
 import org.apache.parquet.format.FieldRepetitionType;
 import org.apache.parquet.format.LogicalType;
 import org.apache.parquet.format.SchemaElement;
@@ -62,6 +66,7 @@ import static io.trino.spi.type.RowType.field;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VariantType.VARIANT;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -84,7 +89,7 @@ class TestHoglakeShreddedVariant
             field("value", VARBINARY),
             field("typed_value", RowType.from(List.of(field("a", FIELD_A), field("browser", FIELD_BROWSER))))));
 
-    private static final Slice METADATA = Metadata.of(List.of(utf8Slice("$Browser"), utf8Slice("a"))).toSlice();
+    static final Slice METADATA = Metadata.of(List.of(utf8Slice("$Browser"), utf8Slice("a"))).toSlice();
 
     @Test
     void shreddedColumnIsRead()
@@ -287,6 +292,69 @@ class TestHoglakeShreddedVariant
     }
 
     @Test
+    void prunedColumnReadsOnlyItsPaths()
+            throws IOException
+    {
+        // Large distinct "$Browser" values, which a column pruned to "a" does not read
+        List<List<Object>> rows = new ArrayList<>();
+        for (long a = 0; a < 8; a++) {
+            rows.add(row(METADATA, null, typedValue(Variant.ofLong(a), "%d%s".formatted(a, "y".repeat(64 * 1024)))));
+        }
+        byte[] file = write(rows, Optional.empty());
+        // Read only the column chunks that the reader needs, not the whole small file
+        ParquetReaderOptions options = ParquetReaderOptions.builder().withSmallFileThreshold(DataSize.ofBytes(0)).build();
+        HoglakeColumnHandle pruned = COLUMN.withVariantPaths(List.of(List.of(HoglakeVariantPathStep.objectKey("a"))));
+
+        ReadResult whole = readWithBytes(file, options, COLUMN);
+        ReadResult prunedResult = readWithBytes(file, options, pruned);
+        assertThat(prunedResult.values()).containsExactlyElementsOf(LongStream.range(0, 8)
+                .mapToObj(a -> variantBytes(objectWithA(a)))
+                .toList());
+        assertThat(prunedResult.bytes()).isLessThan(whole.bytes() / 4);
+    }
+
+    @Test
+    void prunedColumnHandleRoundTrips()
+    {
+        JsonCodec<HoglakeColumnHandle> codec = new JsonCodecFactory(new JsonMapperProvider()
+                .withJsonDeserializers(Map.of(io.trino.spi.type.Type.class, new TypeDeserializer(TESTING_TYPE_MANAGER))).get())
+                .jsonCodec(HoglakeColumnHandle.class);
+        HoglakeColumnHandle pruned = COLUMN.withVariantPaths(List.of(
+                List.of(HoglakeVariantPathStep.objectKey("a"), HoglakeVariantPathStep.arrayElement()),
+                List.of(HoglakeVariantPathStep.objectKey("$Browser"))));
+        assertThat(codec.fromJson(codec.toJson(pruned))).isEqualTo(pruned);
+        assertThat(codec.fromJson(codec.toJson(COLUMN))).isEqualTo(COLUMN);
+        assertThat(pruned).isNotEqualTo(COLUMN);
+        assertThat(pruned.toString()).isEqualTo("v:variant pruned to [['a'][*], ['$Browser']]");
+    }
+
+    private static ReadResult readWithBytes(byte[] file, ParquetReaderOptions options, HoglakeColumnHandle column)
+            throws IOException
+    {
+        HoglakePageSourceProvider provider = new HoglakePageSourceProvider(ConnectorTestFixtures.memoryFileSystem(Map.of(PATH, file)), options);
+        ConnectorPageSource pageSource = provider.createPageSource(
+                HoglakeTransactionHandle.INSTANCE,
+                ConnectorTestFixtures.session(),
+                new HoglakeSplit(PATH, file.length, 8, Optional.empty(), 0),
+                new HoglakeTableHandle("analytics", "shredded_variant_test", 1, "uuid-shredded-variant-test", List.of()),
+                Optional.empty(),
+                List.of((ColumnHandle) column),
+                DynamicFilter.EMPTY,
+                MemoryContext.NO_LIMIT);
+        try {
+            List<Object> values = ConnectorTestFixtures.readAll(pageSource, List.of(VARIANT)).stream()
+                    .map(row -> variantBytes((Variant) row.getFirst()))
+                    .toList();
+            return new ReadResult(values, pageSource.getCompletedBytes());
+        }
+        finally {
+            pageSource.close();
+        }
+    }
+
+    private record ReadResult(List<Object> values, long bytes) {}
+
+    @Test
     void invalidShreddedValueFailsNamingTheDataFile()
     {
         // Field "a" has both a value and a typed_value, but it is not an object
@@ -369,7 +437,7 @@ class TestHoglakeShreddedVariant
         return write(List.of(), rows, createdBy);
     }
 
-    private static byte[] write(List<FileColumn> leadingColumns, List<List<Object>> rows, Optional<String> createdBy)
+    static byte[] write(List<FileColumn> leadingColumns, List<List<Object>> rows, Optional<String> createdBy)
     {
         GroupType variant = Types.optionalGroup()
                 .id(1)
@@ -404,7 +472,7 @@ class TestHoglakeShreddedVariant
                 List.of("v", "typed_value", secondField, "typed_value"), VARCHAR);
     }
 
-    private static List<Object> row(Slice metadata, Slice value, List<Object> typedValue)
+    static List<Object> row(Slice metadata, Slice value, List<Object> typedValue)
     {
         return Arrays.asList(metadata, value, typedValue);
     }
@@ -413,7 +481,7 @@ class TestHoglakeShreddedVariant
      * The typed_value of an object: field "a" in its value column unless it is
      * a bigint, and field "$Browser" as a string, or missing when null.
      */
-    private static List<Object> typedValue(Variant a, String browser)
+    static List<Object> typedValue(Variant a, String browser)
     {
         List<Object> fieldA;
         if (a.primitiveType() == io.trino.spi.variant.Header.PrimitiveType.INT64) {

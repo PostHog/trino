@@ -18,6 +18,7 @@ import io.trino.parquet.ParquetCorruptionException;
 import io.trino.parquet.ParquetDataSourceId;
 import io.trino.spi.TrinoException;
 import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.FixedWidthType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import org.apache.parquet.schema.GroupType;
@@ -60,6 +61,7 @@ import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.UuidType.UUID;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static java.util.Comparator.comparingInt;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MICROS;
@@ -112,6 +114,78 @@ public final class VariantShreddingSchema
     public ShreddedValue value()
     {
         return value;
+    }
+
+    /// Returns the schema with only the shredded columns that the paths read.
+    ///
+    /// A value read with the pruned schema gives the same result as the whole value
+    /// for each of the paths, including errors such as a key of a value that is not an
+    /// object: every `value` column on the way stays, so a value that is not an object
+    /// or an array stays unchanged, and an array keeps all its elements. The value can
+    /// have object fields that no path reads. Corrupt data in the columns that are not
+    /// read is not detected, as with any column pruning.
+    public VariantShreddingSchema prune(VariantPaths paths)
+    {
+        return new VariantShreddingSchema(pruneValue(value, paths));
+    }
+
+    private static ShreddedValue pruneValue(ShreddedValue value, VariantPaths paths)
+    {
+        if (paths.whole()) {
+            return value;
+        }
+        return new ShreddedValue(value.typedValue().map(typedValue -> pruneTypedValue(typedValue, paths)));
+    }
+
+    private static TypedValue pruneTypedValue(TypedValue typedValue, VariantPaths paths)
+    {
+        return switch (typedValue) {
+            case PrimitiveValue primitive -> primitive;
+            case ObjectValue object -> {
+                List<ObjectField> fields = object.fields().stream()
+                        .filter(field -> paths.keys().containsKey(field.name()))
+                        .map(field -> new ObjectField(field.name(), pruneValue(field.value(), paths.keys().get(field.name()))))
+                        .collect(toImmutableList());
+                if (fields.isEmpty()) {
+                    // The reader needs a column of the group to tell whether the value is an object
+                    ObjectField anchor = anchorField(object);
+                    fields = ImmutableList.of(new ObjectField(anchor.name(), minimalValue(anchor.value())));
+                }
+                yield new ObjectValue(fields);
+            }
+            case ArrayValue array -> new ArrayValue(paths.elements()
+                    .map(elements -> pruneValue(array.element(), elements))
+                    .orElseGet(() -> minimalValue(array.element())));
+        };
+    }
+
+    /// The fewest columns that still tell whether a value is null, missing, or of its
+    /// shredded type.
+    private static ShreddedValue minimalValue(ShreddedValue value)
+    {
+        return new ShreddedValue(value.typedValue().map(typedValue -> switch (typedValue) {
+            case PrimitiveValue primitive -> primitive;
+            case ObjectValue object -> {
+                ObjectField anchor = anchorField(object);
+                yield new ObjectValue(ImmutableList.of(new ObjectField(anchor.name(), minimalValue(anchor.value()))));
+            }
+            case ArrayValue array -> new ArrayValue(minimalValue(array.element()));
+        }));
+    }
+
+    /// The field that an object keeps when no path reads its fields. A field with a
+    /// fixed-width primitive type is the cheapest to read, and an object or an array
+    /// field the most expensive.
+    private static ObjectField anchorField(ObjectValue object)
+    {
+        return object.fields().stream()
+                .min(comparingInt(field -> field.value().typedValue()
+                        .map(typedValue -> switch (typedValue) {
+                            case PrimitiveValue primitive -> primitive.type() instanceof FixedWidthType ? 0 : 1;
+                            case ObjectValue _, ArrayValue _ -> 2;
+                        })
+                        .orElse(1)))
+                .orElseThrow();
     }
 
     /// Returns the type that reads the group: a row of `metadata`, `value`, and,

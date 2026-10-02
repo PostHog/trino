@@ -110,18 +110,22 @@ public class TestPartialTranslator
     }
 
     @Test
-    public void testDoesNotExtractPartialTranslationsFromBind()
+    public void testExtractsPartialTranslationsOnlyFromBindValues()
     {
         Symbol capture = new Symbol(BIGINT, "capture");
         Symbol captureArgument = new Symbol(BIGINT, "capture_0");
         Symbol argument = new Symbol(BIGINT, "x");
+        Expression captured = new Call(ADD_BIGINT, ImmutableList.of(capture.toSymbolReference(), new Constant(BIGINT, 1L)));
         Expression bind = new Bind(
-                ImmutableList.of(capture.toSymbolReference()),
+                ImmutableList.of(captured),
                 new Lambda(
                         ImmutableList.of(captureArgument, argument),
                         new Call(ADD_BIGINT, ImmutableList.of(argument.toSymbolReference(), captureArgument.toSymbolReference()))));
 
-        assertThat(extractPartialTranslations(bind, TEST_SESSION)).isEmpty();
+        // The captured value references a symbol of the enclosing plan, which the caller must be able to replace
+        assertThat(extractPartialTranslations(bind, TEST_SESSION))
+                .containsOnlyKeys(NodeRef.of(captured))
+                .containsEntry(NodeRef.of(captured), translate(TEST_SESSION, captured).orElseThrow());
     }
 
     private void assertFullTranslation(Expression expression)
