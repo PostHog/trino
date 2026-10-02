@@ -393,8 +393,9 @@ public class HoglakeMetadata
      * becomes count-only: its rows are counted from the catalog without
      * reading any file, so split planning gives it one whole-file split per
      * file instead of byte ranges. The engine's column pruning offers the
-     * empty projection once the scan's outputs are unreferenced; any other
-     * projection is left to the engine.
+     * empty projection once the scan's outputs are unreferenced. Subscripts on
+     * VARIANT columns are pushed down by {@link HoglakeVariantProjections}; any
+     * other projection is left to the engine.
      */
     @Override
     public Optional<ProjectionApplicationResult<ConnectorTableHandle>> applyProjection(
@@ -404,7 +405,10 @@ public class HoglakeMetadata
             Map<String, ColumnHandle> assignments)
     {
         HoglakeTableHandle handle = (HoglakeTableHandle) table;
-        if (!projections.isEmpty() || handle.countOnly()) {
+        if (!projections.isEmpty()) {
+            return HoglakeVariantProjections.applyProjection(handle, projections, assignments);
+        }
+        if (handle.countOnly()) {
             return Optional.empty();
         }
         return Optional.of(new ProjectionApplicationResult<>(handle.withCountOnly(), List.of(), List.of(), false));

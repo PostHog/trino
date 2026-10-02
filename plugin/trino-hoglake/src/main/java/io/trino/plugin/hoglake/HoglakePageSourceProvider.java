@@ -558,7 +558,9 @@ public class HoglakePageSourceProvider
                 .findFirst()
                 .orElseThrow();
         try {
-            return VariantShreddingSchema.fromParquet(parquetField.asGroupType(), originalNames.children().get(index), dataSource.getId());
+            VariantShreddingSchema shredding = VariantShreddingSchema.fromParquet(parquetField.asGroupType(), originalNames.children().get(index), dataSource.getId());
+            // A column of pushed-down subscripts reads only the shredded columns of their paths
+            return column.variantPathTree().map(shredding::prune).orElse(shredding);
         }
         catch (TrinoException e) {
             throw new TrinoException(e::getErrorCode, "Cannot read column %s from data file %s: %s".formatted(column.name(), path, e.getRawMessage()), e);
