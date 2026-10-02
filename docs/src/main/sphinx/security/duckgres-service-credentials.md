@@ -66,6 +66,33 @@ persistent password entry. Other authenticators must likewise reject this exact
 service-grant pattern. Persistent logins such as `svc_reporter` remain supported. The control plane must not project service grants into password
 or group files.
 
+## Coordinator readiness
+
+The authenticator reports its loaded configuration through the security revisions
+in `/v1/catalog/sync`. Each report makes an authenticated `GET` to the same
+configured validation endpoint, using the current token file. The control plane
+must authenticate the bearer token using the same cell binding as credential
+validation and return `{"cell_id":"registered:cell-a"}`. This check does not mint
+or validate a tenant grant.
+
+The revision is `service-auth-v1:sha256:` followed by the lowercase SHA-256 hex
+digest of the UTF-8 string
+`duckgres-service-credential-v1\n<endpoint>\n<cell_id>`, where the endpoint is the
+configured URI in ASCII form. It binds the reachable validation endpoint to the
+authenticated cell without exposing the token or a token fingerprint. Token
+rotation within the same cell does not change the revision, but every report
+still validates the current token. An unavailable endpoint, rejected token,
+redirect, or malformed response makes the component unavailable rather than
+returning a cached revision. The same HTTP timeouts and response size limit used
+for credential validation apply.
+
+The pool controller must compare this revision separately from persistent
+file-password, group, and access-control revisions. Deploy the authenticated
+readiness endpoint and controller support before enabling this reporting version
+on coordinators. A successful readiness report establishes callback configuration
+and cell authentication; it does not establish that a particular service grant
+is valid or authorized to query data.
+
 ## Expiry and availability
 
 There is no Trino authentication-result cache. Every HTTP request, including query

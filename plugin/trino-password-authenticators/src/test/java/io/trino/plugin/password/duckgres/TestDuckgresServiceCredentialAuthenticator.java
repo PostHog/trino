@@ -18,9 +18,11 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.airlift.http.client.HttpClientConfig;
 import io.airlift.http.client.jetty.JettyHttpClient;
+import io.airlift.http.client.testing.TestingHttpClient;
 import io.airlift.units.Duration;
 import io.trino.plugin.password.PasswordAuthenticatorPlugin;
 import io.trino.spi.security.AccessDeniedException;
+import io.trino.spi.security.LoadedConfiguration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -36,6 +38,9 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.google.common.net.MediaType.JSON_UTF_8;
+import static io.airlift.http.client.HttpStatus.OK;
+import static io.airlift.http.client.testing.TestingResponse.mockResponse;
 import static io.airlift.json.JsonCodec.jsonCodec;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -61,6 +66,7 @@ class TestDuckgresServiceCredentialAuthenticator
     private volatile String response;
     private volatile int status = 200;
     private volatile int delayMillis;
+    private volatile String acceptedToken = "synthetic-current-token";
 
     @BeforeEach
     void setUp()
@@ -83,6 +89,90 @@ class TestDuckgresServiceCredentialAuthenticator
     {
         httpClient.close();
         server.stop(0);
+    }
+
+    @Test
+    void testReportsAuthenticatedCellAndReloadsToken()
+            throws IOException
+    {
+        response = "{\"cell_id\":\"registered:cell-a\"}";
+        var authenticator = new DuckgresServiceCredentialAuthenticator(config, httpClient);
+        LoadedConfiguration loadedConfiguration = authenticator;
+        String revision = loadedConfiguration.loadedRevision();
+        assertThat(revision).startsWith("service-auth-v1:sha256:").hasSize(87);
+        assertThat(authorization.get()).isEqualTo("Bearer synthetic-current-token");
+        assertThat(sentCredential.get()).isNull();
+
+        Files.writeString(tokenFile, "synthetic-rotated-token\n");
+        assertUnavailable(authenticator);
+        acceptedToken = "synthetic-rotated-token";
+        assertThat(loadedConfiguration.loadedRevision()).isEqualTo(revision);
+        assertThat(authorization.get()).isEqualTo("Bearer synthetic-rotated-token");
+        response = "{\"cell_id\":\"registered:cell-b\"}";
+        assertThat(loadedConfiguration.loadedRevision()).isNotEqualTo(revision);
+        assertThat(requests.get()).isEqualTo(4);
+    }
+
+    @Test
+    void testLoadedRevisionContract()
+    {
+        config.setEndpoint(URI.create("https://auth.example.com/auth/trino/service-credentials"));
+        try (var client = new TestingHttpClient(request -> {
+            assertThat(request.getMethod()).isEqualTo("GET");
+            assertThat(request.getUri().getPath()).isEqualTo("/auth/trino/service-credentials");
+            return mockResponse(OK, JSON_UTF_8, "{\"cell_id\":\"registered:cell-a\"}");
+        })) {
+            var authenticator = new DuckgresServiceCredentialAuthenticator(config, client);
+            assertThat(authenticator.loadedRevision()).isEqualTo("service-auth-v1:sha256:e404f60570334ffe2d55047999bc09477fefa5f13ae77e72b5d3d47d10dce21d");
+            config.setEndpoint(URI.create("https://other.example.com/auth/trino/service-credentials"));
+            assertThat(new DuckgresServiceCredentialAuthenticator(config, client).loadedRevision()).isNotEqualTo(authenticator.loadedRevision());
+        }
+    }
+
+    @Test
+    void testLoadedRevisionRejectsMalformedAndOversizedResponses()
+    {
+        var authenticator = new DuckgresServiceCredentialAuthenticator(config, httpClient);
+        for (String body : List.of("not-json", "{}", "null", "{\"cell_id\":null}", "{\"cell_id\":\"\"}", "{\"cell_id\":\" \\n\"}", "{\"cell_id\":\"" + "x".repeat(65537) + "\"}")) {
+            response = body;
+            assertUnavailable(authenticator);
+        }
+    }
+
+    @Test
+    void testLoadedRevisionRejectsErrorsAndDoesNotFollowRedirects()
+    {
+        var authenticator = new DuckgresServiceCredentialAuthenticator(config, httpClient);
+        for (int code : List.of(301, 302, 307, 401, 403, 500, 503)) {
+            status = code;
+            response = "sensitive upstream error";
+            assertUnavailable(authenticator);
+        }
+        assertThat(requests.get()).isEqualTo(7);
+    }
+
+    @Test
+    void testLoadedRevisionTimesOut()
+    {
+        delayMillis = 400;
+        response = "{\"cell_id\":\"registered:cell-a\"}";
+        try (var timeoutClient = new JettyHttpClient(new HttpClientConfig().setRequestTimeout(new Duration(100, MILLISECONDS)))) {
+            assertUnavailable(new DuckgresServiceCredentialAuthenticator(config, timeoutClient));
+        }
+    }
+
+    @Test
+    void testLoadedRevisionMissingOrInvalidTokenFailsClosed()
+            throws IOException
+    {
+        var authenticator = new DuckgresServiceCredentialAuthenticator(config, httpClient);
+        for (String token : List.of("", " \n", "bad token", "x".repeat(8193))) {
+            Files.writeString(tokenFile, token);
+            assertUnavailable(authenticator);
+        }
+        Files.delete(tokenFile);
+        assertUnavailable(authenticator);
+        assertThat(requests.get()).isZero();
     }
 
     @Test
@@ -217,12 +307,30 @@ class TestDuckgresServiceCredentialAuthenticator
                 .hasNoCause();
     }
 
+    private static void assertUnavailable(DuckgresServiceCredentialAuthenticator authenticator)
+    {
+        assertThatThrownBy(authenticator::loadedRevision)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Service credential configuration is unavailable")
+                .hasNoCause();
+    }
+
     private void handle(HttpExchange exchange)
             throws IOException
     {
         requests.incrementAndGet();
         authorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
-        sentCredential.set(jsonCodec(DuckgresServiceCredentialAuthenticator.CredentialRequest.class).fromJson(exchange.getRequestBody().readAllBytes()));
+        if (exchange.getRequestMethod().equals("GET")) {
+            assertThat(exchange.getRequestBody().readAllBytes()).isEmpty();
+            if (!("Bearer " + acceptedToken).equals(authorization.get())) {
+                exchange.sendResponseHeaders(401, -1);
+                exchange.close();
+                return;
+            }
+        }
+        else {
+            sentCredential.set(jsonCodec(DuckgresServiceCredentialAuthenticator.CredentialRequest.class).fromJson(exchange.getRequestBody().readAllBytes()));
+        }
         try {
             Thread.sleep(delayMillis);
         }
