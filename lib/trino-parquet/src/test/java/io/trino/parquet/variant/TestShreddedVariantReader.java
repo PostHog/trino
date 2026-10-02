@@ -36,6 +36,7 @@ import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.connector.SourcePage;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.Type;
+import io.trino.spi.variant.Header;
 import io.trino.spi.variant.Metadata;
 import io.trino.spi.variant.ObjectFieldIdValue;
 import io.trino.spi.variant.Variant;
@@ -82,6 +83,7 @@ import static io.trino.spi.variant.Header.metadataOffsetSize;
 import static io.trino.spi.variant.VariantUtils.readOffset;
 import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static java.util.Collections.nCopies;
+import static java.util.stream.Collectors.joining;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.listType;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.stringType;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.BINARY;
@@ -422,6 +424,101 @@ public class TestShreddedVariantReader
         }
     }
 
+    @Test
+    public void testPrune()
+            throws IOException
+    {
+        assertPrunedPaths(DUCKDB.resolve("objects.parquet"), List.of(List.of(key("address"), key("city")), List.of(key("age")), List.of(key("missing"))));
+        assertPrunedPaths(DUCKDB.resolve("objects.parquet"), List.of(List.of(key("tags"), new VariantPaths.ArrayElement())));
+        assertPrunedPaths(DUCKDB.resolve("objects.parquet"), List.of(List.of(key("address")), List.of(key("address"), key("city"))));
+        assertPrunedPaths(DUCKDB.resolve("arrays.parquet"), List.of(List.of(new VariantPaths.ArrayElement(), key("k"))));
+        assertPrunedPaths(DUCKDB.resolve("nulls.parquet"), List.of(List.of(key("a"), key("c"))));
+        assertPrunedPaths(DUCKDB.resolve("case-variant-keys.parquet"), List.of(List.of(key("props"), key("Plan")), List.of(key("$os"))));
+
+        // Only the shredded fields of the paths remain
+        try (ParquetDataSource dataSource = new FileParquetDataSource(DUCKDB.resolve("objects.parquet").toFile(), ParquetReaderOptions.defaultOptions())) {
+            VariantShreddingSchema schema = parseSchema(MetadataReader.readFooter(dataSource, Optional.empty()), "v", dataSource);
+            VariantShreddingSchema pruned = schema.prune(VariantPaths.of(List.of(List.of(key("address"), key("city")), List.of(key("age")))));
+            VariantShreddingSchema.ObjectValue object = (VariantShreddingSchema.ObjectValue) pruned.value().typedValue().orElseThrow();
+            assertThat(object.fields()).extracting(VariantShreddingSchema.ObjectField::name).containsExactlyInAnyOrder("address", "age");
+            VariantShreddingSchema.ObjectValue address = (VariantShreddingSchema.ObjectValue) object.fields().stream()
+                    .filter(field -> field.name().equals("address"))
+                    .findFirst().orElseThrow()
+                    .value().typedValue().orElseThrow();
+            assertThat(address.fields()).extracting(VariantShreddingSchema.ObjectField::name).containsExactly("city");
+
+            // A path that reads a field whole keeps all of its columns, even with a longer path below it
+            VariantShreddingSchema.ObjectValue prefix = (VariantShreddingSchema.ObjectValue) schema.prune(VariantPaths.of(List.of(List.of(key("address")), List.of(key("address"), key("city")))))
+                    .value().typedValue().orElseThrow();
+            assertThat(prefix.fields()).containsExactly(((VariantShreddingSchema.ObjectValue) schema.value().typedValue().orElseThrow()).fields().stream()
+                    .filter(field -> field.name().equals("address"))
+                    .findFirst().orElseThrow());
+
+            // An object keeps one field, so the reader can tell whether a value is an object. The first
+            // field, address, is an object, so the field kept is one of a fixed-width primitive type.
+            VariantShreddingSchema.ObjectValue anchor = (VariantShreddingSchema.ObjectValue) schema.prune(VariantPaths.of(List.of(List.of(key("missing")))))
+                    .value().typedValue().orElseThrow();
+            assertThat(anchor.fields()).extracting(VariantShreddingSchema.ObjectField::name).containsExactly("score");
+        }
+    }
+
+    /// Checks that each path reads the same result, or fails the same way, from the
+    /// pruned value as from the whole value.
+    private static void assertPrunedPaths(Path file, List<List<VariantPaths.Step>> paths)
+            throws IOException
+    {
+        List<Optional<Variant>> whole = readVariants(file, "v");
+        List<Optional<Variant>> pruned = readPhysicalColumn(file, "v", ParquetReaderOptions.defaultOptions(), Optional.of(VariantPaths.of(paths))).variants();
+        assertThat(pruned).hasSameSizeAs(whole);
+        for (int row = 0; row < whole.size(); row++) {
+            for (List<VariantPaths.Step> path : paths) {
+                assertThat(evaluate(pruned.get(row), path))
+                        .as("%s row %s path %s", file.getFileName(), row, path)
+                        .isEqualTo(evaluate(whole.get(row), path));
+            }
+        }
+    }
+
+    private static String evaluate(Optional<Variant> variant, List<VariantPaths.Step> path)
+    {
+        return variant.map(value -> evaluate(value, path)).orElse("SQL NULL");
+    }
+
+    /// Evaluates a path like the VARIANT subscript operator: a key of a value that is
+    /// not an object, or an element of a value that is not an array, is an error. An
+    /// array step evaluates the rest of the path on every element, so the results of
+    /// all indexes, and of indexes out of bounds, are compared.
+    private static String evaluate(Variant variant, List<VariantPaths.Step> path)
+    {
+        if (path.isEmpty()) {
+            return variantType(variant) + " " + comparable(variant.toObject());
+        }
+        List<VariantPaths.Step> rest = path.subList(1, path.size());
+        return switch (path.getFirst()) {
+            case VariantPaths.Key(String name) -> {
+                if (variant.basicType() != Header.BasicType.OBJECT) {
+                    yield "error: " + variantType(variant) + " is not an object";
+                }
+                yield variant.getObjectField(utf8Slice(name))
+                        .map(field -> evaluate(field, rest))
+                        .orElse("missing");
+            }
+            case VariantPaths.ArrayElement _ -> {
+                if (variant.basicType() != Header.BasicType.ARRAY) {
+                    yield "error: " + variantType(variant) + " is not an array";
+                }
+                yield IntStream.range(0, variant.getArrayLength())
+                        .mapToObj(index -> evaluate(variant.getArrayElement(index), rest))
+                        .collect(joining(", ", "[", "]"));
+            }
+        };
+    }
+
+    private static VariantPaths.Key key(String name)
+    {
+        return new VariantPaths.Key(name);
+    }
+
     private static void assertSchemaError(MessageType schema, Map<List<String>, Type> primitiveTypes, String message)
             throws IOException
     {
@@ -453,16 +550,29 @@ public class TestShreddedVariantReader
     private static PhysicalColumn readPhysicalColumn(Path file, String column, ParquetReaderOptions options)
             throws IOException
     {
+        return readPhysicalColumn(file, column, options, Optional.empty());
+    }
+
+    private static PhysicalColumn readPhysicalColumn(Path file, String column, ParquetReaderOptions options, Optional<VariantPaths> paths)
+            throws IOException
+    {
         try (ParquetDataSource dataSource = new FileParquetDataSource(file.toFile(), options)) {
-            return readPhysicalColumn(dataSource, column, options);
+            return readPhysicalColumn(dataSource, column, options, paths);
         }
     }
 
     private static PhysicalColumn readPhysicalColumn(ParquetDataSource dataSource, String column, ParquetReaderOptions options)
             throws IOException
     {
+        return readPhysicalColumn(dataSource, column, options, Optional.empty());
+    }
+
+    private static PhysicalColumn readPhysicalColumn(ParquetDataSource dataSource, String column, ParquetReaderOptions options, Optional<VariantPaths> paths)
+            throws IOException
+    {
         ParquetMetadata metadata = MetadataReader.readFooter(dataSource, Optional.empty());
-        VariantShreddingSchema schema = parseSchema(metadata, column, dataSource);
+        VariantShreddingSchema whole = parseSchema(metadata, column, dataSource);
+        VariantShreddingSchema schema = paths.map(whole::prune).orElse(whole);
         ShreddedVariantAssembler assembler = new ShreddedVariantAssembler(schema, dataSource.getId());
 
         ImmutableList.Builder<Block> blocks = ImmutableList.builder();
