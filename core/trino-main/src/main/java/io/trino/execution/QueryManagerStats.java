@@ -31,11 +31,13 @@ import java.util.function.Supplier;
 import static io.trino.execution.QueryState.RUNNING;
 import static io.trino.spi.StandardErrorCode.ABANDONED_QUERY;
 import static io.trino.spi.StandardErrorCode.USER_CANCELED;
+import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
 public class QueryManagerStats
 {
+    private final QueryFailureStats queryFailureStats;
     private final CounterStat submittedQueries = new CounterStat();
     private final CounterStat startedQueries = new CounterStat();
     private final CounterStat completedQueries = new CounterStat();
@@ -57,6 +59,11 @@ public class QueryManagerStats
     private final TimeStat queuedTime = new TimeStat(MILLISECONDS);
     private final DistributionStat wallInputBytesRate = new DistributionStat();
     private final DistributionStat cpuInputByteRate = new DistributionStat();
+
+    public QueryManagerStats(QueryFailureStats queryFailureStats)
+    {
+        this.queryFailureStats = requireNonNull(queryFailureStats, "queryFailureStats is null");
+    }
 
     public void trackQueryStats(DispatchQuery managedQueryExecution)
     {
@@ -106,6 +113,7 @@ public class QueryManagerStats
                 canceledQueries.update(1);
             }
             failedQueries.update(1);
+            queryFailureStats.recordFailure(info.getSession().getUser(), info.getErrorCode());
         }
     }
 

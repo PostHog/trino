@@ -61,6 +61,30 @@ A small subset of the available metrics are described below.
 - Queries waiting for resources: `trino.execution:name=QueryManager:WaitingForResourcesQueries`
 - Longest wait for resources (seconds): `trino.execution:name=QueryManager:WaitingForResourcesMaxAgeInSeconds`
 
+### Infrastructure failures by user and error code
+
+Coordinators also export cumulative infrastructure query failures as
+`trino.execution:name=QueryFailureStats,user=<user>,errorCode=<error-code>,errorType=<error-type>,overflow=false:TotalCount`.
+These counters increment at query completion for `INTERNAL_ERROR`, `EXTERNAL`,
+and `INSUFFICIENT_RESOURCES` failures. The `user` property is the authorized
+session user, as reported by the query API. It can differ from the authenticating
+principal when impersonation is enabled. The counters contain no organization
+UUID, query ID, SQL text, exception message, or file path.
+
+Counters are created after the first failure for each combination and reset when
+the coordinator restarts. Export at most 4096 distinct user/error-code/error-type
+combinations per coordinator. Further combinations increment up to three
+additional counters with `user=__other__`, `errorCode=__other__`, and
+`overflow=true`, preserving the error type. Existing combinations continue to
+increment their original counters. Overflow counters must remain in aggregate
+failure alerts because their tenant and error-code attribution is unavailable.
+
+The existing `QueryManager` failure counters remain unchanged. Because each
+series starts at its first failure, rate calculations cannot reconstruct failures
+that precede its first scrape. Retain the aggregate counters for total failure
+coverage. JMX exporter rules can use the new MBean properties as labels without
+polling the query API or executing SQL.
+
 ## Trino tasks
 
 - Input data bytes: `trino.execution:name=SqlTaskManager:InputDataSize.FiveMinute.Count`
