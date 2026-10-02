@@ -3,10 +3,13 @@
 ## `optimizer.dictionary-aggregation`
 
 - **Type:** {ref}`prop-type-boolean`
-- **Default value:** `false`
+- **Default value:** `true`
 - **Session property:** `dictionary_aggregation`
 
 Enables optimization for aggregations on dictionaries.
+
+Set this property to `false` to disable the optimization, or set the
+`dictionary_aggregation` session property to `false` for an individual session.
 
 ## `optimizer.optimize-metadata-queries`
 
