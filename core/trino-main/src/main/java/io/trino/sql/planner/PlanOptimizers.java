@@ -178,6 +178,7 @@ import io.trino.sql.planner.iterative.rule.PushPredicateThroughProjectIntoRowNum
 import io.trino.sql.planner.iterative.rule.PushPredicateThroughProjectIntoWindow;
 import io.trino.sql.planner.iterative.rule.PushProjectionIntoTableScan;
 import io.trino.sql.planner.iterative.rule.PushProjectionThroughExchange;
+import io.trino.sql.planner.iterative.rule.PushProjectionThroughFilterIntoTableScan;
 import io.trino.sql.planner.iterative.rule.PushProjectionThroughUnion;
 import io.trino.sql.planner.iterative.rule.PushRemoteExchangeThroughAssignUniqueId;
 import io.trino.sql.planner.iterative.rule.PushSampleIntoTableScan;
@@ -639,6 +640,7 @@ public class PlanOptimizers
                 .addAll(columnPruningRules)
                 .addAll(projectionPushdownRules)
                 .add(new PushProjectionIntoTableScan(plannerContext, scalarStatsCalculator))
+                .add(new PushProjectionThroughFilterIntoTableScan(plannerContext))
                 .add(new RemoveRedundantIdentityProjections())
                 .add(new PushLimitIntoTableScan(metadata))
                 .add(new PushPredicateIntoTableScan(plannerContext, false))
@@ -673,6 +675,7 @@ public class PlanOptimizers
                 ImmutableSet.<Rule<?>>builder()
                         .addAll(projectionPushdownRules)
                         .add(new PushProjectionIntoTableScan(plannerContext, scalarStatsCalculator))
+                        .add(new PushProjectionThroughFilterIntoTableScan(plannerContext))
                         .build());
 
         builder.add(
@@ -710,6 +713,7 @@ public class PlanOptimizers
                                 .addAll(simplifyOptimizerRules)
                                 .addAll(projectionPushdownRules)
                                 .add(new PushProjectionIntoTableScan(plannerContext, scalarStatsCalculator))
+                                .add(new PushProjectionThroughFilterIntoTableScan(plannerContext))
                                 .build()),
                 // Projection pushdown rules may push reducing projections (e.g. dereferences) below filters for potential
                 // pushdown into the connectors. We invoke PredicatePushdown and PushPredicateIntoTableScan after this

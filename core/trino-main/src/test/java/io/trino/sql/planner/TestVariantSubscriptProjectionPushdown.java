@@ -49,13 +49,18 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Predicate;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.spi.expression.StandardFunctions.CAST_FUNCTION_NAME;
+import static io.trino.spi.expression.StandardFunctions.LESS_THAN_OPERATOR_FUNCTION_NAME;
 import static io.trino.spi.function.OperatorType.SUBSCRIPT;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VariantType.VARIANT;
+import static io.trino.sql.ir.ComparisonOperator.EQUAL;
 import static io.trino.sql.ir.ComparisonOperator.GREATER_THAN;
 import static io.trino.sql.ir.TestingIr.comparison;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
@@ -69,7 +74,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /// Pins the form in which a connector receives `CAST(v['k'] AS varchar)` over a
 /// VARIANT column, and shows that a connector can replace `v` with a column
 /// that holds only the paths the projection reads, while the engine still
-/// evaluates the subscript and the cast.
+/// evaluates the subscript and the cast, also above a filter.
 public class TestVariantSubscriptProjectionPushdown
 {
     private static final String MOCK_CATALOG = "mock_catalog";
@@ -77,8 +82,10 @@ public class TestVariantSubscriptProjectionPushdown
     private static final SchemaTableName TEST_TABLE = new SchemaTableName(TEST_SCHEMA, "test_table");
     private static final Session MOCK_SESSION = testSessionBuilder().setCatalog(MOCK_CATALOG).setSchema(TEST_SCHEMA).build();
 
+    private static final ColumnHandle ID_COLUMN = new MockConnectorColumnHandle("id", BIGINT);
     private static final ColumnHandle VARIANT_COLUMN = new MockConnectorColumnHandle("v", VARIANT);
     private static final ColumnHandle PRUNED_VARIANT_COLUMN = new MockConnectorColumnHandle("v_pruned", VARIANT);
+    private static final ColumnHandle COMPUTED_COLUMN = new MockConnectorColumnHandle("k_value", VARCHAR);
 
     // Connector expressions name builtin functions in lowercase, including mangled operator names
     private static final FunctionName SUBSCRIPT_FUNCTION_NAME = new FunctionName("$operator$subscript");
@@ -113,13 +120,41 @@ public class TestVariantSubscriptProjectionPushdown
     }
 
     @Test
-    public void testFilterBlocksSubscriptCastPushdown()
+    public void testSubscriptCastPushdownPastFilter()
     {
-        // PushProjectionIntoTableScan only matches a projection directly on a table scan. When
-        // the connector uses the predicate only to skip data and leaves the whole filter to the
-        // engine, it is never offered the projection.
+        // The connector uses the predicate only to skip data and leaves the whole filter to the
+        // engine. The pruned column replaces v in both the project and the filter, which stay
+        // where they are.
         List<List<ConnectorExpression>> projections = new CopyOnWriteArrayList<>();
-        try (PlanTester planTester = createPlanTester(projections)) {
+        try (PlanTester planTester = createPlanTester(projections, false)) {
+            assertPlan(
+                    planTester,
+                    "SELECT CAST(v['k'] AS varchar) FROM test_table WHERE id > 1",
+                    output(project(
+                            ImmutableMap.of("value", expression(castSubscript(new Reference(VARIANT, "pruned")))),
+                            filter(
+                                    comparison(GREATER_THAN, new Reference(BIGINT, "id"), new io.trino.sql.ir.Constant(BIGINT, 1L)),
+                                    tableScan(isTestTable(), TupleDomain.all(), ImmutableMap.of("id", ID_COLUMN::equals, "pruned", PRUNED_VARIANT_COLUMN::equals))))));
+
+            assertPlan(
+                    planTester,
+                    "SELECT id FROM test_table WHERE CAST(v['k'] AS varchar) = 'x'",
+                    output(project(filter(
+                            comparison(EQUAL, castSubscript(new Reference(VARIANT, "pruned")), new io.trino.sql.ir.Constant(VARCHAR, utf8Slice("x"))),
+                            tableScan(isTestTable(), TupleDomain.all(), ImmutableMap.of("id", ID_COLUMN::equals, "pruned", PRUNED_VARIANT_COLUMN::equals))))));
+        }
+        // The filter's expressions are offered with the project's
+        assertThat(projections).contains(ImmutableList.of(
+                new Call(BOOLEAN, LESS_THAN_OPERATOR_FUNCTION_NAME, ImmutableList.of(new Constant(1L, BIGINT), new Variable("id", BIGINT))),
+                castSubscriptProjection(new Variable("v", VARIANT))));
+    }
+
+    @Test
+    public void testConnectorCannotComputeProjectionBelowFilter()
+    {
+        // A connector that computes the subscript in the table scan would evaluate it on rows
+        // that the filter removes, so the projection is not pushed past the filter
+        try (PlanTester planTester = createPlanTester(new CopyOnWriteArrayList<>(), true)) {
             assertPlan(
                     planTester,
                     "SELECT CAST(v['k'] AS varchar) FROM test_table WHERE id > 1",
@@ -128,12 +163,21 @@ public class TestVariantSubscriptProjectionPushdown
                             filter(
                                     comparison(GREATER_THAN, new Reference(BIGINT, "id"), new io.trino.sql.ir.Constant(BIGINT, 1L)),
                                     tableScan(TEST_TABLE.getTableName(), ImmutableMap.of("id", "id", "v", "v"))))));
-        }
 
-        assertThat(projections).isEmpty();
+            // Without a filter, the connector computes it
+            assertPlan(
+                    planTester,
+                    "SELECT CAST(v['k'] AS varchar) FROM test_table",
+                    output(tableScan(isTestTable(), TupleDomain.all(), ImmutableMap.of("value", COMPUTED_COLUMN::equals))));
+        }
     }
 
     private static PlanTester createPlanTester(List<List<ConnectorExpression>> projections)
+    {
+        return createPlanTester(projections, false);
+    }
+
+    private static PlanTester createPlanTester(List<List<ConnectorExpression>> projections, boolean computeInTableScan)
     {
         PlanTester planTester = PlanTester.create(MOCK_SESSION);
         planTester.createCatalog(
@@ -146,6 +190,9 @@ public class TestVariantSubscriptProjectionPushdown
                         .withApplyFilter(TestVariantSubscriptProjectionPushdown::applyFilter)
                         .withApplyProjection((_, handle, projectionList, assignments) -> {
                             projections.add(ImmutableList.copyOf(projectionList));
+                            if (computeInTableScan) {
+                                return computeProjection(handle, projectionList, assignments);
+                            }
                             return applyProjection(handle, projectionList, assignments);
                         })
                         .build(),
@@ -168,38 +215,108 @@ public class TestVariantSubscriptProjectionPushdown
                 false));
     }
 
-    /// Replaces `v` in `CAST(v[<key>] AS <type>)` with a column pruned to the paths that the
-    /// projection reads, and returns the same expression on that column. Declines any other
-    /// projections.
+    /// Replaces `v` in `v[<key>]` with a column pruned to the paths that the projections
+    /// read, and returns the same expressions on that column. Declines projections that
+    /// read `v` in another way, or do not read it.
     private static Optional<ProjectionApplicationResult<ConnectorTableHandle>> applyProjection(
             ConnectorTableHandle handle,
             List<ConnectorExpression> projections,
             Map<String, ColumnHandle> assignments)
     {
-        if (projections.size() != 1 ||
-                !(projections.getFirst() instanceof Call cast) ||
-                !cast.getFunctionName().equals(CAST_FUNCTION_NAME) ||
-                !(cast.getArguments().getFirst() instanceof Call subscript) ||
-                !subscript.getFunctionName().equals(SUBSCRIPT_FUNCTION_NAME) ||
-                !(subscript.getArguments().getFirst() instanceof Variable base) ||
-                !VARIANT_COLUMN.equals(assignments.get(base.getName()))) {
+        Variable pruned = new Variable("pruned", VARIANT);
+        List<ConnectorExpression> newProjections = projections.stream()
+                .map(projection -> replaceSubscriptBase(projection, assignments, pruned))
+                .collect(toImmutableList());
+        if (newProjections.equals(projections) || newProjections.stream().anyMatch(projection -> readsColumn(projection, VARIANT_COLUMN, assignments))) {
             return Optional.empty();
         }
 
+        ImmutableList.Builder<Assignment> newAssignments = ImmutableList.<Assignment>builder()
+                .add(new Assignment(pruned.getName(), PRUNED_VARIANT_COLUMN, VARIANT));
+        newProjections.stream()
+                .flatMap(projection -> variables(projection).stream())
+                .filter(variable -> !variable.equals(pruned))
+                .distinct()
+                .forEach(variable -> newAssignments.add(new Assignment(variable.getName(), assignments.get(variable.getName()), variable.getType())));
+        List<Assignment> resultAssignments = newAssignments.build();
         MockConnectorTableHandle table = (MockConnectorTableHandle) handle;
-        Variable pruned = new Variable("pruned", VARIANT);
-        ConnectorExpression projection = new Call(
-                cast.getType(),
-                cast.getFunctionName(),
-                ImmutableList.of(new Call(
-                        subscript.getType(),
-                        subscript.getFunctionName(),
-                        ImmutableList.of(pruned, subscript.getArguments().get(1)))));
         return Optional.of(new ProjectionApplicationResult<>(
-                new MockConnectorTableHandle(table.getTableName(), table.getConstraint(), Optional.of(ImmutableList.of(PRUNED_VARIANT_COLUMN))),
-                ImmutableList.of(projection),
-                ImmutableList.of(new Assignment(pruned.getName(), PRUNED_VARIANT_COLUMN, VARIANT)),
+                new MockConnectorTableHandle(table.getTableName(), table.getConstraint(), Optional.of(resultAssignments.stream().map(Assignment::getColumn).collect(toImmutableList()))),
+                newProjections,
+                resultAssignments,
                 false));
+    }
+
+    /// Computes `CAST(v['k'] AS varchar)` in the table scan, as a column of its own, and
+    /// replaces each other column with a copy, as a connector that also prunes columns.
+    private static Optional<ProjectionApplicationResult<ConnectorTableHandle>> computeProjection(
+            ConnectorTableHandle handle,
+            List<ConnectorExpression> projections,
+            Map<String, ColumnHandle> assignments)
+    {
+        ConnectorExpression computed = castSubscriptProjection(new Variable("v", VARIANT));
+        if (!projections.contains(computed) || !VARIANT_COLUMN.equals(assignments.get("v"))) {
+            return Optional.empty();
+        }
+        Variable value = new Variable("k_value", VARCHAR);
+        List<ConnectorExpression> newProjections = projections.stream()
+                .map(projection -> projection.equals(computed) ? value : copyColumns(projection))
+                .collect(toImmutableList());
+        ImmutableList.Builder<Assignment> newAssignments = ImmutableList.<Assignment>builder()
+                .add(new Assignment(value.getName(), COMPUTED_COLUMN, VARCHAR));
+        newProjections.stream()
+                .flatMap(projection -> variables(projection).stream())
+                .filter(variable -> !variable.equals(value))
+                .distinct()
+                .forEach(variable -> newAssignments.add(new Assignment(variable.getName(), new MockConnectorColumnHandle(variable.getName(), variable.getType()), variable.getType())));
+        return Optional.of(new ProjectionApplicationResult<>(handle, newProjections, newAssignments.build(), false));
+    }
+
+    private static ConnectorExpression copyColumns(ConnectorExpression expression)
+    {
+        return switch (expression) {
+            case Variable variable -> new Variable(variable.getName() + "_copy", variable.getType());
+            case Call call -> new Call(call.getType(), call.getFunctionName(), call.getArguments().stream()
+                    .map(TestVariantSubscriptProjectionPushdown::copyColumns)
+                    .collect(toImmutableList()));
+            default -> expression;
+        };
+    }
+
+    private static ConnectorExpression replaceSubscriptBase(ConnectorExpression expression, Map<String, ColumnHandle> assignments, Variable pruned)
+    {
+        if (expression instanceof Call call &&
+                call.getFunctionName().equals(SUBSCRIPT_FUNCTION_NAME) &&
+                call.getArguments().getFirst() instanceof Variable base &&
+                VARIANT_COLUMN.equals(assignments.get(base.getName()))) {
+            return new Call(call.getType(), call.getFunctionName(), ImmutableList.of(pruned, call.getArguments().get(1)));
+        }
+        if (expression instanceof Call call) {
+            return new Call(call.getType(), call.getFunctionName(), call.getArguments().stream()
+                    .map(argument -> replaceSubscriptBase(argument, assignments, pruned))
+                    .collect(toImmutableList()));
+        }
+        return expression;
+    }
+
+    private static boolean readsColumn(ConnectorExpression expression, ColumnHandle column, Map<String, ColumnHandle> assignments)
+    {
+        return variables(expression).stream().anyMatch(variable -> column.equals(assignments.get(variable.getName())));
+    }
+
+    private static List<Variable> variables(ConnectorExpression expression)
+    {
+        if (expression instanceof Variable variable) {
+            return ImmutableList.of(variable);
+        }
+        return expression.getChildren().stream()
+                .flatMap(child -> variables(child).stream())
+                .collect(toImmutableList());
+    }
+
+    private static Predicate<ConnectorTableHandle> isTestTable()
+    {
+        return handle -> ((MockConnectorTableHandle) handle).getTableName().equals(TEST_TABLE);
     }
 
     private static ConnectorExpression castSubscriptProjection(Variable variant)
