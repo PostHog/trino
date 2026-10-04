@@ -1930,6 +1930,161 @@ public class TestDeltaLakeBasic
         assertUpdate("DROP TABLE " + tableName);
     }
 
+    /**
+     * @see deltalake.deletion_vectors_disabled
+     * @see deltalake.deletion_vectors_unset
+     * @see deltalake.deletion_vectors_disabled_checkpoint
+     */
+    @Test
+    public void testDeletionVectorsReadWithPropertyDisabled()
+            throws Exception
+    {
+        testDeletionVectorsReadWithPropertyDisabled("deltalake/deletion_vectors_disabled", "VALUES (1, 10), (3, 10), (4, 10), (6, 20)");
+        testDeletionVectorsReadWithPropertyDisabled("deltalake/deletion_vectors_unset", "VALUES (1, 10), (3, 10), (4, 10), (6, 20)");
+        testDeletionVectorsReadWithPropertyDisabled("deltalake/deletion_vectors_disabled_checkpoint", "VALUES (1, 10), (3, 10), (4, 10), (6, 20), (7, 20)");
+    }
+
+    private void testDeletionVectorsReadWithPropertyDisabled(String resourceName, String expectedRows)
+            throws Exception
+    {
+        String tableName = "deletion_vectors_disabled_" + randomNameSuffix();
+        Path tableLocation = catalogDir.resolve(tableName);
+        copyDirectoryContents(new File(Resources.getResource(resourceName).toURI()).toPath(), tableLocation);
+        assertUpdate("CALL system.register_table('%s', '%s', '%s')".formatted(getSession().getSchema().orElseThrow(), tableName, tableLocation.toUri()));
+
+        assertThat((String) computeScalar("SHOW CREATE TABLE " + tableName))
+                .doesNotContain("deletion_vectors_enabled");
+        assertQuery("SELECT * FROM " + tableName, expectedRows);
+        assertQuery("SELECT * FROM " + tableName + " WHERE part = 20", "SELECT * FROM (" + expectedRows + ") t(id, part) WHERE part = 20");
+
+        assertUpdate("ALTER TABLE " + tableName + " ADD COLUMN extra int");
+        assertQuery("SELECT * FROM " + tableName, "SELECT id, part, NULL FROM (" + expectedRows + ") t(id, part)");
+
+        assertUpdate("DROP TABLE " + tableName);
+    }
+
+    /**
+     * @see deltalake.deletion_vectors_disabled
+     */
+    @Test
+    public void testDeletionVectorsVacuumWithPropertyDisabled()
+            throws Exception
+    {
+        Session sessionWithShortRetentionUnlocked = Session.builder(getSession())
+                .setCatalogSessionProperty(getSession().getCatalog().orElseThrow(), "vacuum_min_retention", "0s")
+                .build();
+
+        String tableName = "deletion_vectors_disabled_vacuum_" + randomNameSuffix();
+        Path tableLocation = catalogDir.resolve(tableName);
+        copyDirectoryContents(new File(Resources.getResource("deltalake/deletion_vectors_disabled").toURI()).toPath(), tableLocation);
+        assertUpdate("CALL system.register_table('%s', '%s', '%s')".formatted(getSession().getSchema().orElseThrow(), tableName, tableLocation.toUri()));
+
+        Path deletionVector;
+        try (Stream<Path> files = Files.list(tableLocation)) {
+            deletionVector = files.filter(file -> file.getFileName().toString().startsWith("deletion_vector_")).collect(onlyElement());
+        }
+        Files.setLastModifiedTime(deletionVector, FileTime.from(Instant.now().minus(1, HOURS)));
+        assertUpdate(sessionWithShortRetentionUnlocked, "CALL system.vacuum(schema_name => CURRENT_SCHEMA, table_name => '" + tableName + "', retention => '10m')");
+        assertThat(deletionVector).exists();
+        assertQuery("SELECT * FROM " + tableName, "VALUES (1, 10), (3, 10), (4, 10), (6, 20)");
+
+        assertUpdate("DROP TABLE " + tableName);
+    }
+
+    /**
+     * @see deltalake.deletion_vectors_disabled
+     * @see deltalake.deletion_vectors_unset
+     */
+    @Test
+    public void testDeletionVectorsDmlWithPropertyDisabled()
+            throws Exception
+    {
+        testDeletionVectorsDmlWithPropertyDisabled("deltalake/deletion_vectors_disabled");
+        testDeletionVectorsDmlWithPropertyDisabled("deltalake/deletion_vectors_unset");
+    }
+
+    private void testDeletionVectorsDmlWithPropertyDisabled(String resourceName)
+            throws Exception
+    {
+        String tableName = "deletion_vectors_disabled_dml_" + randomNameSuffix();
+        Path tableLocation = catalogDir.resolve(tableName);
+        copyDirectoryContents(new File(Resources.getResource(resourceName).toURI()).toPath(), tableLocation);
+        assertUpdate("CALL system.register_table('%s', '%s', '%s')".formatted(getSession().getSchema().orElseThrow(), tableName, tableLocation.toUri()));
+        assertQuery("SELECT * FROM " + tableName, "VALUES (1, 10), (3, 10), (4, 10), (6, 20)");
+
+        // existing deletion vector rows stay deleted and the remove entry carries the old deletion vector
+        assertUpdate("DELETE FROM " + tableName + " WHERE id = 3", 1);
+        assertQuery("SELECT * FROM " + tableName, "VALUES (1, 10), (4, 10), (6, 20)");
+        List<String> deleteLog = Files.readAllLines(tableLocation.resolve("_delta_log/00000000000000000004.json"));
+        assertThat(deleteLog.stream().filter(line -> line.startsWith("{\"remove\"")).collect(onlyElement()))
+                .contains("\"deletionVector\"");
+        assertThat(deleteLog.stream().filter(line -> line.startsWith("{\"add\"")).collect(onlyElement()))
+                .doesNotContain("\"deletionVector\"");
+
+        assertUpdate("UPDATE " + tableName + " SET id = 60 WHERE id = 6", 1);
+        assertQuery("SELECT * FROM " + tableName, "VALUES (1, 10), (4, 10), (60, 20)");
+        List<String> updateLog = Files.readAllLines(tableLocation.resolve("_delta_log/00000000000000000005.json"));
+        assertThat(updateLog.stream().filter(line -> line.startsWith("{\"remove\"")).collect(onlyElement()))
+                .contains("\"deletionVector\"");
+        assertThat(updateLog.stream().filter(line -> line.startsWith("{\"add\"")).collect(onlyElement()))
+                .doesNotContain("\"deletionVector\"");
+
+        assertUpdate("MERGE INTO " + tableName + " t USING (VALUES 4) AS s(id) ON t.id = s.id WHEN MATCHED THEN DELETE", 1);
+        assertQuery("SELECT * FROM " + tableName, "VALUES (1, 10), (60, 20)");
+
+        assertUpdate("DROP TABLE " + tableName);
+    }
+
+    /**
+     * @see deltalake.deletion_vectors_disabled_cdf
+     */
+    @Test
+    public void testDeletionVectorsChangeDataFeedWithPropertyDisabled()
+            throws Exception
+    {
+        String tableName = "deletion_vectors_disabled_cdf_" + randomNameSuffix();
+        Path tableLocation = catalogDir.resolve(tableName);
+        copyDirectoryContents(new File(Resources.getResource("deltalake/deletion_vectors_disabled_cdf").toURI()).toPath(), tableLocation);
+        assertUpdate("CALL system.register_table('%s', '%s', '%s')".formatted(getSession().getSchema().orElseThrow(), tableName, tableLocation.toUri()));
+        assertQuery("SELECT * FROM " + tableName, "VALUES (1, 10), (3, 10), (4, 10), (6, 20)");
+
+        assertUpdate("DELETE FROM " + tableName + " WHERE id = 3", 1);
+        assertUpdate("UPDATE " + tableName + " SET id = 60 WHERE id = 6", 1);
+        assertQuery("SELECT * FROM " + tableName, "VALUES (1, 10), (4, 10), (60, 20)");
+        // rows already deleted by the existing deletion vector produce no change data feed entries
+        assertQuery(
+                "SELECT id, part, _change_type, _commit_version FROM TABLE(system.table_changes(CURRENT_SCHEMA, '" + tableName + "', 3))",
+                "VALUES (3, 10, 'delete', 4), (6, 20, 'update_preimage', 5), (60, 20, 'update_postimage', 5)");
+
+        assertUpdate("DROP TABLE " + tableName);
+    }
+
+    /**
+     * @see deltalake.deletion_vectors_disabled_checkpoint
+     */
+    @Test
+    public void testDeletionVectorsCheckpointWithPropertyDisabled()
+            throws Exception
+    {
+        String tableName = "deletion_vectors_disabled_checkpoint_" + randomNameSuffix();
+        Path tableLocation = catalogDir.resolve(tableName);
+        copyDirectoryContents(new File(Resources.getResource("deltalake/deletion_vectors_disabled_checkpoint").toURI()).toPath(), tableLocation);
+        assertUpdate("CALL system.register_table('%s', '%s', '%s')".formatted(getSession().getSchema().orElseThrow(), tableName, tableLocation.toUri()));
+        assertQuery("SELECT * FROM " + tableName, "VALUES (1, 10), (3, 10), (4, 10), (6, 20), (7, 20)");
+
+        assertUpdate("DELETE FROM " + tableName + " WHERE id = 3", 1);
+        assertUpdate("INSERT INTO " + tableName + " VALUES (8, 20)", 1);
+        assertUpdate("INSERT INTO " + tableName + " VALUES (9, 20)", 1);
+        assertUpdate("INSERT INTO " + tableName + " VALUES (10, 20)", 1);
+        assertThat(tableLocation.resolve("_delta_log/00000000000000000008.checkpoint.parquet")).exists();
+
+        // the checkpoint written by Trino keeps the deletion vector of the untouched part=20 file
+        assertQuery("SELECT * FROM " + tableName, "VALUES (1, 10), (4, 10), (6, 20), (7, 20), (8, 20), (9, 20), (10, 20)");
+        assertQuery("SELECT * FROM " + tableName + " WHERE part = 20", "VALUES (6, 20), (7, 20), (8, 20), (9, 20), (10, 20)");
+
+        assertUpdate("DROP TABLE " + tableName);
+    }
+
     @Test
     public void testDeletionVectorsRandomPrefix()
             throws Exception

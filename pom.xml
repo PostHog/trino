@@ -53,6 +53,7 @@
         <module>lib/trino-geospatial-toolkit</module>
         <module>lib/trino-hdfs</module>
         <module>lib/trino-hive-formats</module>
+        <module>lib/trino-json</module>
         <module>lib/trino-matching</module>
         <module>lib/trino-memory-context</module>
         <module>lib/trino-metastore</module>
@@ -331,7 +332,7 @@
             <dependency>
                 <groupId>software.amazon.awssdk</groupId>
                 <artifactId>bom</artifactId>
-                <version>2.55.4</version>
+                <version>2.55.5</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
@@ -1184,6 +1185,12 @@
 
             <dependency>
                 <groupId>io.trino</groupId>
+                <artifactId>trino-json</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>io.trino</groupId>
                 <artifactId>trino-kafka</artifactId>
                 <version>${project.version}</version>
             </dependency>
@@ -1527,7 +1534,7 @@
             <dependency>
                 <groupId>io.trino.coral</groupId>
                 <artifactId>coral</artifactId>
-                <version>2.2.49-1</version>
+                <version>2.5.10-1</version>
             </dependency>
 
             <dependency>
@@ -2538,7 +2545,7 @@
                 <plugin>
                     <groupId>ca.vanzyl.provisio.maven.plugins</groupId>
                     <artifactId>provisio-maven-plugin</artifactId>
-                    <version>2.0.0</version>
+                    <version>2.0.1</version>
                 </plugin>
 
                 <plugin>
