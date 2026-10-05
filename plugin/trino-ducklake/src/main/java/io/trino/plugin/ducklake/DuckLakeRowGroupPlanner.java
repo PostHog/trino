@@ -15,6 +15,7 @@ package io.trino.plugin.ducklake;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.parquet.metadata.BlockMetadata;
+import io.trino.parquet.metadata.ColumnChunkMetadata;
 import io.trino.parquet.metadata.ParquetMetadata;
 import org.apache.parquet.format.FileMetaData;
 import org.apache.parquet.format.RowGroup;
@@ -52,6 +53,7 @@ final class DuckLakeRowGroupPlanner
         long firstRowIndex = 0;
         long rows = 0;
         long bytes = 0;
+        long startingPosition = 0;
         long fileRows = 0;
         for (int index = 0; index < blocks.size(); index++) {
             BlockMetadata block = blocks.get(index);
@@ -65,11 +67,14 @@ final class DuckLakeRowGroupPlanner
             long groupBytes = compressedSize(block);
             // Keep row groups indivisible even when one is larger than the target.
             if (!selected.isEmpty() && (bytes >= targetBytes || groupBytes > targetBytes - bytes)) {
-                splits.add(split(file, selected, firstRowIndex, rows, bytes, false));
+                splits.add(split(file, selected, firstRowIndex, rows, bytes, startingPosition, false));
                 firstRowIndex = addExact(firstRowIndex, rows, "Parquet row offset exceeds long range");
                 selected.clear();
                 rows = 0;
                 bytes = 0;
+            }
+            if (selected.isEmpty()) {
+                startingPosition = startingPosition(block);
             }
             selected.add(rowGroups.get(index));
             rows = addExact(rows, block.rowCount(), "Parquet split row count exceeds long range");
@@ -79,7 +84,7 @@ final class DuckLakeRowGroupPlanner
             throw new IOException("Parquet file row count %s does not match row group row count %s".formatted(file.getNum_rows(), fileRows));
         }
         if (!selected.isEmpty()) {
-            splits.add(split(file, selected, firstRowIndex, rows, bytes, firstRowIndex == 0 && rows == fileRows));
+            splits.add(split(file, selected, firstRowIndex, rows, bytes, startingPosition, firstRowIndex == 0 && rows == fileRows));
         }
         return splits.build();
     }
@@ -97,6 +102,17 @@ final class DuckLakeRowGroupPlanner
         return bytes;
     }
 
+    /**
+     * The file offset of the first page of the row group, a dictionary page when one precedes the data.
+     */
+    private static long startingPosition(BlockMetadata block)
+    {
+        return block.columns().stream()
+                .mapToLong(ColumnChunkMetadata::getStartingPos)
+                .min()
+                .orElse(0);
+    }
+
     private static long addExact(long left, long right, String message)
             throws IOException
     {
@@ -108,7 +124,7 @@ final class DuckLakeRowGroupPlanner
         }
     }
 
-    private static RowGroupSplit split(FileMetaData file, List<RowGroup> groups, long firstRowIndex, long rows, long bytes, boolean allRowGroups)
+    private static RowGroupSplit split(FileMetaData file, List<RowGroup> groups, long firstRowIndex, long rows, long bytes, long startingPosition, boolean allRowGroups)
             throws IOException
     {
         // Copy the file schema, not all of the file's row groups. Sending the original footer
@@ -125,8 +141,12 @@ final class DuckLakeRowGroupPlanner
         }
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         writeFileMetaData(selected, output);
-        return new RowGroupSplit(rows, bytes, new DuckLakeRowGroupMetadata(firstRowIndex, allRowGroups, output.toByteArray()));
+        return new RowGroupSplit(rows, bytes, startingPosition, new DuckLakeRowGroupMetadata(firstRowIndex, allRowGroups, output.toByteArray()));
     }
 
-    record RowGroupSplit(long recordCount, long compressedBytes, DuckLakeRowGroupMetadata metadata) {}
+    /**
+     * @param startingPosition file offset of the first page of the split's first row group, which
+     *         with {@code compressedBytes} identifies the split's data for cache affinity
+     */
+    record RowGroupSplit(long recordCount, long compressedBytes, long startingPosition, DuckLakeRowGroupMetadata metadata) {}
 }

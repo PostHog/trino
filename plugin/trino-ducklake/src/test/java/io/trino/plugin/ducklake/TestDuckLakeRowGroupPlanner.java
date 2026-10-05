@@ -18,8 +18,12 @@ import com.google.common.collect.ImmutableMap;
 import io.airlift.json.JsonCodec;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
+import io.trino.filesystem.cache.CacheSplitAffinityProvider;
+import io.trino.filesystem.cache.NoopSplitAffinityProvider;
 import io.trino.filesystem.local.LocalFileSystem;
 import io.trino.parquet.ParquetReaderOptions;
+import io.trino.parquet.metadata.BlockMetadata;
+import io.trino.parquet.metadata.ColumnChunkMetadata;
 import io.trino.parquet.metadata.ParquetMetadata;
 import io.trino.parquet.reader.MetadataReader;
 import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
@@ -90,12 +94,25 @@ class TestDuckLakeRowGroupPlanner
                     .formatted(directory.resolve("deletes.parquet")));
         }
         fileSize = Files.size(directory.resolve("data.parquet"));
+        metadata = readFooter("local:///data.parquet", fileSize);
+    }
+
+    private ParquetMetadata readFooter(String path, long size)
+            throws IOException
+    {
         try (TrinoParquetDataSource source = new TrinoParquetDataSource(
-                new LocalFileSystem(directory).newInputFile(Location.of("local:///data.parquet"), fileSize),
+                new LocalFileSystem(directory).newInputFile(Location.of(path), size),
                 ParquetReaderOptions.defaultOptions(),
                 new FileFormatDataSourceStats())) {
-            metadata = MetadataReader.readFooter(source, ParquetReaderOptions.defaultOptions(), Optional.empty(), Optional.empty());
+            return MetadataReader.readFooter(source, ParquetReaderOptions.defaultOptions(), Optional.empty(), Optional.empty());
         }
+    }
+
+    private static long compressedBytes(BlockMetadata block)
+    {
+        return block.columns().stream()
+                .mapToLong(ColumnChunkMetadata::getTotalSize)
+                .sum();
     }
 
     @Test
@@ -158,6 +175,7 @@ class TestDuckLakeRowGroupPlanner
                 ParquetReaderOptions.defaultOptions(),
                 stats,
                 1,
+                new NoopSplitAffinityProvider(),
                 Runnable::run)) {
             splits.addAll(source.getNextBatch(1, DynamicFilterSnapshot.EMPTY).get());
             long plannedBytes = (long) stats.getReadBytes().getAllTime().getTotal();
@@ -168,6 +186,54 @@ class TestDuckLakeRowGroupPlanner
         }
         assertThat(splits).hasSize(metadata.getBlocks().size());
         assertThat(splits).allSatisfy(split -> assertThat(((DuckLakeSplit) split).rowGroupMetadata()).isPresent());
+    }
+
+    @Test
+    void testSplitsCarryAffinityKeysOfTheirOwnRowGroups()
+            throws Exception
+    {
+        // A dictionary-encoded first column puts the first page of each row group before its first
+        // data page, and a target of two average row groups makes splits batch several of them.
+        try (Connection connection = DriverManager.getConnection("jdbc:duckdb:");
+                Statement statement = connection.createStatement()) {
+            statement.execute("COPY (SELECT 'category-' || (range %% 7) AS category, range AS id FROM range(%s)) TO '%s' (FORMAT PARQUET, ROW_GROUP_SIZE 2048)"
+                    .formatted(ROW_COUNT, directory.resolve("dictionary.parquet")));
+        }
+        long dictionaryFileSize = Files.size(directory.resolve("dictionary.parquet"));
+        ParquetMetadata dictionaryMetadata = readFooter("local:///dictionary.parquet", dictionaryFileSize);
+        assertThat(dictionaryMetadata.getBlocks()).allSatisfy(block -> assertThat(block.columns().getFirst().getDictionaryPageOffset())
+                .isPositive()
+                .isLessThan(block.columns().getFirst().getFirstDataPageOffset()));
+        long targetBytes = 2 * dictionaryMetadata.getBlocks().stream().mapToLong(TestDuckLakeRowGroupPlanner::compressedBytes).sum() / dictionaryMetadata.getBlocks().size();
+
+        List<DuckLakeSplit> splits = DuckLakeSplitSource.planFile(
+                new LocalFileSystem(directory),
+                ParquetReaderOptions.defaultOptions(),
+                new FileFormatDataSourceStats(),
+                targetBytes,
+                new CacheSplitAffinityProvider(),
+                fileSplit("local:///dictionary.parquet", dictionaryFileSize));
+        assertThat(splits)
+                .hasSizeLessThan(dictionaryMetadata.getBlocks().size())
+                .hasSizeGreaterThan(1);
+        // Row groups are written back to back after the 4-byte magic number, so the keys of
+        // consecutive splits tile the file's data: each starts where the previous one ended.
+        long nextStart = 4;
+        for (DuckLakeSplit split : splits) {
+            List<BlockMetadata> blocks = split.rowGroupMetadata().orElseThrow().read("local:///dictionary.parquet").getBlocks();
+            long length = blocks.stream().mapToLong(TestDuckLakeRowGroupPlanner::compressedBytes).sum();
+            assertThat(split.getAffinityKey()).contains("local:///dictionary.parquet:%s:%s".formatted(nextStart, length));
+            nextStart += length;
+        }
+
+        assertThat(DuckLakeSplitSource.planFile(
+                new LocalFileSystem(directory),
+                ParquetReaderOptions.defaultOptions(),
+                new FileFormatDataSourceStats(),
+                targetBytes,
+                new NoopSplitAffinityProvider(),
+                fileSplit("local:///dictionary.parquet", dictionaryFileSize)))
+                .allSatisfy(split -> assertThat(split.getAffinityKey()).isEmpty());
     }
 
     @Test
@@ -196,6 +262,7 @@ class TestDuckLakeRowGroupPlanner
                         ParquetReaderOptions.defaultOptions(),
                         new FileFormatDataSourceStats(),
                         Long.MAX_VALUE,
+                        new NoopSplitAffinityProvider(),
                         executor)) {
             CompletableFuture<List<ConnectorSplit>> firstBatch = source.getNextBatch(fileCount, DynamicFilterSnapshot.EMPTY);
             try {
@@ -286,7 +353,8 @@ class TestDuckLakeRowGroupPlanner
                 ImmutableMap.of(),
                 Optional.empty(),
                 SplitWeight.standard(),
-                Optional.of(group.metadata()));
+                Optional.of(group.metadata()),
+                Optional.of("local:///data.parquet:%s:%s".formatted(group.startingPosition(), group.compressedBytes())));
         JsonCodec<DuckLakeSplit> codec = JsonCodec.jsonCodec(DuckLakeSplit.class);
         DuckLakeSplit roundTrip = codec.fromJson(codec.toJson(split));
         assertThat(roundTrip).isEqualTo(split);
@@ -302,12 +370,17 @@ class TestDuckLakeRowGroupPlanner
 
     private DuckLakeSplit fileSplit(String path)
     {
+        return fileSplit(path, fileSize);
+    }
+
+    private static DuckLakeSplit fileSplit(String path, long size)
+    {
         return new DuckLakeSplit(
                 1,
                 path,
                 0,
-                fileSize,
-                fileSize,
+                size,
+                size,
                 OptionalLong.empty(),
                 ROW_COUNT,
                 OptionalLong.empty(),

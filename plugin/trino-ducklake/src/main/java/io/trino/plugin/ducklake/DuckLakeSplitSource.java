@@ -16,6 +16,7 @@ package io.trino.plugin.ducklake;
 import com.google.common.collect.ImmutableList;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
+import io.trino.filesystem.cache.SplitAffinityProvider;
 import io.trino.parquet.ParquetCorruptionException;
 import io.trino.parquet.ParquetDataSourceId;
 import io.trino.parquet.ParquetReaderOptions;
@@ -56,6 +57,7 @@ final class DuckLakeSplitSource
     private final ParquetReaderOptions parquetReaderOptions;
     private final FileFormatDataSourceStats fileFormatDataSourceStats;
     private final long targetSplitBytes;
+    private final SplitAffinityProvider affinityProvider;
     private final Executor executor;
     private final Deque<DuckLakeSplit> pendingSplits = new ArrayDeque<>();
     private final Deque<CompletableFuture<List<DuckLakeSplit>>> prefetchedFiles = new ArrayDeque<>();
@@ -70,6 +72,7 @@ final class DuckLakeSplitSource
             ParquetReaderOptions parquetReaderOptions,
             FileFormatDataSourceStats fileFormatDataSourceStats,
             long targetSplitBytes,
+            SplitAffinityProvider affinityProvider,
             Executor executor)
     {
         this.files = ImmutableList.copyOf(files).iterator();
@@ -78,6 +81,7 @@ final class DuckLakeSplitSource
         this.fileFormatDataSourceStats = requireNonNull(fileFormatDataSourceStats, "fileFormatDataSourceStats is null");
         checkArgument(targetSplitBytes > 0, "targetSplitBytes is not positive: %s", targetSplitBytes);
         this.targetSplitBytes = targetSplitBytes;
+        this.affinityProvider = requireNonNull(affinityProvider, "affinityProvider is null");
         this.executor = requireNonNull(executor, "executor is null");
     }
 
@@ -154,7 +158,7 @@ final class DuckLakeSplitSource
     private List<DuckLakeSplit> planFile(DuckLakeSplit file)
     {
         try {
-            return planFile(fileSystem, parquetReaderOptions, fileFormatDataSourceStats, targetSplitBytes, file);
+            return planFile(fileSystem, parquetReaderOptions, fileFormatDataSourceStats, targetSplitBytes, affinityProvider, file);
         }
         catch (ParquetCorruptionException e) {
             throw new TrinoException(DUCKLAKE_BAD_DATA, "Invalid Parquet metadata for " + file.path(), e);
@@ -169,6 +173,7 @@ final class DuckLakeSplitSource
             ParquetReaderOptions parquetReaderOptions,
             FileFormatDataSourceStats fileFormatDataSourceStats,
             long targetSplitBytes,
+            SplitAffinityProvider affinityProvider,
             DuckLakeSplit file)
             throws IOException
     {
@@ -202,7 +207,10 @@ final class DuckLakeSplitSource
                     file.partitionValues(),
                     file.nameMapping(),
                     DuckLakeSplitManager.splitWeight(group.compressedBytes(), targetSplitBytes),
-                    Optional.of(group.metadata())));
+                    Optional.of(group.metadata()),
+                    // Every split of the file carries the whole-file byte range but reads only its
+                    // own row groups, so key on those to spread the file's splits across workers.
+                    affinityProvider.getKey(file.path(), group.startingPosition(), group.compressedBytes())));
         }
         return splits.build();
     }

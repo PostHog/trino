@@ -15,6 +15,7 @@ package io.trino.plugin.ducklake;
 
 import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
+import io.trino.filesystem.cache.NoopSplitAffinityProvider;
 import io.trino.filesystem.local.LocalFileSystem;
 import io.trino.parquet.ParquetReaderOptions;
 import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
@@ -284,6 +285,7 @@ final class TestDuckLakeFooterSize
                 ParquetReaderOptions.defaultOptions(),
                 stats,
                 Long.MAX_VALUE,
+                new NoopSplitAffinityProvider(),
                 file);
         return (long) stats.getReadBytes().getAllTime().getTotal();
     }
