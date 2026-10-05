@@ -18,9 +18,11 @@ import io.trino.parquet.ParquetCorruptionException;
 import io.trino.parquet.ParquetDataSourceId;
 import io.trino.spi.TrinoException;
 import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.FixedWidthType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
+import io.trino.spi.variant.Header;
 import org.apache.parquet.schema.GroupType;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.LogicalTypeAnnotation.DateLogicalTypeAnnotation;
@@ -32,9 +34,15 @@ import org.apache.parquet.schema.LogicalTypeAnnotation.TimeLogicalTypeAnnotation
 import org.apache.parquet.schema.LogicalTypeAnnotation.TimestampLogicalTypeAnnotation;
 import org.apache.parquet.schema.LogicalTypeAnnotation.UUIDLogicalTypeAnnotation;
 import org.apache.parquet.schema.PrimitiveType;
+import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
+import org.apache.parquet.schema.Type.Repetition;
+import org.apache.parquet.schema.Types;
 
+import java.math.BigInteger;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -66,8 +74,22 @@ import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MICROS;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.NANOS;
+import static org.apache.parquet.schema.LogicalTypeAnnotation.dateType;
+import static org.apache.parquet.schema.LogicalTypeAnnotation.decimalType;
+import static org.apache.parquet.schema.LogicalTypeAnnotation.intType;
+import static org.apache.parquet.schema.LogicalTypeAnnotation.listType;
+import static org.apache.parquet.schema.LogicalTypeAnnotation.stringType;
+import static org.apache.parquet.schema.LogicalTypeAnnotation.timeType;
+import static org.apache.parquet.schema.LogicalTypeAnnotation.timestampType;
+import static org.apache.parquet.schema.LogicalTypeAnnotation.uuidType;
+import static org.apache.parquet.schema.LogicalTypeAnnotation.variantType;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.BINARY;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT32;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
+import static org.apache.parquet.schema.Type.Repetition.OPTIONAL;
 import static org.apache.parquet.schema.Type.Repetition.REPEATED;
+import static org.apache.parquet.schema.Type.Repetition.REQUIRED;
 
 /// The layout of a shredded VARIANT group in a Parquet file, as defined by the
 /// [Parquet VARIANT shredding specification](https://github.com/apache/parquet-format/blob/master/VariantShredding.md).
@@ -86,6 +108,11 @@ import static org.apache.parquet.schema.Type.Repetition.REPEATED;
 /// A `typed_value` column of `TIMESTAMP(isAdjustedToUTC=true)` is read as
 /// TIMESTAMP WITH TIME ZONE, which holds about 71,000 years before and after 1970.
 /// A value outside that range fails the read, although a Variant can hold it.
+///
+/// To write shredded VARIANT values, create the schema with [#of(ShreddedValue)] and
+/// add the group of [#toParquetType(String,Repetition)] to the Parquet schema. The
+/// Parquet writer reads the schema back from that group with
+/// [#fromWriterSchema(GroupType)], and writes the values with [VariantShredder].
 public final class VariantShreddingSchema
 {
     private final ShreddedValue value;
@@ -108,6 +135,82 @@ public final class VariantShreddingSchema
             throw new ParquetCorruptionException(dataSourceId, "Shredded VARIANT group %s is repeated", originalNames);
         }
         return new VariantShreddingSchema(parseValue(variantGroup, originalNames, true, dataSourceId));
+    }
+
+    /// Returns a schema to write.
+    ///
+    /// @throws IllegalArgumentException if a Trino reader cannot read the schema: an
+    ///         object has no fields, or a field with an empty name, or two fields whose names
+    ///         are equal or differ only by case
+    public static VariantShreddingSchema of(ShreddedValue value)
+    {
+        checkWritable(value, "$");
+        return new VariantShreddingSchema(value);
+    }
+
+    /// Parses a shredded VARIANT group of a schema to write. The group must be the
+    /// group that [#toParquetType(String,Repetition)] returns, with an optional field id.
+    ///
+    /// @throws IllegalArgumentException if the group does not have that layout
+    public static VariantShreddingSchema fromWriterSchema(GroupType variantGroup)
+    {
+        VariantShreddingSchema schema = of(writerValue(variantGroup));
+        GroupType expected = schema.toParquetType(variantGroup.getName(), variantGroup.getRepetition());
+        if (variantGroup.getId() != null) {
+            expected = expected.withId(variantGroup.getId().intValue());
+        }
+        checkArgument(variantGroup.equals(expected), "Shredded VARIANT group does not have the layout of the specification: %s, expected: %s", variantGroup, expected);
+        return schema;
+    }
+
+    private static ShreddedValue writerValue(GroupType group)
+    {
+        if (!group.containsField("typed_value")) {
+            return new ShreddedValue(Optional.empty());
+        }
+        org.apache.parquet.schema.Type typedValue = group.getType("typed_value");
+        if (typedValue.isPrimitive()) {
+            return new ShreddedValue(Optional.of(primitiveValue(typedValue.asPrimitiveType())
+                    .orElseThrow(() -> new IllegalArgumentException("Unsupported shredded VARIANT value type: " + typedValue))));
+        }
+        GroupType typedGroup = typedValue.asGroupType();
+        if (typedGroup.getLogicalTypeAnnotation() instanceof ListLogicalTypeAnnotation) {
+            checkArgument(typedGroup.getFieldCount() == 1 && !typedGroup.getType(0).isPrimitive(), "Shredded VARIANT list does not have a repeated group: %s", typedGroup);
+            GroupType repeated = typedGroup.getType(0).asGroupType();
+            checkArgument(repeated.getFieldCount() == 1 && !repeated.getType(0).isPrimitive(), "Shredded VARIANT list does not have an element group: %s", typedGroup);
+            return new ShreddedValue(Optional.of(new ArrayValue(writerValue(repeated.getType(0).asGroupType()))));
+        }
+        ImmutableList.Builder<ObjectField> fields = ImmutableList.builder();
+        for (org.apache.parquet.schema.Type field : typedGroup.getFields()) {
+            checkArgument(!field.isPrimitive(), "Shredded VARIANT object field is not a group: %s", field);
+            fields.add(new ObjectField(field.getName(), writerValue(field.asGroupType())));
+        }
+        return new ShreddedValue(Optional.of(new ObjectValue(fields.build())));
+    }
+
+    private static void checkWritable(ShreddedValue value, String path)
+    {
+        if (value.typedValue().isEmpty()) {
+            return;
+        }
+        switch (value.typedValue().get()) {
+            // The type of a primitive value is checked when it is created
+            case PrimitiveValue _ -> {}
+            case ObjectValue object -> {
+                checkArgument(!object.fields().isEmpty(), "Shredded VARIANT object %s has no fields", path);
+                // The reader finds Parquet columns by lowercase name, so it cannot tell these fields apart
+                Map<String, String> lowercaseNames = new HashMap<>();
+                for (ObjectField field : object.fields()) {
+                    String name = field.name();
+                    checkArgument(!name.isEmpty(), "Shredded VARIANT object %s has a field with an empty name", path);
+                    String previous = lowercaseNames.putIfAbsent(name.toLowerCase(ENGLISH), name);
+                    checkArgument(previous == null || !previous.equals(name), "Shredded VARIANT object %s has duplicate field %s", path, name);
+                    checkArgument(previous == null, "Shredded VARIANT object %s has fields that differ only by case: %s and %s", path, previous, name);
+                    checkWritable(field.value(), path + "." + name);
+                }
+            }
+            case ArrayValue array -> checkWritable(array.element(), path + "[*]");
+        }
     }
 
     /// The `value` and `typed_value` columns of the VARIANT group.
@@ -216,6 +319,92 @@ public final class VariantShreddingSchema
                     .collect(toImmutableList()));
             case ArrayValue array -> new ArrayType(RowType.from(valueFields(array.element())));
         };
+    }
+
+    /// Returns the Parquet group of a VARIANT with this schema, in the layout of the
+    /// specification: a `required` `metadata` column, an `optional` `value` column in
+    /// each group, `required` object field groups, and three-level lists with
+    /// `required` element groups. Without a top-level `typed_value`, the group has the
+    /// unshredded layout, in which `value` is `required`.
+    public GroupType toParquetType(String name, Repetition repetition)
+    {
+        checkArgument(repetition != REPEATED, "VARIANT group is repeated: %s", name);
+        Types.GroupBuilder<GroupType> group = Types.buildGroup(repetition)
+                .as(variantType(Header.VERSION))
+                .addField(Types.required(BINARY).named("metadata"));
+        if (value.typedValue().isEmpty()) {
+            return group.addField(Types.required(BINARY).named("value")).named(name);
+        }
+        return group.addFields(valueParquetFields(value)).named(name);
+    }
+
+    private static org.apache.parquet.schema.Type[] valueParquetFields(ShreddedValue value)
+    {
+        // A group always has a value column, which holds the values that typed_value cannot hold
+        ImmutableList.Builder<org.apache.parquet.schema.Type> fields = ImmutableList.builder();
+        fields.add(Types.optional(BINARY).named("value"));
+        value.typedValue().ifPresent(typedValue -> fields.add(typedValueParquetType(typedValue)));
+        return fields.build().toArray(new org.apache.parquet.schema.Type[0]);
+    }
+
+    private static org.apache.parquet.schema.Type typedValueParquetType(TypedValue typedValue)
+    {
+        return switch (typedValue) {
+            case PrimitiveValue primitive -> primitiveParquetType(primitive).named("typed_value");
+            case ObjectValue object -> {
+                Types.GroupBuilder<GroupType> group = Types.buildGroup(OPTIONAL);
+                for (ObjectField field : object.fields()) {
+                    group.addField(Types.buildGroup(REQUIRED).addFields(valueParquetFields(field.value())).named(field.name()));
+                }
+                yield group.named("typed_value");
+            }
+            case ArrayValue array -> Types.buildGroup(OPTIONAL)
+                    .as(listType())
+                    .addField(Types.buildGroup(REPEATED)
+                            .addField(Types.buildGroup(REQUIRED).addFields(valueParquetFields(array.element())).named("element"))
+                            .named("list"))
+                    .named("typed_value");
+        };
+    }
+
+    private static Types.PrimitiveBuilder<PrimitiveType> primitiveParquetType(PrimitiveValue primitive)
+    {
+        return switch (primitive.shreddedType()) {
+            case BOOLEAN -> Types.optional(PrimitiveTypeName.BOOLEAN);
+            case INT8 -> Types.optional(INT32).as(intType(8, true));
+            case INT16 -> Types.optional(INT32).as(intType(16, true));
+            case INT32 -> Types.optional(INT32);
+            case INT64 -> Types.optional(INT64);
+            case FLOAT -> Types.optional(PrimitiveTypeName.FLOAT);
+            case DOUBLE -> Types.optional(PrimitiveTypeName.DOUBLE);
+            case DECIMAL4 -> Types.optional(INT32).as(decimalAnnotation(primitive));
+            case DECIMAL8 -> Types.optional(INT64).as(decimalAnnotation(primitive));
+            case DECIMAL16 -> Types.optional(FIXED_LEN_BYTE_ARRAY)
+                    .length(decimalByteLength(((DecimalType) primitive.type()).getPrecision()))
+                    .as(decimalAnnotation(primitive));
+            case DATE -> Types.optional(INT32).as(dateType());
+            case TIME_MICROS -> Types.optional(INT64).as(timeType(false, MICROS));
+            case TIMESTAMP_MICROS -> Types.optional(INT64).as(timestampType(false, MICROS));
+            case TIMESTAMP_NANOS -> Types.optional(INT64).as(timestampType(false, NANOS));
+            case TIMESTAMP_TZ_MICROS -> Types.optional(INT64).as(timestampType(true, MICROS));
+            case TIMESTAMP_TZ_NANOS -> Types.optional(INT64).as(timestampType(true, NANOS));
+            case BINARY -> Types.optional(BINARY);
+            case STRING -> Types.optional(BINARY).as(stringType());
+            case UUID -> Types.optional(FIXED_LEN_BYTE_ARRAY).length(16).as(uuidType());
+        };
+    }
+
+    private static LogicalTypeAnnotation decimalAnnotation(PrimitiveValue primitive)
+    {
+        DecimalType decimal = (DecimalType) primitive.type();
+        return decimalType(decimal.getScale(), decimal.getPrecision());
+    }
+
+    /// The fewest bytes of a two's complement number that hold every unscaled value of the precision
+    private static int decimalByteLength(int precision)
+    {
+        int bits = BigInteger.TEN.pow(precision).subtract(BigInteger.ONE).bitLength() + 1;
+        return (bits + Byte.SIZE - 1) / Byte.SIZE;
     }
 
     private static ShreddedValue parseValue(GroupType group, ParquetOriginalFieldNames names, boolean variantGroup, ParquetDataSourceId dataSourceId)
@@ -455,6 +644,53 @@ public final class VariantShreddingSchema
         {
             requireNonNull(shreddedType, "shreddedType is null");
             requireNonNull(type, "type is null");
+            checkArgument(holds(type, shreddedType), "Type %s does not hold shredded VARIANT values of type %s", type, shreddedType);
+        }
+
+        /// Returns a column of a type that is not a decimal.
+        public static PrimitiveValue of(ShreddedType shreddedType)
+        {
+            return new PrimitiveValue(shreddedType, nonDecimalType(shreddedType));
+        }
+
+        /// Returns a column of DECIMAL4, DECIMAL8 or DECIMAL16 values with the precision and scale.
+        public static PrimitiveValue decimal(ShreddedType shreddedType, int precision, int scale)
+        {
+            return new PrimitiveValue(shreddedType, createDecimalType(precision, scale));
+        }
+
+        private static boolean holds(Type type, ShreddedType shreddedType)
+        {
+            return switch (shreddedType) {
+                case DECIMAL4 -> type instanceof DecimalType decimal && decimal.getPrecision() <= 9;
+                case DECIMAL8 -> type instanceof DecimalType decimal && decimal.getPrecision() <= MAX_SHORT_PRECISION;
+                case DECIMAL16 -> type instanceof DecimalType;
+                case BOOLEAN, INT8, INT16, INT32, INT64, FLOAT, DOUBLE, DATE, TIME_MICROS, TIMESTAMP_MICROS, TIMESTAMP_NANOS,
+                     TIMESTAMP_TZ_MICROS, TIMESTAMP_TZ_NANOS, BINARY, STRING, UUID -> type.equals(nonDecimalType(shreddedType));
+            };
+        }
+
+        private static Type nonDecimalType(ShreddedType shreddedType)
+        {
+            return switch (shreddedType) {
+                case BOOLEAN -> BOOLEAN;
+                case INT8 -> TINYINT;
+                case INT16 -> SMALLINT;
+                case INT32 -> INTEGER;
+                case INT64 -> BIGINT;
+                case FLOAT -> REAL;
+                case DOUBLE -> DOUBLE;
+                case DECIMAL4, DECIMAL8, DECIMAL16 -> throw new IllegalArgumentException("A decimal column needs a precision and a scale: " + shreddedType);
+                case DATE -> DATE;
+                case TIME_MICROS -> TIME_MICROS;
+                case TIMESTAMP_MICROS -> TIMESTAMP_MICROS;
+                case TIMESTAMP_NANOS -> TIMESTAMP_NANOS;
+                case TIMESTAMP_TZ_MICROS -> TIMESTAMP_TZ_MICROS;
+                case TIMESTAMP_TZ_NANOS -> TIMESTAMP_TZ_NANOS;
+                case BINARY -> VARBINARY;
+                case STRING -> VARCHAR;
+                case UUID -> UUID;
+            };
         }
     }
 

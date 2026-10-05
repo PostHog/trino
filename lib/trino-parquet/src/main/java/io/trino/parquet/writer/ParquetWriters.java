@@ -15,6 +15,14 @@ package io.trino.parquet.writer;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ObjectArrays;
+import io.trino.parquet.variant.VariantShredder;
+import io.trino.parquet.variant.VariantShreddingSchema;
+import io.trino.parquet.variant.VariantShreddingSchema.ArrayValue;
+import io.trino.parquet.variant.VariantShreddingSchema.ObjectField;
+import io.trino.parquet.variant.VariantShreddingSchema.ObjectValue;
+import io.trino.parquet.variant.VariantShreddingSchema.PrimitiveValue;
+import io.trino.parquet.variant.VariantShreddingSchema.ShreddedValue;
+import io.trino.parquet.variant.VariantShreddingSchema.TypedValue;
 import io.trino.parquet.writer.valuewriter.BigintValueWriter;
 import io.trino.parquet.writer.valuewriter.BinaryValueWriter;
 import io.trino.parquet.writer.valuewriter.BooleanValueWriter;
@@ -280,6 +288,9 @@ final class ParquetWriters
                     LogicalTypeAnnotation.variantType(Header.VERSION).equals(variant.getLogicalTypeAnnotation()),
                     "VARIANT group must be annotated with VARIANT logical type: %s",
                     variant);
+            if (variant.containsField("typed_value")) {
+                return shreddedVariant(variant);
+            }
             checkArgument(
                     variant.getFieldCount() == 2,
                     "Unsupported VARIANT schema (expected exactly 2 fields: metadata, value): %s",
@@ -305,10 +316,10 @@ final class ParquetWriters
                     "VARIANT metadata field must be required: %s",
                     metadataPrimitive);
 
-            // For now, we only support the unshredded form: required value
+            // Without typed_value, the group is not shredded, so every value is in the value column
             checkArgument(
                     valuePrimitive.getRepetition() == Repetition.REQUIRED,
-                    "VARIANT value field must be required (unshredded only supported): %s",
+                    "VARIANT value field must be required in a group without typed_value: %s",
                     valuePrimitive);
 
             String[] path = currentPath();
@@ -316,6 +327,52 @@ final class ParquetWriters
             ColumnWriter valueColumnWriter = primitive(valuePrimitive, ObjectArrays.concat(path, "value"), VARBINARY);
             int fieldDefinitionLevel = type.getMaxDefinitionLevel(path);
             return new VariantColumnWriter(metadataColumnWriter, valueColumnWriter, fieldDefinitionLevel);
+        }
+
+        private ColumnWriter shreddedVariant(GroupType variant)
+        {
+            VariantShreddingSchema schema = VariantShreddingSchema.fromWriterSchema(variant);
+            String[] path = currentPath();
+            ColumnWriter groupWriter = new StructColumnWriter(
+                    ImmutableList.<ColumnWriter>builder()
+                            .add(primitive(variant.getType("metadata").asPrimitiveType(), ObjectArrays.concat(path, "metadata"), VARBINARY))
+                            .addAll(valueWriters(variant, path, schema.value()))
+                            .build(),
+                    type.getMaxDefinitionLevel(path));
+            return new ShreddedVariantColumnWriter(new VariantShredder(schema), groupWriter, variant.isRepetition(Repetition.REQUIRED));
+        }
+
+        /// The writers of the `value` and `typed_value` columns of a group of a shredded VARIANT
+        private List<ColumnWriter> valueWriters(GroupType group, String[] path, ShreddedValue value)
+        {
+            ImmutableList.Builder<ColumnWriter> writers = ImmutableList.builder();
+            writers.add(primitive(group.getType("value").asPrimitiveType(), ObjectArrays.concat(path, "value"), VARBINARY));
+            value.typedValue().ifPresent(typedValue -> writers.add(typedValueWriter(group.getType("typed_value"), ObjectArrays.concat(path, "typed_value"), typedValue)));
+            return writers.build();
+        }
+
+        private ColumnWriter typedValueWriter(org.apache.parquet.schema.Type parquetType, String[] path, TypedValue typedValue)
+        {
+            return switch (typedValue) {
+                case PrimitiveValue primitive -> primitive(parquetType.asPrimitiveType(), path, primitive.type());
+                case ObjectValue object -> {
+                    GroupType group = parquetType.asGroupType();
+                    ImmutableList.Builder<ColumnWriter> fields = ImmutableList.builder();
+                    for (ObjectField field : object.fields()) {
+                        String[] fieldPath = ObjectArrays.concat(path, field.name());
+                        fields.add(new StructColumnWriter(valueWriters(group.getType(field.name()).asGroupType(), fieldPath, field.value()), type.getMaxDefinitionLevel(fieldPath)));
+                    }
+                    yield new StructColumnWriter(fields.build(), type.getMaxDefinitionLevel(path));
+                }
+                case ArrayValue array -> {
+                    GroupType element = parquetType.asGroupType().getType("list").asGroupType().getType("element").asGroupType();
+                    // Like list(), the levels of the repeated group
+                    String[] repeatedPath = ObjectArrays.concat(path, "list");
+                    String[] elementPath = ObjectArrays.concat(repeatedPath, "element");
+                    ColumnWriter elementWriter = new StructColumnWriter(valueWriters(element, elementPath, array.element()), type.getMaxDefinitionLevel(elementPath));
+                    yield new ArrayColumnWriter(elementWriter, type.getMaxDefinitionLevel(repeatedPath), type.getMaxRepetitionLevel(repeatedPath));
+                }
+            };
         }
 
         @Override

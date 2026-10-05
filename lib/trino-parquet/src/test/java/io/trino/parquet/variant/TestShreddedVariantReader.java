@@ -212,7 +212,7 @@ public class TestShreddedVariantReader
         Variant duplicateFields = Variant.from(duplicateMetadata, data);
         assertThatThrownBy(() -> VariantRepairs.withSortedObjectFields(duplicateFields))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("Shredded VARIANT object has duplicate field k");
+                .hasMessage("VARIANT object has duplicate field k");
     }
 
     @Test
@@ -365,7 +365,21 @@ public class TestShreddedVariantReader
                 ImmutableList.of(new byte[] {0x14}));
         assertThatThrownBy(() -> readPhysicalColumn(dataSource, "v", ParquetReaderOptions.defaultOptions()))
                 .isInstanceOf(ParquetCorruptionException.class)
-                .hasMessageContaining("Shredded VARIANT value is truncated");
+                .hasMessageContaining("VARIANT value is truncated");
+
+        // The same as the element of an array, and as the field of an object, whose offsets leave it one value byte
+        ParquetDataSource arrayElement = writeUnshreddedVariants(
+                ImmutableList.of(new byte[] {0x01, 0x00, 0x00}),
+                ImmutableList.of(new byte[] {0x03, 0x01, 0x00, 0x02, 0x14, 0x00}));
+        assertThatThrownBy(() -> readPhysicalColumn(arrayElement, "v", ParquetReaderOptions.defaultOptions()))
+                .isInstanceOf(ParquetCorruptionException.class)
+                .hasMessageContaining("VARIANT value is truncated");
+        ParquetDataSource objectField = writeUnshreddedVariants(
+                ImmutableList.of(new byte[] {0x01, 0x01, 0x00, 0x01, 'a'}),
+                ImmutableList.of(new byte[] {0x02, 0x01, 0x00, 0x00, 0x02, 0x14, 0x00}));
+        assertThatThrownBy(() -> readPhysicalColumn(objectField, "v", ParquetReaderOptions.defaultOptions()))
+                .isInstanceOf(ParquetCorruptionException.class)
+                .hasMessageContaining("VARIANT value is truncated");
     }
 
     /// Writes a VARIANT group with only `metadata` and `value` columns, which the
