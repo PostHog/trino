@@ -369,12 +369,18 @@ final class TestHoglakeLiveWrites
                     runner.execute("INSERT INTO scalar_types " + scalarValues);
                 }
                 var beforeCompaction = runner.execute("SELECT * FROM scalar_types").getMaterializedRows();
-                long filesBefore = client.getTable("test", "scalar_types").orElseThrow().fileCount();
+                int filesBefore = client.scan("test", "scalar_types", client.getCatalog().headSnapshotId()).size();
+                // Compaction plans from the file statistics and the table totals, which the server
+                // computes asynchronously after commits
+                assertEventually(() -> {
+                    assertThat(client.scan("test", "scalar_types", client.getCatalog().headSnapshotId())).allMatch(file -> file.dataFile().statsState().equals("provided"));
+                    assertThat(client.getTable("test", "scalar_types").orElseThrow().fileCount()).isEqualTo(filesBefore);
+                });
                 try (HttpClient http = HttpClient.newHttpClient()) {
                     JsonNode result = post(http, uri + "/v1/catalogs/" + catalog + "/maintenance/compact?batch=100", Map.of());
                     assertThat(result.path("unconvertible_schema").asLong()).isZero();
                 }
-                assertThat(client.getTable("test", "scalar_types").orElseThrow().fileCount()).isLessThan(filesBefore);
+                assertThat(client.scan("test", "scalar_types", client.getCatalog().headSnapshotId())).hasSizeLessThan(filesBefore);
                 assertThat(runner.execute("SELECT * FROM scalar_types").getMaterializedRows())
                         .containsExactlyInAnyOrderElementsOf(beforeCompaction);
             }
@@ -389,7 +395,7 @@ final class TestHoglakeLiveWrites
                 assertThat(runner.execute("SELECT sum(id) FROM distributed_copy").getOnlyValue()).isEqualTo(250025000L);
             }
             assertThat(client.listTables("test")).noneMatch(table -> table.name().startsWith("_trino_ctas_"));
-            assertThat(client.getTable("test", "measurements").orElseThrow().recordCount()).isEqualTo(3);
+            assertEventually(() -> assertThat(client.getTable("test", "measurements").orElseThrow().recordCount()).isEqualTo(3));
         }
     }
 
