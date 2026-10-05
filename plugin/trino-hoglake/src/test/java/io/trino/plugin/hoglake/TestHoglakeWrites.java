@@ -294,7 +294,7 @@ final class TestHoglakeWrites
                     for (HoglakeDtos.FileRegistration file : append.files()) {
                         assertThat(file.recordCount()).isPositive();
                         assertThat(file.footerSize()).isPositive();
-                        files.get(append.table()).add(new HoglakeDtos.ScanFile(new HoglakeDtos.DataFile(nextFileId++, file.path(), "parquet", file.recordCount(), file.fileSizeBytes(), file.footerSize(), count, "pending", snapshot + 1), null));
+                        files.get(append.table()).add(new HoglakeDtos.ScanFile(new HoglakeDtos.DataFile(nextFileId++, file.path(), file.fileFormat(), file.recordCount(), file.fileSizeBytes(), file.footerSize(), count, "pending", snapshot + 1), null));
                         count += file.recordCount();
                         bytes += file.fileSizeBytes();
                     }
@@ -339,7 +339,7 @@ final class TestHoglakeWrites
                     for (HoglakeDtos.FileRegistration file : append.files()) {
                         assertThat(file.recordCount()).isPositive();
                         assertThat(file.footerSize()).isPositive();
-                        files.get(append.table()).add(new HoglakeDtos.ScanFile(new HoglakeDtos.DataFile(nextFileId++, file.path(), "parquet", file.recordCount(), file.fileSizeBytes(), file.footerSize(), count, "pending", snapshot + 1), null));
+                        files.get(append.table()).add(new HoglakeDtos.ScanFile(new HoglakeDtos.DataFile(nextFileId++, file.path(), file.fileFormat(), file.recordCount(), file.fileSizeBytes(), file.footerSize(), count, "pending", snapshot + 1), null));
                         count += file.recordCount();
                         bytes += file.fileSizeBytes();
                     }
@@ -411,7 +411,7 @@ final class TestHoglakeWrites
                 snapshot++;
                 for (var node : request.path("files")) {
                     HoglakeDtos.FileRegistration file = mapper.treeToValue(node, HoglakeDtos.FileRegistration.class);
-                    registered.add(new HoglakeDtos.ScanFile(new HoglakeDtos.DataFile(nextFileId++, file.path(), "parquet", file.recordCount(), file.fileSizeBytes(), file.footerSize(), count, "pending", snapshot), null));
+                    registered.add(new HoglakeDtos.ScanFile(new HoglakeDtos.DataFile(nextFileId++, file.path(), file.fileFormat(), file.recordCount(), file.fileSizeBytes(), file.footerSize(), count, "pending", snapshot), null));
                     count += file.recordCount();
                     bytes += file.fileSizeBytes();
                 }
@@ -450,6 +450,70 @@ final class TestHoglakeWrites
         }
         if (server != null) {
             server.stop(0);
+        }
+    }
+
+    @Test
+    void testPackedMergeTreeTablesAreRejectedBeforeDataOperations()
+    {
+        String tableName = "packed_format_guard";
+        String parquetTableName = "parquet_format_guard";
+        String copyName = "packed_format_guard_copy";
+        tables.put(tableName, new HoglakeDtos.Table(
+                tableName,
+                "test",
+                UUID.randomUUID().toString(),
+                List.of(new HoglakeDtos.Column(1, 0, "id", "long", Map.of(), true)),
+                0,
+                0,
+                0,
+                null,
+                null,
+                null,
+                Map.of(HoglakeFileFormats.WRITE_FORMAT_DEFAULT_PROPERTY, HoglakeFileFormats.CLICKHOUSE_MERGETREE_PACKED)));
+        files.put(tableName, new ArrayList<>());
+        tables.put(parquetTableName, new HoglakeDtos.Table(
+                parquetTableName,
+                "test",
+                UUID.randomUUID().toString(),
+                List.of(new HoglakeDtos.Column(1, 0, "id", "long", Map.of(), true)),
+                0,
+                0,
+                0));
+        files.put(parquetTableName, new ArrayList<>());
+        int commitsBefore = commits;
+        try {
+            for (String sql : List.of(
+                    "SELECT count(*) FROM " + tableName,
+                    "INSERT INTO " + tableName + " VALUES 1",
+                    "DELETE FROM " + tableName + " WHERE id = 1",
+                    "UPDATE " + tableName + " SET id = 2 WHERE id = 1",
+                    "MERGE INTO " + tableName + " target USING (VALUES 1) source(id) ON target.id = source.id WHEN MATCHED THEN DELETE",
+                    "CREATE TABLE " + copyName + " AS SELECT * FROM " + tableName)) {
+                assertThatThrownBy(() -> runner.execute(sql))
+                        .describedAs(sql)
+                        .hasMessageContaining("uses unsupported format 'clickhouse-mergetree-packed'")
+                        .hasMessageContaining("supports only 'parquet'");
+            }
+            assertThatThrownBy(() -> runner.execute(
+                    "CREATE TABLE " + copyName + " (id bigint) WITH (extra_properties = MAP(ARRAY['write.format.default'], ARRAY['clickhouse-mergetree-packed']))"))
+                    .hasMessageContaining("uses unsupported format 'clickhouse-mergetree-packed'")
+                    .hasMessageContaining("supports only 'parquet'");
+            assertThatThrownBy(() -> runner.execute(
+                    "ALTER TABLE " + parquetTableName + " SET PROPERTIES extra_properties = MAP(ARRAY['write.format.default'], ARRAY['clickhouse-mergetree-packed'])"))
+                    .hasMessageContaining("uses unsupported format 'clickhouse-mergetree-packed'")
+                    .hasMessageContaining("supports only 'parquet'");
+            assertThat(commits).isEqualTo(commitsBefore);
+            assertThat(files.get(tableName)).isEmpty();
+            assertThat(tables).doesNotContainKey(copyName);
+        }
+        finally {
+            files.remove(tableName);
+            tables.remove(tableName);
+            files.remove(parquetTableName);
+            tables.remove(parquetTableName);
+            files.remove(copyName);
+            tables.remove(copyName);
         }
     }
 

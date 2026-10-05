@@ -141,6 +141,21 @@ final class TestHoglakeCount
                     body = "[" + instant.formatted(4, INSTANTS_FILE_PATH, instants.length, withStats ? stats.formatted("2026-03-01T00:00Z", "2026-03-01T12:00Z") : "") +
                             "," + instant.formatted(5, UNREADABLE_FILE_PATH, instants.length, withStats ? stats.formatted("2026-02-01T00:00Z", "2026-02-01T23:59:59.999999Z") : "") + "]";
                 }
+                else if (path.contains("/packed_pruned/")) {
+                    String parquetStats = withStats
+                            ? ", \"column_stats\":[{\"field_id\":1, \"value_count\":4, \"null_count\":1, \"lower_bound\":1, \"upper_bound\":2}]"
+                            : "";
+                    String packedStats = withStats
+                            ? ", \"column_stats\":[{\"field_id\":1, \"value_count\":4, \"null_count\":0, \"lower_bound\":100, \"upper_bound\":200}]"
+                            : "";
+                    body =
+                            """
+                            [{"data_file":{"data_file_id":1, "path":"%s", "record_count":4, "file_size_bytes":%d,
+                              "file_format":"parquet", "stats_state":"provided", "begin_snapshot":1%s}},
+                             {"data_file":{"data_file_id":6, "path":"memory:///unsupported-data.packed", "record_count":4, "file_size_bytes":100,
+                              "file_format":"clickhouse-mergetree-packed", "stats_state":"provided", "begin_snapshot":1%s}}]
+                            """.formatted(FIRST_FILE_PATH, parquet.length, parquetStats, packedStats);
+                }
                 else if (path.contains("/bounded/") || path.contains("/mixed/")) {
                     // A provided file holding [1, 2] (and a null), a provided
                     // file holding [100, 200] that storage does not have, and
@@ -333,6 +348,14 @@ final class TestHoglakeCount
         assertThatThrownBy(() -> queryRunner.execute("SELECT count(value) FROM bounded"))
                 .hasStackTraceContaining("Object storage must not be accessed for catalog counts");
         assertThat(scanQueries.get("/v1/catalogs/lake/namespaces/test/tables/bounded/scan")).isEqualTo("snapshot=7&include=split_offsets");
+    }
+
+    @Test
+    void testUnsupportedFormatIsRejectedBeforeFilePruning()
+    {
+        assertThatThrownBy(() -> queryRunner.execute("SELECT count(*) FROM packed_pruned WHERE value = 1"))
+                .hasMessageContaining("uses unsupported format 'clickhouse-mergetree-packed'")
+                .hasMessageContaining("supports only 'parquet'");
     }
 
     /**

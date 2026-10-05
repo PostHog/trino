@@ -175,6 +175,7 @@ public class HoglakePageSourceProvider
             MemoryContext memoryContext)
     {
         HoglakeSplit hoglakeSplit = (HoglakeSplit) split;
+        HoglakeFileFormats.checkDataFile(hoglakeSplit.dataFileFormat(), hoglakeSplit.path());
 
         TupleDomain<HoglakeColumnHandle> predicate = ((HoglakeTableHandle) table).constraint();
         if (predicate.isNone()) {

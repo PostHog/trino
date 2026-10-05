@@ -249,8 +249,12 @@ public class HoglakeMetadata
         if (!properties.keySet().equals(Set.of("extra_properties"))) {
             throw new TrinoException(NOT_SUPPORTED, "Only extra_properties can be altered; partitioning and sorted_by are creation properties");
         }
+        @SuppressWarnings("unchecked")
+        Map<String, String> extraProperties = (Map<String, String>) properties.get("extra_properties").orElse(Map.of());
+        HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
+        HoglakeFileFormats.checkTableProperties(extraProperties, handle.schemaTableName().toString());
         checkMetadataSupport();
-        alterColumns((HoglakeTableHandle) tableHandle, Map.of("op", "set_properties", "properties", properties.get("extra_properties").orElse(Map.of())));
+        alterColumns(handle, Map.of("op", "set_properties", "properties", extraProperties));
     }
 
     private void alterColumns(HoglakeTableHandle handle, Map<String, Object> operation)
@@ -303,6 +307,7 @@ public class HoglakeMetadata
         HoglakeTableHandle handle = (HoglakeTableHandle) table;
         HoglakeDtos.Table definition = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId())
                 .orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
+        HoglakeFileFormats.checkReadableTable(definition);
         return new ConnectorTableMetadata(
                 handle.schemaTableName(),
                 handle.columns().stream().map(HoglakeColumnHandle::columnMetadata).toList(),
@@ -498,9 +503,13 @@ public class HoglakeMetadata
             if (!catalog.capabilities().contains("atomic-table-replacement-v1")) {
                 throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support atomic-table-replacement-v1");
             }
-            replacement = plannedTargets.computeIfAbsent(metadata.getTable(), name -> new HoglakeDtos.ReplacementTarget(
-                    client.getTable(name.getSchemaName(), name.getTableName(), catalog.headSnapshotId()).map(HoglakeDtos.Table::tableUuid).orElse(null),
-                    catalog.headSnapshotId()));
+            replacement = plannedTargets.computeIfAbsent(metadata.getTable(), tableName -> {
+                Optional<HoglakeDtos.Table> replacementTable = client.getTable(tableName.getSchemaName(), tableName.getTableName(), catalog.headSnapshotId());
+                replacementTable.ifPresent(HoglakeFileFormats::checkReadableTable);
+                return new HoglakeDtos.ReplacementTarget(
+                        replacementTable.map(HoglakeDtos.Table::tableUuid).orElse(null),
+                        catalog.headSnapshotId());
+            });
         }
         @SuppressWarnings("unchecked")
         List<String> partitioning = (List<String>) metadata.getProperties().getOrDefault("partitioning", List.of());
@@ -516,6 +525,7 @@ public class HoglakeMetadata
         }
         @SuppressWarnings("unchecked")
         Map<String, String> extraProperties = (Map<String, String>) metadata.getProperties().getOrDefault("extra_properties", Map.of());
+        HoglakeFileFormats.checkTableProperties(extraProperties, metadata.getTable().toString());
         if (metadata.getComment().isPresent() || !extraProperties.isEmpty() || definitions.stream().anyMatch(HoglakeDtos.ColumnDefinition::hasComments)) {
             checkMetadataSupport();
         }
@@ -571,6 +581,7 @@ public class HoglakeMetadata
     {
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
         HoglakeDtos.Table table = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId()).orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
+        HoglakeFileFormats.checkReadableTable(table);
         List<HoglakeDtos.PartitionField> partitionFields = HoglakePartitioning.read(table.partitionSpec());
         HoglakePartitioning.validate(partitionFields, handle.columns());
         List<HoglakeDtos.SortField> sortFields = HoglakeSorting.read(table.sortSpec());
@@ -666,6 +677,7 @@ public class HoglakeMetadata
     {
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
         HoglakeDtos.Table table = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId()).orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
+        HoglakeFileFormats.checkReadableTable(table);
         Optional<String> insertFailure = Optional.empty();
         List<HoglakeDtos.PartitionField> partitionFields = HoglakePartitioning.read(table.partitionSpec());
         try {
@@ -757,7 +769,9 @@ public class HoglakeMetadata
         ObjectMapper mapper = new ObjectMapper();
         for (Slice fragment : fragments) {
             try {
-                files.add(mapper.readValue(fragment.getBytes(), HoglakeDtos.FileRegistration.class));
+                HoglakeDtos.FileRegistration file = mapper.readValue(fragment.getBytes(), HoglakeDtos.FileRegistration.class);
+                HoglakeFileFormats.checkWriterFile(file.fileFormat(), file.path());
+                files.add(file);
             }
             catch (IOException e) {
                 throw new TrinoException(HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake writer fragment", e);

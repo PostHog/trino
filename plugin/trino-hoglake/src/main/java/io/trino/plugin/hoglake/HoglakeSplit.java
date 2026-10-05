@@ -55,6 +55,7 @@ import static java.util.Objects.requireNonNull;
 public record HoglakeSplit(
         @JsonProperty("dataFileId") long dataFileId,
         @JsonProperty("path") String path,
+        @JsonProperty("dataFileFormat") String dataFileFormat,
         @JsonProperty("fileSizeBytes") long fileSizeBytes,
         @JsonProperty("recordCount") long recordCount,
         @JsonProperty("deleteFilePath") Optional<String> deleteFilePath,
@@ -73,6 +74,7 @@ public record HoglakeSplit(
     public HoglakeSplit
     {
         requireNonNull(path, "path is null");
+        requireNonNull(dataFileFormat, "dataFileFormat is null");
         requireNonNull(deleteFilePath, "deleteFilePath is null");
         requireNonNull(deleteFileFormat, "deleteFileFormat is null");
         requireNonNull(splitWeight, "splitWeight is null");
@@ -96,7 +98,7 @@ public record HoglakeSplit(
             long deleteCount,
             Optional<String> deleteFileFormat)
     {
-        this(dataFileId, path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat, 0, fileSizeBytes, SplitWeight.standard(), OptionalLong.empty(), Optional.empty());
+        this(dataFileId, path, HoglakeFileFormats.PARQUET, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat, 0, fileSizeBytes, SplitWeight.standard(), OptionalLong.empty(), Optional.empty());
     }
 
     /**
@@ -129,7 +131,7 @@ public record HoglakeSplit(
      */
     public HoglakeSplit withRange(long start, long length, SplitWeight splitWeight, Optional<String> affinityKey)
     {
-        return new HoglakeSplit(dataFileId, path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat, start, length, splitWeight, footerSize, affinityKey);
+        return new HoglakeSplit(dataFileId, path, dataFileFormat, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat, start, length, splitWeight, footerSize, affinityKey);
     }
 
     /**
@@ -180,6 +182,7 @@ public record HoglakeSplit(
     {
         return INSTANCE_SIZE
                 + estimatedSizeOf(path)
+                + estimatedSizeOf(dataFileFormat)
                 + sizeOf(deleteFilePath, SizeOf::estimatedSizeOf)
                 + sizeOf(deleteFileFormat, SizeOf::estimatedSizeOf)
                 + splitWeight.getRetainedSizeInBytes()

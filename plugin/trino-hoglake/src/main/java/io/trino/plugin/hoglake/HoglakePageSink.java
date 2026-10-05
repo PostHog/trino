@@ -318,7 +318,7 @@ public class HoglakePageSink
         }
         writer.close();
         long size = fileSystem.newInputFile(location).length();
-        HoglakeDtos.FileRegistration file = new HoglakeDtos.FileRegistration(location.toString(), rows, size, writer.getFooterSize(), partitionValues);
+        HoglakeDtos.FileRegistration file = new HoglakeDtos.FileRegistration(location.toString(), HoglakeFileFormats.PARQUET, rows, size, writer.getFooterSize(), partitionValues);
         fragments.add(wrappedBuffer(new ObjectMapper().writeValueAsBytes(file)));
         completedBytes += size;
         writer = null;
