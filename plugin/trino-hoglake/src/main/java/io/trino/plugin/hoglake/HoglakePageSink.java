@@ -69,7 +69,7 @@ public class HoglakePageSink
 
     private final TrinoFileSystem fileSystem;
     private final HoglakeWriteHandle handle;
-    private final HoglakeParquetSchema schema;
+    private HoglakeParquetSchema schema;
     private final String trinoVersion;
     private final PageSorter pageSorter;
     private final List<Page> sortBuffer = new ArrayList<>();
@@ -107,7 +107,6 @@ public class HoglakePageSink
         this.fileSystem = requireNonNull(fileSystem, "fileSystem is null");
         this.handle = requireNonNull(handle, "handle is null");
         HoglakePartitioning.validate(handle.partitionFields(), handle.columns());
-        this.schema = HoglakeParquetSchema.create(handle.columns());
         this.trinoVersion = requireNonNull(trinoVersion, "trinoVersion is null");
     }
 
@@ -218,6 +217,11 @@ public class HoglakePageSink
             partitionValues = values;
         }
         if (writer == null) {
+            if (schema == null) {
+                // Created with the first file, so that a merge that only deletes rows does
+                // not need a layout that it could not write
+                schema = HoglakeParquetSchema.create(handle.columns());
+            }
             String dataPath = handle.dataPath();
             // Location requires a slash after the authority, even for a bucket root.
             location = Location.of(dataPath.endsWith("/") ? dataPath : dataPath + "/")

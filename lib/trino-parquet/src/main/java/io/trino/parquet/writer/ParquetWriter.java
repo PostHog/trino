@@ -54,6 +54,8 @@ import org.apache.parquet.format.Uncompressed;
 import org.apache.parquet.format.Util;
 import org.apache.parquet.format.XxHash;
 import org.apache.parquet.io.MessageColumnIO;
+import org.apache.parquet.schema.GroupType;
+import org.apache.parquet.schema.LogicalTypeAnnotation.VariantLogicalTypeAnnotation;
 import org.apache.parquet.schema.MessageType;
 import org.joda.time.DateTimeZone;
 
@@ -136,6 +138,8 @@ public class ParquetWriter
         this.validationBuilder = requireNonNull(validationBuilder, "validationBuilder is null");
         this.outputStream = new OutputStreamSliceOutput(requireNonNull(outputStream, "outputStream is null"));
         this.messageType = requireNonNull(messageType, "messageType is null");
+        // The validation reads the file back with ParquetReader, which does not read shredded VARIANT groups
+        checkArgument(validationBuilder.isEmpty() || !hasShreddedVariant(messageType), "Write validation does not support shredded VARIANT columns");
         this.primitiveTypes = requireNonNull(primitiveTypes, "primitiveTypes is null");
         this.writerOption = requireNonNull(writerOption, "writerOption is null");
         this.compressionCodec = requireNonNull(compressionCodec, "compressionCodec is null");
@@ -310,6 +314,18 @@ public class ParquetWriter
     private void recordValidation(Consumer<ParquetWriteValidationBuilder> task)
     {
         validationBuilder.ifPresent(task);
+    }
+
+    private static boolean hasShreddedVariant(org.apache.parquet.schema.Type type)
+    {
+        if (type.isPrimitive()) {
+            return false;
+        }
+        GroupType group = type.asGroupType();
+        if (group.getLogicalTypeAnnotation() instanceof VariantLogicalTypeAnnotation && group.containsField("typed_value")) {
+            return true;
+        }
+        return group.getFields().stream().anyMatch(ParquetWriter::hasShreddedVariant);
     }
 
     // Parquet File Layout:

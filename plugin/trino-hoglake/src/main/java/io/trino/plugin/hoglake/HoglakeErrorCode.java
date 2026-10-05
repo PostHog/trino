@@ -61,7 +61,12 @@ public enum HoglakeErrorCode
      * A deletion vector is corrupt, truncated, unsupported, or does not
      * match the catalog metadata of the data file it is paired with.
      */
-    HOGLAKE_DELETION_VECTOR_INVALID(6, USER_ERROR);
+    HOGLAKE_DELETION_VECTOR_INVALID(6, USER_ERROR),
+    /**
+     * The {@code type_params.shredding} of a VARIANT column is not a valid
+     * declaration of a shredded layout.
+     */
+    HOGLAKE_INVALID_VARIANT_SHREDDING(7, USER_ERROR);
 
     // Arbitrary plugin-private range; only uniqueness within this
     // connector matters (external plugins pick their own base).

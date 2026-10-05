@@ -111,7 +111,7 @@ public class ParquetTypeVisitor<T>
             }
         }
         if (LogicalTypeAnnotation.variantType(Header.VERSION).equals(annotation)) {
-            checkArgument(group.getFieldCount() == 2, "Invalid variant: expected 2 fields (metadata, value): %s", group);
+            // The visitor checks the fields, which are metadata, value, and for a shredded VARIANT, typed_value
             return visitor.variant(group);
         }
         return visitor.struct(group, visitFields(group, visitor));

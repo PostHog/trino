@@ -576,6 +576,7 @@ public class HoglakeMetadata
         List<HoglakeDtos.SortField> sortFields = HoglakeSorting.read(table.sortSpec());
         HoglakeSorting.validate(sortFields, handle.columns());
         handle.columns().forEach(column -> HoglakeTypes.toHoglakeType(column.type()));
+        HoglakeVariantShredding.checkWritable(handle.columns());
         List<HoglakeColumnHandle> inputs = columns.stream().map(HoglakeColumnHandle.class::cast).toList();
         for (HoglakeColumnHandle column : handle.columns()) {
             if (!column.nullable() && !inputs.contains(column)) {
@@ -684,6 +685,10 @@ public class HoglakeMetadata
         // INSERT-only MERGE has no update cases, so also enforce this in the worker sink.
         if (!updateCaseColumns.isEmpty() && insertFailure.isPresent()) {
             throw new TrinoException(NOT_SUPPORTED, insertFailure.orElseThrow());
+        }
+        if (!updateCaseColumns.isEmpty()) {
+            // The worker sink checks the shredded layouts when an INSERT-only MERGE writes rows
+            HoglakeVariantShredding.checkWritable(handle.columns());
         }
         handle.columns().forEach(column -> HoglakeTypes.toHoglakeType(column.type()));
         HoglakeDtos.Catalog catalog = client.getCatalog();
@@ -808,7 +813,9 @@ public class HoglakeMetadata
                 column.isNullable(),
                 column.children().stream().map(HoglakeMetadata::toColumnHandle).toList(),
                 column.type(),
-                column.comment());
+                column.comment(),
+                List.of(),
+                HoglakeVariantShredding.declaration(column));
     }
 
     private static List<ColumnMetadata> columnMetadata(HoglakeDtos.Table table)

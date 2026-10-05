@@ -23,9 +23,9 @@ import io.trino.parquet.ParquetReaderOptions;
 import io.trino.parquet.metadata.ParquetMetadata;
 import io.trino.parquet.reader.FileParquetDataSource;
 import io.trino.parquet.reader.MetadataReader;
-import io.trino.parquet.reader.ParquetReader;
 import io.trino.parquet.reader.TestingParquetDataSource;
 import io.trino.parquet.variant.ShreddedVariantTestFiles.ShreddedVariantCase;
+import io.trino.parquet.variant.ShreddedVariantTestUtils.PhysicalColumn;
 import io.trino.parquet.writer.ParquetWriterOptions;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
@@ -33,12 +33,8 @@ import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.DictionaryBlock;
 import io.trino.spi.block.RowBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
-import io.trino.spi.connector.SourcePage;
-import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.Type;
-import io.trino.spi.variant.Header;
 import io.trino.spi.variant.Metadata;
-import io.trino.spi.variant.ObjectFieldIdValue;
 import io.trino.spi.variant.Variant;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.Types;
@@ -47,11 +43,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.IOException;
-import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -59,10 +52,7 @@ import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.airlift.slice.Slices.utf8Slice;
-import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
-import static io.trino.parquet.ParquetTestUtils.createParquetReader;
 import static io.trino.parquet.ParquetTestUtils.writeParquetFile;
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.CaseKind.ERROR;
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.CaseKind.NO_FILES;
@@ -70,20 +60,24 @@ import static io.trino.parquet.variant.ShreddedVariantTestFiles.DUCKDB;
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.DUCKDB_FIXTURES;
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.PARQUET_TESTING;
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.loadParquetTestingCases;
+import static io.trino.parquet.variant.ShreddedVariantTestUtils.assertSameVariant;
+import static io.trino.parquet.variant.ShreddedVariantTestUtils.assertSameVariants;
+import static io.trino.parquet.variant.ShreddedVariantTestUtils.comparable;
+import static io.trino.parquet.variant.ShreddedVariantTestUtils.evaluate;
+import static io.trino.parquet.variant.ShreddedVariantTestUtils.key;
+import static io.trino.parquet.variant.ShreddedVariantTestUtils.parseSchema;
+import static io.trino.parquet.variant.ShreddedVariantTestUtils.readPhysicalColumn;
+import static io.trino.parquet.variant.ShreddedVariantTestUtils.readVariantFile;
+import static io.trino.parquet.variant.ShreddedVariantTestUtils.readVariants;
+import static io.trino.parquet.variant.ShreddedVariantTestUtils.toVariants;
 import static io.trino.plugin.base.util.JsonUtils.parseJson;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
-import static io.trino.spi.type.VariantType.VARIANT;
-import static io.trino.spi.variant.Header.BasicType.PRIMITIVE;
-import static io.trino.spi.variant.Header.BasicType.SHORT_STRING;
-import static io.trino.spi.variant.Header.PrimitiveType.STRING;
 import static io.trino.spi.variant.Header.metadataHeader;
 import static io.trino.spi.variant.Header.metadataOffsetSize;
-import static io.trino.spi.variant.VariantUtils.readOffset;
 import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static java.util.Collections.nCopies;
-import static java.util.stream.Collectors.joining;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.listType;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.stringType;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.BINARY;
@@ -195,7 +189,7 @@ public class TestShreddedVariantReader
     public void testWithSortedObjectFields()
     {
         Variant sorted = Variant.ofObject(ImmutableMap.of(utf8Slice("a"), Variant.ofInt(1), utf8Slice("b"), Variant.ofInt(2)));
-        assertThat(ShreddedVariantAssembler.withSortedObjectFields(sorted)).isSameAs(sorted);
+        assertThat(VariantRepairs.withSortedObjectFields(sorted)).isSameAs(sorted);
 
         // Metadata ["b", "a"], and an object that lists field 0 ("b") before field 1 ("a")
         Metadata metadata = Metadata.of(ImmutableList.of(utf8Slice("b"), utf8Slice("a")));
@@ -207,7 +201,7 @@ public class TestShreddedVariantReader
         Variant unsorted = Variant.from(metadata, data);
         assertThat(unsorted.objectFieldNames().map(Slice::toStringUtf8)).containsExactly("b", "a");
 
-        Variant repaired = ShreddedVariantAssembler.withSortedObjectFields(Variant.ofArray(ImmutableList.of(unsorted)));
+        Variant repaired = VariantRepairs.withSortedObjectFields(Variant.ofArray(ImmutableList.of(unsorted)));
         Variant object = repaired.getArrayElement(0);
         assertThat(object.objectFieldNames().map(Slice::toStringUtf8)).containsExactly("a", "b");
         assertThat(object.getObjectField(utf8Slice("a")).orElseThrow().getInt()).isEqualTo(1);
@@ -216,9 +210,9 @@ public class TestShreddedVariantReader
         // Metadata ["k", "k"], as DuckDB writes it, and an object with a field for each entry
         Metadata duplicateMetadata = Metadata.from(Slices.wrappedBuffer(new byte[] {0x01, 0x02, 0x00, 0x01, 0x02, 'k', 'k'}));
         Variant duplicateFields = Variant.from(duplicateMetadata, data);
-        assertThatThrownBy(() -> ShreddedVariantAssembler.withSortedObjectFields(duplicateFields))
+        assertThatThrownBy(() -> VariantRepairs.withSortedObjectFields(duplicateFields))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("Shredded VARIANT object has duplicate field k");
+                .hasMessage("VARIANT object has duplicate field k");
     }
 
     @Test
@@ -226,17 +220,17 @@ public class TestShreddedVariantReader
     {
         Metadata sorted = Metadata.of(ImmutableList.of(utf8Slice("a"), utf8Slice("b")));
         assertThat(sorted.isSorted()).isTrue();
-        assertThat(ShreddedVariantAssembler.withVerifiedSortedFlag(sorted)).isSameAs(sorted);
+        assertThat(VariantRepairs.withVerifiedSortedFlag(sorted)).isSameAs(sorted);
 
         Metadata unsorted = Metadata.of(ImmutableList.of(utf8Slice("b"), utf8Slice("a")));
         assertThat(unsorted.isSorted()).isFalse();
-        assertThat(ShreddedVariantAssembler.withVerifiedSortedFlag(unsorted)).isSameAs(unsorted);
+        assertThat(VariantRepairs.withVerifiedSortedFlag(unsorted)).isSameAs(unsorted);
 
         Slice falselySortedSlice = unsorted.toSlice().copy();
         falselySortedSlice.setByte(0, metadataHeader(true, metadataOffsetSize(falselySortedSlice.getByte(0))));
         Metadata falselySorted = Metadata.from(falselySortedSlice);
         assertThat(falselySorted.isSorted()).isTrue();
-        Metadata verified = ShreddedVariantAssembler.withVerifiedSortedFlag(falselySorted);
+        Metadata verified = VariantRepairs.withVerifiedSortedFlag(falselySorted);
         assertThat(verified.isSorted()).isFalse();
         assertThat(verified.get(0)).isEqualTo(utf8Slice("b"));
         assertThat(verified.get(1)).isEqualTo(utf8Slice("a"));
@@ -371,7 +365,21 @@ public class TestShreddedVariantReader
                 ImmutableList.of(new byte[] {0x14}));
         assertThatThrownBy(() -> readPhysicalColumn(dataSource, "v", ParquetReaderOptions.defaultOptions()))
                 .isInstanceOf(ParquetCorruptionException.class)
-                .hasMessageContaining("Shredded VARIANT value is truncated");
+                .hasMessageContaining("VARIANT value is truncated");
+
+        // The same as the element of an array, and as the field of an object, whose offsets leave it one value byte
+        ParquetDataSource arrayElement = writeUnshreddedVariants(
+                ImmutableList.of(new byte[] {0x01, 0x00, 0x00}),
+                ImmutableList.of(new byte[] {0x03, 0x01, 0x00, 0x02, 0x14, 0x00}));
+        assertThatThrownBy(() -> readPhysicalColumn(arrayElement, "v", ParquetReaderOptions.defaultOptions()))
+                .isInstanceOf(ParquetCorruptionException.class)
+                .hasMessageContaining("VARIANT value is truncated");
+        ParquetDataSource objectField = writeUnshreddedVariants(
+                ImmutableList.of(new byte[] {0x01, 0x01, 0x00, 0x01, 'a'}),
+                ImmutableList.of(new byte[] {0x02, 0x01, 0x00, 0x00, 0x02, 0x14, 0x00}));
+        assertThatThrownBy(() -> readPhysicalColumn(objectField, "v", ParquetReaderOptions.defaultOptions()))
+                .isInstanceOf(ParquetCorruptionException.class)
+                .hasMessageContaining("VARIANT value is truncated");
     }
 
     /// Writes a VARIANT group with only `metadata` and `value` columns, which the
@@ -479,46 +487,6 @@ public class TestShreddedVariantReader
         }
     }
 
-    private static String evaluate(Optional<Variant> variant, List<VariantPaths.Step> path)
-    {
-        return variant.map(value -> evaluate(value, path)).orElse("SQL NULL");
-    }
-
-    /// Evaluates a path like the VARIANT subscript operator: a key of a value that is
-    /// not an object, or an element of a value that is not an array, is an error. An
-    /// array step evaluates the rest of the path on every element, so the results of
-    /// all indexes, and of indexes out of bounds, are compared.
-    private static String evaluate(Variant variant, List<VariantPaths.Step> path)
-    {
-        if (path.isEmpty()) {
-            return variantType(variant) + " " + comparable(variant.toObject());
-        }
-        List<VariantPaths.Step> rest = path.subList(1, path.size());
-        return switch (path.getFirst()) {
-            case VariantPaths.Key(String name) -> {
-                if (variant.basicType() != Header.BasicType.OBJECT) {
-                    yield "error: " + variantType(variant) + " is not an object";
-                }
-                yield variant.getObjectField(utf8Slice(name))
-                        .map(field -> evaluate(field, rest))
-                        .orElse("missing");
-            }
-            case VariantPaths.ArrayElement _ -> {
-                if (variant.basicType() != Header.BasicType.ARRAY) {
-                    yield "error: " + variantType(variant) + " is not an array";
-                }
-                yield IntStream.range(0, variant.getArrayLength())
-                        .mapToObj(index -> evaluate(variant.getArrayElement(index), rest))
-                        .collect(joining(", ", "[", "]"));
-            }
-        };
-    }
-
-    private static VariantPaths.Key key(String name)
-    {
-        return new VariantPaths.Key(name);
-    }
-
     private static void assertSchemaError(MessageType schema, Map<List<String>, Type> primitiveTypes, String message)
             throws IOException
     {
@@ -528,162 +496,5 @@ public class TestShreddedVariantReader
         assertThatThrownBy(() -> parseSchema(metadata, "v", dataSource))
                 .isInstanceOf(ParquetCorruptionException.class)
                 .hasMessageContaining(message);
-    }
-
-    private static void assertSameVariants(List<Optional<Variant>> actual, List<Optional<Variant>> expected, String description)
-    {
-        assertThat(actual).as(description).hasSize(expected.size());
-        for (int row = 0; row < actual.size(); row++) {
-            assertThat(actual.get(row).isPresent()).as("%s row %s", description, row).isEqualTo(expected.get(row).isPresent());
-            if (actual.get(row).isPresent()) {
-                assertSameVariant(actual.get(row).get(), expected.get(row).get(), description + " row " + row);
-            }
-        }
-    }
-
-    private static List<Optional<Variant>> readVariants(Path file, String column)
-            throws IOException
-    {
-        return readPhysicalColumn(file, column, ParquetReaderOptions.defaultOptions()).variants();
-    }
-
-    private static PhysicalColumn readPhysicalColumn(Path file, String column, ParquetReaderOptions options)
-            throws IOException
-    {
-        return readPhysicalColumn(file, column, options, Optional.empty());
-    }
-
-    private static PhysicalColumn readPhysicalColumn(Path file, String column, ParquetReaderOptions options, Optional<VariantPaths> paths)
-            throws IOException
-    {
-        try (ParquetDataSource dataSource = new FileParquetDataSource(file.toFile(), options)) {
-            return readPhysicalColumn(dataSource, column, options, paths);
-        }
-    }
-
-    private static PhysicalColumn readPhysicalColumn(ParquetDataSource dataSource, String column, ParquetReaderOptions options)
-            throws IOException
-    {
-        return readPhysicalColumn(dataSource, column, options, Optional.empty());
-    }
-
-    private static PhysicalColumn readPhysicalColumn(ParquetDataSource dataSource, String column, ParquetReaderOptions options, Optional<VariantPaths> paths)
-            throws IOException
-    {
-        ParquetMetadata metadata = MetadataReader.readFooter(dataSource, Optional.empty());
-        VariantShreddingSchema whole = parseSchema(metadata, column, dataSource);
-        VariantShreddingSchema schema = paths.map(whole::prune).orElse(whole);
-        ShreddedVariantAssembler assembler = new ShreddedVariantAssembler(schema, dataSource.getId());
-
-        ImmutableList.Builder<Block> blocks = ImmutableList.builder();
-        ImmutableList.Builder<Optional<Variant>> variants = ImmutableList.builder();
-        try (ParquetReader reader = createParquetReader(dataSource, metadata, options, newSimpleAggregatedMemoryContext(), ImmutableList.of(schema.physicalType()), ImmutableList.of(column), TupleDomain.all())) {
-            for (SourcePage page = reader.nextPage(); page != null; page = reader.nextPage()) {
-                Block block = page.getBlock(0);
-                blocks.add(block);
-                variants.addAll(toVariants(assembler.assemble(block)));
-            }
-        }
-        return new PhysicalColumn(assembler, blocks.build(), variants.build());
-    }
-
-    private static List<Optional<Variant>> toVariants(Block block)
-    {
-        ImmutableList.Builder<Optional<Variant>> variants = ImmutableList.builder();
-        for (int position = 0; position < block.getPositionCount(); position++) {
-            if (block.isNull(position)) {
-                variants.add(Optional.empty());
-            }
-            else {
-                variants.add(Optional.of(VARIANT.getObject(block, position)));
-            }
-        }
-        return variants.build();
-    }
-
-    /// The blocks of a shredded VARIANT column as the Parquet reader returns them, and their variants.
-    private record PhysicalColumn(ShreddedVariantAssembler assembler, List<Block> blocks, List<Optional<Variant>> variants) {}
-
-    private static VariantShreddingSchema parseSchema(ParquetMetadata metadata, String column, ParquetDataSource dataSource)
-            throws ParquetCorruptionException
-    {
-        MessageType fileSchema = metadata.getFileMetaData().getSchema();
-        int index = fileSchema.getFieldIndex(column);
-        ParquetOriginalFieldNames names = ParquetOriginalFieldNames.fromSchema(metadata.getParquetMetadata().getSchema()).children().get(index);
-        return VariantShreddingSchema.fromParquet(fileSchema.getType(index).asGroupType(), names, dataSource.getId());
-    }
-
-    /// Reads a `.variant.bin` file, which has the variant metadata followed by the variant value.
-    private static Variant readVariantFile(Path file)
-            throws IOException
-    {
-        Slice bytes = Slices.wrappedBuffer(Files.readAllBytes(file));
-        byte header = bytes.getByte(0);
-        int offsetSize = metadataOffsetSize(header);
-        int dictionarySize = readOffset(bytes, 1, offsetSize);
-        int dictionaryLength = readOffset(bytes, 1 + (dictionarySize + 1) * offsetSize, offsetSize);
-        int metadataLength = 1 + (dictionarySize + 2) * offsetSize + dictionaryLength;
-        Metadata metadata = Metadata.from(bytes.slice(0, metadataLength));
-        return Variant.from(metadata, bytes.slice(metadataLength, bytes.length() - metadataLength));
-    }
-
-    /// Checks that two variants have the same value and the same Variant types.
-    /// {@link Variant#equals} compares numbers of different types by value.
-    private static void assertSameVariant(Variant actual, Variant expected, String path)
-    {
-        assertThat(variantType(actual)).as(path).isEqualTo(variantType(expected));
-        switch (actual.basicType()) {
-            case OBJECT -> {
-                Map<String, Variant> actualFields = objectFields(actual);
-                Map<String, Variant> expectedFields = objectFields(expected);
-                assertThat(actualFields.keySet()).as(path).isEqualTo(expectedFields.keySet());
-                actualFields.forEach((name, value) -> assertSameVariant(value, expectedFields.get(name), path + "." + name));
-            }
-            case ARRAY -> {
-                assertThat(actual.getArrayLength()).as(path).isEqualTo(expected.getArrayLength());
-                for (int index = 0; index < actual.getArrayLength(); index++) {
-                    assertSameVariant(actual.getArrayElement(index), expected.getArrayElement(index), path + "[" + index + "]");
-                }
-            }
-            case PRIMITIVE, SHORT_STRING -> assertThat(actual.toObject()).as(path).isEqualTo(expected.toObject());
-        }
-    }
-
-    private static String variantType(Variant variant)
-    {
-        // A short string is a string with a shorter encoding
-        if (variant.basicType() == SHORT_STRING || (variant.basicType() == PRIMITIVE && variant.primitiveType() == STRING)) {
-            return "STRING";
-        }
-        if (variant.basicType() == PRIMITIVE) {
-            return variant.primitiveType().name();
-        }
-        return variant.basicType().name();
-    }
-
-    private static Map<String, Variant> objectFields(Variant variant)
-    {
-        return variant.objectFields()
-                .collect(toImmutableMap(field -> variant.metadata().get(field.fieldId()).toStringUtf8(), ObjectFieldIdValue::value));
-    }
-
-    /// Converts the values of [Variant#toObject] and of parsed JSON to the same form.
-    private static Object comparable(Object value)
-    {
-        return switch (value) {
-            case null -> null;
-            case Map<?, ?> map -> {
-                Map<Object, Object> result = new HashMap<>();
-                map.forEach((key, entry) -> result.put(key, comparable(entry)));
-                yield result;
-            }
-            case List<?> list -> {
-                List<Object> result = new ArrayList<>();
-                list.forEach(element -> result.add(comparable(element)));
-                yield result;
-            }
-            case Number number -> new BigDecimal(number.toString()).stripTrailingZeros();
-            default -> value;
-        };
     }
 }
