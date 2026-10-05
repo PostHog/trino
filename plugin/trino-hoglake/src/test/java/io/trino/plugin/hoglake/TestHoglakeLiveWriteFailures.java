@@ -131,14 +131,15 @@ final class TestHoglakeLiveWriteFailures
             assertThat(runner.execute("SELECT id FROM append_target").getOnlyValue()).isEqualTo(3L);
 
             assertThat(client.scan("test", "append_target", client.getCatalog().headSnapshotId())).hasSize(1);
-            assertThat(client.getTable("test", "append_target").orElseThrow().recordCount()).isEqualTo(1);
+            // The table totals catch up with commits asynchronously
+            assertEventually(() -> assertThat(client.getTable("test", "append_target").orElseThrow().recordCount()).isEqualTo(1));
 
             runner.execute("CREATE TABLE retry_insert (id bigint)");
             proxy.failBeforeCommit = true;
             runner.execute("INSERT INTO retry_insert VALUES 8");
             assertThat(runner.execute("SELECT id FROM retry_insert").getOnlyValue()).isEqualTo(8L);
             assertThat(client.scan("test", "retry_insert", client.getCatalog().headSnapshotId())).hasSize(1);
-            assertThat(client.getTable("test", "retry_insert").orElseThrow().recordCount()).isEqualTo(1);
+            assertEventually(() -> assertThat(client.getTable("test", "retry_insert").orElseThrow().recordCount()).isEqualTo(1));
 
             runner.execute("CREATE TABLE unresolved_insert (id bigint)");
             proxy.failStatus = true;
@@ -149,7 +150,7 @@ final class TestHoglakeLiveWriteFailures
             proxy.failStatus = false;
             assertThat(runner.execute("SELECT id FROM unresolved_insert").getOnlyValue()).isEqualTo(9L);
             assertThat(client.scan("test", "unresolved_insert", client.getCatalog().headSnapshotId())).hasSize(1);
-            assertThat(client.getTable("test", "unresolved_insert").orElseThrow().recordCount()).isEqualTo(1);
+            assertEventually(() -> assertThat(client.getTable("test", "unresolved_insert").orElseThrow().recordCount()).isEqualTo(1));
 
             // Even when receipt lookup fails, rollback must not delete a committed table.
             proxy.failStatus = true;
@@ -424,8 +425,13 @@ final class TestHoglakeLiveWriteFailures
             for (int value = 1; value <= 5; value++) {
                 runner.execute("INSERT INTO compact_delete VALUES " + value);
             }
-            assertEventually(() -> assertThat(client.scan("test", "compact_delete", client.getCatalog().headSnapshotId()))
-                    .allMatch(entry -> entry.dataFile().statsState().equals("provided")));
+            // Compaction plans from the file statistics and the table totals, which the server
+            // computes asynchronously after commits
+            assertEventually(() -> {
+                assertThat(client.scan("test", "compact_delete", client.getCatalog().headSnapshotId()))
+                        .allMatch(entry -> entry.dataFile().statsState().equals("provided"));
+                assertThat(client.getTable("test", "compact_delete").orElseThrow().fileCount()).isEqualTo(5);
+            });
             runner.execute("DELETE FROM compact_delete WHERE id = 1");
             long beforeCompaction = client.getCatalog().headSnapshotId();
             proxy.beforeCommit(() -> proxy.post(base + "/maintenance/compact?batch=100", Map.of()));
