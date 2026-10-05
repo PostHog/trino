@@ -19,6 +19,7 @@ import com.google.common.collect.ListMultimap;
 import com.google.inject.Inject;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.filesystem.cache.SplitAffinityProvider;
 import io.trino.parquet.ParquetReaderOptions;
 import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.ducklake.metastore.DuckLakeDataFileEntry;
@@ -81,6 +82,7 @@ public class DuckLakeSplitManager
     private final TrinoFileSystemFactory fileSystemFactory;
     private final FileFormatDataSourceStats fileFormatDataSourceStats;
     private final ParquetReaderOptions parquetReaderOptions;
+    private final SplitAffinityProvider affinityProvider;
     private final ExecutorService executor;
 
     @Inject
@@ -89,12 +91,14 @@ public class DuckLakeSplitManager
             TrinoFileSystemFactory fileSystemFactory,
             FileFormatDataSourceStats fileFormatDataSourceStats,
             ParquetReaderConfig parquetReaderConfig,
+            SplitAffinityProvider affinityProvider,
             @ForDuckLakeSplitManager ExecutorService executor)
     {
         this.metastore = requireNonNull(metastore, "metastore is null");
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.fileFormatDataSourceStats = requireNonNull(fileFormatDataSourceStats, "fileFormatDataSourceStats is null");
         this.parquetReaderOptions = parquetReaderConfig.toParquetReaderOptions();
+        this.affinityProvider = requireNonNull(affinityProvider, "affinityProvider is null");
         this.executor = requireNonNull(executor, "executor is null");
     }
 
@@ -213,7 +217,7 @@ public class DuckLakeSplitManager
             return new FixedSplitSource(retainedFiles);
         }
         TrinoFileSystem fileSystem = fileSystemFactory.create(session);
-        return new DuckLakeSplitSource(retainedFiles, fileSystem, parquetReaderOptions, fileFormatDataSourceStats, maxSplitSize, executor);
+        return new DuckLakeSplitSource(retainedFiles, fileSystem, parquetReaderOptions, fileFormatDataSourceStats, maxSplitSize, affinityProvider, executor);
     }
 
     static SplitWeight splitWeight(long length, long maxSplitSize)

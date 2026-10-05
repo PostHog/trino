@@ -41,6 +41,9 @@ import static java.util.Objects.requireNonNull;
  * @param recordCount number of stored rows in the selected row groups, or exact visible rows for a
  *         metadata-only whole-file split
  * @param rowGroupMetadata file schema and metadata for only the row groups assigned to this split
+ * @param affinityKey key the filesystem's {@code SplitAffinityProvider} assigned to the data this
+ *         split reads, present only when the catalog caches filesystem data, so that the split is
+ *         preferably scheduled on the worker whose cache holds that data
  */
 public record DuckLakeSplit(
         long dataFileId,
@@ -55,7 +58,8 @@ public record DuckLakeSplit(
         Map<Integer, Optional<String>> partitionValues,
         Optional<DuckLakeNameMapping> nameMapping,
         SplitWeight splitWeight,
-        Optional<DuckLakeRowGroupMetadata> rowGroupMetadata)
+        Optional<DuckLakeRowGroupMetadata> rowGroupMetadata,
+        Optional<String> affinityKey)
         implements ConnectorSplit
 {
     private static final int INSTANCE_SIZE = toIntExact(instanceSize(DuckLakeSplit.class));
@@ -77,6 +81,7 @@ public record DuckLakeSplit(
         requireNonNull(rowGroupMetadata, "rowGroupMetadata is null");
         checkArgument(rowGroupMetadata.isEmpty() || (start == 0 && length == fileSizeBytes),
                 "row-group metadata requires a whole-file byte range");
+        requireNonNull(affinityKey, "affinityKey is null");
     }
 
     public DuckLakeSplit(
@@ -105,7 +110,14 @@ public record DuckLakeSplit(
                 partitionValues,
                 nameMapping,
                 splitWeight,
+                Optional.empty(),
                 Optional.empty());
+    }
+
+    @Override
+    public Optional<String> getAffinityKey()
+    {
+        return affinityKey;
     }
 
     @Override
@@ -125,7 +137,8 @@ public record DuckLakeSplit(
                 + estimatedSizeOf(partitionValues, SizeOf::sizeOf, value -> sizeOf(value, SizeOf::estimatedSizeOf))
                 + sizeOf(nameMapping, DuckLakeNameMapping::retainedSizeInBytes)
                 + splitWeight.getRetainedSizeInBytes()
-                + sizeOf(rowGroupMetadata, DuckLakeRowGroupMetadata::retainedSizeInBytes);
+                + sizeOf(rowGroupMetadata, DuckLakeRowGroupMetadata::retainedSizeInBytes)
+                + sizeOf(affinityKey, SizeOf::estimatedSizeOf);
     }
 
     @Override
