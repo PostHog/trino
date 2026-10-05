@@ -39,7 +39,9 @@ import io.trino.spi.security.ConnectorIdentity;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.StandaloneQueryRunner;
+import org.apache.parquet.format.FieldRepetitionType;
 import org.apache.parquet.format.LogicalTypes;
+import org.apache.parquet.format.SchemaElement;
 import org.apache.parquet.schema.Types;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -59,6 +61,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static com.google.common.collect.MoreCollectors.onlyElement;
 import static io.trino.plugin.hoglake.HoglakeConfig.DEFAULT_MAX_SPLIT_SIZE;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.testing.TestingSession.testSessionBuilder;
@@ -517,6 +520,133 @@ final class TestHoglakeWrites
         finally {
             recursiveWriteSchema = true;
         }
+    }
+
+    @Test
+    void testShreddedVariantWrites()
+            throws IOException
+    {
+        idempotentMutation = true;
+        try {
+            runner.execute("CREATE TABLE shredded_events (id bigint, properties variant)");
+            Map<String, Object> shredding = Map.of("type", "object", "fields", List.of(
+                    Map.of("name", "$browser", "type", "string"),
+                    Map.of("name", "$screen_width", "type", "int64"),
+                    Map.of("name", "$set", "type", "object", "fields", List.of(Map.of("name", "plan", "type", "string"))),
+                    Map.of("name", "tags", "type", "array", "element", Map.of("type", "string"))));
+            declareShredding("shredded_events", List.of("properties"), shredding);
+            String rows =
+                    """
+                    (1, '{"$browser": "Chrome", "$screen_width": 1920, "$set": {"plan": "free"}, "tags": ["a", "b", null], "other": 1.5}'),
+                    (2, '{"$browser": 42, "$screen_width": "wide", "$set": "not an object", "tags": "not an array"}'),
+                    (3, '{"$Browser": "Safari", "$BROWSER": "Edge", "$set": {"Plan": "team", "plan": "pro"}, "$screen_width": 5000000000}'),
+                    (4, 'null'),
+                    (5, NULL),
+                    (6, '"a string"'),
+                    (7, '{}')
+                    """;
+            runner.execute("INSERT INTO shredded_events SELECT id, CAST(json_parse(json) AS variant) FROM (VALUES " + rows + ") AS t(id, json)");
+
+            // The values are the same as before they were written, including the keys that differ only by case
+            assertQuery(
+                    "SELECT id, properties IS NULL, json_format(CAST(properties AS json)) FROM shredded_events",
+                    "SELECT CAST(id AS bigint), json IS NULL, json_format(CAST(CAST(json_parse(json) AS variant) AS json)) FROM (VALUES " + rows + ") AS t(id, json)");
+            assertQuery(
+                    "SELECT id, CAST(properties['$browser'] AS varchar), CAST(properties['$Browser'] AS varchar), CAST(properties['$screen_width'] AS bigint), CAST(properties['$set']['plan'] AS varchar) FROM shredded_events WHERE id IN (1, 3, 7)",
+                    "VALUES (BIGINT '1', 'Chrome', CAST(NULL AS varchar), BIGINT '1920', 'free'), (3, NULL, 'Safari', 5000000000, 'pro'), (7, NULL, NULL, NULL, NULL)");
+            // A SQL NULL stays different from a variant null
+            assertQuery("SELECT id FROM shredded_events WHERE properties IS NULL", "VALUES BIGINT '5'");
+
+            // The files have the shredded layout, with required field groups, and the field id only on the group
+            long fieldId = tables.get("shredded_events").columns().get(1).fieldId();
+            List<SchemaElement> schema = writtenSchema("shredded_events");
+            SchemaElement group = schema.stream().filter(element -> element.getName().equals("properties")).collect(onlyElement());
+            assertThat(group.getLogicalType()).isEqualTo(LogicalTypes.VARIANT((byte) 1));
+            assertThat((long) group.getField_id()).isEqualTo(fieldId);
+            List<SchemaElement> children = schema.subList(schema.indexOf(group) + 1, schema.size());
+            assertThat(children).allSatisfy(element -> assertThat(element.isSetField_id()).isFalse());
+            assertThat(children).extracting(SchemaElement::getName).contains("metadata", "value", "typed_value", "$browser", "$screen_width", "$set", "plan", "tags", "list", "element");
+            assertThat(children).filteredOn(element -> Set.of("$browser", "$screen_width", "$set", "plan", "tags", "element").contains(element.getName()))
+                    .allSatisfy(element -> assertThat(element.getRepetition_type()).isEqualTo(FieldRepetitionType.REQUIRED));
+
+            // A declaration that is not valid fails writes before they run, even when the source
+            // of the rows would fail, but it does not fail reads or deletes
+            declareShredding("shredded_events", List.of("properties"), Map.of("type", "text"));
+            assertThatThrownBy(() -> runner.execute("INSERT INTO shredded_events SELECT 8, CAST(json_parse('{') AS variant)"))
+                    .hasMessage("Invalid type_params.shredding of column properties: $ has an unknown type: text");
+            assertThatThrownBy(() -> runner.execute("UPDATE shredded_events SET properties = CAST(json_parse('{') AS variant) WHERE id = 7"))
+                    .hasMessage("Invalid type_params.shredding of column properties: $ has an unknown type: text");
+            assertThat(runner.execute("SELECT count(*) FROM shredded_events").getOnlyValue()).isEqualTo(7L);
+            assertThat(runner.execute("DELETE FROM shredded_events WHERE id = 6").getUpdateCount()).hasValue(1);
+
+            // An update writes the new rows with the declared layout
+            declareShredding("shredded_events", List.of("properties"), shredding);
+            runner.execute("UPDATE shredded_events SET properties = CAST(JSON '{\"$browser\": \"Firefox\", \"extra\": true}' AS variant) WHERE id = 2");
+            assertQuery(
+                    "SELECT CAST(properties['$browser'] AS varchar), CAST(properties['extra'] AS boolean) FROM shredded_events WHERE id = 2",
+                    "VALUES ('Firefox', true)");
+
+            // Hoglake reads shredded files only in top-level columns
+            runner.execute("CREATE TABLE nested_shredding (r row(x variant))");
+            declareShredding("nested_shredding", List.of("r", "x"), Map.of("type", "string"));
+            assertThatThrownBy(() -> runner.execute("INSERT INTO nested_shredding SELECT CAST(ROW(CAST(JSON '\"a\"' AS variant)) AS row(x variant))"))
+                    .hasMessage("Hoglake writes shredded VARIANT values only in top-level columns: x");
+        }
+        finally {
+            idempotentMutation = false;
+        }
+    }
+
+    /**
+     * Declares the shredded layout of a column, at a path of field names, in the catalog.
+     */
+    private void declareShredding(String tableName, List<String> path, Object shredding)
+    {
+        HoglakeDtos.Table table = tables.get(tableName);
+        tables.put(tableName, new HoglakeDtos.Table(
+                table.name(),
+                table.namespace(),
+                table.tableUuid(),
+                withShredding(table.columns(), path, shredding),
+                table.recordCount(),
+                table.fileCount(),
+                table.fileSizeBytes(),
+                table.partitionSpec(),
+                table.sortSpec(),
+                table.comment(),
+                table.properties()));
+    }
+
+    private static List<HoglakeDtos.Column> withShredding(List<HoglakeDtos.Column> columns, List<String> path, Object shredding)
+    {
+        return columns.stream()
+                .map(column -> {
+                    if (!column.name().equals(path.getFirst())) {
+                        return column;
+                    }
+                    if (path.size() > 1) {
+                        return new HoglakeDtos.Column(column.fieldId(), column.ordinal(), column.name(), column.type(), column.typeParams(), column.nullable(), withShredding(column.children(), path.subList(1, path.size()), shredding), column.comment());
+                    }
+                    return new HoglakeDtos.Column(column.fieldId(), column.ordinal(), column.name(), column.type(), Map.of("shredding", shredding), column.nullable(), column.children(), column.comment());
+                })
+                .toList();
+    }
+
+    /**
+     * The Thrift schema of the data files of a table, which must all have the same schema.
+     */
+    private List<SchemaElement> writtenSchema(String tableName)
+            throws IOException
+    {
+        List<List<SchemaElement>> schemas = new ArrayList<>();
+        for (HoglakeDtos.ScanFile file : files.get(tableName)) {
+            try (var input = storage.create(ConnectorIdentity.ofUser("test")).newInputFile(Location.of(file.dataFile().path())).newStream()) {
+                schemas.add(ConnectorTestFixtures.fileMetaData(input.readAllBytes()).getSchema());
+            }
+        }
+        assertThat(schemas).isNotEmpty();
+        assertThat(Set.copyOf(schemas)).hasSize(1);
+        return schemas.getFirst();
     }
 
     @Test

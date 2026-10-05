@@ -40,6 +40,8 @@ import static java.util.stream.Collectors.joining;
  *
  * <p>A VARIANT column with {@code variantPaths} holds only the parts of
  * each value that those paths read; see {@link HoglakeVariantProjections}.
+ * {@code variantShredding} is the JSON text of the shredded layout that the
+ * catalog column declares for writes; see {@link HoglakeVariantShredding}.
  */
 public record HoglakeColumnHandle(
         @JsonProperty("name") String name,
@@ -49,7 +51,8 @@ public record HoglakeColumnHandle(
         @JsonProperty("children") List<HoglakeColumnHandle> children,
         @JsonProperty("hoglakeType") String hoglakeType,
         @JsonProperty("comment") String comment,
-        @JsonProperty("variantPaths") List<List<HoglakeVariantPathStep>> variantPaths)
+        @JsonProperty("variantPaths") List<List<HoglakeVariantPathStep>> variantPaths,
+        @JsonProperty("variantShredding") Optional<String> variantShredding)
         implements ColumnHandle
 {
     static final HoglakeColumnHandle ROW_ID = new HoglakeColumnHandle(
@@ -73,6 +76,11 @@ public record HoglakeColumnHandle(
         this(name, fieldId, type, nullable, children, hoglakeType, comment, List.of());
     }
 
+    public HoglakeColumnHandle(String name, long fieldId, Type type, boolean nullable, List<HoglakeColumnHandle> children, String hoglakeType, String comment, List<List<HoglakeVariantPathStep>> variantPaths)
+    {
+        this(name, fieldId, type, nullable, children, hoglakeType, comment, variantPaths, Optional.empty());
+    }
+
     @JsonCreator
     public HoglakeColumnHandle
     {
@@ -82,6 +90,8 @@ public record HoglakeColumnHandle(
         children = children == null ? List.of() : ImmutableList.copyOf(children);
         variantPaths = variantPaths == null ? List.of() : variantPaths.stream().map(ImmutableList::copyOf).collect(toImmutableList());
         checkArgument(variantPaths.isEmpty() || type.equals(VARIANT), "Only a VARIANT column has variant paths: %s", name);
+        variantShredding = variantShredding == null ? Optional.empty() : variantShredding;
+        checkArgument(variantShredding.isEmpty() || type.equals(VARIANT), "Only a VARIANT column has a shredded layout: %s", name);
     }
 
     /**
@@ -90,7 +100,7 @@ public record HoglakeColumnHandle(
     public HoglakeColumnHandle withVariantPaths(List<List<HoglakeVariantPathStep>> paths)
     {
         checkArgument(!paths.isEmpty(), "paths is empty");
-        return new HoglakeColumnHandle(name, fieldId, type, nullable, children, hoglakeType, comment, paths);
+        return new HoglakeColumnHandle(name, fieldId, type, nullable, children, hoglakeType, comment, paths, variantShredding);
     }
 
     /**

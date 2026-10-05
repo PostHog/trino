@@ -14,6 +14,7 @@
 package io.trino.plugin.hoglake;
 
 import com.google.common.collect.ImmutableMap;
+import io.trino.spi.TrinoException;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.Type;
@@ -27,6 +28,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.lang.Math.toIntExact;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.MICROS;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.TimeUnit.NANOS;
@@ -77,6 +79,12 @@ public record HoglakeParquetSchema(MessageType messageType, Map<List<String>, Ty
                     .id(toIntExact(column.fieldId())).named(column.name());
         }
         if (wire.equals("variant")) {
+            if (column.variantShredding().isPresent()) {
+                if (!parent.isEmpty()) {
+                    throw new TrinoException(NOT_SUPPORTED, "Hoglake writes shredded VARIANT values only in top-level columns: " + column.name());
+                }
+                return HoglakeVariantShredding.schema(column).toParquetType(column.name(), repetition).withId(toIntExact(column.fieldId()));
+            }
             return Types.buildGroup(repetition).as(LogicalTypeAnnotation.variantType((byte) 1))
                     .addField(Types.required(BINARY).named("metadata"))
                     .addField(Types.required(BINARY).named("value"))
