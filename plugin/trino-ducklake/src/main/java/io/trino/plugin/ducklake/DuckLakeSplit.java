@@ -44,6 +44,8 @@ import static java.util.Objects.requireNonNull;
  * @param affinityKey key the filesystem's {@code SplitAffinityProvider} assigned to the data this
  *         split reads, present only when the catalog caches filesystem data, so that the split is
  *         preferably scheduled on the worker whose cache holds that data
+ * @param inlinedDeletions positions of the file deleted inline in the catalog database, which apply
+ *         in addition to those of the delete file
  */
 public record DuckLakeSplit(
         long dataFileId,
@@ -59,7 +61,8 @@ public record DuckLakeSplit(
         Optional<DuckLakeNameMapping> nameMapping,
         SplitWeight splitWeight,
         Optional<DuckLakeRowGroupMetadata> rowGroupMetadata,
-        Optional<String> affinityKey)
+        Optional<String> affinityKey,
+        Optional<DuckLakeInlinedDeletions> inlinedDeletions)
         implements ConnectorSplit
 {
     private static final int INSTANCE_SIZE = toIntExact(instanceSize(DuckLakeSplit.class));
@@ -82,6 +85,40 @@ public record DuckLakeSplit(
         checkArgument(rowGroupMetadata.isEmpty() || (start == 0 && length == fileSizeBytes),
                 "row-group metadata requires a whole-file byte range");
         requireNonNull(affinityKey, "affinityKey is null");
+        requireNonNull(inlinedDeletions, "inlinedDeletions is null");
+    }
+
+    public DuckLakeSplit(
+            long dataFileId,
+            String path,
+            long start,
+            long length,
+            long fileSizeBytes,
+            OptionalLong footerSize,
+            long recordCount,
+            OptionalLong rowIdStart,
+            Optional<DuckLakeDeleteFileHandle> deleteFile,
+            Map<Integer, Optional<String>> partitionValues,
+            Optional<DuckLakeNameMapping> nameMapping,
+            SplitWeight splitWeight,
+            Optional<DuckLakeRowGroupMetadata> rowGroupMetadata,
+            Optional<String> affinityKey)
+    {
+        this(dataFileId,
+                path,
+                start,
+                length,
+                fileSizeBytes,
+                footerSize,
+                recordCount,
+                rowIdStart,
+                deleteFile,
+                partitionValues,
+                nameMapping,
+                splitWeight,
+                rowGroupMetadata,
+                affinityKey,
+                Optional.empty());
     }
 
     public DuckLakeSplit(
@@ -111,6 +148,7 @@ public record DuckLakeSplit(
                 nameMapping,
                 splitWeight,
                 Optional.empty(),
+                Optional.empty(),
                 Optional.empty());
     }
 
@@ -138,7 +176,8 @@ public record DuckLakeSplit(
                 + sizeOf(nameMapping, DuckLakeNameMapping::retainedSizeInBytes)
                 + splitWeight.getRetainedSizeInBytes()
                 + sizeOf(rowGroupMetadata, DuckLakeRowGroupMetadata::retainedSizeInBytes)
-                + sizeOf(affinityKey, SizeOf::estimatedSizeOf);
+                + sizeOf(affinityKey, SizeOf::estimatedSizeOf)
+                + sizeOf(inlinedDeletions, DuckLakeInlinedDeletions::retainedSizeInBytes);
     }
 
     @Override

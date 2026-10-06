@@ -23,12 +23,18 @@ import static java.util.Objects.requireNonNull;
 /**
  * @param footerSize length of the Parquet footer of the file as the catalog records it, excluding
  *         the postscript that follows it
+ * @param deleteCount the number of positions the file holds, as the catalog records it
+ * @param exactDeleteCount whether every position of the file applies in the snapshot read, so that
+ *         {@code deleteCount} is the number of rows the file removes there. A delete file DuckDB
+ *         wrote with the snapshot of each deletion may also hold deletions of newer snapshots,
+ *         which are not applied.
  */
 public record DuckLakeDeleteFileHandle(
         String path,
         long fileSizeBytes,
         OptionalLong footerSize,
-        long deleteCount)
+        long deleteCount,
+        boolean exactDeleteCount)
 {
     private static final int INSTANCE_SIZE = (int) instanceSize(DuckLakeDeleteFileHandle.class);
 
@@ -36,6 +42,11 @@ public record DuckLakeDeleteFileHandle(
     {
         requireNonNull(path, "path is null");
         requireNonNull(footerSize, "footerSize is null");
+    }
+
+    public DuckLakeDeleteFileHandle(String path, long fileSizeBytes, OptionalLong footerSize, long deleteCount)
+    {
+        this(path, fileSizeBytes, footerSize, deleteCount, true);
     }
 
     public long retainedSizeInBytes()
