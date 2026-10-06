@@ -68,7 +68,11 @@ final class TestDuckDbTemporalText
         assertTimestamp("2024-01-02 03:04:05.12", LocalDateTime.of(2024, 1, 2, 3, 4, 5), 120_000_000, OptionalInt.empty());
         assertTimestamp("2024-01-02 03:04:05.000000001", LocalDateTime.of(2024, 1, 2, 3, 4, 5), 1, OptionalInt.empty());
         assertTimestamp("1969-12-31 23:59:59.999999", LocalDateTime.of(1969, 12, 31, 23, 59, 59), 999_999_000, OptionalInt.empty());
-        assertTimestamp("0001-01-01 00:00:00 (BC)", LocalDateTime.of(0, 1, 1, 0, 0, 0), 0, OptionalInt.empty());
+        // DuckDB writes the era right after the date, PostgreSQL at the end
+        assertTimestamp("0001-01-01 (BC) 00:00:00", LocalDateTime.of(0, 1, 1, 0, 0, 0), 0, OptionalInt.empty());
+        assertTimestamp("0044-03-15 (BC) 12:30:00.5", LocalDateTime.of(-43, 3, 15, 12, 30, 0), 500_000_000, OptionalInt.empty());
+        assertTimestamp("0044-03-15 (BC) 12:30:00+01", LocalDateTime.of(-43, 3, 15, 12, 30, 0), 0, OptionalInt.of(3600));
+        assertTimestamp("0001-01-01 00:00:00 BC", LocalDateTime.of(0, 1, 1, 0, 0, 0), 0, OptionalInt.empty());
         // a timestamp with time zone carries the offset of the zone DuckDB wrote it in
         assertTimestamp("2024-01-01 21:34:05+00", LocalDateTime.of(2024, 1, 1, 21, 34, 5), 0, OptionalInt.of(0));
         assertTimestamp("2024-01-01 22:04:05-05", LocalDateTime.of(2024, 1, 1, 22, 4, 5), 0, OptionalInt.of(-5 * 3600));
@@ -80,6 +84,7 @@ final class TestDuckDbTemporalText
         assertThatThrownBy(() -> parseTimestamp("2024-01-02")).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> parseTimestamp("2024-01-02 03:04:05.1234567890")).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> parseTimestamp("2024-01-02 03:04:05+05:99")).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> parseTimestamp("0001-01-01 (BC) 00:00:00 BC")).isInstanceOf(IllegalArgumentException.class);
     }
 
     private static void assertTimestamp(String text, LocalDateTime expected, int nanoOfSecond, OptionalInt offsetSeconds)

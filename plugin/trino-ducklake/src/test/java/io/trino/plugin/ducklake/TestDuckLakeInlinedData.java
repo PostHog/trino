@@ -162,8 +162,8 @@ final class TestDuckLakeInlinedData
                     '00000000-0000-0000-0000-000000000000',
                     DATE '0044-03-15 (BC)', TIME '00:00:00',
                     TIMESTAMP '1969-12-31 23:59:59.999999',
-                    TIMESTAMP_S '0001-01-01 00:00:00',
-                    TIMESTAMP_MS '1969-12-31 23:59:59.999',
+                    make_timestamp(-43, 3, 15, 12, 30, 0)::TIMESTAMP_S,
+                    make_timestamp(-43, 3, 15, 12, 30, 0.5)::TIMESTAMP_MS,
                     TIMESTAMP_NS '1969-12-31 23:59:59.999999999',
                     TIMESTAMPTZ '2024-05-01 12:34:56.000001+05:30')
                 """,

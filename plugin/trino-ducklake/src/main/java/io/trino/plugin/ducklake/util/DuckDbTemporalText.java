@@ -31,11 +31,12 @@ import static java.util.Objects.requireNonNull;
  * can, so the values are kept as the strings DuckDB casts them to.
  * <p>
  * DuckDB writes a year before 1 AD as the year counted backwards followed by {@code (BC)}, so that
- * {@code 0001-01-01 (BC)} is the year 0 of the proleptic Gregorian calendar; years past 9999 take
- * as many digits as they need; fractions of a second have their trailing zeros removed; and a
- * timestamp with time zone carries the offset of the zone it was written in, such as {@code +00},
- * {@code -05} or {@code +05:30}. PostgreSQL text differs only in writing {@code BC} without the
- * parentheses, which is accepted as well. Infinite values have no Trino counterpart and are
+ * {@code 0001-01-01 (BC)} is the year 0 of the proleptic Gregorian calendar, also within a
+ * timestamp, as in {@code 0001-01-01 (BC) 12:00:00}; years past 9999 take as many digits as they
+ * need; fractions of a second have their trailing zeros removed; and a timestamp with time zone
+ * carries the offset of the zone it was written in, such as {@code +00}, {@code -05} or
+ * {@code +05:30}. PostgreSQL text differs in writing {@code BC} without the parentheses, and at the
+ * end of a timestamp, which is accepted as well. Infinite values have no Trino counterpart and are
  * rejected, as is anything else that is not one of these shapes.
  */
 public final class DuckDbTemporalText
@@ -47,7 +48,8 @@ public final class DuckDbTemporalText
 
     private static final Pattern DATE_PATTERN = Pattern.compile(DATE + ERA);
     private static final Pattern TIME_PATTERN = Pattern.compile(TIME);
-    private static final Pattern TIMESTAMP_PATTERN = Pattern.compile(DATE + "[ T]" + TIME + OFFSET + ERA);
+    // DuckDB writes the era after the date, before the time; PostgreSQL writes it at the end
+    private static final Pattern TIMESTAMP_PATTERN = Pattern.compile(DATE + ERA + "[ T]" + TIME + OFFSET + ERA);
 
     private static final long SECONDS_PER_DAY = 86_400L;
 
@@ -84,7 +86,7 @@ public final class DuckDbTemporalText
         if (!matcher.matches()) {
             throw invalid("date", text);
         }
-        return date(text, matcher, 4).toEpochDay();
+        return date(text, matcher, matcher.group(4) != null).toEpochDay();
     }
 
     /**
@@ -114,10 +116,13 @@ public final class DuckDbTemporalText
         if (!matcher.matches()) {
             throw invalid("timestamp", text);
         }
-        LocalDate date = date(text, matcher, 12);
-        int hour = Integer.parseInt(matcher.group(4));
-        int minute = Integer.parseInt(matcher.group(5));
-        int second = Integer.parseInt(matcher.group(6));
+        if (matcher.group(4) != null && matcher.group(13) != null) {
+            throw invalid("timestamp", text);
+        }
+        LocalDate date = date(text, matcher, matcher.group(4) != null || matcher.group(13) != null);
+        int hour = Integer.parseInt(matcher.group(5));
+        int minute = Integer.parseInt(matcher.group(6));
+        int second = Integer.parseInt(matcher.group(7));
         long secondOfDay;
         try {
             secondOfDay = LocalTime.of(hour, minute, second).toSecondOfDay();
@@ -125,17 +130,17 @@ public final class DuckDbTemporalText
         catch (DateTimeException e) {
             throw invalid("timestamp", text);
         }
-        int nanoOfSecond = (int) fraction(matcher.group(7));
+        int nanoOfSecond = (int) fraction(matcher.group(8));
         OptionalInt offset = OptionalInt.empty();
-        if (matcher.group(8) != null) {
-            int offsetHours = Integer.parseInt(matcher.group(9));
-            int offsetMinutes = matcher.group(10) == null ? 0 : Integer.parseInt(matcher.group(10));
-            int offsetSeconds = matcher.group(11) == null ? 0 : Integer.parseInt(matcher.group(11));
+        if (matcher.group(9) != null) {
+            int offsetHours = Integer.parseInt(matcher.group(10));
+            int offsetMinutes = matcher.group(11) == null ? 0 : Integer.parseInt(matcher.group(11));
+            int offsetSeconds = matcher.group(12) == null ? 0 : Integer.parseInt(matcher.group(12));
             if (offsetMinutes >= 60 || offsetSeconds >= 60) {
                 throw invalid("timestamp", text);
             }
             int total = offsetHours * 3600 + offsetMinutes * 60 + offsetSeconds;
-            offset = OptionalInt.of(matcher.group(8).equals("-") ? -total : total);
+            offset = OptionalInt.of(matcher.group(9).equals("-") ? -total : total);
         }
         try {
             return new Timestamp(addExact(multiplyExact(date.toEpochDay(), SECONDS_PER_DAY), secondOfDay), nanoOfSecond, offset);
@@ -145,7 +150,7 @@ public final class DuckDbTemporalText
         }
     }
 
-    private static LocalDate date(String text, Matcher matcher, int eraGroup)
+    private static LocalDate date(String text, Matcher matcher, boolean beforeCommonEra)
     {
         long year;
         try {
@@ -154,7 +159,7 @@ public final class DuckDbTemporalText
         catch (NumberFormatException e) {
             throw invalid("date", text);
         }
-        if (matcher.group(eraGroup) != null) {
+        if (beforeCommonEra) {
             // a year written backwards from 1 BC, which is the year 0 counted forwards
             year = 1 - year;
         }
