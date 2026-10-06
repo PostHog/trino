@@ -224,9 +224,11 @@ public final class VariantShreddingSchema
     /// A value read with the pruned schema gives the same result as the whole value
     /// for each of the paths, including errors such as a key of a value that is not an
     /// object: every `value` column on the way stays, so a value that is not an object
-    /// or an array stays unchanged, and an array keeps all its elements. The value can
-    /// have object fields that no path reads. Corrupt data in the columns that are not
-    /// read is not detected, as with any column pruning.
+    /// or an array stays unchanged, and an array keeps all its elements. An assembler
+    /// without the paths builds values that can have object fields that no path reads.
+    /// An assembler with the paths builds only their keys, and reads the top-level
+    /// `metadata` and `value` columns only for the rows that need them. Corrupt data in
+    /// the columns that are not read is not detected, as with any column pruning.
     public VariantShreddingSchema prune(VariantPaths paths)
     {
         return new VariantShreddingSchema(pruneValue(value, paths));
