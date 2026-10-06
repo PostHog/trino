@@ -59,7 +59,7 @@ final class DuckLakeSplitSource
     private final long targetSplitBytes;
     private final SplitAffinityProvider affinityProvider;
     private final Executor executor;
-    private final Deque<DuckLakeSplit> pendingSplits = new ArrayDeque<>();
+    private final Deque<ConnectorSplit> pendingSplits = new ArrayDeque<>();
     private final Deque<CompletableFuture<List<DuckLakeSplit>>> prefetchedFiles = new ArrayDeque<>();
 
     private CompletableFuture<List<DuckLakeSplit>> currentFilePlan;
@@ -75,6 +75,24 @@ final class DuckLakeSplitSource
             SplitAffinityProvider affinityProvider,
             Executor executor)
     {
+        this(files, ImmutableList.of(), fileSystem, parquetReaderOptions, fileFormatDataSourceStats, targetSplitBytes, affinityProvider, executor);
+    }
+
+    /**
+     * @param readySplits splits that need no planning, such as those reading inlined rows, which
+     *         are handed out before the splits of the files
+     */
+    public DuckLakeSplitSource(
+            List<DuckLakeSplit> files,
+            List<? extends ConnectorSplit> readySplits,
+            TrinoFileSystem fileSystem,
+            ParquetReaderOptions parquetReaderOptions,
+            FileFormatDataSourceStats fileFormatDataSourceStats,
+            long targetSplitBytes,
+            SplitAffinityProvider affinityProvider,
+            Executor executor)
+    {
+        pendingSplits.addAll(readySplits);
         this.files = ImmutableList.copyOf(files).iterator();
         this.fileSystem = requireNonNull(fileSystem, "fileSystem is null");
         this.parquetReaderOptions = requireNonNull(parquetReaderOptions, "parquetReaderOptions is null");
@@ -210,7 +228,8 @@ final class DuckLakeSplitSource
                     Optional.of(group.metadata()),
                     // Every split of the file carries the whole-file byte range but reads only its
                     // own row groups, so key on those to spread the file's splits across workers.
-                    affinityProvider.getKey(file.path(), group.startingPosition(), group.compressedBytes())));
+                    affinityProvider.getKey(file.path(), group.startingPosition(), group.compressedBytes()),
+                    file.inlinedDeletions()));
         }
         return splits.build();
     }

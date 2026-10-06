@@ -32,6 +32,7 @@ import io.trino.plugin.ducklake.metastore.DuckLakeCommitAction;
 import io.trino.plugin.ducklake.metastore.DuckLakeDataFileEntry;
 import io.trino.plugin.ducklake.metastore.DuckLakeDeleteFileEntry;
 import io.trino.plugin.ducklake.metastore.DuckLakeFileColumnStatsRow;
+import io.trino.plugin.ducklake.metastore.DuckLakeInlinedSummary;
 import io.trino.plugin.ducklake.metastore.DuckLakePartitionColumn;
 import io.trino.plugin.ducklake.metastore.DuckLakePartitionInfo;
 import io.trino.plugin.ducklake.metastore.DuckLakeRowCount;
@@ -147,6 +148,7 @@ public class DuckLakeMetadata
     private final JdbcDuckLakeMetastore metastore;
     private final String dataPath;
     private final Map<Long, DuckLakeRowCount> rowCounts = new ConcurrentHashMap<>();
+    private final Map<TableSnapshot, DuckLakeInlinedSummary> inlinedSummaries = new ConcurrentHashMap<>();
     private final JsonCodec<DuckLakeDataFile> dataFileCodec;
     private final JsonCodec<DuckLakeMergeFragment> mergeFragmentCodec;
     private final JsonCodec<ConnectorViewDefinition> viewDefinitionCodec;
@@ -302,9 +304,9 @@ public class DuckLakeMetadata
             return null;
         }
         DuckLakeTableEntry tableEntry = table.get();
-        if (metastore.hasInlinedData(snapshot, tableEntry.tableId())) {
-            throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Table %s has inlined data, which is not supported. Flush inlined data to Parquet with DuckDB first".formatted(tableName));
-        }
+        // Rows and deletions a DuckDB writer stored inline in the catalog database are read along
+        // with the data files. Changing them is not supported, which the statements that would are
+        // told by verifyNoInlinedData.
         return new DuckLakeTableHandle(
                 tableName.getSchemaName(),
                 tableName.getTableName(),
@@ -563,6 +565,7 @@ public class DuckLakeMetadata
             throw new TrinoException(NOT_SUPPORTED, "This connector only supports adding columns at the end of a table");
         }
         DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        verifyNoInlinedRows(handle, "adding a column");
         commit(commit -> {
             List<DuckLakeColumnRow> existing = commit.columns(handle.tableId());
             existing.stream()
@@ -588,6 +591,7 @@ public class DuckLakeMetadata
     {
         DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
         DuckLakeColumnHandle column = (DuckLakeColumnHandle) columnHandle;
+        verifyNoInlinedRows(handle, "dropping a column");
         commit(commit -> {
             List<DuckLakeColumnRow> columns = commit.columns(handle.tableId());
             if (columns.stream().filter(row -> row.parentColumn().isEmpty()).count() <= 1) {
@@ -606,6 +610,7 @@ public class DuckLakeMetadata
     {
         DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
         DuckLakeColumnHandle column = (DuckLakeColumnHandle) columnHandle;
+        verifyNoInlinedRows(handle, "renaming a column");
         commit(commit -> {
             // Data files keep the name the column had when they were written, and are not
             // rewritten. They are read by the column identifier they also carry, which a rename
@@ -624,6 +629,7 @@ public class DuckLakeMetadata
     {
         DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
         DuckLakeColumnHandle column = (DuckLakeColumnHandle) columnHandle;
+        verifyNoInlinedRows(handle, "changing the type of a column");
         if (!isWideningTypeChange(column.type(), type)) {
             // data files already written keep the old physical type, so the new type has to be one
             // every value of the old one reads back as
@@ -637,6 +643,7 @@ public class DuckLakeMetadata
     {
         DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
         DuckLakeColumnHandle column = (DuckLakeColumnHandle) columnHandle;
+        verifyNoInlinedRows(handle, "dropping a NOT NULL constraint");
         replaceColumn(handle, column.columnId(), row -> row.withNullsAllowed(true));
     }
 
@@ -1040,6 +1047,8 @@ public class DuckLakeMetadata
     public ConnectorMergeTableHandle beginMerge(ConnectorSession session, ConnectorTableHandle tableHandle, Map<Integer, Collection<ColumnHandle>> updateCaseColumns, RetryMode retryMode)
     {
         DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        // DELETE, UPDATE and MERGE all come through here
+        verifyNoInlinedData(handle, "modifying rows");
         List<DuckLakeWriteColumn> writeColumns = DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId()));
         return new DuckLakeMergeTableHandle(
                 handle,
@@ -1202,6 +1211,7 @@ public class DuckLakeMetadata
     public Optional<ConnectorTableHandle> applyDelete(ConnectorSession session, ConnectorTableHandle handle)
     {
         DuckLakeTableHandle tableHandle = (DuckLakeTableHandle) handle;
+        verifyNoInlinedData(tableHandle, "deleting rows");
         // anything the connector cannot decide from the catalog alone needs the positions of the
         // rows that go, which the engine produces through a merge
         if (!tableHandle.unenforcedConstraint().isAll()) {
@@ -1217,6 +1227,7 @@ public class DuckLakeMetadata
     public OptionalLong executeDelete(ConnectorSession session, ConnectorTableHandle handle)
     {
         DuckLakeTableHandle tableHandle = (DuckLakeTableHandle) handle;
+        verifyNoInlinedData(tableHandle, "deleting rows");
         if (tableHandle.enforcedConstraint().isAll()) {
             return OptionalLong.of(commit(commit -> {
                 long removed = removeAllRows(commit, tableHandle.tableId());
@@ -1328,6 +1339,7 @@ public class DuckLakeMetadata
     public void truncateTable(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        verifyNoInlinedData(handle, "truncating it");
         commit(commit -> {
             removeAllRows(commit, handle.tableId());
             commit.recordDelete(handle.tableId());
@@ -1650,6 +1662,7 @@ public class DuckLakeMetadata
     public void setTableProperties(ConnectorSession session, ConnectorTableHandle tableHandle, Map<String, Optional<Object>> properties)
     {
         DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
+        verifyNoInlinedRows(handle, "changing its partitioning");
         Set<String> unsupported = properties.keySet().stream()
                 .filter(name -> !name.equals(DuckLakeTableProperties.PARTITIONING_PROPERTY))
                 .collect(toImmutableSet());
@@ -1707,7 +1720,9 @@ public class DuckLakeMetadata
             newUnenforcedConstraint = TupleDomain.all();
         }
         else {
-            Map<Long, DuckLakePartitionColumn> partitionColumns = enforceablePartitionColumns(handle);
+            // Inlined rows carry no partition values to prune by, so while the table holds any, no
+            // predicate is enforced and the engine filters every row.
+            Map<Long, DuckLakePartitionColumn> partitionColumns = inlinedSummary(handle).hasRows() ? ImmutableMap.of() : enforceablePartitionColumns(handle);
             ImmutableMap.Builder<DuckLakeColumnHandle, Domain> enforceableDomains = ImmutableMap.builder();
             ImmutableMap.Builder<DuckLakeColumnHandle, Domain> unenforceableDomains = ImmutableMap.builder();
             for (Map.Entry<DuckLakeColumnHandle, Domain> entry : predicate.getDomains().orElseThrow().entrySet()) {
@@ -1873,6 +1888,56 @@ public class DuckLakeMetadata
                 && !aggregate.isDistinct()
                 && aggregate.getFilter().isEmpty()
                 && aggregate.getSortItems().isEmpty();
+    }
+
+    /**
+     * Whether the table holds anything stored inline in the catalog database in the handle's
+     * snapshot, read once per table and snapshot.
+     */
+    private DuckLakeInlinedSummary inlinedSummary(DuckLakeTableHandle handle)
+    {
+        return inlinedSummaries.computeIfAbsent(
+                new TableSnapshot(handle.tableId(), handle.snapshotId()),
+                key -> metastore.inlinedSummary(key.snapshotId(), key.tableId()));
+    }
+
+    private record TableSnapshot(long tableId, long snapshotId) {}
+
+    /**
+     * Refuses a statement that would change the rows of a table holding rows or deletions stored
+     * inline in the catalog database. Such a statement would neither see nor change them: a
+     * DELETE would leave the inlined rows in place, and an UPDATE would rewrite only the rows of
+     * data files.
+     */
+    private void verifyNoInlinedData(DuckLakeTableHandle handle, String operation)
+    {
+        DuckLakeInlinedSummary summary = inlinedSummary(handle);
+        if (summary.hasRows()) {
+            throw inlinedDataNotSupported(handle, "inlined data", operation);
+        }
+        if (summary.hasFileDeletions()) {
+            throw inlinedDataNotSupported(handle, "rows deleted inline", operation);
+        }
+    }
+
+    /**
+     * Refuses a change to the columns or layout of a table holding inlined rows. DuckDB keeps the
+     * inlined rows of every schema version of a table in a table of their own, which it creates as
+     * it changes the schema, and a change made here would not create one.
+     */
+    private void verifyNoInlinedRows(DuckLakeTableHandle handle, String operation)
+    {
+        if (inlinedSummary(handle).hasRows()) {
+            throw inlinedDataNotSupported(handle, "inlined data", operation);
+        }
+    }
+
+    private static TrinoException inlinedDataNotSupported(DuckLakeTableHandle handle, String what, String operation)
+    {
+        return new TrinoException(
+                DUCKLAKE_UNSUPPORTED_FEATURE,
+                "Table %s has %s stored in the DuckLake catalog database, and %s is not supported for such a table. Flush inlined data to Parquet with DuckDB first (CALL ducklake_flush_inlined_data(...))"
+                        .formatted(handle.schemaTableName(), what, operation));
     }
 
     /**

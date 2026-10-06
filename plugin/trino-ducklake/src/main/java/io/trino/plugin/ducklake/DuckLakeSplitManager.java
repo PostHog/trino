@@ -24,7 +24,9 @@ import io.trino.parquet.ParquetReaderOptions;
 import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.ducklake.metastore.DuckLakeDataFileEntry;
 import io.trino.plugin.ducklake.metastore.DuckLakeDeleteFileEntry;
+import io.trino.plugin.ducklake.metastore.DuckLakeDeletions;
 import io.trino.plugin.ducklake.metastore.DuckLakeFileColumnStats;
+import io.trino.plugin.ducklake.metastore.DuckLakeInlinedData;
 import io.trino.plugin.ducklake.metastore.DuckLakeNameMapping;
 import io.trino.plugin.ducklake.metastore.DuckLakePartitionColumn;
 import io.trino.plugin.ducklake.metastore.DuckLakePartitionInfo;
@@ -37,6 +39,7 @@ import io.trino.spi.SplitWeight;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
@@ -59,7 +62,9 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_CONCURRENT_MODIFICATION;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_FEATURE;
 import static io.trino.plugin.ducklake.DuckLakeSessionProperties.getMaxSplitSize;
@@ -77,6 +82,12 @@ public class DuckLakeSplitManager
      * query over many tiny files still schedules a bounded number of splits per node.
      */
     private static final double MINIMUM_ASSIGNED_SPLIT_WEIGHT = 0.05;
+    /**
+     * Listings taken before a scan gives up on a table whose inlined rows keep being flushed while
+     * its splits are listed. A flush takes far longer than a listing, so a second attempt is
+     * normally enough.
+     */
+    private static final int MAX_LISTING_ATTEMPTS = 3;
 
     private final JdbcDuckLakeMetastore metastore;
     private final TrinoFileSystemFactory fileSystemFactory;
@@ -124,11 +135,56 @@ public class DuckLakeSplitManager
             return new FixedSplitSource(ImmutableList.of());
         }
         Map<DuckLakeColumnHandle, Domain> domains = effectivePredicate.getDomains().orElseThrow();
+
+        // DuckDB moves inlined rows into data files by deleting them from the catalog database and
+        // registering the files under the snapshots the rows were written in, so a flush landing
+        // while the splits are listed can make the listing see the rows in neither place, or the
+        // deletions of a flushed row in neither. Such a listing is discarded and taken again.
+        for (int attempt = 1; ; attempt++) {
+            Listing listing = listSplits(session, handle, domains);
+            if (listing.inlinedWatermark().isEmpty() || !metastore.inlinedDataFlushedAfter(handle.tableId(), listing.inlinedWatermark().orElseThrow())) {
+                return listing.splitSource();
+            }
+            listing.splitSource().close();
+            if (attempt == MAX_LISTING_ATTEMPTS) {
+                throw new TrinoException(DUCKLAKE_CONCURRENT_MODIFICATION, "Inlined data of table %s was flushed to Parquet files while the query was planned, %s times in a row; run the query again".formatted(handle.schemaTableName(), attempt));
+            }
+        }
+    }
+
+    /**
+     * The splits of a table, and, when the table may hold inlined rows, the newest snapshot of the
+     * catalog when they were looked for.
+     */
+    private record Listing(ConnectorSplitSource splitSource, OptionalLong inlinedWatermark) {}
+
+    private Listing listSplits(ConnectorSession session, DuckLakeTableHandle handle, Map<DuckLakeColumnHandle, Domain> domains)
+    {
         Set<DuckLakeColumnHandle> enforcedColumns = handle.enforcedConstraint().getDomains()
                 .map(Map::keySet)
                 .orElse(Set.of());
 
-        Map<Long, DuckLakeDeleteFileEntry> deleteFilesByDataFileId = deleteFilesByDataFileId(handle);
+        // the inlined rows are listed first, so that a flush that moves them into data files after
+        // this point is one the check in getSplits sees
+        DuckLakeInlinedData inlinedData = metastore.inlinedData(handle.snapshotId(), handle.tableId());
+        List<ConnectorSplit> inlinedSplits = inlinedData.tables().stream()
+                .map(inlinedTable -> (ConnectorSplit) new DuckLakeInlinedSplit(
+                        handle.schemaName(),
+                        handle.tableName(),
+                        handle.tableId(),
+                        handle.snapshotId(),
+                        inlinedData.watermarkSnapshotId(),
+                        inlinedTable.tableName(),
+                        inlinedTable.columns()))
+                .collect(toImmutableList());
+        if (!inlinedSplits.isEmpty() && !enforcedColumns.isEmpty()) {
+            // inlined rows carry no partition values, so nothing can have been enforced by pruning
+            throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Table %s holds inlined rows, but a partition predicate was enforced".formatted(handle.schemaTableName()));
+        }
+        OptionalLong inlinedWatermark = metastore.inlinedDataSupported() ? OptionalLong.of(inlinedData.watermarkSnapshotId()) : OptionalLong.empty();
+
+        DuckLakeDeletions deletions = metastore.deletions(handle.snapshotId(), handle.tableId());
+        Map<Long, DuckLakeDeleteFileEntry> deleteFilesByDataFileId = deleteFilesByDataFileId(handle, deletions.deleteFiles());
 
         Optional<DuckLakePartitionInfo> partitionInfo = Optional.empty();
         ListMultimap<Long, DuckLakePartitionColumn> transformsByColumnId = ArrayListMultimap.create();
@@ -170,6 +226,8 @@ public class DuckLakeSplitManager
                             entry.footerSize(),
                             entry.deleteCount()));
             long recordCount = dataFile.recordCount() - deleteFile.map(DuckLakeDeleteFileHandle::deleteCount).orElse(0L);
+            Optional<DuckLakeInlinedDeletions> inlinedDeletions = Optional.ofNullable(deletions.inlinedDeletions().get(dataFile.dataFileId()))
+                    .map(DuckLakeInlinedDeletions::new);
             String path = PathResolver.resolve(handle.tableLocation(), dataFile.path(), dataFile.pathIsRelative());
             Optional<DuckLakeNameMapping> nameMapping = Optional.empty();
             if (dataFile.mappingId().isPresent()) {
@@ -182,7 +240,8 @@ public class DuckLakeSplitManager
             }
             if (metadataOnly) {
                 // File pruning has enforced the remaining predicate. Keep exact catalog counts
-                // and avoid fetching any footer for a scan that needs no stored column.
+                // and avoid fetching any footer for a scan that needs no stored column. A file with
+                // rows deleted inline has no exact count, and its split reads which rows are left.
                 files.add(new DuckLakeSplit(
                         dataFile.dataFileId(),
                         path,
@@ -195,7 +254,10 @@ public class DuckLakeSplitManager
                         deleteFile,
                         dataFile.partitionValues(),
                         nameMapping,
-                        SplitWeight.standard()));
+                        SplitWeight.standard(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        inlinedDeletions));
                 continue;
             }
             files.add(new DuckLakeSplit(
@@ -210,14 +272,21 @@ public class DuckLakeSplitManager
                     deleteFile,
                     dataFile.partitionValues(),
                     nameMapping,
-                    SplitWeight.standard()));
+                    SplitWeight.standard(),
+                    Optional.empty(),
+                    Optional.empty(),
+                    inlinedDeletions));
         }
         List<DuckLakeSplit> retainedFiles = files.build();
         if (metadataOnly || retainedFiles.isEmpty()) {
-            return new FixedSplitSource(retainedFiles);
+            return new Listing(
+                    new FixedSplitSource(ImmutableList.<ConnectorSplit>builder().addAll(inlinedSplits).addAll(retainedFiles).build()),
+                    inlinedWatermark);
         }
         TrinoFileSystem fileSystem = fileSystemFactory.create(session);
-        return new DuckLakeSplitSource(retainedFiles, fileSystem, parquetReaderOptions, fileFormatDataSourceStats, maxSplitSize, affinityProvider, executor);
+        return new Listing(
+                new DuckLakeSplitSource(retainedFiles, inlinedSplits, fileSystem, parquetReaderOptions, fileFormatDataSourceStats, maxSplitSize, affinityProvider, executor),
+                inlinedWatermark);
     }
 
     static SplitWeight splitWeight(long length, long maxSplitSize)
@@ -238,10 +307,10 @@ public class DuckLakeSplitManager
         return metastore.nameMappings(mappingIds);
     }
 
-    private Map<Long, DuckLakeDeleteFileEntry> deleteFilesByDataFileId(DuckLakeTableHandle handle)
+    private static Map<Long, DuckLakeDeleteFileEntry> deleteFilesByDataFileId(DuckLakeTableHandle handle, List<DuckLakeDeleteFileEntry> deleteFiles)
     {
         Map<Long, DuckLakeDeleteFileEntry> deleteFilesByDataFileId = new HashMap<>();
-        for (DuckLakeDeleteFileEntry deleteFile : metastore.deleteFiles(handle.snapshotId(), handle.tableId())) {
+        for (DuckLakeDeleteFileEntry deleteFile : deleteFiles) {
             validateDeleteFile(handle, deleteFile);
             if (deleteFilesByDataFileId.putIfAbsent(deleteFile.dataFileId(), deleteFile) != null) {
                 throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Multiple delete files are visible for data file %s of table %s".formatted(deleteFile.dataFileId(), handle.schemaTableName()));
@@ -379,6 +448,12 @@ public class DuckLakeSplitManager
         }
         if (deleteFile.encryptionKey().isPresent()) {
             throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Delete file %s of table %s is encrypted, which is not supported".formatted(deleteFile.path(), handle.schemaTableName()));
+        }
+        // Like a partial data file, a delete file DuckDB wrote when it flushed deletions it had
+        // recorded inline tags each deletion with its snapshot, and applies in full only from the
+        // newest of them on. Applying it at an older snapshot would remove rows still visible there.
+        if (deleteFile.partialMax().isPresent() && deleteFile.partialMax().orElseThrow() > handle.snapshotId()) {
+            throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Delete file %s of table %s holds deletions newer than snapshot %s, which is not supported".formatted(deleteFile.path(), handle.schemaTableName(), handle.snapshotId()));
         }
     }
 }
