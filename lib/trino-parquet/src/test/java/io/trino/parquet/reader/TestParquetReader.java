@@ -51,6 +51,7 @@ import org.apache.parquet.example.data.Group;
 import org.apache.parquet.example.data.simple.SimpleGroupFactory;
 import org.apache.parquet.hadoop.ParquetWriter;
 import org.apache.parquet.hadoop.example.ExampleParquetWriter;
+import org.apache.parquet.hadoop.metadata.ColumnPath;
 import org.apache.parquet.io.LocalOutputFile;
 import org.apache.parquet.io.MessageColumnIO;
 import org.apache.parquet.schema.MessageType;
@@ -67,10 +68,12 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Random;
 import java.util.stream.IntStream;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -969,6 +972,60 @@ public class TestParquetReader
             testReadingOldParquetFiles(parquetFile, ImmutableList.of("repeatedInt"), INTEGER, expectedValues);
         }).hasMessage("Unsupported Trino column type (integer) for Parquet column ([repeatedint] repeated int32 repeatedint)")
                 .isInstanceOf(TrinoException.class);
+    }
+
+    @Test
+    public void testSeparatelyPlannedColumns()
+            throws IOException
+    {
+        // Columns a and c are small, and b holds about 100 KB, so the ranges of the three
+        // columns are adjacent, and the reader merges them into one read
+        List<String> names = ImmutableList.of("a", "b", "c");
+        List<Type> types = ImmutableList.of(VARCHAR, VARCHAR, VARCHAR);
+        Random random = new Random(42);
+        BlockBuilder a = VARCHAR.createBlockBuilder(null, 100);
+        BlockBuilder b = VARCHAR.createBlockBuilder(null, 100);
+        BlockBuilder c = VARCHAR.createBlockBuilder(null, 100);
+        for (int row = 0; row < 100; row++) {
+            VARCHAR.writeString(a, "a" + row);
+            byte[] bytes = new byte[1000];
+            random.nextBytes(bytes);
+            VARCHAR.writeString(b, Base64.getEncoder().encodeToString(bytes));
+            VARCHAR.writeString(c, "c" + row);
+        }
+        Block bValues = b.build();
+        Slice file = writeParquetFile(ParquetWriterOptions.builder().build(), types, names, ImmutableList.of(new Page(a.build(), bValues, c.build())));
+        ParquetMetadata metadata = MetadataReader.readFooter(new TestingParquetDataSource(file, ParquetReaderOptions.defaultOptions()), Optional.empty());
+        long aSize = metadata.getBlocks().getFirst().columns().get(0).getTotalSize();
+        long bSize = metadata.getBlocks().getFirst().columns().get(1).getTotalSize();
+        long cSize = metadata.getBlocks().getFirst().columns().get(2).getTotalSize();
+        assertThat(bSize).isGreaterThan(100_000);
+
+        // Without separate planning, reading a reads b and c too
+        TestingParquetDataSource merged = new TestingParquetDataSource(file, ParquetReaderOptions.defaultOptions());
+        try (ParquetReader reader = createParquetReader(merged, metadata, ParquetReaderOptions.defaultOptions(), newSimpleAggregatedMemoryContext(), types, names, TupleDomain.all(), false, UTC)) {
+            reader.nextPage().getBlock(0);
+            assertThat(merged.getReadBytes()).isEqualTo(aSize + bSize + cSize);
+        }
+
+        // A separately planned column that is not loaded is not read, and loading it reads only its own range
+        TestingParquetDataSource separate = new TestingParquetDataSource(file, ParquetReaderOptions.defaultOptions());
+        List<String> values = new ArrayList<>();
+        try (ParquetReader reader = createParquetReader(separate, metadata, ParquetReaderOptions.defaultOptions(), newSimpleAggregatedMemoryContext(), types, names, TupleDomain.all(), false, UTC, ImmutableSet.of(ColumnPath.get("b")))) {
+            SourcePage page = reader.nextPage();
+            page.getBlock(0);
+            page.getBlock(2);
+            assertThat(separate.getReadBytes()).isEqualTo(aSize + cSize);
+            for (; page != null; page = reader.nextPage()) {
+                Block block = page.getBlock(1);
+                for (int position = 0; position < block.getPositionCount(); position++) {
+                    values.add(VARCHAR.getSlice(block, position).toStringUtf8());
+                }
+            }
+            assertThat(separate.getReadBytes()).isEqualTo(aSize + bSize + cSize);
+        }
+        assertThat(values).hasSize(100);
+        assertThat(values.getLast()).isEqualTo(VARCHAR.getSlice(bValues, 99).toStringUtf8());
     }
 
     @Test
