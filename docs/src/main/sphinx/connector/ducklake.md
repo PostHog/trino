@@ -359,6 +359,7 @@ rows. Flush the inlined data with DuckDB first.
   in the file path (`ducklake_name_mapping.is_partition`), or maps the fields
   nested inside the column, fail. Other columns of such a table can be read.
 - Encrypted data files are not supported.
-- A data file or delete file that DuckDB flushed from inlined data and that
-  holds rows or deletions of a snapshot newer than the one a query reads fails
-  the query. This can happen when a flush lands while a query is planned.
+- A data file that DuckDB flushed from inlined data and that holds rows of a
+  snapshot newer than the one a query reads fails the query. This can happen
+  when a flush lands while a query is planned. Delete files are not affected:
+  as in DuckDB, a deletion they record for a newer snapshot is not applied.

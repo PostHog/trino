@@ -115,6 +115,11 @@ public class DuckLakePageSourceProvider
     private static final String MISSING_COLUMN_NAME_PREFIX = "$ducklake_missing_column$";
     private static final int LONG_OPEN_HASH_SET_INSTANCE_SIZE = instanceSize(LongOpenHashSet.class);
     /**
+     * The column of a delete file giving the snapshot each deletion was made in, which only some
+     * delete files have.
+     */
+    private static final String DELETE_FILE_SNAPSHOT_COLUMN = "_ducklake_internal_snapshot_id";
+    /**
      * Positions of a page produced for a scan that reads row counts only. A page of no columns
      * holds no data, so this only bounds the position count to an {@code int}.
      */
@@ -254,7 +259,7 @@ public class DuckLakePageSourceProvider
             // DuckDB may record a position in both, which the set absorbs.
             Supplier<LongOpenHashSet> deletedPositions = Suppliers.memoize(() -> {
                 LongOpenHashSet positions = deleteFile
-                        .map(file -> readDeletedPositions(fileSystem, file, splitMemoryContext, deletedPositionsMemoryContext, deleteFileReadStatistics))
+                        .map(file -> readDeletedPositions(fileSystem, file, tableHandle.snapshotId(), splitMemoryContext, deletedPositionsMemoryContext, deleteFileReadStatistics))
                         .orElseGet(LongOpenHashSet::new);
                 inlinedDeletions.ifPresent(deletions -> {
                     for (int index = 0; index < deletions.size(); index++) {
@@ -360,8 +365,9 @@ public class DuckLakePageSourceProvider
      * reads;
      * <li>the split is a metadata-only whole-file split, whose record count is the exact number of
      * visible rows after deletes. A file with rows deleted inline in the catalog database never is
-     * one, because those deletions may repeat positions of its delete file, so its rows are counted
-     * by reading which of them are left.
+     * one, because those deletions may repeat positions of its delete file, and neither is one whose
+     * delete file may hold deletions newer than the snapshot read, which do not apply; the rows of
+     * such a file are counted by reading which of them are left.
      * </ul>
      */
     private static boolean isRowCountOnly(List<DuckLakeColumnHandle> columns, TupleDomain<DuckLakeColumnHandle> effectivePredicate, DuckLakeSplit split)
@@ -369,6 +375,7 @@ public class DuckLakePageSourceProvider
         return columns.isEmpty()
                 && effectivePredicate.isAll()
                 && split.inlinedDeletions().isEmpty()
+                && split.deleteFile().map(DuckLakeDeleteFileHandle::exactDeleteCount).orElse(true)
                 && split.rowGroupMetadata().isEmpty()
                 && split.start() == 0
                 && split.length() == split.fileSizeBytes();
@@ -588,10 +595,16 @@ public class DuckLakePageSourceProvider
      * from the single data file the delete file belongs to. The retained size of the loaded
      * positions is accounted in {@code deletedPositionsMemoryContext}, which stays open until
      * the enclosing page source is closed.
+     * <p>
+     * A delete file DuckDB wrote over an earlier one, or when it flushed inlined rows or
+     * deletions, also has a {@code _ducklake_internal_snapshot_id} column giving the snapshot each
+     * deletion was made in, and is registered from the oldest of them on. As in DuckDB, a deletion
+     * of a snapshot newer than the one read does not apply.
      */
     private LongOpenHashSet readDeletedPositions(
             TrinoFileSystem fileSystem,
             DuckLakeDeleteFileHandle deleteFile,
+            long snapshotId,
             AggregatedMemoryContext memoryContext,
             LocalMemoryContext deletedPositionsMemoryContext,
             DeleteFileReadStatistics readStatistics)
@@ -599,6 +612,15 @@ public class DuckLakePageSourceProvider
         HiveColumnHandle positionColumn = new HiveColumnHandle(
                 "pos",
                 0,
+                DuckLakeTypes.toHiveType(BIGINT),
+                BIGINT,
+                Optional.empty(),
+                HiveColumnHandle.ColumnType.REGULAR,
+                Optional.empty());
+        // read by name, so that it reads as NULL in a delete file without it
+        HiveColumnHandle snapshotColumn = new HiveColumnHandle(
+                DELETE_FILE_SNAPSHOT_COLUMN,
+                1,
                 DuckLakeTypes.toHiveType(BIGINT),
                 BIGINT,
                 Optional.empty(),
@@ -614,7 +636,7 @@ public class DuckLakePageSourceProvider
                 inputFile,
                 0,
                 deleteFile.fileSizeBytes(),
-                ImmutableList.of(positionColumn),
+                ImmutableList.of(positionColumn, snapshotColumn),
                 ImmutableList.of(TupleDomain.all()),
                 true, // resolve columns by name
                 DateTimeZone.UTC,
@@ -632,9 +654,13 @@ public class DuckLakePageSourceProvider
                         continue;
                     }
                     Block block = page.getBlock(0);
+                    Block snapshots = page.getBlock(1);
                     for (int position = 0; position < block.getPositionCount(); position++) {
                         if (block.isNull(position)) {
                             throw new TrinoException(DUCKLAKE_BAD_DATA, "Delete file %s contains a null position".formatted(deleteFile.path()));
+                        }
+                        if (!snapshots.isNull(position) && BIGINT.getLong(snapshots, position) > snapshotId) {
+                            continue;
                         }
                         deletedPositions.add(BIGINT.getLong(block, position));
                     }
@@ -653,7 +679,7 @@ public class DuckLakePageSourceProvider
             readerMemoryContext.close();
         }
         if (rowCount != deleteFile.deleteCount()) {
-            // guards against delete files whose rows are only partially visible at the snapshot
+            // guards against a delete file that does not match its catalog entry
             throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Delete file %s contains %s positions but the catalog records %s deleted rows".formatted(deleteFile.path(), rowCount, deleteFile.deleteCount()));
         }
         deletedPositionsMemoryContext.setBytes(estimatedRetainedSizeOfLongSet(deletedPositions.size()));

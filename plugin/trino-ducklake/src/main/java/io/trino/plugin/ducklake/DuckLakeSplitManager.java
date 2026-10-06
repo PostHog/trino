@@ -224,7 +224,8 @@ public class DuckLakeSplitManager
                             PathResolver.resolve(handle.tableLocation(), entry.path(), entry.pathIsRelative()),
                             entry.fileSizeBytes(),
                             entry.footerSize(),
-                            entry.deleteCount()));
+                            entry.deleteCount(),
+                            !mayHoldNewerDeletions(handle, dataFile, entry)));
             long recordCount = dataFile.recordCount() - deleteFile.map(DuckLakeDeleteFileHandle::deleteCount).orElse(0L);
             Optional<DuckLakeInlinedDeletions> inlinedDeletions = Optional.ofNullable(deletions.inlinedDeletions().get(dataFile.dataFileId()))
                     .map(DuckLakeInlinedDeletions::new);
@@ -449,11 +450,23 @@ public class DuckLakeSplitManager
         if (deleteFile.encryptionKey().isPresent()) {
             throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Delete file %s of table %s is encrypted, which is not supported".formatted(deleteFile.path(), handle.schemaTableName()));
         }
-        // Like a partial data file, a delete file DuckDB wrote when it flushed deletions it had
-        // recorded inline tags each deletion with its snapshot, and applies in full only from the
-        // newest of them on. Applying it at an older snapshot would remove rows still visible there.
-        if (deleteFile.partialMax().isPresent() && deleteFile.partialMax().orElseThrow() > handle.snapshotId()) {
-            throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Delete file %s of table %s holds deletions newer than snapshot %s, which is not supported".formatted(deleteFile.path(), handle.schemaTableName(), handle.snapshotId()));
+    }
+
+    /**
+     * Whether a delete file may hold deletions of snapshots newer than the one read. DuckDB tags
+     * each deletion with the snapshot that made it when it writes a delete file over an existing
+     * one or flushes inlined deletions or inlined rows, and registers that file from the oldest of
+     * those snapshots on, replacing the file it merged. The page source applies only the deletions
+     * of the snapshot read and older ones, like DuckDB, so the catalog's delete count of such a
+     * file overstates the rows it removes. DuckDB records the newest snapshot of the file as its
+     * partial_max, except for the delete file it writes when it flushes inlined rows, which belongs
+     * to a data file of that flush, the only kind of data file with a partial_max.
+     */
+    private static boolean mayHoldNewerDeletions(DuckLakeTableHandle handle, DuckLakeDataFileEntry dataFile, DuckLakeDeleteFileEntry deleteFile)
+    {
+        if (deleteFile.partialMax().isPresent()) {
+            return deleteFile.partialMax().orElseThrow() > handle.snapshotId();
         }
+        return dataFile.partialMax().isPresent();
     }
 }

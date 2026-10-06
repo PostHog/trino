@@ -211,7 +211,28 @@ final class TestDuckLakeInlinedData
                 "INSERT INTO inlined_flushed VALUES (3, 'three')",
 
                 "CREATE TABLE inlined_race (id INTEGER)",
-                "INSERT INTO inlined_race VALUES (1), (2)");
+                "INSERT INTO inlined_race VALUES (1), (2)",
+
+                // flushed by a test as another table than the one it reads
+                "CREATE TABLE inlined_other (id INTEGER)",
+                "INSERT INTO inlined_other VALUES (1)",
+
+                // read to pin the snapshot of a transaction; never changed
+                "CREATE TABLE snapshot_pin (id INTEGER)",
+                "INSERT INTO snapshot_pin VALUES (1), (2), (3)",
+
+                "CREATE TABLE inlined_dropped (id INTEGER)",
+                "INSERT INTO inlined_dropped VALUES (1), (2)",
+
+                // flushed by a test while a transaction reads an older snapshot
+                "CREATE TABLE inlined_flushed_deletes (id INTEGER)",
+                "INSERT INTO inlined_flushed_deletes VALUES (1), (2), (3), (4), (5)",
+                "DELETE FROM inlined_flushed_deletes WHERE id = 2",
+
+                // a delete file DuckDB replaces by a later DELETE of more rows than it inlines
+                "CREATE TABLE merged_deletes (i INTEGER)",
+                "INSERT INTO merged_deletes SELECT range FROM range(0, 100)",
+                "DELETE FROM merged_deletes WHERE i < 20");
     }
 
     @Test
@@ -511,7 +532,7 @@ final class TestDuckLakeInlinedData
         }
 
         // a flush of another table is no reason to fail
-        catalog.executeInDuckDb("CALL ducklake_flush_inlined_data('lake', table_name => 'inlined_only')");
+        catalog.executeInDuckDb("CALL ducklake_flush_inlined_data('lake', table_name => 'inlined_other')");
         assertThat(metastore.inlinedDataFlushedAfter(tableId, inlinedData.watermarkSnapshotId())).isFalse();
 
         catalog.executeInDuckDb("CALL ducklake_flush_inlined_data('lake', table_name => 'inlined_race')");
@@ -522,7 +543,87 @@ final class TestDuckLakeInlinedData
 
         // a listing taken after the flush finds the rows in the data file, and reads them
         assertQuery("SELECT id FROM inlined_race", "VALUES 1, 2");
-        assertQuery("SELECT id, v FROM inlined_only", "VALUES (1, 'one'), (2, 'two'), (3, NULL)");
+        assertQuery("SELECT id FROM inlined_other", "VALUES 1");
+    }
+
+    /**
+     * A flush that drops an inlined data table after its rows were listed leaves them visible in
+     * the snapshot of the reading transaction, but the table cannot be read any more. The read
+     * fails rather than return no rows, and a count from the catalog is not trusted.
+     */
+    @Test
+    void testInlinedTableDroppedAfterListing()
+            throws SQLException
+    {
+        JdbcDuckLakeMetastore metastore = newMetastore();
+        long tableId = tableId("inlined_dropped");
+        long snapshotId = metastore.currentSnapshotId();
+        DuckLakeInlinedData inlinedData = metastore.inlinedData(snapshotId, tableId);
+        assertThat(inlinedData.tables()).hasSize(1);
+        String inlinedTable = inlinedData.tables().getFirst().tableName();
+        List<String> columns = ImmutableList.of(inlinedData.tables().getFirst().columns().getFirst().name());
+        assertThat(metastore.rowCount(snapshotId, tableId).exact()).isTrue();
+
+        // what a drop committed after the read began looks like to the lookup of the table
+        executeInMetastore("DROP TABLE %s".formatted(inlinedTable));
+
+        assertThatThrownBy(() -> metastore.openInlinedRows(tableId, snapshotId, inlinedData.watermarkSnapshotId(), inlinedTable, columns, 10).close())
+                .isInstanceOfSatisfying(TrinoException.class, e -> assertThat(e.getErrorCode()).isEqualTo(DUCKLAKE_CONCURRENT_MODIFICATION.toErrorCode()))
+                .hasMessageContaining("was dropped while the query was reading it");
+        assertThat(metastore.rowCount(snapshotId, tableId).exact()).isFalse();
+    }
+
+    /**
+     * DuckDB flushes inlined rows into a data file together with a delete file holding the
+     * deletions of those rows, each tagged with the snapshot that made it, and registers the delete
+     * file from the oldest of them on. A reader of an older snapshot applies only the deletions it
+     * can see, like DuckDB.
+     */
+    @Test
+    void testFlushedDeletionsNewerThanTheSnapshotAreNotApplied()
+    {
+        inTransaction(session -> {
+            // the transaction reads the snapshot current when it first reads the catalog
+            assertQuery(session, "SELECT id FROM snapshot_pin", "VALUES 1, 2, 3");
+            try {
+                catalog.executeInDuckDb(
+                        "DELETE FROM inlined_flushed_deletes WHERE id = 4",
+                        "CALL ducklake_flush_inlined_data('lake', table_name => 'inlined_flushed_deletes')");
+                assertThat(metastoreLong("SELECT count(*) FROM ducklake_data_file WHERE table_id = %s".formatted(tableId("inlined_flushed_deletes")))).isEqualTo(1);
+            }
+            catch (SQLException e) {
+                throw new RuntimeException(e);
+            }
+            assertQuery(session, "SELECT id FROM inlined_flushed_deletes", "VALUES 1, 3, 4, 5");
+            assertQuery(session, "SELECT count(*) FROM inlined_flushed_deletes", "VALUES 4");
+        });
+        assertQuery("SELECT id FROM inlined_flushed_deletes", "VALUES 1, 3, 5");
+        assertQuery("SELECT count(*) FROM inlined_flushed_deletes", "VALUES 3");
+    }
+
+    /**
+     * A DELETE of a data file that already has a delete file writes one holding both, each
+     * deletion tagged with its snapshot and the file registered from the oldest of them on, and
+     * removes the old one from the catalog. A reader of a snapshot older than the second DELETE
+     * reads the new file and applies only the deletions of the first.
+     */
+    @Test
+    void testMergedDeletionsNewerThanTheSnapshotAreNotApplied()
+    {
+        inTransaction(session -> {
+            assertQuery(session, "SELECT id FROM snapshot_pin", "VALUES 1, 2, 3");
+            try {
+                catalog.executeInDuckDb("DELETE FROM merged_deletes WHERE i >= 20 AND i < 40");
+                assertThat(metastoreLong("SELECT count(*) FROM ducklake_delete_file WHERE table_id = %s".formatted(tableId("merged_deletes")))).isEqualTo(1);
+            }
+            catch (SQLException e) {
+                throw new RuntimeException(e);
+            }
+            assertQuery(session, "SELECT count(*) FROM merged_deletes", "VALUES 80");
+            assertQuery(session, "SELECT min(i), max(i), sum(i) FROM merged_deletes", "VALUES (20, 99, 4760)");
+        });
+        assertQuery("SELECT count(*) FROM merged_deletes", "VALUES 60");
+        assertQuery("SELECT min(i), max(i), sum(i) FROM merged_deletes", "VALUES (40, 99, 4170)");
     }
 
     private JdbcDuckLakeMetastore newMetastore()
@@ -545,6 +646,15 @@ final class TestDuckLakeInlinedData
             throws SQLException
     {
         return metastoreLong("SELECT table_id FROM ducklake_table WHERE table_name = '%s' AND end_snapshot IS NULL".formatted(tableName));
+    }
+
+    private void executeInMetastore(@Language("SQL") String sql)
+            throws SQLException
+    {
+        try (Connection connection = DriverManager.getConnection(catalog.jdbcUrl(), USER, PASSWORD);
+                Statement statement = connection.createStatement()) {
+            statement.execute(sql);
+        }
     }
 
     private long metastoreLong(@Language("SQL") String sql)

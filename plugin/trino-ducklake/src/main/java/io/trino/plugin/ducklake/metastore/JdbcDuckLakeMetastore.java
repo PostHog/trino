@@ -19,7 +19,6 @@ import com.google.inject.Inject;
 import io.trino.plugin.ducklake.DuckLakeConfig;
 import io.trino.spi.TrinoException;
 import it.unimi.dsi.fastutil.longs.LongArrayList;
-import jakarta.annotation.Nullable;
 import org.jdbi.v3.core.ConnectionFactory;
 import org.jdbi.v3.core.Handle;
 import org.jdbi.v3.core.Jdbi;
@@ -436,10 +435,11 @@ public class JdbcDuckLakeMetastore
      * Returns the number of rows of a table in a snapshot, computed from the catalog alone. The
      * result also says whether that number is exactly what a scan of the table would return, which
      * is what lets a {@code count(*)} be answered from it. It is not exact when the table holds a
-     * file the connector refuses to read, a data or delete file only partly visible in the
-     * snapshot, or rows of a data file deleted inline, whose deletions may repeat those of a delete
-     * file; all are conditions the split manager checks per file, and reporting them here keeps a
-     * {@code count(*)} failing wherever a scan would fail.
+     * file the connector refuses to read, a data file only partly visible in the snapshot, a delete
+     * file that may hold deletions newer than the snapshot, or rows of a data file deleted inline,
+     * whose deletions may repeat those of a delete file. The split manager and the page source
+     * check the same conditions per file, and reporting them here keeps a {@code count(*)} failing
+     * wherever a scan would fail and counting rows wherever a scan would.
      * <p>
      * Rows stored inline in the catalog database are counted too. Everything is read in one
      * transaction, because DuckDB moves inlined rows into Parquet files by deleting them from the
@@ -458,12 +458,24 @@ public class JdbcDuckLakeMetastore
         if (dataFileHasPartialMax()) {
             partiallyVisibleCondition = "(f.partial_max IS NOT NULL AND f.partial_max > :snapshot)";
         }
-        String partiallyVisibleDeleteCondition = "1 = 0";
+        // A delete file that tags each deletion with the snapshot that made it applies only the
+        // deletions of the snapshot read and older ones, so its delete count overstates the rows it
+        // removes in an older snapshot. DuckDB records the newest of those snapshots as the delete
+        // file's partial_max, except in the delete file it writes when it flushes inlined rows,
+        // which belongs to a data file written by the same flush, the only kind of data file that
+        // has a partial_max.
+        String newerDeletionsCondition = "1 = 0";
         if (deleteFileHasPartialMax()) {
-            partiallyVisibleDeleteCondition = "(d.partial_max IS NOT NULL AND d.partial_max > :snapshot)";
+            newerDeletionsCondition = "(d.partial_max IS NOT NULL AND d.partial_max > :snapshot)";
+        }
+        if (dataFileHasPartialMax()) {
+            newerDeletionsCondition = "(%s OR (%sEXISTS (SELECT 1 FROM %s g WHERE g.data_file_id = d.data_file_id AND g.partial_max IS NOT NULL)))".formatted(
+                    newerDeletionsCondition,
+                    deleteFileHasPartialMax() ? "d.partial_max IS NULL AND " : "",
+                    table("ducklake_data_file"));
         }
         String dataFileCondition = partiallyVisibleCondition;
-        String deleteFileCondition = partiallyVisibleDeleteCondition;
+        String deleteFileCondition = newerDeletionsCondition;
         try {
             return jdbi.inTransaction(TransactionIsolationLevel.REPEATABLE_READ, handle -> {
                 DuckLakeRowCount dataFiles = handle.createQuery(
@@ -515,9 +527,19 @@ public class JdbcDuckLakeMetastore
                         .one();
 
                 long inlinedRows = 0;
+                // An inlined data table registered in this transaction's snapshot that no longer
+                // exists may have been dropped by a flush committed since, which the lookup of a
+                // table by name sees although the rows are still visible in the snapshot. Its rows
+                // cannot be counted, so the count is not exact and a scan, which notices the flush,
+                // counts instead.
+                boolean inlinedRowsCounted = true;
                 if (inlinedDataSupported) {
-                    for (String inlinedTableName : existingInlinedDataTableNames(handle, tableId)) {
-                        inlinedRows += handle.createQuery("SELECT count(*) FROM %s WHERE %s".formatted(table(inlinedTableName), VISIBLE))
+                    for (InlinedDataTableRegistration registration : inlinedDataTableRegistrations(handle, tableId)) {
+                        if (!relationExists(handle, registration.tableName())) {
+                            inlinedRowsCounted = false;
+                            continue;
+                        }
+                        inlinedRows += handle.createQuery("SELECT count(*) FROM %s WHERE %s".formatted(table(registration.tableName()), VISIBLE))
                                 .bind("snapshot", snapshotId)
                                 .mapTo(Long.class)
                                 .one();
@@ -530,7 +552,7 @@ public class JdbcDuckLakeMetastore
 
                 return new DuckLakeRowCount(
                         dataFiles.rowCount() - deleteFiles.rowCount() - inlinedDeletions + inlinedRows,
-                        dataFiles.exact() && deleteFiles.exact() && inlinedDeletions == 0);
+                        dataFiles.exact() && deleteFiles.exact() && inlinedDeletions == 0 && inlinedRowsCounted);
             });
         }
         catch (JdbiException e) {
@@ -1139,9 +1161,14 @@ public class JdbcDuckLakeMetastore
                         "Inlined data of DuckLake table %s was flushed to Parquet files while the query was reading it; run the query again".formatted(tableId));
             }
             if (!relationExists(handle, inlinedTableName)) {
-                // registered but gone: DuckDB drops an inlined data table only once it is empty
-                closeQuietly(handle);
-                return InlinedRows.EMPTY;
+                // The split exists because the table held rows visible in the snapshot when it was
+                // listed. DuckDB drops an inlined data table once it has emptied it, and the
+                // lookup of a table by name sees a drop committed after this transaction began
+                // although the rows themselves would still be visible in it. Returning no rows
+                // would silently lose them.
+                throw new TrinoException(
+                        DUCKLAKE_CONCURRENT_MODIFICATION,
+                        "Inlined data table %s of DuckLake table %s was dropped while the query was reading it; run the query again".formatted(inlinedTableName, tableId));
             }
             String projection = columnNames.isEmpty()
                     ? "1"
@@ -1192,20 +1219,15 @@ public class JdbcDuckLakeMetastore
     public static final class InlinedRows
             implements AutoCloseable
     {
-        static final InlinedRows EMPTY = new InlinedRows(null, null, null);
-
-        @Nullable
         private final Handle handle;
-        @Nullable
         private final Statement statement;
-        @Nullable
         private final ResultSet resultSet;
 
-        private InlinedRows(@Nullable Handle handle, @Nullable Statement statement, @Nullable ResultSet resultSet)
+        private InlinedRows(Handle handle, Statement statement, ResultSet resultSet)
         {
-            this.handle = handle;
-            this.statement = statement;
-            this.resultSet = resultSet;
+            this.handle = requireNonNull(handle, "handle is null");
+            this.statement = requireNonNull(statement, "statement is null");
+            this.resultSet = requireNonNull(resultSet, "resultSet is null");
         }
 
         /**
@@ -1214,7 +1236,7 @@ public class JdbcDuckLakeMetastore
         public boolean next()
                 throws SQLException
         {
-            return resultSet != null && resultSet.next();
+            return resultSet.next();
         }
 
         /**
@@ -1222,20 +1244,15 @@ public class JdbcDuckLakeMetastore
          */
         public ResultSet row()
         {
-            return requireNonNull(resultSet, "no rows");
+            return resultSet;
         }
 
         @Override
         public void close()
         {
-            if (handle == null) {
-                return;
-            }
             try {
-                if (statement != null) {
-                    // closing the statement closes its result set
-                    statement.close();
-                }
+                // closing the statement closes its result set
+                statement.close();
             }
             catch (SQLException _) {
                 // the transaction is rolled back below, which releases whatever the statement held
