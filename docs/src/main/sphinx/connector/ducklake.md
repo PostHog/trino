@@ -302,6 +302,37 @@ it. As in DuckDB, the table that takes the name is a new table. Nothing of the
 old one carries over, so a comment or a `partitioning` property that the new
 definition does not state is gone.
 
+## Inlined data
+
+A DuckDB writer with `data_inlining_row_limit` set stores the rows of a small
+insert in the catalog database rather than in a Parquet file, and records the
+deletion of a few rows of a data file there rather than in a delete file. It
+moves both into files later, with `ducklake_flush_inlined_data`. The connector
+reads inlined rows along with the data files, at the same snapshot, and applies
+inlined deletions along with the delete files:
+
+- Inlined rows are read by the workers from the catalog database, one split per
+  inlined data table. Every predicate on a table holding inlined rows is
+  applied by the engine, since inlined rows carry no partition values to prune
+  by.
+- Columns added, dropped, renamed, or widened since the rows were inlined read
+  as they do in DuckDB: an added column is `NULL`, and the values of a renamed
+  column follow it.
+- Values of nested types (`ARRAY`, `MAP`, and `ROW`) are stored as text DuckDB
+  writes, which the connector does not read; a query reading such a column of an
+  inlined row that is not `NULL` fails. So does an inlined `infinity` or
+  `-infinity` date or timestamp, which Trino cannot represent.
+- `SELECT count(*)` still answers from the catalog, counting the inlined rows,
+  unless rows of a data file were deleted inline.
+- A flush committed while a query reads the inlined rows fails the query,
+  rather than letting it miss the rows that moved; run it again.
+
+`INSERT`, `DROP TABLE`, `ALTER TABLE ... RENAME TO`, and `COMMENT` work on such
+a table. `DELETE`, `UPDATE`, `MERGE`, and `TRUNCATE` fail on a table holding
+inlined rows or inlined deletions, because they would not see or change them,
+and so do changes to the columns or the partitioning of a table holding inlined
+rows. Flush the inlined data with DuckDB first.
+
 ## Limitations
 
 - Each query reads at the latest catalog snapshot committed when the query
@@ -327,4 +358,7 @@ definition does not state is gone.
 - Queries on a column whose name mapping reads the values from a Hive partition
   in the file path (`ducklake_name_mapping.is_partition`), or maps the fields
   nested inside the column, fail. Other columns of such a table can be read.
-- Encrypted data files and inlined data are not supported.
+- Encrypted data files are not supported.
+- A data file or delete file that DuckDB flushed from inlined data and that
+  holds rows or deletions of a snapshot newer than the one a query reads fails
+  the query. This can happen when a flush lands while a query is planned.
