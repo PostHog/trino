@@ -14,6 +14,7 @@
 package io.trino.plugin.hoglake;
 
 import com.sun.net.httpserver.HttpServer;
+import io.trino.Session;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
@@ -27,6 +28,7 @@ import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.session.PropertyMetadata;
 import io.trino.spi.transaction.IsolationLevel;
 import io.trino.spi.variant.Variant;
 import io.trino.testing.MaterializedRow;
@@ -154,6 +156,12 @@ final class TestHoglakeVariantPushdown
                         {
                             @Override
                             public void shutdown() {}
+
+                            @Override
+                            public List<PropertyMetadata<?>> getSessionProperties()
+                            {
+                                return new HoglakeSessionProperties(new HoglakeConfig()).getSessionProperties();
+                            }
 
                             @Override
                             public ConnectorTransactionHandle beginTransaction(IsolationLevel isolationLevel, boolean readOnly, boolean autoCommit)
@@ -350,6 +358,30 @@ final class TestHoglakeVariantPushdown
     }
 
     @Test
+    void pathAssemblyGivesTheSameResults()
+    {
+        Session disabled = Session.builder(queryRunner.getDefaultSession())
+                .setCatalogSessionProperty("hoglake", "variant_path_assembly_enabled", "false")
+                .build();
+        List<String> queries = List.of(
+                "SELECT CAST(v['$Browser'] AS varchar) AS browser, count(*) FROM events WHERE CAST(v['$Browser'] AS varchar) IS NOT NULL GROUP BY 1",
+                "SELECT id FROM events WHERE CAST(v['$Browser'] AS varchar) = 'Chrome'",
+                "SELECT id, CAST(v['a'] AS varchar), v['missing'] IS NULL FROM events",
+                "SELECT id, CAST(v['a'] AS varchar) FROM mixed WHERE id = 0",
+                "SELECT id, v FROM events");
+        for (String query : queries) {
+            assertThat(rows(query)).as(query).containsExactlyInAnyOrderElementsOf(rows(disabled, query));
+        }
+        // The same errors, for the first row of each table
+        for (Session session : List.of(queryRunner.getDefaultSession(), disabled)) {
+            assertThatThrownBy(() -> queryRunner.execute(session, "SELECT v['a'] FROM mixed"))
+                    .hasMessageContaining("VARIANT value is int32, not an object");
+            assertThatThrownBy(() -> queryRunner.execute(session, "SELECT v['a']['b'] FROM events WHERE id = 0"))
+                    .hasMessageContaining("VARIANT value is int64, not an object");
+        }
+    }
+
+    @Test
     void countIsNotAffected()
     {
         assertThat(rows("SELECT count(*) FROM events")).containsExactly(List.of(3L));
@@ -362,7 +394,12 @@ final class TestHoglakeVariantPushdown
 
     private List<List<Object>> rows(String query)
     {
-        return queryRunner.execute(query).getMaterializedRows().stream()
+        return rows(queryRunner.getDefaultSession(), query);
+    }
+
+    private List<List<Object>> rows(Session session, String query)
+    {
+        return queryRunner.execute(session, query).getMaterializedRows().stream()
                 .map(MaterializedRow::getFields)
                 .toList();
     }

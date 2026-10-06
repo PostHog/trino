@@ -26,6 +26,7 @@ the catalog's files.
 | `hoglake.client.request-timeout` | Positive request timeout, with `ms`, `s`, `m`, `h`, or `d` suffix. | `2m` |
 | `hoglake.max-split-size` | Largest byte range of one Parquet file assigned to a single split; at least `1MB`. See [](hoglake-split-planning). Use the `max_split_size` catalog session property to change it for a session. | `256MB` |
 | `hoglake.parquet-footer-cache.max-size` | Serialized size of the parsed Parquet footers each worker keeps for the catalog; `0B` disables the cache. See [](hoglake-split-planning). | `64MB` |
+| `hoglake.variant-path-assembly-enabled` | Build pushed-down `VARIANT` subscripts from the requested keys of each value, instead of from the whole value. See [](hoglake-variant). Use the `variant_path_assembly_enabled` catalog session property to change it for a session. | `true` |
 | `fs.s3.enabled` | Enable the native S3 filesystem. | `true` |
 | `s3.endpoint` | Optional S3-compatible endpoint. | AWS endpoint resolution |
 | `s3.region` | S3 region. | `us-east-1` |
@@ -100,6 +101,24 @@ are provided by the shared cache infrastructure.
 | `timestamp`, `timestamptz` | `TIMESTAMP(6)`, `TIMESTAMP(6) WITH TIME ZONE` |
 | `uuid` | `UUID` |
 | `decimal(p,s)` | `DECIMAL(p,s)` |
+
+(hoglake-variant)=
+### VARIANT
+
+A `variant` column is read as `VARIANT`, from shredded or unshredded Parquet
+VARIANT groups. DuckDB writes a SQL NULL as a variant null, so a top-level
+variant null in its files is read as NULL.
+
+Subscripts with constant keys and indexes on a `VARIANT` column, such as
+`CAST(v['$browser'] AS varchar)`, are pushed into the table scan. The scan reads
+only the shredded columns of those paths. It builds each value from the requested
+keys only: a shredded key is read from its column, and another key is found in the
+unshredded part of the object without decoding the rest. A subscript that reads an
+object or an array whole copies it whole. The results and errors of the subscripts
+are the same as for the whole value. The `hoglake.variant-path-assembly-enabled`
+configuration property, `true` by default, and the
+`variant_path_assembly_enabled` session property turn this off; the scan then
+builds whole values and reads all their columns.
 
 ## Row-level deletes
 

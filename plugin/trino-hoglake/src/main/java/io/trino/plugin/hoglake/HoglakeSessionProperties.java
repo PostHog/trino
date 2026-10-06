@@ -25,6 +25,7 @@ import java.util.List;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.plugin.base.session.PropertyMetadataUtil.dataSizeProperty;
 import static io.trino.plugin.base.session.PropertyMetadataUtil.validateMinDataSize;
+import static io.trino.spi.session.PropertyMetadata.booleanProperty;
 
 public class HoglakeSessionProperties
         implements SessionPropertiesProvider
@@ -32,6 +33,7 @@ public class HoglakeSessionProperties
     private static final DataSize MINIMUM_MAX_SPLIT_SIZE = DataSize.of(1, MEGABYTE);
 
     private static final String MAX_SPLIT_SIZE = "max_split_size";
+    private static final String VARIANT_PATH_ASSEMBLY_ENABLED = "variant_path_assembly_enabled";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
@@ -44,6 +46,11 @@ public class HoglakeSessionProperties
                         "Largest byte range of one Parquet file assigned to a single split",
                         config.getMaxSplitSize(),
                         value -> validateMinDataSize(MAX_SPLIT_SIZE, value, MINIMUM_MAX_SPLIT_SIZE),
+                        false),
+                booleanProperty(
+                        VARIANT_PATH_ASSEMBLY_ENABLED,
+                        "Build pushed-down VARIANT subscripts from the parts of each value that they read",
+                        config.isVariantPathAssemblyEnabled(),
                         false));
     }
 
@@ -56,5 +63,10 @@ public class HoglakeSessionProperties
     public static DataSize getMaxSplitSize(ConnectorSession session)
     {
         return session.getProperty(MAX_SPLIT_SIZE, DataSize.class);
+    }
+
+    public static boolean isVariantPathAssemblyEnabled(ConnectorSession session)
+    {
+        return session.getProperty(VARIANT_PATH_ASSEMBLY_ENABLED, Boolean.class);
     }
 }
