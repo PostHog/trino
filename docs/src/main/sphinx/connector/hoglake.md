@@ -27,6 +27,7 @@ the catalog's files.
 | `hoglake.max-split-size` | Largest byte range of one Parquet file assigned to a single split; at least `1MB`. See [](hoglake-split-planning). Use the `max_split_size` catalog session property to change it for a session. | `256MB` |
 | `hoglake.parquet-footer-cache.max-size` | Serialized size of the parsed Parquet footers each worker keeps for the catalog; `0B` disables the cache. See [](hoglake-split-planning). | `64MB` |
 | `hoglake.variant-path-assembly-enabled` | Build pushed-down `VARIANT` subscripts from the requested keys of each value, instead of from the whole value. See [](hoglake-variant). Use the `variant_path_assembly_enabled` catalog session property to change it for a session. | `true` |
+| `hoglake.variant-lazy-residual-enabled` | With `hoglake.variant-path-assembly-enabled`, read the top-level `metadata` and `value` columns of a shredded `VARIANT` only for the batches of rows that need them. See [](hoglake-variant). Use the `variant_lazy_residual_enabled` catalog session property to change it for a session. | `true` |
 | `fs.s3.enabled` | Enable the native S3 filesystem. | `true` |
 | `s3.endpoint` | Optional S3-compatible endpoint. | AWS endpoint resolution |
 | `s3.region` | S3 region. | `us-east-1` |
@@ -119,6 +120,13 @@ are the same as for the whole value. The `hoglake.variant-path-assembly-enabled`
 configuration property, `true` by default, and the
 `variant_path_assembly_enabled` session property turn this off; the scan then
 builds whole values and reads all their columns.
+
+The scan also reads the top-level `metadata` and `value` columns of a shredded
+`VARIANT` only for the batches of rows that need them: a row that is not an
+object, a key that is not shredded, or an object or array that a subscript reads
+whole. A query whose subscripts read only shredded keys of objects reads neither
+column. The `hoglake.variant-lazy-residual-enabled` configuration property, `true`
+by default, and the `variant_lazy_residual_enabled` session property turn this off.
 
 ## Row-level deletes
 
