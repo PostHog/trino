@@ -51,7 +51,6 @@ public final class VariantFieldRemapper
     }
 
     private final int[] fieldIdMapping;
-    private final int originalFieldIdEncodedWidth;
 
     private final Slice variant;
 
@@ -59,6 +58,7 @@ public final class VariantFieldRemapper
     private int size = -1;
 
     private Int2IntOpenHashMap containerSizeCache;
+    private boolean containerSizeChanged;
 
     public static VariantFieldRemapper create(Variant variant, Metadata.Builder metadataBuilder)
     {
@@ -77,22 +77,20 @@ public final class VariantFieldRemapper
         this.variant = requireNonNull(variant, "variant is null");
 
         this.fieldIdMapping = new int[0];
-        this.originalFieldIdEncodedWidth = -1;
         this.remapMode = RemapMode.NONE;
         this.size = variant.length();
     }
 
-    private VariantFieldRemapper(Slice variant, int[] fieldIdMapping, int originalFieldIdEncodedWidth)
+    private VariantFieldRemapper(Slice variant, int[] fieldIdMapping)
     {
         this.fieldIdMapping = requireNonNull(fieldIdMapping, "fieldIdMapping is null");
-        this.originalFieldIdEncodedWidth = originalFieldIdEncodedWidth;
         this.variant = requireNonNull(variant, "variant is null");
     }
 
     /// Finalizes the field remapping value by updating the provisional field IDs to final field IDs.
     /// The system creates a globally sorted metadata dictionary after all values have been planned,
     /// which may change the field IDs assigned during initial setup.
-    /// This method must be called before `size()` or `remapVariant()`.
+    /// This method must be called before `size()` or `write()`.
     // Note: This method can rely on the field IDs being assigned in ascending order for determining the write order of object fields.
     public void finalize(IntUnaryOperator remapFieldIds)
     {
@@ -116,27 +114,32 @@ public final class VariantFieldRemapper
         }
         if (identity) {
             remapMode = RemapMode.IDENTITY;
-        }
-        else if (originalFieldIdEncodedWidth == 1 && getOffsetSize(maxFieldId) == 1) {
-            // fast path where original and final field id encoded widths are both 1 byte
-            // this cannot be used if size is > 1, because an object inside the
-            // variant could have originally been encoded with a larger field offset size, and
-            // with the compacted metadata dictionary, the max field id could be smaller, allowing
-            // the field offset size to be reduced.
-            remapMode = RemapMode.SAME_SIZE;
-        }
-        else {
-            remapMode = RemapMode.RESIZE;
+            size = variant.length();
+            return;
         }
 
+        // set the mode first, so finalize() cannot be called again if the size calculation fails
+        remapMode = RemapMode.RESIZE;
+
         // compute size of remapped variant data
-        if (remapMode == RemapMode.IDENTITY) {
-            size = variant.length();
+        containerSizeCache = new Int2IntOpenHashMap(16);
+        size = calculateFullyRemappedSize(variant, 0, variant.length(), containerSizeCache);
+
+        if (getOffsetSize(maxFieldId) == 1 && !containerSizeChanged) {
+            // Fast path for 1-byte field IDs where every container keeps its size, so only the field IDs change.
+            // Remapped containers use the minimal sizes for field IDs, offsets, and counts, so a container
+            // changes size when its original field IDs need more than 1 byte, or when it was encoded with
+            // larger sizes than necessary, which the Variant encoding allows.
+            remapMode = RemapMode.SAME_SIZE;
+            // the container sizes are only needed to resize containers
+            containerSizeCache = null;
         }
-        else {
-            containerSizeCache = new Int2IntOpenHashMap(16);
-            size = calculateFullyRemappedSize(variant, 0, variant.length(), containerSizeCache);
-        }
+    }
+
+    // Visible for testing
+    boolean isSameSizeRemap()
+    {
+        return remapMode == RemapMode.SAME_SIZE;
     }
 
     /// Returns the size, in bytes, required to write the variant.
@@ -157,7 +160,7 @@ public final class VariantFieldRemapper
     public int write(Slice output, int outputOffset)
     {
         if (remapMode == null) {
-            throw new IllegalStateException("remapVariant() called before finalize()");
+            throw new IllegalStateException("write() called before finalize()");
         }
         checkFromIndexSize(outputOffset, size, output.length());
 
@@ -183,6 +186,7 @@ public final class VariantFieldRemapper
                 }
                 int arrayTotalSize = VariantEncoder.encodedArraySize(array.count(), totalChildrenLength);
                 containerSizeCache.putIfAbsent(offset, arrayTotalSize);
+                containerSizeChanged |= (arrayTotalSize != length);
                 yield arrayTotalSize;
             }
             case VariantDecoder.ObjectLayout object -> {
@@ -200,6 +204,7 @@ public final class VariantFieldRemapper
 
                 int objectTotalSize = VariantEncoder.encodedObjectSize(maxFieldId, object.count(), totalChildrenLength);
                 containerSizeCache.putIfAbsent(offset, objectTotalSize);
+                containerSizeChanged |= (objectTotalSize != length);
                 yield objectTotalSize;
             }
             case VariantDecoder.PrimitiveLayout _ -> length;
@@ -286,7 +291,6 @@ public final class VariantFieldRemapper
         private final Variant variant;
         private final Metadata.Builder metadataBuilder;
         private int[] variantFieldIdToProvisionalFieldId;
-        private int maxEnabledFieldId = -1;
         private int enabledFieldCount;
 
         private Builder(Variant variant, Metadata.Builder metadataBuilder)
@@ -315,9 +319,6 @@ public final class VariantFieldRemapper
             }
             if (variantFieldIdToProvisionalFieldId[variantFieldId] == -1) {
                 variantFieldIdToProvisionalFieldId[variantFieldId] = metadataBuilder.addFieldName(variant.metadata().get(variantFieldId));
-                if (variantFieldId > maxEnabledFieldId) {
-                    maxEnabledFieldId = variantFieldId;
-                }
                 enabledFieldCount++;
             }
         }
@@ -356,7 +357,7 @@ public final class VariantFieldRemapper
             if (variantFieldIdToProvisionalFieldId == null) {
                 return new VariantFieldRemapper(variant.data());
             }
-            return new VariantFieldRemapper(variant.data(), variantFieldIdToProvisionalFieldId, getOffsetSize(maxEnabledFieldId));
+            return new VariantFieldRemapper(variant.data(), variantFieldIdToProvisionalFieldId);
         }
     }
 }
