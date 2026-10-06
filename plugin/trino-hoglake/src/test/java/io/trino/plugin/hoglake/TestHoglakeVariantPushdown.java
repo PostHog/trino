@@ -31,6 +31,7 @@ import io.trino.spi.transaction.IsolationLevel;
 import io.trino.spi.variant.Variant;
 import io.trino.testing.MaterializedRow;
 import io.trino.testing.StandaloneQueryRunner;
+import org.apache.parquet.schema.GroupType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -47,8 +48,11 @@ import java.util.Optional;
 import static io.trino.plugin.hoglake.TestHoglakeShreddedVariant.METADATA;
 import static io.trino.plugin.hoglake.TestHoglakeShreddedVariant.row;
 import static io.trino.plugin.hoglake.TestHoglakeShreddedVariant.typedValue;
+import static io.trino.plugin.hoglake.TestHoglakeShreddedVariant.wideDuckDbObject;
+import static io.trino.plugin.hoglake.TestHoglakeShreddedVariant.wideObject;
 import static io.trino.plugin.hoglake.TestHoglakeShreddedVariant.write;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.VariantType.VARIANT;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
@@ -68,6 +72,7 @@ final class TestHoglakeVariantPushdown
 {
     private static final String EVENTS_PATH = "memory:///variant-pushdown-events.parquet";
     private static final String MIXED_PATH = "memory:///variant-pushdown-mixed.parquet";
+    private static final String WIDE_PATH = "memory:///variant-pushdown-wide.parquet";
 
     private HttpServer server;
     private HoglakeClient client;
@@ -92,7 +97,14 @@ final class TestHoglakeVariantPushdown
                         row(METADATA, null, typedValue(Variant.ofLong(1), "Chrome")),
                         row(METADATA, Variant.ofInt(42).data(), null)),
                 Optional.empty());
-        TrinoFileSystemFactory storage = ConnectorTestFixtures.memoryFileSystem(Map.of(EVENTS_PATH, events, MIXED_PATH, mixed));
+        // An unshredded column with the 70-key object as DuckDB writes it, and as Trino writes it
+        GroupType wideColumn = HoglakeParquetSchema.create(List.of(new HoglakeColumnHandle("v", 1, VARIANT, true))).messageType().getType(0).asGroupType();
+        byte[] wide = ConnectorTestFixtures.rewriteFooter(
+                ConnectorTestFixtures.writeParquet(List.of(
+                        new FileColumn(optional(INT64).id(2).named("id"), BIGINT, Arrays.asList(0L, 1L)),
+                        new FileColumn(wideColumn, VARIANT, Arrays.asList(wideDuckDbObject(), wideObject())))),
+                metadata -> metadata.setCreated_by("DuckDB version v1.5.5 (build d8cdaa33fd)"));
+        TrinoFileSystemFactory storage = ConnectorTestFixtures.memoryFileSystem(Map.of(EVENTS_PATH, events, MIXED_PATH, mixed, WIDE_PATH, wide));
         HoglakePageSourceProvider pageSources = new HoglakePageSourceProvider(storage);
 
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -103,9 +115,19 @@ final class TestHoglakeVariantPushdown
                 body = "{\"name\":\"lake\", \"head_snapshot_id\":7, \"schema_version\":1}";
             }
             else if (path.endsWith("/scan")) {
-                String file = path.contains("/mixed/") ? MIXED_PATH : EVENTS_PATH;
-                int size = path.contains("/mixed/") ? mixed.length : events.length;
-                int records = path.contains("/mixed/") ? 2 : 3;
+                String file = EVENTS_PATH;
+                int size = events.length;
+                int records = 3;
+                if (path.contains("/mixed/")) {
+                    file = MIXED_PATH;
+                    size = mixed.length;
+                    records = 2;
+                }
+                else if (path.contains("/wide/")) {
+                    file = WIDE_PATH;
+                    size = wide.length;
+                    records = 2;
+                }
                 body =
                         """
                         [{"data_file":{"data_file_id":1, "path":"%s", "record_count":%d, "file_size_bytes":%d,
@@ -347,6 +369,26 @@ final class TestHoglakeVariantPushdown
                 List.of("1", true),
                 List.of("one", true),
                 Arrays.asList(null, true));
+    }
+
+    @Test
+    void duckDbObjectKeysAreFound()
+    {
+        // Every key of the object that DuckDB wrote out of field name order
+        assertThat(rows("SELECT id, count(*) FROM wide CROSS JOIN UNNEST(sequence(0, 69)) AS t(k) " +
+                "WHERE CAST(v[format('k%02d', k)] AS bigint) = k GROUP BY id"))
+                .containsExactlyInAnyOrder(List.of(0L, 70L), List.of(1L, 70L));
+
+        String query = "SELECT id, CAST(v['k00'] AS bigint), CAST(v['k05'] AS bigint), CAST(v['k69'] AS bigint) FROM wide";
+        assertThat(explain(query)).contains("pruned to");
+        assertThat(rows(query)).containsExactlyInAnyOrder(List.of(0L, 0L, 5L, 69L), List.of(1L, 0L, 5L, 69L));
+    }
+
+    @Test
+    void duckDbObjectEqualsTrinoObject()
+    {
+        assertThat(rows("SELECT count(DISTINCT v) FROM wide")).containsExactly(List.of(1L));
+        assertThat(rows("SELECT a.id, b.id FROM wide a JOIN wide b ON a.v = b.v")).hasSize(4);
     }
 
     @Test

@@ -17,6 +17,7 @@ import io.airlift.json.JsonCodec;
 import io.airlift.json.JsonCodecFactory;
 import io.airlift.json.JsonMapperProvider;
 import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 import io.airlift.units.DataSize;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.parquet.ParquetReaderOptions;
@@ -51,10 +52,12 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.IntStream;
 import java.util.stream.LongStream;
 
 import static io.airlift.slice.Slices.utf8Slice;
@@ -66,6 +69,11 @@ import static io.trino.spi.type.RowType.field;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VariantType.VARIANT;
+import static io.trino.spi.variant.Header.metadataHeader;
+import static io.trino.spi.variant.Header.metadataOffsetSize;
+import static io.trino.spi.variant.Header.objectHeader;
+import static io.trino.spi.variant.VariantEncoder.ENCODED_LONG_SIZE;
+import static io.trino.spi.variant.VariantEncoder.encodeLong;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -90,6 +98,13 @@ class TestHoglakeShreddedVariant
             field("typed_value", RowType.from(List.of(field("a", FIELD_A), field("browser", FIELD_BROWSER))))));
 
     static final Slice METADATA = Metadata.of(List.of(utf8Slice("$Browser"), utf8Slice("a"))).toSlice();
+
+    /**
+     * The keys of {@link #wideObject()}, in field name order.
+     */
+    static final List<Slice> WIDE_KEYS = IntStream.range(0, 70)
+            .mapToObj(key -> utf8Slice("k%02d".formatted(key)))
+            .toList();
 
     @Test
     void shreddedColumnIsRead()
@@ -208,6 +223,38 @@ class TestHoglakeShreddedVariant
 
         assertThat(readVariantBytes(duckDb, 3)).containsExactly(null, variantBytes(Variant.ofInt(1)), null);
         assertThat(readVariantBytes(unshredded, 3)).containsExactly(variantBytes(Variant.NULL_VALUE), variantBytes(Variant.ofInt(1)), null);
+    }
+
+    @Test
+    void duckDbObjectsInUnshreddedColumnsAreRepaired()
+    {
+        // DuckDB writes object fields in field id order and marks unsorted dictionaries as
+        // sorted. Lookups in objects of more than 64 fields assume field name order.
+        Variant duckDb = wideDuckDbObject();
+        Variant expected = wideObject();
+        assertThat(WIDE_KEYS.stream().filter(key -> duckDb.getObjectField(key).isPresent()).count()).isLessThan(WIDE_KEYS.size());
+
+        HoglakeColumnHandle nestedVariant = new HoglakeColumnHandle("v", 3, VARIANT, true);
+        HoglakeColumnHandle nested = new HoglakeColumnHandle("r", 2, RowType.from(List.of(field("v", VARIANT))), true, List.of(nestedVariant), "struct");
+        HoglakeParquetSchema schema = HoglakeParquetSchema.create(List.of(COLUMN, nested));
+        byte[] file = ConnectorTestFixtures.writeParquet(List.of(
+                new FileColumn(schema.messageType().getType(0), VARIANT, Arrays.asList(duckDb, expected, Variant.ofInt(1)), schema.primitiveTypes()),
+                new FileColumn(schema.messageType().getType(1), nested.type(), Arrays.asList(List.of(duckDb), null, Arrays.asList((Object) null)), schema.primitiveTypes())));
+        file = ConnectorTestFixtures.rewriteFooter(file, metadata -> metadata.setCreated_by(DUCKDB_CREATED_BY));
+
+        TrinoFileSystemFactory fileSystem = ConnectorTestFixtures.memoryFileSystem(Map.of(PATH, file));
+        List<List<Object>> rows = readValues(fileSystem, new HoglakeSplit(PATH, file.length, 3, Optional.empty(), 0), List.of(COLUMN, nested));
+        List<Variant> objects = List.of((Variant) rows.get(0).get(0), (Variant) ((List<?>) rows.get(0).get(1)).getFirst(), (Variant) rows.get(1).get(0));
+        for (Variant object : objects) {
+            for (int key = 0; key < WIDE_KEYS.size(); key++) {
+                assertThat(object.getObjectField(WIDE_KEYS.get(key))).hasValue(Variant.ofLong(key));
+            }
+            // Equality and hashing compare object fields by position
+            assertThat(object).isEqualTo(expected);
+            assertThat(object.longHashCode()).isEqualTo(expected.longHashCode());
+        }
+        assertThat(rows.get(1).get(1)).isNull();
+        assertThat(rows.get(2)).isEqualTo(Arrays.asList(Variant.ofInt(1), Arrays.asList((Object) null)));
     }
 
     @Test
@@ -493,6 +540,45 @@ class TestHoglakeShreddedVariant
         return Arrays.asList(fieldA, Arrays.asList(null, browser));
     }
 
+    /**
+     * An object of 70 keys, {@code k00} to {@code k69}, whose values are their numbers.
+     */
+    static Variant wideObject()
+    {
+        Map<Slice, Variant> fields = new HashMap<>();
+        for (int key = 0; key < WIDE_KEYS.size(); key++) {
+            fields.put(WIDE_KEYS.get(key), Variant.ofLong(key));
+        }
+        return Variant.ofObject(fields);
+    }
+
+    /**
+     * {@link #wideObject()} as DuckDB 1.5.5 writes it from JSON with the keys in
+     * descending order: the dictionary keeps that order and sets
+     * {@code sorted_strings}, and the fields are in field id order. These are the
+     * bytes of row 3 of the trino-parquet test file
+     * {@code variant/shredded/duckdb/wide-object-unshredded.parquet}.
+     */
+    static Variant wideDuckDbObject()
+    {
+        List<Slice> keys = WIDE_KEYS.reversed();
+        Slice metadata = Metadata.of(keys).toSlice().copy();
+        metadata.setByte(0, metadataHeader(true, metadataOffsetSize(metadata.getByte(0))));
+        // One-byte field ids and two-byte offsets
+        int valuesStart = 2 + keys.size() + (keys.size() + 1) * 2;
+        Slice data = Slices.allocate(valuesStart + keys.size() * ENCODED_LONG_SIZE);
+        data.setByte(0, objectHeader(1, 2, false));
+        data.setByte(1, keys.size());
+        for (int id = 0; id <= keys.size(); id++) {
+            if (id < keys.size()) {
+                data.setByte(2 + id, id);
+                encodeLong(Long.parseLong(keys.get(id).toStringUtf8().substring(1)), data, valuesStart + id * ENCODED_LONG_SIZE);
+            }
+            data.setShort(2 + keys.size() + id * 2, (short) (id * ENCODED_LONG_SIZE));
+        }
+        return Variant.from(Metadata.from(metadata), data);
+    }
+
     private static Variant objectWithA(long a)
     {
         return Variant.ofObject(Map.of(utf8Slice("a"), Variant.ofLong(a)));
@@ -511,6 +597,16 @@ class TestHoglakeShreddedVariant
      */
     private static List<List<Object>> read(TrinoFileSystemFactory fileSystem, HoglakeSplit split, List<HoglakeColumnHandle> columns)
     {
+        return readValues(fileSystem, split, columns).stream()
+                .map(row -> row.stream().map(TestHoglakeShreddedVariant::comparable).toList())
+                .toList();
+    }
+
+    /**
+     * The rows of the columns, with each variant as a {@link Variant}.
+     */
+    private static List<List<Object>> readValues(TrinoFileSystemFactory fileSystem, HoglakeSplit split, List<HoglakeColumnHandle> columns)
+    {
         ConnectorPageSource pageSource = new HoglakePageSourceProvider(fileSystem).createPageSource(
                 HoglakeTransactionHandle.INSTANCE,
                 ConnectorTestFixtures.session(),
@@ -521,9 +617,7 @@ class TestHoglakeShreddedVariant
                 DynamicFilter.EMPTY,
                 MemoryContext.NO_LIMIT);
         try {
-            return ConnectorTestFixtures.readAll(pageSource, columns.stream().map(HoglakeColumnHandle::type).toList()).stream()
-                    .map(row -> row.stream().map(TestHoglakeShreddedVariant::comparable).toList())
-                    .toList();
+            return ConnectorTestFixtures.readAll(pageSource, columns.stream().map(HoglakeColumnHandle::type).toList());
         }
         finally {
             try {

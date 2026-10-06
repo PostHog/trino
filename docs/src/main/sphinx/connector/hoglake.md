@@ -101,6 +101,19 @@ are provided by the shared cache infrastructure.
 | `uuid` | `UUID` |
 | `decimal(p,s)` | `DECIMAL(p,s)` |
 
+### VARIANT
+
+A `variant` column is read as `VARIANT`, from shredded or unshredded Parquet
+VARIANT groups.
+
+DuckDB writes the fields of VARIANT objects out of field name order, and marks
+metadata dictionaries that are not sorted as sorted. The connector repairs these
+values when it reads an unshredded column of a file whose footer `created_by`
+starts with `DuckDB`, so key lookups, equality, and grouping return the same
+results as for other writers. The repair re-encodes each object, which costs
+more CPU than reading the files of other writers. DuckDB also writes a SQL NULL
+as a variant null, so a top-level variant null in its files is read as NULL.
+
 ## Row-level deletes
 
 Hoglake pairs a data file with its live deletion vector at the snapshot being
