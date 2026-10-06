@@ -151,23 +151,13 @@ public final class VariantShredder
                 builder.appendNull();
                 continue;
             }
-            Variant variant = repair(VARIANT.getObject(variants, position));
+            Variant variant = VariantRepairs.repair(VARIANT.getObject(variants, position));
             builder.buildEntry(fields -> {
                 VARBINARY.writeSlice(fields.get(0), variant.metadata().toSlice());
                 writeValue(variant, value, fields, 1);
             });
         }
         return builder.build();
-    }
-
-    private static Variant repair(Variant variant)
-    {
-        Variant sorted = VariantRepairs.withSortedObjectFields(variant);
-        Metadata metadata = VariantRepairs.withVerifiedSortedFlag(sorted.metadata());
-        if (metadata == sorted.metadata()) {
-            return sorted;
-        }
-        return Variant.from(metadata, sorted.data());
     }
 
     /// Writes `variant` to the `value` column at `valueField` of a group, and to the

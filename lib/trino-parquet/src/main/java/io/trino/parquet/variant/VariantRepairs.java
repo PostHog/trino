@@ -14,6 +14,11 @@
 package io.trino.parquet.variant;
 
 import io.airlift.slice.Slice;
+import io.trino.parquet.ParquetCorruptionException;
+import io.trino.parquet.ParquetDataSourceId;
+import io.trino.spi.block.Bitmap;
+import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.VariantBlock;
 import io.trino.spi.variant.Header.BasicType;
 import io.trino.spi.variant.Header.PrimitiveType;
 import io.trino.spi.variant.Metadata;
@@ -25,9 +30,11 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.variant.Header.BasicType.ARRAY;
 import static io.trino.spi.variant.Header.BasicType.OBJECT;
 import static io.trino.spi.variant.Header.BasicType.PRIMITIVE;
@@ -46,11 +53,126 @@ import static java.lang.Math.toIntExact;
 
 /// Repairs two defects of some Variant writers: a metadata dictionary that sets
 /// `sorted_strings` but is not sorted, and object fields that are not in field name
-/// order. Lookups that trust either one miss keys. [ShreddedVariantAssembler] repairs
-/// the values that it reads, and [VariantShredder] the values that it writes.
-final class VariantRepairs
+/// order. Lookups that trust either one miss keys. DuckDB 1.5.5 writes both.
+/// [ShreddedVariantAssembler] repairs the values that it reads, [VariantShredder] the
+/// values that it writes, and the Parquet reader the unshredded values that it reads.
+public final class VariantRepairs
 {
     private VariantRepairs() {}
+
+    /// Whether the files of a writer can have the defects that [#repair(VariantBlock,ParquetDataSourceId)]
+    /// repairs. A repair checks every object of every value, which costs several times
+    /// more than a key lookup, so readers check only the files of these writers.
+    ///
+    /// @param createdBy the `created_by` field of the file footer
+    public static boolean writesDefects(Optional<String> createdBy)
+    {
+        // DuckDB 1.5.5 writes both defects, and no release has fixed them
+        return createdBy.map(writer -> writer.startsWith("DuckDB")).orElse(false);
+    }
+
+    /// Returns `variant` with the fields of each object in field name order, and with a
+    /// `sorted_strings` flag only if its dictionary is sorted and unique, or `variant`
+    /// itself if it has neither defect. A repaired object has a new dictionary.
+    ///
+    /// @throws IllegalArgumentException if an object has two fields with the same name, or a
+    ///         value is truncated
+    public static Variant repair(Variant variant)
+    {
+        boolean sortedAndUnique = isSortedAndUnique(variant.metadata());
+        Variant sorted = withSortedObjectFields(variant, sortedAndUnique);
+        Metadata metadata = sorted.metadata();
+        if (sorted == variant) {
+            if (!metadata.isSorted() || sortedAndUnique) {
+                return variant;
+            }
+            return Variant.from(withoutSortedFlag(metadata), variant.data());
+        }
+        Metadata verified = withVerifiedSortedFlag(metadata);
+        if (verified == metadata) {
+            return sorted;
+        }
+        return Variant.from(verified, sorted.data());
+    }
+
+    /// Returns `variants` with each value repaired by [#repair(Variant)], or `variants`
+    /// itself if no value needs it. Only the blocks of a block that needs repairs are
+    /// copied.
+    ///
+    /// @throws ParquetCorruptionException if an object has two fields with the same name, or a
+    ///         value is invalid
+    public static VariantBlock repair(VariantBlock variants, ParquetDataSourceId dataSourceId)
+            throws ParquetCorruptionException
+    {
+        try {
+            return repair(variants);
+        }
+        catch (IllegalArgumentException | IllegalStateException | IndexOutOfBoundsException e) {
+            // Variant decoding reports invalid data with these exceptions
+            throw new ParquetCorruptionException(e, dataSourceId, "Invalid VARIANT: %s", e.getMessage());
+        }
+        catch (RuntimeException e) {
+            // The variant package also reports invalid data with its own package-private VerifyException
+            if (e.getClass().getPackageName().equals(Variant.class.getPackageName())) {
+                throw new ParquetCorruptionException(e, dataSourceId, "Invalid VARIANT: %s", e.getMessage());
+            }
+            throw e;
+        }
+    }
+
+    private static VariantBlock repair(VariantBlock variants)
+    {
+        int positionCount = variants.getPositionCount();
+        BlockBuilder metadataBuilder = null;
+        BlockBuilder valueBuilder = null;
+        for (int position = 0; position < positionCount; position++) {
+            Variant repaired = null;
+            if (!variants.isNull(position)) {
+                Variant variant = variants.getVariant(position);
+                repaired = repair(variant);
+                if (repaired == variant) {
+                    repaired = null;
+                }
+            }
+            if (repaired != null && metadataBuilder == null) {
+                // The first value that needs a repair: copy the values before it
+                metadataBuilder = VARBINARY.createBlockBuilder(null, positionCount);
+                valueBuilder = VARBINARY.createBlockBuilder(null, positionCount);
+                for (int previous = 0; previous < position; previous++) {
+                    appendUnchanged(variants, previous, metadataBuilder, valueBuilder);
+                }
+            }
+            if (repaired != null) {
+                VARBINARY.writeSlice(metadataBuilder, repaired.metadata().toSlice());
+                VARBINARY.writeSlice(valueBuilder, repaired.data());
+            }
+            else if (metadataBuilder != null) {
+                appendUnchanged(variants, position, metadataBuilder, valueBuilder);
+            }
+        }
+        if (metadataBuilder == null) {
+            return variants;
+        }
+        long[] valueIsValid = variants.getRawValueIsValid();
+        if (valueIsValid != null && variants.getRawOffset() != 0) {
+            long[] copy = Bitmap.allocateWords(positionCount, false);
+            Bitmap.copyBits(valueIsValid, variants.getRawOffset(), copy, 0, positionCount);
+            valueIsValid = copy;
+        }
+        return VariantBlock.create(positionCount, metadataBuilder.build(), valueBuilder.build(), Optional.ofNullable(valueIsValid));
+    }
+
+    private static void appendUnchanged(VariantBlock variants, int position, BlockBuilder metadataBuilder, BlockBuilder valueBuilder)
+    {
+        if (variants.isNull(position)) {
+            metadataBuilder.appendNull();
+            valueBuilder.appendNull();
+            return;
+        }
+        int rawPosition = variants.getRawOffset() + position;
+        VARBINARY.writeSlice(metadataBuilder, VARBINARY.getSlice(variants.getRawMetadata(), rawPosition));
+        VARBINARY.writeSlice(valueBuilder, VARBINARY.getSlice(variants.getRawValues(), rawPosition));
+    }
 
     /// Returns `metadata` without the `sorted_strings` flag if its dictionary is not
     /// sorted and unique. Some writers set the flag for every dictionary, and lookups
@@ -60,6 +182,11 @@ final class VariantRepairs
         if (!metadata.isSorted() || isSortedAndUnique(metadata)) {
             return metadata;
         }
+        return withoutSortedFlag(metadata);
+    }
+
+    private static Metadata withoutSortedFlag(Metadata metadata)
+    {
         Slice copy = metadata.toSlice().copy();
         copy.setByte(0, metadataHeader(false, metadataOffsetSize(copy.getByte(0))));
         return Metadata.from(copy);

@@ -42,6 +42,7 @@ import io.trino.parquet.metadata.PrunedBlockMetadata;
 import io.trino.parquet.predicate.TupleDomainParquetPredicate;
 import io.trino.parquet.reader.FilteredOffsetIndex.OffsetRange;
 import io.trino.parquet.spark.Variant;
+import io.trino.parquet.variant.VariantRepairs;
 import io.trino.plugin.base.metrics.LongCount;
 import io.trino.spi.Page;
 import io.trino.spi.block.ArrayBlock;
@@ -132,6 +133,7 @@ public class ParquetReader
     public static final String SELECTED_POSITIONS_PUSHDOWNS = "ParquetSelectedPositionsPushdowns";
 
     private final Optional<String> fileCreatedBy;
+    private final boolean repairVariants;
     private final List<RowGroupInfo> rowGroups;
     private final List<Column> columnFields;
     private final boolean appendRowNumberColumn;
@@ -231,6 +233,7 @@ public class ParquetReader
             throws IOException
     {
         this.fileCreatedBy = requireNonNull(fileCreatedBy, "fileCreatedBy is null");
+        this.repairVariants = VariantRepairs.writesDefects(fileCreatedBy);
         requireNonNull(columnFields, "columnFields is null");
         this.columnFields = ImmutableList.copyOf(columnFields);
         this.appendRowNumberColumn = appendRowNumberColumn;
@@ -1115,7 +1118,10 @@ public class ParquetReader
             valueBlock = toNotNullSupressedBlock(positionsCount, variantIsValid, valueBlock);
         }
 
-        Block variantBlock = VariantBlock.create(positionsCount, metadataBlock, valueBlock, valueIsValid);
+        VariantBlock variantBlock = VariantBlock.create(positionsCount, metadataBlock, valueBlock, valueIsValid);
+        if (repairVariants) {
+            variantBlock = VariantRepairs.repair(variantBlock, dataSource.getId());
+        }
         return new ColumnChunk(variantBlock, metadataChunk.getDefinitionLevels(), metadataChunk.getRepetitionLevels());
     }
 

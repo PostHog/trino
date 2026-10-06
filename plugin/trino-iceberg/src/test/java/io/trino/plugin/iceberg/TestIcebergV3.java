@@ -14,18 +14,27 @@
 package io.trino.plugin.iceberg;
 
 import com.google.common.collect.ImmutableMap;
+import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 import io.trino.Session;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.metastore.HiveMetastore;
 import io.trino.parquet.metadata.ParquetMetadata;
+import io.trino.parquet.writer.ParquetWriter;
+import io.trino.parquet.writer.ParquetWriterOptions;
 import io.trino.plugin.geospatial.GeoPlugin;
 import io.trino.plugin.hive.HivePlugin;
 import io.trino.plugin.iceberg.catalog.TrinoCatalog;
 import io.trino.plugin.iceberg.encryption.DefaultEncryptionManagerFactory;
 import io.trino.plugin.iceberg.encryption.EncryptionManagerFactory;
 import io.trino.plugin.tpch.TpchPlugin;
+import io.trino.spi.Page;
+import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.variant.Header;
+import io.trino.spi.variant.Metadata;
+import io.trino.spi.variant.Variant;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.MaterializedResult;
@@ -33,6 +42,7 @@ import io.trino.testing.QueryRunner;
 import io.trino.testing.sql.TestTable;
 import org.apache.iceberg.BaseTable;
 import org.apache.iceberg.DataFile;
+import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
@@ -56,9 +66,18 @@ import org.apache.iceberg.parquet.Parquet;
 import org.apache.iceberg.types.EdgeAlgorithm;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.types.Types.GeometryType;
+import org.apache.parquet.format.CompressionCodec;
+import org.apache.parquet.format.FileMetaData;
+import org.apache.parquet.format.Util;
+import org.apache.parquet.schema.MessageType;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
@@ -67,9 +86,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.IntStream;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
+import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.iceberg.IcebergQueryRunner.ICEBERG_CATALOG;
 import static io.trino.plugin.iceberg.IcebergTestUtils.SESSION;
 import static io.trino.plugin.iceberg.IcebergTestUtils.getFileSystemFactory;
@@ -78,10 +99,20 @@ import static io.trino.plugin.iceberg.IcebergTestUtils.getParquetFileMetadata;
 import static io.trino.plugin.iceberg.IcebergTestUtils.getTrinoCatalog;
 import static io.trino.plugin.iceberg.util.EqualityDeleteUtils.writeEqualityDeleteForTable;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.VariantType.VARIANT;
+import static io.trino.spi.variant.Header.metadataHeader;
+import static io.trino.spi.variant.Header.metadataOffsetSize;
+import static io.trino.spi.variant.Header.objectHeader;
+import static io.trino.spi.variant.VariantEncoder.ENCODED_LONG_SIZE;
+import static io.trino.spi.variant.VariantEncoder.encodeLong;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static org.apache.iceberg.TableProperties.FORMAT_VERSION;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.geometryType;
+import static org.apache.parquet.schema.LogicalTypeAnnotation.variantType;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.BINARY;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT32;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -506,6 +537,100 @@ public class TestIcebergV3
                 .matches("VALUES (1, TIMESTAMP '2024-01-15 12:30:45.123456789')");
 
         assertUpdate("DROP TABLE " + tableName);
+    }
+
+    @Test
+    void testDuckDbVariantObject()
+            throws IOException
+    {
+        String tableName = "test_duckdb_variant_object_" + randomNameSuffix();
+        Schema schema = new Schema(
+                Types.NestedField.optional(1, "id", Types.IntegerType.get()),
+                Types.NestedField.optional(2, "v", Types.VariantType.get()));
+        Table table = createV3Table(tableName, schema);
+
+        // A 70-key object as DuckDB 1.5.5 writes it from JSON with the keys in descending
+        // order: the dictionary keeps that order and sets sorted_strings, and the object
+        // fields are in field id order. Lookups in objects of more than 64 fields assume
+        // field name order.
+        List<Slice> keys = IntStream.range(0, 70)
+                .mapToObj(key -> utf8Slice("k%02d".formatted(69 - key)))
+                .toList();
+        Slice metadata = Metadata.of(keys).toSlice().copy();
+        metadata.setByte(0, metadataHeader(true, metadataOffsetSize(metadata.getByte(0))));
+        int valuesStart = 2 + keys.size() + (keys.size() + 1) * 2;
+        Slice value = Slices.allocate(valuesStart + keys.size() * ENCODED_LONG_SIZE);
+        value.setByte(0, objectHeader(1, 2, false));
+        value.setByte(1, keys.size());
+        for (int id = 0; id <= keys.size(); id++) {
+            if (id < keys.size()) {
+                value.setByte(2 + id, id);
+                encodeLong(69 - id, value, valuesStart + id * ENCODED_LONG_SIZE);
+            }
+            value.setShort(2 + keys.size() + id * 2, (short) (id * ENCODED_LONG_SIZE));
+        }
+
+        MessageType fileSchema = org.apache.parquet.schema.Types.buildMessage()
+                .optional(INT32).id(1).named("id")
+                .optionalGroup().as(variantType(Header.VERSION)).id(2)
+                .required(BINARY).named("metadata")
+                .required(BINARY).named("value")
+                .named("v")
+                .named("table");
+        BlockBuilder ids = INTEGER.createBlockBuilder(null, 1);
+        INTEGER.writeLong(ids, 1);
+        BlockBuilder variants = VARIANT.createBlockBuilder(null, 1);
+        VARIANT.writeObject(variants, Variant.from(Metadata.from(metadata), value));
+        ByteArrayOutputStream file = new ByteArrayOutputStream();
+        try (ParquetWriter writer = new ParquetWriter(
+                file,
+                fileSchema,
+                ImmutableMap.of(List.of("id"), INTEGER),
+                ParquetWriterOptions.builder().build(),
+                CompressionCodec.SNAPPY,
+                "test",
+                Optional.empty(),
+                Optional.empty())) {
+            writer.write(new Page(ids.build(), variants.build()));
+        }
+        // The reader repairs the files of DuckDB
+        String dataPath = table.location() + "/data/data-" + UUID.randomUUID() + ".parquet";
+        try (OutputStream output = table.io().newOutputFile(dataPath).create()) {
+            output.write(withCreatedBy(file.toByteArray(), "DuckDB version v1.5.5 (build d8cdaa33fd)"));
+        }
+        table.newFastAppend()
+                .appendFile(DataFiles.builder(table.spec())
+                        .withPath(dataPath)
+                        .withFormat(FileFormat.PARQUET)
+                        .withFileSizeInBytes(table.io().newInputFile(dataPath).getLength())
+                        .withRecordCount(1)
+                        .build())
+                .commit();
+
+        assertThat(query("SELECT count(*) FROM " + tableName + " CROSS JOIN UNNEST(sequence(0, 69)) AS t(k) WHERE CAST(v[format('k%02d', k)] AS bigint) = k"))
+                .matches("VALUES BIGINT '70'");
+        assertThat(query("SELECT v = CAST(map_from_entries(transform(sequence(0, 69), k -> ROW(format('k%02d', k), CAST(k AS bigint)))) AS variant) FROM " + tableName))
+                .matches("VALUES true");
+
+        assertUpdate("DROP TABLE " + tableName);
+    }
+
+    private static byte[] withCreatedBy(byte[] file, String createdBy)
+            throws IOException
+    {
+        // The footer is followed by its length and the magic number
+        int footerLength = ByteBuffer.wrap(file, file.length - 8, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+        int footerStart = file.length - 8 - footerLength;
+        FileMetaData footer = Util.readFileMetaData(new ByteArrayInputStream(file, footerStart, footerLength));
+        footer.setCreated_by(createdBy);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        output.write(file, 0, footerStart);
+        ByteArrayOutputStream newFooter = new ByteArrayOutputStream();
+        Util.writeFileMetaData(footer, newFooter);
+        newFooter.writeTo(output);
+        output.write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(newFooter.size()).array());
+        output.write(file, file.length - 4, 4);
+        return output.toByteArray();
     }
 
     @Test
