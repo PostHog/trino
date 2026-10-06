@@ -503,13 +503,16 @@ public class HoglakeMetadata
             if (!catalog.capabilities().contains("atomic-table-replacement-v1")) {
                 throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support atomic-table-replacement-v1");
             }
-            replacement = plannedTargets.computeIfAbsent(metadata.getTable(), tableName -> {
-                Optional<HoglakeDtos.Table> replacementTable = client.getTable(tableName.getSchemaName(), tableName.getTableName(), catalog.headSnapshotId());
-                replacementTable.ifPresent(HoglakeFileFormats::checkReadableTable);
-                return new HoglakeDtos.ReplacementTarget(
-                        replacementTable.map(HoglakeDtos.Table::tableUuid).orElse(null),
-                        catalog.headSnapshotId());
-            });
+            replacement = plannedTargets.computeIfAbsent(metadata.getTable(), tableName -> new HoglakeDtos.ReplacementTarget(
+                    client.getTable(tableName.getSchemaName(), tableName.getTableName(), catalog.headSnapshotId()).map(HoglakeDtos.Table::tableUuid).orElse(null),
+                    catalog.headSnapshotId()));
+            // The engine usually plans the target through getTableHandle, which
+            // does not check the format so that DROP TABLE works on any table,
+            // so check the replaced table here, at the snapshot the guard pins.
+            if (replacement.expectedTableUuid() != null) {
+                client.getTable(metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), replacement.readSnapshot())
+                        .ifPresent(HoglakeFileFormats::checkReadableTable);
+            }
         }
         @SuppressWarnings("unchecked")
         List<String> partitioning = (List<String>) metadata.getProperties().getOrDefault("partitioning", List.of());

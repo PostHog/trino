@@ -122,7 +122,15 @@ A table with an unsupported `write.format.default` value is rejected before plan
 including when it has no files. The connector also validates every scan file before
 statistics pruning and carries `file_format` in each split for a second check on the
 worker. A malformed or mixed-format table therefore fails explicitly; unsupported
-files are never skipped or passed to the Parquet reader.
+files are never skipped or passed to the Parquet reader. The table property is compared
+case-insensitively, so `PARQUET` is Parquet; the file format of a scan data file must be
+exactly `parquet`. `CREATE OR REPLACE TABLE` cannot replace a table with an unsupported
+format, and `CREATE TABLE` and `ALTER TABLE ... SET PROPERTIES` cannot set one.
+
+Operations that never read data remain available on a table with an unsupported format,
+so its columns can still be listed in `information_schema` and it can be renamed,
+truncated and dropped. The server can still refuse some of these changes for such a
+table.
 
 The split field is required rather than defaulted. A current coordinator always emits
 it, while a current worker rejects a split from an older coordinator that omits it
