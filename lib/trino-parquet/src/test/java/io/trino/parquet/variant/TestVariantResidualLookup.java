@@ -119,6 +119,16 @@ public class TestVariantResidualLookup
         assertThatThrownBy(() -> lookup.find(Variant.ofLong(1).data(), 0, ImmutableList.of(utf8Slice("a")), new int[1]))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("VARIANT value is not an object");
+        // A four-byte field offset of -1, which points into the header
+        Slice negativeOffset = Slices.wrappedBuffer(new byte[] {
+                (byte) objectHeader(1, 4, false), 0x01, 0x00,
+                (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF,
+                0x01, 0x00, 0x00, 0x00,
+                0x00,
+        });
+        assertThatThrownBy(() -> lookup.find(negativeOffset, 0, ImmutableList.of(utf8Slice("a")), new int[1]))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("VARIANT object has an invalid field offset");
         assertThatThrownBy(() -> lookup.reset(Slices.wrappedBuffer((byte) 0x02, (byte) 0)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("Unsupported VARIANT metadata version: 2");

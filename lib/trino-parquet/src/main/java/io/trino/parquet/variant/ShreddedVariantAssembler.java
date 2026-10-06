@@ -201,7 +201,8 @@ public final class ShreddedVariantAssembler
     }
 
     /// The number of rows of pruned values that were built with new metadata, because a
-    /// path reads an object or an array whole.
+    /// path reads an object or an array whole, or, for paths with an empty key, which
+    /// the shared dictionary cannot hold, every row.
     public long rowsWithNewMetadata()
     {
         return rowsWithNewMetadata;
@@ -975,9 +976,10 @@ public final class ShreddedVariantAssembler
 
         int elementStart(int index)
         {
-            int start = valuesStart + readOffset(data, offsetsStart + index * offsetSize, offsetSize);
-            checkArgument(start < data.length(), "VARIANT array is truncated");
-            return start;
+            long start = valuesStart + (long) readOffset(data, offsetsStart + index * offsetSize, offsetSize);
+            // A four-byte offset can be negative
+            checkArgument(start >= valuesStart && start < data.length(), "VARIANT array has an invalid element offset");
+            return (int) start;
         }
     }
 

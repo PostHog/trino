@@ -94,7 +94,8 @@ final class VariantResidualLookup
                 if (candidate.length() == nameLength && metadata.equals(namesStart + nameStart, nameLength, candidate, 0, nameLength)) {
                     checkArgument(starts[name] == -1, "VARIANT object has duplicate field %s", candidate.toStringUtf8());
                     long valueStart = valuesStart + readOffset(data, (int) fieldOffsetsStart + index * fieldOffsetSize, fieldOffsetSize);
-                    checkArgument(valueStart < data.length(), "VARIANT object is truncated");
+                    // A four-byte offset can be negative
+                    checkArgument(valueStart >= valuesStart && valueStart < data.length(), "VARIANT object has an invalid field offset");
                     starts[name] = (int) valueStart;
                 }
             }
