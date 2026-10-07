@@ -110,15 +110,15 @@ VARIANT groups. DuckDB writes a SQL NULL as a variant null, so a top-level
 variant null in its files is read as NULL.
 
 Subscripts with constant keys and indexes on a `VARIANT` column, such as
-`CAST(v['$browser'] AS varchar)`, are pushed into the table scan. The scan reads
-only the shredded columns of those paths. It builds each value from the requested
-keys only: a shredded key is read from its column, and another key is found in the
-unshredded part of the object without decoding the rest. A subscript that reads an
-object or an array whole copies it whole. The results and errors of the subscripts
-are the same as for the whole value. The `hoglake.variant-path-assembly-enabled`
-configuration property, `true` by default, and the
-`variant_path_assembly_enabled` session property turn this off; the scan then
-builds whole values and reads all their columns.
+`CAST(v['$browser'] AS varchar)`, are pushed into the table scan. Of the shredded
+columns, the scan reads only those of the paths, besides the top-level `metadata`
+and `value` columns. It builds each value from the requested keys only: a shredded
+key is read from its column, and another key is found in the unshredded part of the
+object without decoding the rest. A subscript that reads an object or an array whole
+copies it whole. The results and errors of the subscripts are the same as for the
+whole value. The `hoglake.variant-path-assembly-enabled` configuration property,
+`true` by default, and the `variant_path_assembly_enabled` session property turn
+off this assembly; the scan then builds whole values from the same columns.
 
 ## Row-level deletes
 

@@ -87,7 +87,8 @@ public class HoglakePageSource
     /**
      * The rows of pushed-down VARIANT subscripts that were built with new
      * metadata, because a subscript reads an object or an array of the row
-     * whole. Other rows are built without decoding their objects.
+     * whole, or, for subscripts with an empty key, every row. Other rows are
+     * built without decoding their objects.
      */
     public static final String VARIANT_SLOW_PATH_ROWS = "variantSlowPathRows";
 
