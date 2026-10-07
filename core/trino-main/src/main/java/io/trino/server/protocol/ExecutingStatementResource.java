@@ -132,6 +132,11 @@ public class ExecutingStatementResource
         queryPurger.shutdownNow();
     }
 
+    public boolean hasQuery(QueryId queryId)
+    {
+        return queries.containsKey(queryId);
+    }
+
     @GET
     @Path("{queryId}/{slug}/{token}")
     @Produces(MediaType.APPLICATION_JSON)
