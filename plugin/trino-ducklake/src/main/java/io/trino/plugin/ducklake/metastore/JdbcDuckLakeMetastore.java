@@ -47,6 +47,7 @@ import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_COMMIT_FAILED;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_CONCURRENT_MODIFICATION;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_METASTORE_ERROR;
+import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_FEATURE;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
@@ -62,6 +63,7 @@ public class JdbcDuckLakeMetastore
      */
     private static final List<String> INLINED_SYSTEM_COLUMNS = ImmutableList.of("row_id", "begin_snapshot", "end_snapshot");
     private static final String UNDEFINED_TABLE_SQL_STATE = "42P01";
+    private static final String LEGACY_PARTIAL_MAX_PREFIX = "partial_max:";
     private static final String SERIALIZATION_FAILURE_SQL_STATE = "40001";
     private static final String DEADLOCK_DETECTED_SQL_STATE = "40P01";
     private static final String UNIQUE_VIOLATION_SQL_STATE = "23505";
@@ -77,6 +79,7 @@ public class JdbcDuckLakeMetastore
     private final long commitRetryBackoffMillis;
 
     private volatile Boolean dataFileHasPartialMax;
+    private volatile Boolean dataFileHasPartialFileInfo;
     private volatile Boolean deleteFileHasPartialMax;
     private volatile Boolean schemaVersionsTableExists;
     private volatile Boolean schemaVersionsHasTableId;
@@ -392,6 +395,10 @@ public class JdbcDuckLakeMetastore
         if (dataFileHasPartialMax()) {
             partialMaxColumn = "f.partial_max";
         }
+        else if (dataFileHasPartialFileInfo()) {
+            partialMaxColumn = "NULL AS partial_max, f.partial_file_info";
+        }
+        boolean legacyPartialFileInfo = !dataFileHasPartialMax() && dataFileHasPartialFileInfo();
         try (Handle handle = jdbi.open()) {
             Map<Long, DuckLakeDataFileEntry> filesById = new LinkedHashMap<>();
             Map<Long, Map<Integer, Optional<String>>> partitionValuesByFileId = new LinkedHashMap<>();
@@ -412,7 +419,7 @@ public class JdbcDuckLakeMetastore
                     .bind("tableId", tableId)
                     .map((rs, _) -> {
                         long dataFileId = rs.getLong("data_file_id");
-                        filesById.computeIfAbsent(dataFileId, _ -> dataFileEntry(rs, dataFileId));
+                        filesById.computeIfAbsent(dataFileId, _ -> dataFileEntry(rs, dataFileId, legacyPartialFileInfo, snapshotId, tableId));
                         int partitionKeyIndex = rs.getInt("partition_key_index");
                         if (!rs.wasNull()) {
                             partitionValuesByFileId
@@ -460,6 +467,10 @@ public class JdbcDuckLakeMetastore
             // the page source leaves them out
             partiallyVisibleCondition = "(f.partial_max IS NOT NULL AND f.partial_max > :snapshot)";
         }
+        else if (dataFileHasPartialFileInfo()) {
+            // an older catalog describes such a file in text, which is not decoded here
+            partiallyVisibleCondition = "f.partial_file_info IS NOT NULL";
+        }
         // A delete file that tags each deletion with the snapshot that made it applies only the
         // deletions of the snapshot read and older ones, so its delete count overstates the rows it
         // removes in an older snapshot. DuckDB records the newest of those snapshots as the delete
@@ -470,11 +481,12 @@ public class JdbcDuckLakeMetastore
         if (deleteFileHasPartialMax()) {
             newerDeletionsCondition = "(d.partial_max IS NOT NULL AND d.partial_max > :snapshot)";
         }
-        if (dataFileHasPartialMax()) {
-            newerDeletionsCondition = "(%s OR (%sEXISTS (SELECT 1 FROM %s g WHERE g.data_file_id = d.data_file_id AND g.partial_max IS NOT NULL)))".formatted(
+        if (dataFileHasPartialMax() || dataFileHasPartialFileInfo()) {
+            newerDeletionsCondition = "(%s OR (%sEXISTS (SELECT 1 FROM %s g WHERE g.data_file_id = d.data_file_id AND g.%s IS NOT NULL)))".formatted(
                     newerDeletionsCondition,
                     deleteFileHasPartialMax() ? "d.partial_max IS NULL AND " : "",
-                    table("ducklake_data_file"));
+                    table("ducklake_data_file"),
+                    dataFileHasPartialMax() ? "partial_max" : "partial_file_info");
         }
         String dataFileCondition = partiallyVisibleCondition;
         String deleteFileCondition = newerDeletionsCondition;
@@ -1488,6 +1500,16 @@ public class JdbcDuckLakeMetastore
         return hasIsPartition;
     }
 
+    private boolean dataFileHasPartialFileInfo()
+    {
+        Boolean hasPartialFileInfo = dataFileHasPartialFileInfo;
+        if (hasPartialFileInfo == null) {
+            hasPartialFileInfo = columnExists("ducklake_data_file", "partial_file_info");
+            dataFileHasPartialFileInfo = hasPartialFileInfo;
+        }
+        return hasPartialFileInfo;
+    }
+
     private boolean dataFileHasPartialMax()
     {
         Boolean hasPartialMax = dataFileHasPartialMax;
@@ -1547,9 +1569,13 @@ public class JdbcDuckLakeMetastore
                 resultSet.getBoolean("schema_path_is_relative"));
     }
 
-    private static DuckLakeDataFileEntry dataFileEntry(ResultSet resultSet, long dataFileId)
+    private static DuckLakeDataFileEntry dataFileEntry(ResultSet resultSet, long dataFileId, boolean legacyPartialFileInfo, long snapshotId, long tableId)
     {
         try {
+            OptionalLong partialMax = optionalLong(resultSet, "partial_max");
+            if (legacyPartialFileInfo) {
+                partialMax = legacyPartialMax(resultSet.getString("partial_file_info"), resultSet.getLong("record_count"), snapshotId, resultSet.getString("path"), tableId);
+            }
             return new DuckLakeDataFileEntry(
                     dataFileId,
                     resultSet.getString("path"),
@@ -1562,11 +1588,55 @@ public class JdbcDuckLakeMetastore
                     optionalLong(resultSet, "partition_id"),
                     Optional.ofNullable(resultSet.getString("encryption_key")),
                     optionalLong(resultSet, "mapping_id"),
-                    optionalLong(resultSet, "partial_max"),
+                    partialMax,
                     Map.of());
         }
         catch (SQLException e) {
             throw new TrinoException(DUCKLAKE_METASTORE_ERROR, "Failed to read DuckLake metadata: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * The partial_max of a data file in a catalog of DuckLake specification 0.3 and older, which
+     * describes a data file holding the rows of several snapshots in the
+     * {@code ducklake_data_file.partial_file_info} text column instead. DuckDB 1.0 converts the
+     * column when it upgrades a catalog, but a catalog it has not upgraded still holds it.
+     * <p>
+     * A flush wrote {@code partial_max:<snapshot>}, the same partial_max DuckLake 1.0 records,
+     * which leaves out the rows of newer snapshots by their embedded snapshot. A merge of adjacent
+     * files wrote {@code <snapshot>:<row count>|...} instead, the number of leading rows of the
+     * file visible from each snapshot on. That is a different filter, which this connector does
+     * not apply: such a file read at a snapshot that sees only some of its rows is refused
+     * rather than read whole, which would return rows the snapshot does not hold.
+     */
+    private static OptionalLong legacyPartialMax(String partialFileInfo, long recordCount, long snapshotId, String path, long tableId)
+    {
+        if (partialFileInfo == null || partialFileInfo.isEmpty()) {
+            return OptionalLong.empty();
+        }
+        try {
+            if (partialFileInfo.startsWith(LEGACY_PARTIAL_MAX_PREFIX)) {
+                return OptionalLong.of(Long.parseLong(partialFileInfo.substring(LEGACY_PARTIAL_MAX_PREFIX.length())));
+            }
+            long visibleRows = 0;
+            for (String split : partialFileInfo.split("\\|")) {
+                int separator = split.indexOf(':');
+                if (separator < 0) {
+                    throw new NumberFormatException(split);
+                }
+                long snapshot = Long.parseLong(split.substring(0, separator));
+                long rows = Long.parseLong(split.substring(separator + 1));
+                if (snapshot <= snapshotId) {
+                    visibleRows = Math.max(visibleRows, rows);
+                }
+            }
+            if (visibleRows < recordCount) {
+                throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Data file %s of table %s holds rows added after snapshot %s, recorded in the partial_file_info of an older DuckLake catalog, which is not supported. Upgrade the catalog with DuckDB".formatted(path, tableId, snapshotId));
+            }
+            return OptionalLong.empty();
+        }
+        catch (NumberFormatException e) {
+            throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Data file %s of table %s has malformed partial_file_info: %s".formatted(path, tableId, partialFileInfo), e);
         }
     }
 

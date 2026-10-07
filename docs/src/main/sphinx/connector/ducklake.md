@@ -369,3 +369,8 @@ rows. Flush the inlined data with DuckDB first.
   in the file path (`ducklake_name_mapping.is_partition`), or maps the fields
   nested inside the column, fail. Other columns of such a table can be read.
 - Encrypted data files are not supported.
+- A catalog of specification version 0.3 that DuckDB has not upgraded records
+  a file merged with `ducklake_merge_adjacent_files` as a count of leading rows
+  visible from each snapshot. A query reading such a file at a snapshot that
+  sees only some of its rows fails. Attach the catalog with a DuckDB version
+  that upgrades it to 1.0 first.
