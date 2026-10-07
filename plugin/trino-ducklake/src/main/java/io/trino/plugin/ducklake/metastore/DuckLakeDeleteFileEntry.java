@@ -18,6 +18,11 @@ import java.util.OptionalLong;
 
 import static java.util.Objects.requireNonNull;
 
+/**
+ * @param partialMax the newest snapshot whose deletions the file holds, present when the file holds
+ *         deletions of several snapshots, each tagged with the snapshot that made it. Such a file is
+ *         visible from its first snapshot on, but only applies in full from this one.
+ */
 public record DuckLakeDeleteFileEntry(
         long deleteFileId,
         long dataFileId,
@@ -27,7 +32,8 @@ public record DuckLakeDeleteFileEntry(
         long deleteCount,
         long fileSizeBytes,
         OptionalLong footerSize,
-        Optional<String> encryptionKey)
+        Optional<String> encryptionKey,
+        OptionalLong partialMax)
 {
     public DuckLakeDeleteFileEntry
     {
@@ -35,5 +41,6 @@ public record DuckLakeDeleteFileEntry(
         requireNonNull(format, "format is null");
         requireNonNull(footerSize, "footerSize is null");
         requireNonNull(encryptionKey, "encryptionKey is null");
+        requireNonNull(partialMax, "partialMax is null");
     }
 }

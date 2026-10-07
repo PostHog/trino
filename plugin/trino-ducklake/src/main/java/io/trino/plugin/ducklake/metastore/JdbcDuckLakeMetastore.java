@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import io.trino.plugin.ducklake.DuckLakeConfig;
 import io.trino.spi.TrinoException;
+import it.unimi.dsi.fastutil.longs.LongArrayList;
 import org.jdbi.v3.core.ConnectionFactory;
 import org.jdbi.v3.core.Handle;
 import org.jdbi.v3.core.Jdbi;
@@ -25,8 +26,11 @@ import org.jdbi.v3.core.JdbiException;
 import org.jdbi.v3.core.statement.StatementContext;
 import org.jdbi.v3.core.transaction.TransactionIsolationLevel;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -38,11 +42,14 @@ import java.util.Set;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_COMMIT_FAILED;
+import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_CONCURRENT_MODIFICATION;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_METASTORE_ERROR;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.joining;
 
 /**
  * Reads DuckLake catalog metadata from the {@code ducklake_*} tables in a PostgreSQL database.
@@ -50,6 +57,10 @@ import static java.util.Objects.requireNonNull;
 public class JdbcDuckLakeMetastore
 {
     private static final String VISIBLE = "begin_snapshot <= :snapshot AND (end_snapshot IS NULL OR end_snapshot > :snapshot)";
+    /**
+     * The columns every inlined data table starts with, ahead of the columns of the DuckLake table.
+     */
+    private static final List<String> INLINED_SYSTEM_COLUMNS = ImmutableList.of("row_id", "begin_snapshot", "end_snapshot");
     private static final String UNDEFINED_TABLE_SQL_STATE = "42P01";
     private static final String SERIALIZATION_FAILURE_SQL_STATE = "40001";
     private static final String DEADLOCK_DETECTED_SQL_STATE = "40P01";
@@ -66,6 +77,9 @@ public class JdbcDuckLakeMetastore
     private final long commitRetryBackoffMillis;
 
     private volatile Boolean dataFileHasPartialMax;
+    private volatile Boolean deleteFileHasPartialMax;
+    private volatile Boolean schemaVersionsTableExists;
+    private volatile Boolean schemaVersionsHasTableId;
     private volatile Boolean inlinedDataTablesRegistryExists;
     private volatile Boolean nameMappingTableExists;
     private volatile Boolean sortInfoTableExists;
@@ -282,28 +296,33 @@ public class JdbcDuckLakeMetastore
     public List<DuckLakeColumnEntry> columns(long snapshotId, long tableId)
     {
         try (Handle handle = jdbi.open()) {
-            return handle.createQuery(
-                            """
-                            SELECT column_id, column_order, column_name, column_type, initial_default, default_value, nulls_allowed, parent_column
-                            FROM %s
-                            WHERE table_id = :tableId AND %s
-                            ORDER BY parent_column NULLS FIRST, column_order""".formatted(table("ducklake_column"), VISIBLE))
-                    .bind("snapshot", snapshotId)
-                    .bind("tableId", tableId)
-                    .map((rs, _) -> new DuckLakeColumnEntry(
-                            rs.getLong("column_id"),
-                            rs.getLong("column_order"),
-                            rs.getString("column_name"),
-                            rs.getString("column_type"),
-                            optionalLong(rs, "parent_column"),
-                            rs.getBoolean("nulls_allowed"),
-                            Optional.ofNullable(rs.getString("initial_default")),
-                            Optional.ofNullable(rs.getString("default_value"))))
-                    .list();
+            return columns(handle, snapshotId, tableId);
         }
         catch (JdbiException e) {
             throw metastoreError(e);
         }
+    }
+
+    private List<DuckLakeColumnEntry> columns(Handle handle, long snapshotId, long tableId)
+    {
+        return handle.createQuery(
+                        """
+                        SELECT column_id, column_order, column_name, column_type, initial_default, default_value, nulls_allowed, parent_column
+                        FROM %s
+                        WHERE table_id = :tableId AND %s
+                        ORDER BY parent_column NULLS FIRST, column_order""".formatted(table("ducklake_column"), VISIBLE))
+                .bind("snapshot", snapshotId)
+                .bind("tableId", tableId)
+                .map((rs, _) -> new DuckLakeColumnEntry(
+                        rs.getLong("column_id"),
+                        rs.getLong("column_order"),
+                        rs.getString("column_name"),
+                        rs.getString("column_type"),
+                        optionalLong(rs, "parent_column"),
+                        rs.getBoolean("nulls_allowed"),
+                        Optional.ofNullable(rs.getString("initial_default")),
+                        Optional.ofNullable(rs.getString("default_value"))))
+                .list();
     }
 
     /**
@@ -416,12 +435,20 @@ public class JdbcDuckLakeMetastore
      * Returns the number of rows of a table in a snapshot, computed from the catalog alone. The
      * result also says whether that number is exactly what a scan of the table would return, which
      * is what lets a {@code count(*)} be answered from it. It is not exact when the table holds a
-     * file the connector refuses to read, or a data file only partly visible in the snapshot; both
-     * are conditions the split manager checks per file, and reporting them here keeps a
-     * {@code count(*)} failing wherever a scan would fail.
+     * file the connector refuses to read, a data file only partly visible in the snapshot, a delete
+     * file that may hold deletions newer than the snapshot, or rows of a data file deleted inline,
+     * whose deletions may repeat those of a delete file. The split manager and the page source
+     * check the same conditions per file, and reporting them here keeps a {@code count(*)} failing
+     * wherever a scan would fail and counting rows wherever a scan would.
+     * <p>
+     * Rows stored inline in the catalog database are counted too. Everything is read in one
+     * transaction, because DuckDB moves inlined rows into Parquet files by deleting them from the
+     * catalog database while it adds the files under the snapshots the rows were written in: read
+     * at two different moments, the same rows could be counted twice or not at all.
      */
     public DuckLakeRowCount rowCount(long snapshotId, long tableId)
     {
+        boolean inlinedDataSupported = inlinedDataTablesRegistryExists();
         // Files the split manager rejects are counted rather than located, because the count only
         // decides whether to answer from the catalog at all; the scan that runs instead reports
         // which file it was.
@@ -431,56 +458,102 @@ public class JdbcDuckLakeMetastore
         if (dataFileHasPartialMax()) {
             partiallyVisibleCondition = "(f.partial_max IS NOT NULL AND f.partial_max > :snapshot)";
         }
-        try (Handle handle = jdbi.open()) {
-            DuckLakeRowCount dataFiles = handle.createQuery(
-                            """
-                            SELECT
-                                coalesce(sum(f.record_count), 0) AS record_count,
-                                coalesce(sum(CASE WHEN lower(f.file_format) <> 'parquet'
-                                        OR f.encryption_key IS NOT NULL
-                                        OR %s THEN 1 ELSE 0 END), 0) AS unreadable_count
-                            FROM %s f
-                            WHERE f.table_id = :tableId AND %s""".formatted(
-                                    partiallyVisibleCondition,
-                                    table("ducklake_data_file"),
-                                    visible("f")))
-                    .bind("snapshot", snapshotId)
-                    .bind("tableId", tableId)
-                    .map((rs, _) -> new DuckLakeRowCount(rs.getLong("record_count"), rs.getLong("unreadable_count") == 0))
-                    .one();
+        // A delete file that tags each deletion with the snapshot that made it applies only the
+        // deletions of the snapshot read and older ones, so its delete count overstates the rows it
+        // removes in an older snapshot. DuckDB records the newest of those snapshots as the delete
+        // file's partial_max, except in the delete file it writes when it flushes inlined rows,
+        // which belongs to a data file written by the same flush, the only kind of data file that
+        // has a partial_max.
+        String newerDeletionsCondition = "1 = 0";
+        if (deleteFileHasPartialMax()) {
+            newerDeletionsCondition = "(d.partial_max IS NOT NULL AND d.partial_max > :snapshot)";
+        }
+        if (dataFileHasPartialMax()) {
+            newerDeletionsCondition = "(%s OR (%sEXISTS (SELECT 1 FROM %s g WHERE g.data_file_id = d.data_file_id AND g.partial_max IS NOT NULL)))".formatted(
+                    newerDeletionsCondition,
+                    deleteFileHasPartialMax() ? "d.partial_max IS NULL AND " : "",
+                    table("ducklake_data_file"));
+        }
+        String dataFileCondition = partiallyVisibleCondition;
+        String deleteFileCondition = newerDeletionsCondition;
+        try {
+            return jdbi.inTransaction(TransactionIsolationLevel.REPEATABLE_READ, handle -> {
+                DuckLakeRowCount dataFiles = handle.createQuery(
+                                """
+                                SELECT
+                                    coalesce(sum(f.record_count), 0) AS record_count,
+                                    coalesce(sum(CASE WHEN lower(f.file_format) <> 'parquet'
+                                            OR f.encryption_key IS NOT NULL
+                                            OR %s THEN 1 ELSE 0 END), 0) AS unreadable_count
+                                FROM %s f
+                                WHERE f.table_id = :tableId AND %s""".formatted(
+                                        dataFileCondition,
+                                        table("ducklake_data_file"),
+                                        visible("f")))
+                        .bind("snapshot", snapshotId)
+                        .bind("tableId", tableId)
+                        .map((rs, _) -> new DuckLakeRowCount(rs.getLong("record_count"), rs.getLong("unreadable_count") == 0))
+                        .one();
 
-            // The rows to subtract come from the delete files joined to their data file, so that one
-            // left behind for a data file that is no longer visible does not remove rows that were
-            // never counted. The files to reject are looked for without that join, because the
-            // split manager checks every visible delete file whether or not it applies to one.
-            // Several visible delete files for one data file is such a rejection, and the count
-            // could not be trusted there either because they may delete the same row twice.
-            DuckLakeRowCount deleteFiles = handle.createQuery(
-                            """
-                            SELECT
-                                (SELECT coalesce(sum(j.delete_count), 0)
-                                    FROM %s j
-                                    JOIN %s f ON f.table_id = j.table_id AND f.data_file_id = j.data_file_id
-                                    WHERE j.table_id = :tableId AND %s AND %s) AS delete_count,
-                                coalesce(sum(CASE WHEN lower(d.format) <> 'parquet'
-                                        OR d.encryption_key IS NOT NULL THEN 1 ELSE 0 END), 0)
-                                    + (count(*) - count(DISTINCT d.data_file_id)) AS unreadable_count
-                            FROM %s d
-                            WHERE d.table_id = :tableId AND %s""".formatted(
-                                    table("ducklake_delete_file"),
-                                    table("ducklake_data_file"),
-                                    visible("j"),
-                                    visible("f"),
-                                    table("ducklake_delete_file"),
-                                    visible("d")))
-                    .bind("snapshot", snapshotId)
-                    .bind("tableId", tableId)
-                    .map((rs, _) -> new DuckLakeRowCount(rs.getLong("delete_count"), rs.getLong("unreadable_count") == 0))
-                    .one();
+                // The rows to subtract come from the delete files joined to their data file, so that one
+                // left behind for a data file that is no longer visible does not remove rows that were
+                // never counted. The files to reject are looked for without that join, because the
+                // split manager checks every visible delete file whether or not it applies to one.
+                // Several visible delete files for one data file is such a rejection, and the count
+                // could not be trusted there either because they may delete the same row twice.
+                DuckLakeRowCount deleteFiles = handle.createQuery(
+                                """
+                                SELECT
+                                    (SELECT coalesce(sum(j.delete_count), 0)
+                                        FROM %s j
+                                        JOIN %s f ON f.table_id = j.table_id AND f.data_file_id = j.data_file_id
+                                        WHERE j.table_id = :tableId AND %s AND %s) AS delete_count,
+                                    coalesce(sum(CASE WHEN lower(d.format) <> 'parquet'
+                                            OR d.encryption_key IS NOT NULL
+                                            OR %s THEN 1 ELSE 0 END), 0)
+                                        + (count(*) - count(DISTINCT d.data_file_id)) AS unreadable_count
+                                FROM %s d
+                                WHERE d.table_id = :tableId AND %s""".formatted(
+                                        table("ducklake_delete_file"),
+                                        table("ducklake_data_file"),
+                                        visible("j"),
+                                        visible("f"),
+                                        deleteFileCondition,
+                                        table("ducklake_delete_file"),
+                                        visible("d")))
+                        .bind("snapshot", snapshotId)
+                        .bind("tableId", tableId)
+                        .map((rs, _) -> new DuckLakeRowCount(rs.getLong("delete_count"), rs.getLong("unreadable_count") == 0))
+                        .one();
 
-            return new DuckLakeRowCount(
-                    dataFiles.rowCount() - deleteFiles.rowCount(),
-                    dataFiles.exact() && deleteFiles.exact());
+                long inlinedRows = 0;
+                // An inlined data table registered in this transaction's snapshot that no longer
+                // exists may have been dropped by a flush committed since, which the lookup of a
+                // table by name sees although the rows are still visible in the snapshot. Its rows
+                // cannot be counted, so the count is not exact and a scan, which notices the flush,
+                // counts instead.
+                boolean inlinedRowsCounted = true;
+                if (inlinedDataSupported) {
+                    for (InlinedDataTableRegistration registration : inlinedDataTableRegistrations(handle, tableId)) {
+                        if (!relationExists(handle, registration.tableName())) {
+                            inlinedRowsCounted = false;
+                            continue;
+                        }
+                        inlinedRows += handle.createQuery("SELECT count(*) FROM %s WHERE %s".formatted(table(registration.tableName()), VISIBLE))
+                                .bind("snapshot", snapshotId)
+                                .mapTo(Long.class)
+                                .one();
+                    }
+                }
+                // A position deleted inline may also be recorded by a delete file of the same data
+                // file, so subtracting both may count a row twice. The result is the number DuckDB
+                // reports, which subtracts both, but it is not exact enough to answer a count with.
+                long inlinedDeletions = inlinedFileDeletionCount(handle, snapshotId, tableId);
+
+                return new DuckLakeRowCount(
+                        dataFiles.rowCount() - deleteFiles.rowCount() - inlinedDeletions + inlinedRows,
+                        dataFiles.exact() && deleteFiles.exact() && inlinedDeletions == 0 && inlinedRowsCounted);
+            });
         }
         catch (JdbiException e) {
             throw metastoreError(e);
@@ -490,29 +563,121 @@ public class JdbcDuckLakeMetastore
     public List<DuckLakeDeleteFileEntry> deleteFiles(long snapshotId, long tableId)
     {
         try (Handle handle = jdbi.open()) {
-            return handle.createQuery(
-                            """
-                            SELECT delete_file_id, data_file_id, path, path_is_relative, format, delete_count, file_size_bytes, footer_size, encryption_key
-                            FROM %s
-                            WHERE table_id = :tableId AND %s
-                            ORDER BY delete_file_id""".formatted(table("ducklake_delete_file"), VISIBLE))
-                    .bind("snapshot", snapshotId)
-                    .bind("tableId", tableId)
-                    .map((rs, _) -> new DuckLakeDeleteFileEntry(
-                            rs.getLong("delete_file_id"),
-                            rs.getLong("data_file_id"),
-                            rs.getString("path"),
-                            rs.getBoolean("path_is_relative"),
-                            rs.getString("format"),
-                            rs.getLong("delete_count"),
-                            rs.getLong("file_size_bytes"),
-                            optionalLong(rs, "footer_size"),
-                            Optional.ofNullable(rs.getString("encryption_key"))))
-                    .list();
+            return deleteFiles(handle, snapshotId, tableId);
         }
         catch (JdbiException e) {
             throw metastoreError(e);
         }
+    }
+
+    /**
+     * The delete files of a table visible in the snapshot together with the positions of its data
+     * files deleted inline, read in one transaction. See {@link DuckLakeDeletions}.
+     */
+    public DuckLakeDeletions deletions(long snapshotId, long tableId)
+    {
+        try {
+            return jdbi.inTransaction(TransactionIsolationLevel.REPEATABLE_READ, handle -> new DuckLakeDeletions(
+                    deleteFiles(handle, snapshotId, tableId),
+                    inlinedFileDeletions(handle, snapshotId, tableId)));
+        }
+        catch (JdbiException e) {
+            throw metastoreError(e);
+        }
+    }
+
+    private List<DuckLakeDeleteFileEntry> deleteFiles(Handle handle, long snapshotId, long tableId)
+    {
+        String partialMaxColumn = "NULL AS partial_max";
+        if (deleteFileHasPartialMax()) {
+            partialMaxColumn = "partial_max";
+        }
+        return handle.createQuery(
+                        """
+                        SELECT delete_file_id, data_file_id, path, path_is_relative, format, delete_count, file_size_bytes, footer_size, encryption_key, %s
+                        FROM %s
+                        WHERE table_id = :tableId AND %s
+                        ORDER BY delete_file_id""".formatted(partialMaxColumn, table("ducklake_delete_file"), VISIBLE))
+                .bind("snapshot", snapshotId)
+                .bind("tableId", tableId)
+                .map((rs, _) -> new DuckLakeDeleteFileEntry(
+                        rs.getLong("delete_file_id"),
+                        rs.getLong("data_file_id"),
+                        rs.getString("path"),
+                        rs.getBoolean("path_is_relative"),
+                        rs.getString("format"),
+                        rs.getLong("delete_count"),
+                        rs.getLong("file_size_bytes"),
+                        optionalLong(rs, "footer_size"),
+                        Optional.ofNullable(rs.getString("encryption_key")),
+                        optionalLong(rs, "partial_max")))
+                .list();
+    }
+
+    /**
+     * The positions of rows of the table's data files that DuckDB deleted by recording them in
+     * {@code ducklake_inlined_delete_<table id>} instead of writing a delete file, by data file
+     * identifier. A position there is the index of the row within its data file, like the
+     * positions a delete file holds, and a deletion is never ended: it applies from the snapshot
+     * that recorded it on, for as long as the data file it names is visible.
+     */
+    private Map<Long, long[]> inlinedFileDeletions(Handle handle, long snapshotId, long tableId)
+    {
+        String deletionTable = inlinedFileDeletionTableName(tableId);
+        if (!relationExists(handle, deletionTable)) {
+            return ImmutableMap.of();
+        }
+        Map<Long, LongArrayList> positionsByDataFile = new HashMap<>();
+        handle.createQuery(
+                        """
+                        SELECT DISTINCT file_id, row_id
+                        FROM %s
+                        WHERE begin_snapshot <= :snapshot
+                        ORDER BY file_id, row_id""".formatted(table(deletionTable)))
+                .bind("snapshot", snapshotId)
+                .map((rs, _) -> {
+                    long dataFileId = rs.getLong("file_id");
+                    long position = rs.getLong("row_id");
+                    if (rs.wasNull() || position < 0) {
+                        throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Inlined deletion of data file %s of table %s has an invalid position".formatted(dataFileId, tableId));
+                    }
+                    positionsByDataFile.computeIfAbsent(dataFileId, _ -> new LongArrayList()).add(position);
+                    return dataFileId;
+                })
+                .list();
+        return positionsByDataFile.entrySet().stream()
+                .collect(toImmutableMap(Map.Entry::getKey, entry -> entry.getValue().toLongArray()));
+    }
+
+    /**
+     * The number of inline deletions applying to the data files of the table visible in the
+     * snapshot.
+     */
+    private long inlinedFileDeletionCount(Handle handle, long snapshotId, long tableId)
+    {
+        String deletionTable = inlinedFileDeletionTableName(tableId);
+        if (!relationExists(handle, deletionTable)) {
+            return 0;
+        }
+        return handle.createQuery(
+                        """
+                        SELECT count(*) FROM (
+                            SELECT DISTINCT d.file_id, d.row_id
+                            FROM %s d
+                            JOIN %s f ON f.data_file_id = d.file_id
+                            WHERE d.begin_snapshot <= :snapshot AND f.table_id = :tableId AND %s) deletions""".formatted(
+                                table(deletionTable),
+                                table("ducklake_data_file"),
+                                visible("f")))
+                .bind("snapshot", snapshotId)
+                .bind("tableId", tableId)
+                .mapTo(Long.class)
+                .one();
+    }
+
+    private static String inlinedFileDeletionTableName(long tableId)
+    {
+        return "ducklake_inlined_delete_" + tableId;
     }
 
     /**
@@ -868,44 +1033,355 @@ public class JdbcDuckLakeMetastore
     }
 
     /**
-     * Returns true when the table has data stored inline in the catalog database that is visible
-     * at the given snapshot. Such rows are not backed by Parquet files and are not supported.
+     * Whether the catalog can hold inlined rows at all, which catalogs written before DuckLake
+     * inlined data cannot.
      */
-    public boolean hasInlinedData(long snapshotId, long tableId)
+    public boolean inlinedDataSupported()
     {
-        if (!inlinedDataTablesRegistryExists()) {
-            // older DuckLake catalogs have no ducklake_inlined_data_tables table and cannot inline data
-            return false;
-        }
-        List<String> inlinedTableNames;
-        try (Handle handle = jdbi.open()) {
-            inlinedTableNames = handle.createQuery("SELECT table_name FROM " + table("ducklake_inlined_data_tables") + " WHERE table_id = :tableId")
-                    .bind("tableId", tableId)
-                    .mapTo(String.class)
-                    .list();
+        return inlinedDataTablesRegistryExists();
+    }
+
+    /**
+     * Whether the table holds rows or deletions stored inline in the catalog database that are
+     * visible in the snapshot. Both are read in one transaction.
+     */
+    public DuckLakeInlinedSummary inlinedSummary(long snapshotId, long tableId)
+    {
+        boolean inlinedDataSupported = inlinedDataTablesRegistryExists();
+        try {
+            return jdbi.inTransaction(TransactionIsolationLevel.REPEATABLE_READ, handle -> {
+                boolean hasRows = false;
+                if (inlinedDataSupported) {
+                    for (String inlinedTableName : existingInlinedDataTableNames(handle, tableId)) {
+                        if (hasVisibleRows(handle, inlinedTableName, snapshotId)) {
+                            hasRows = true;
+                            break;
+                        }
+                    }
+                }
+                return new DuckLakeInlinedSummary(hasRows, inlinedFileDeletionCount(handle, snapshotId, tableId) > 0);
+            });
         }
         catch (JdbiException e) {
             throw metastoreError(e);
         }
-        for (String inlinedTableName : inlinedTableNames) {
-            try (Handle handle = jdbi.open()) {
-                boolean hasRows = handle.createQuery("SELECT 1 FROM %s WHERE %s LIMIT 1".formatted(table(inlinedTableName), VISIBLE))
-                        .bind("snapshot", snapshotId)
+    }
+
+    /**
+     * The inlined data tables of the table holding rows visible in the snapshot, with the columns
+     * each of them stores, read in one transaction together with the newest snapshot of the
+     * catalog. See {@link DuckLakeInlinedData}.
+     * <p>
+     * DuckDB creates an inlined data table for every schema version of a table it inlines rows
+     * under, and names its columns as the table named them in that version. The columns are tied
+     * to the DuckLake column identifiers through the columns the table had in the first snapshot of
+     * that schema version, which is how DuckDB reads them too. An inlined data table whose columns
+     * are not exactly those is rejected rather than guessed at, since a guess could hand the values
+     * of one column to another. An inlined data table that is registered but does not exist holds
+     * nothing; DuckDB drops the ones it emptied.
+     */
+    public DuckLakeInlinedData inlinedData(long snapshotId, long tableId)
+    {
+        if (!inlinedDataTablesRegistryExists()) {
+            // older DuckLake catalogs have no ducklake_inlined_data_tables table and cannot inline data
+            return DuckLakeInlinedData.none(snapshotId);
+        }
+        try {
+            return jdbi.inTransaction(TransactionIsolationLevel.REPEATABLE_READ, handle -> {
+                long watermark = handle.createQuery("SELECT max(snapshot_id) FROM " + table("ducklake_snapshot"))
                         .mapTo(Long.class)
-                        .findOne()
-                        .isPresent();
-                if (hasRows) {
-                    return true;
+                        .one();
+                ImmutableList.Builder<DuckLakeInlinedDataTable> tables = ImmutableList.builder();
+                for (InlinedDataTableRegistration registration : inlinedDataTableRegistrations(handle, tableId)) {
+                    if (!relationExists(handle, registration.tableName()) || !hasVisibleRows(handle, registration.tableName(), snapshotId)) {
+                        continue;
+                    }
+                    tables.add(new DuckLakeInlinedDataTable(
+                            registration.tableName(),
+                            registration.schemaVersion(),
+                            inlinedColumns(handle, tableId, registration)));
                 }
+                return new DuckLakeInlinedData(watermark, tables.build());
+            });
+        }
+        catch (JdbiException e) {
+            throw metastoreError(e);
+        }
+    }
+
+    /**
+     * Whether DuckDB moved inlined rows of the table into Parquet files in a snapshot newer than
+     * the given one. Such a flush deletes the rows from the catalog database, so rows listed as
+     * inlined before it may since have gone from there, to Parquet files a reader of the earlier
+     * listing does not know about.
+     */
+    public boolean inlinedDataFlushedAfter(long tableId, long watermarkSnapshotId)
+    {
+        try (Handle handle = jdbi.open()) {
+            return inlinedDataFlushedAfter(handle, tableId, watermarkSnapshotId);
+        }
+        catch (JdbiException e) {
+            throw metastoreError(e);
+        }
+    }
+
+    private boolean inlinedDataFlushedAfter(Handle handle, long tableId, long watermarkSnapshotId)
+    {
+        // the patterns only narrow down the rows to look at; the entries are matched exactly below
+        return handle.createQuery(
+                        """
+                        SELECT changes_made FROM %s
+                        WHERE snapshot_id > :watermark
+                            AND (changes_made LIKE '%%inline_flush:%%' OR changes_made LIKE '%%flushed_inlined:%%')""".formatted(table("ducklake_snapshot_changes")))
+                .bind("watermark", watermarkSnapshotId)
+                .mapTo(String.class)
+                .list()
+                .stream()
+                .anyMatch(changes -> DuckLakeSnapshotChanges.recordsInlinedDataFlush(changes, tableId));
+    }
+
+    /**
+     * Opens the rows of an inlined data table visible in the snapshot, reading the given columns.
+     * The rows are read in a transaction of their own, which first makes sure that no flush of the
+     * table was committed after {@code watermarkSnapshotId}, the snapshot the inlined data tables
+     * were listed in: a flush in between would have moved the rows to Parquet files the scan does
+     * not read, and the scan would silently miss them. Reading both in one transaction is what
+     * makes the check hold for the rows read.
+     */
+    public InlinedRows openInlinedRows(long tableId, long snapshotId, long watermarkSnapshotId, String inlinedTableName, List<String> columnNames, int fetchSize)
+    {
+        Handle handle = jdbi.open();
+        try {
+            handle.begin();
+            // a single snapshot of the catalog database for the check and the rows it vouches for
+            handle.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY");
+            if (inlinedDataFlushedAfter(handle, tableId, watermarkSnapshotId)) {
+                throw new TrinoException(
+                        DUCKLAKE_CONCURRENT_MODIFICATION,
+                        "Inlined data of DuckLake table %s was flushed to Parquet files while the query was reading it; run the query again".formatted(tableId));
             }
-            catch (JdbiException e) {
-                if (!isUndefinedTable(e)) {
-                    throw metastoreError(e);
-                }
-                // the inlined data table is registered but does not exist (e.g. already cleaned up); treat as empty
+            if (!relationExists(handle, inlinedTableName)) {
+                // The split exists because the table held rows visible in the snapshot when it was
+                // listed. DuckDB drops an inlined data table once it has emptied it, and the
+                // lookup of a table by name sees a drop committed after this transaction began
+                // although the rows themselves would still be visible in it. Returning no rows
+                // would silently lose them.
+                throw new TrinoException(
+                        DUCKLAKE_CONCURRENT_MODIFICATION,
+                        "Inlined data table %s of DuckLake table %s was dropped while the query was reading it; run the query again".formatted(inlinedTableName, tableId));
+            }
+            String projection = columnNames.isEmpty()
+                    ? "1"
+                    : columnNames.stream().map(JdbcDuckLakeMetastore::quoted).collect(joining(", "));
+            Connection connection = handle.getConnection();
+            PreparedStatement statement = connection.prepareStatement("SELECT %s FROM %s WHERE begin_snapshot <= ? AND (end_snapshot IS NULL OR end_snapshot > ?)".formatted(projection, table(inlinedTableName)));
+            try {
+                statement.setFetchSize(fetchSize);
+                statement.setLong(1, snapshotId);
+                statement.setLong(2, snapshotId);
+                return new InlinedRows(handle, statement, statement.executeQuery());
+            }
+            catch (SQLException | RuntimeException e) {
+                statement.close();
+                throw e;
             }
         }
-        return false;
+        catch (SQLException e) {
+            closeQuietly(handle);
+            throw new TrinoException(DUCKLAKE_METASTORE_ERROR, "Failed to read inlined data from DuckLake catalog: " + e.getMessage(), e);
+        }
+        catch (JdbiException e) {
+            closeQuietly(handle);
+            throw metastoreError(e);
+        }
+        catch (RuntimeException e) {
+            closeQuietly(handle);
+            throw e;
+        }
+    }
+
+    private static void closeQuietly(Handle handle)
+    {
+        try (handle) {
+            if (handle.isInTransaction()) {
+                handle.rollback();
+            }
+        }
+        catch (RuntimeException _) {
+            // the connection is discarded or reset by the pool either way
+        }
+    }
+
+    /**
+     * Rows of an inlined data table being read, holding the transaction they are read in until
+     * closed.
+     */
+    public static final class InlinedRows
+            implements AutoCloseable
+    {
+        private final Handle handle;
+        private final Statement statement;
+        private final ResultSet resultSet;
+
+        private InlinedRows(Handle handle, Statement statement, ResultSet resultSet)
+        {
+            this.handle = requireNonNull(handle, "handle is null");
+            this.statement = requireNonNull(statement, "statement is null");
+            this.resultSet = requireNonNull(resultSet, "resultSet is null");
+        }
+
+        /**
+         * Moves to the next row, returning false once there is none.
+         */
+        public boolean next()
+                throws SQLException
+        {
+            return resultSet.next();
+        }
+
+        /**
+         * The current row, whose columns are numbered from one in the order they were requested.
+         */
+        public ResultSet row()
+        {
+            return resultSet;
+        }
+
+        @Override
+        public void close()
+        {
+            try {
+                // closing the statement closes its result set
+                statement.close();
+            }
+            catch (SQLException _) {
+                // the transaction is rolled back below, which releases whatever the statement held
+            }
+            closeQuietly(handle);
+        }
+    }
+
+    private record InlinedDataTableRegistration(String tableName, long schemaVersion) {}
+
+    private List<InlinedDataTableRegistration> inlinedDataTableRegistrations(Handle handle, long tableId)
+    {
+        return handle.createQuery(
+                        """
+                        SELECT table_name, schema_version FROM %s
+                        WHERE table_id = :tableId
+                        ORDER BY schema_version""".formatted(table("ducklake_inlined_data_tables")))
+                .bind("tableId", tableId)
+                .map((rs, _) -> new InlinedDataTableRegistration(rs.getString("table_name"), rs.getLong("schema_version")))
+                .list();
+    }
+
+    private List<String> existingInlinedDataTableNames(Handle handle, long tableId)
+    {
+        return inlinedDataTableRegistrations(handle, tableId).stream()
+                .map(InlinedDataTableRegistration::tableName)
+                .filter(tableName -> relationExists(handle, tableName))
+                .collect(toImmutableList());
+    }
+
+    private boolean hasVisibleRows(Handle handle, String inlinedTableName, long snapshotId)
+    {
+        return handle.createQuery("SELECT 1 FROM %s WHERE %s LIMIT 1".formatted(table(inlinedTableName), VISIBLE))
+                .bind("snapshot", snapshotId)
+                .mapTo(Long.class)
+                .findOne()
+                .isPresent();
+    }
+
+    /**
+     * Ties the columns of an inlined data table to the DuckLake columns they hold the values of.
+     */
+    private List<DuckLakeInlinedColumn> inlinedColumns(Handle handle, long tableId, InlinedDataTableRegistration registration)
+    {
+        record StoredColumn(String name, String type) {}
+
+        List<StoredColumn> stored = handle.createQuery(
+                        """
+                        SELECT column_name, udt_name FROM information_schema.columns
+                        WHERE table_schema = :schema AND table_name = :tableName
+                        ORDER BY ordinal_position""")
+                .bind("schema", metadataSchema)
+                .bind("tableName", registration.tableName())
+                .map((rs, _) -> new StoredColumn(rs.getString("column_name"), rs.getString("udt_name")))
+                .list();
+        List<String> systemColumns = stored.stream()
+                .limit(INLINED_SYSTEM_COLUMNS.size())
+                .map(StoredColumn::name)
+                .collect(toImmutableList());
+        if (!systemColumns.equals(INLINED_SYSTEM_COLUMNS)) {
+            throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Inlined data table %s of table %s does not start with the columns %s".formatted(registration.tableName(), tableId, INLINED_SYSTEM_COLUMNS));
+        }
+        List<StoredColumn> dataColumns = stored.subList(INLINED_SYSTEM_COLUMNS.size(), stored.size());
+
+        long versionSnapshot = schemaVersionSnapshot(handle, tableId, registration.schemaVersion());
+        Map<String, Long> columnIdsByName = new LinkedHashMap<>();
+        for (DuckLakeColumnEntry column : columns(handle, versionSnapshot, tableId)) {
+            if (column.parentColumn().isEmpty() && columnIdsByName.put(column.columnName(), column.columnId()) != null) {
+                throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Table %s had two columns named '%s' at snapshot %s".formatted(tableId, column.columnName(), versionSnapshot));
+            }
+        }
+        Set<String> storedNames = dataColumns.stream()
+                .map(StoredColumn::name)
+                .collect(toImmutableSet());
+        if (!storedNames.equals(columnIdsByName.keySet()) || storedNames.size() != dataColumns.size()) {
+            throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Inlined data table %s of table %s stores the columns %s, but the table had the columns %s in schema version %s".formatted(
+                    registration.tableName(),
+                    tableId,
+                    dataColumns.stream().map(StoredColumn::name).toList(),
+                    columnIdsByName.keySet(),
+                    registration.schemaVersion()));
+        }
+        return dataColumns.stream()
+                .map(column -> new DuckLakeInlinedColumn(columnIdsByName.get(column.name()), column.name(), column.type()))
+                .collect(toImmutableList());
+    }
+
+    /**
+     * A snapshot in which the table has the columns it had in the given schema version, found the
+     * way DuckDB finds it: the snapshot {@code ducklake_schema_versions} records for the table and
+     * version, and failing that, for catalogs that record schema versions without the table they
+     * belong to or not at all, a snapshot of that schema version, and finally the snapshot the table
+     * was created in.
+     */
+    private long schemaVersionSnapshot(Handle handle, long tableId, long schemaVersion)
+    {
+        if (schemaVersionsTableExists() && schemaVersionsHasTableId()) {
+            Optional<Long> snapshot = handle.createQuery(
+                            """
+                            SELECT min(begin_snapshot) FROM %s
+                            WHERE table_id = :tableId AND schema_version = :schemaVersion""".formatted(table("ducklake_schema_versions")))
+                    .bind("tableId", tableId)
+                    .bind("schemaVersion", schemaVersion)
+                    .mapTo(Long.class)
+                    .findOne();
+            if (snapshot.isPresent()) {
+                return snapshot.get();
+            }
+        }
+        Optional<Long> snapshot = handle.createQuery("SELECT min(snapshot_id) FROM %s WHERE schema_version = :schemaVersion".formatted(table("ducklake_snapshot")))
+                .bind("schemaVersion", schemaVersion)
+                .mapTo(Long.class)
+                .findOne();
+        if (snapshot.isPresent()) {
+            return snapshot.get();
+        }
+        return handle.createQuery("SELECT min(begin_snapshot) FROM %s WHERE table_id = :tableId".formatted(table("ducklake_table")))
+                .bind("tableId", tableId)
+                .mapTo(Long.class)
+                .findOne()
+                .orElseThrow(() -> new TrinoException(DUCKLAKE_INVALID_METADATA, "Cannot find the columns of table %s in schema version %s".formatted(tableId, schemaVersion)));
+    }
+
+    private boolean relationExists(Handle handle, String tableName)
+    {
+        return handle.createQuery("SELECT to_regclass(:name) IS NOT NULL")
+                .bind("name", table(tableName))
+                .mapTo(Boolean.class)
+                .one();
     }
 
     /**
@@ -930,6 +1406,40 @@ public class JdbcDuckLakeMetastore
             inlinedDataTablesRegistryExists = registryExists;
         }
         return registryExists;
+    }
+
+    private boolean schemaVersionsTableExists()
+    {
+        Boolean tableExists = schemaVersionsTableExists;
+        if (tableExists == null) {
+            tableExists = tableExists("ducklake_schema_versions");
+            schemaVersionsTableExists = tableExists;
+        }
+        return tableExists;
+    }
+
+    /**
+     * Whether {@code ducklake_schema_versions} records which table each schema version belongs to,
+     * which catalogs written before DuckLake versioned the schema of each table separately do not.
+     */
+    private boolean schemaVersionsHasTableId()
+    {
+        Boolean hasTableId = schemaVersionsHasTableId;
+        if (hasTableId == null) {
+            hasTableId = columnExists("ducklake_schema_versions", "table_id");
+            schemaVersionsHasTableId = hasTableId;
+        }
+        return hasTableId;
+    }
+
+    private boolean deleteFileHasPartialMax()
+    {
+        Boolean hasPartialMax = deleteFileHasPartialMax;
+        if (hasPartialMax == null) {
+            hasPartialMax = columnExists("ducklake_delete_file", "partial_max");
+            deleteFileHasPartialMax = hasPartialMax;
+        }
+        return hasPartialMax;
     }
 
     private boolean viewTableExists()
@@ -1074,6 +1584,11 @@ public class JdbcDuckLakeMetastore
                 file.mappingId(),
                 file.partialMax(),
                 partitionValues);
+    }
+
+    private static String quoted(String identifier)
+    {
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
     }
 
     private String table(String tableName)

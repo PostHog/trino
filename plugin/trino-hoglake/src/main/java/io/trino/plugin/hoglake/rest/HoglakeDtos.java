@@ -55,6 +55,11 @@ public final class HoglakeDtos
             return new ColumnDefinition(name, type, typeParams, nullable, children, comment);
         }
 
+        public ColumnDefinition withTypeParams(Map<String, Object> typeParams)
+        {
+            return new ColumnDefinition(name, type, typeParams, nullable, children, comment);
+        }
+
         public boolean hasComments()
         {
             return comment != null || children.stream().anyMatch(ColumnDefinition::hasComments);

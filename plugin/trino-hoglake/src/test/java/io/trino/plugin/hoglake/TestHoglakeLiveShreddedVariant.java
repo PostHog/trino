@@ -265,17 +265,28 @@ final class TestHoglakeLiveShreddedVariant
             assertSameAsTwin(runner, "SELECT id, note, json_format(CAST(props AS json)) FROM %s WHERE id < 100000");
             assertRows(runner, "SELECT id, CAST(props['$browser'] AS varchar) FROM events WHERE id IN (1, 100)", "VALUES (BIGINT '1', 'Chrome'), (100, 'Edge')");
 
-            // The server does not check declarations, so Trino rejects the ones it cannot write
-            client.createTable("test", "invalid_layout", List.of(
-                    new HoglakeDtos.ColumnDefinition("id", "long", null, true),
-                    new HoglakeDtos.ColumnDefinition("properties", "variant", Map.of("shredding", Map.of("type", "text")), true)));
-            assertThatThrownBy(() -> runner.execute("INSERT INTO invalid_layout VALUES (1, CAST(JSON '1' AS variant))"))
-                    .hasMessage("Invalid type_params.shredding of column properties: $ has an unknown type: text");
-            assertThat(runner.execute("SELECT count(*) FROM invalid_layout").getOnlyValue()).isEqualTo(0L);
-            client.createTable("test", "nested_layout", List.of(new HoglakeDtos.ColumnDefinition("r", "struct", null, true, List.of(
-                    new HoglakeDtos.ColumnDefinition("x", "variant", Map.of("shredding", Map.of("type", "string")), true)))));
-            assertThatThrownBy(() -> runner.execute("INSERT INTO nested_layout SELECT CAST(ROW(CAST(JSON '\"a\"' AS variant)) AS row(x variant))"))
-                    .hasMessage("Hoglake writes shredded VARIANT values only in top-level columns: x");
+            // The server refuses the declarations that Trino cannot write
+            assertThatThrownBy(() -> client.createTable("test", "invalid_layout", List.of(
+                    new HoglakeDtos.ColumnDefinition("properties", "variant", Map.of("shredding", Map.of("type", "text")), true))))
+                    .hasMessageContaining("variant column 'properties' has an invalid type_params.shredding: $ has an unknown type 'text'");
+            assertThatThrownBy(() -> client.createTable("test", "nested_layout", List.of(new HoglakeDtos.ColumnDefinition("r", "struct", null, true, List.of(
+                    new HoglakeDtos.ColumnDefinition("x", "variant", Map.of("shredding", Map.of("type", "string")), true))))))
+                    .hasMessageContaining("variant column 'r.x' is nested, and only a top-level variant column can declare type_params.shredding");
+            assertThat(client.getTable("test", "invalid_layout")).isEmpty();
+            assertThat(client.getTable("test", "nested_layout")).isEmpty();
+
+            // SQL declares a layout when it creates a table or adds a column, and the server keeps it
+            runner.execute("CREATE TABLE sql_declared (id bigint, properties variant WITH (shredding = '{\"type\": \"object\", \"fields\": [{\"name\": \"$browser\", \"type\": \"string\"}]}'))");
+            runner.execute("ALTER TABLE sql_declared ADD COLUMN extra variant WITH (shredding = '{\"type\": \"int64\"}')");
+            assertThat((String) runner.execute("SHOW CREATE TABLE sql_declared").getOnlyValue()).contains(
+                    "shredding = '{\"type\":\"object\",\"fields\":[{\"name\":\"$browser\",\"type\":\"string\"}]}'",
+                    "shredding = '{\"type\":\"int64\"}'");
+            snapshot = client.getCatalog().headSnapshotId();
+            runner.execute("INSERT INTO sql_declared VALUES (1, CAST(JSON '{\"$browser\": \"Chrome\"}' AS variant), CAST(JSON '7' AS variant))");
+            assertThat(typedValueCounts(fileSystem, filesAddedAfter(client, "sql_declared", snapshot)))
+                    .containsEntry("properties.typed_value.$browser.typed_value", 1L)
+                    .containsEntry("extra.typed_value", 1L);
+            assertRows(runner, "SELECT CAST(properties['$browser'] AS varchar), CAST(extra AS bigint) FROM sql_declared", "VALUES ('Chrome', BIGINT '7')");
         }
         finally {
             fileSystemFactory.destroy();

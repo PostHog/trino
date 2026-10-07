@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.ducklake;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -28,6 +29,7 @@ import io.trino.parquet.ParquetReaderOptions;
 import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.ducklake.metastore.DuckLakeNameMapping;
 import io.trino.plugin.ducklake.metastore.DuckLakeNameMappingEntry;
+import io.trino.plugin.ducklake.metastore.JdbcDuckLakeMetastore;
 import io.trino.plugin.ducklake.util.DuckLakeFieldIds;
 import io.trino.plugin.ducklake.util.DuckLakeTypes;
 import io.trino.plugin.hive.HiveColumnHandle;
@@ -113,6 +115,11 @@ public class DuckLakePageSourceProvider
     private static final String MISSING_COLUMN_NAME_PREFIX = "$ducklake_missing_column$";
     private static final int LONG_OPEN_HASH_SET_INSTANCE_SIZE = instanceSize(LongOpenHashSet.class);
     /**
+     * The column of a delete file giving the snapshot each deletion was made in, which only some
+     * delete files have.
+     */
+    private static final String DELETE_FILE_SNAPSHOT_COLUMN = "_ducklake_internal_snapshot_id";
+    /**
      * Positions of a page produced for a scan that reads row counts only. A page of no columns
      * holds no data, so this only bounds the position count to an {@code int}.
      */
@@ -126,16 +133,40 @@ public class DuckLakePageSourceProvider
     private final TrinoFileSystemFactory fileSystemFactory;
     private final FileFormatDataSourceStats fileFormatDataSourceStats;
     private final ParquetReaderOptions parquetReaderOptions;
+    private final Optional<JdbcDuckLakeMetastore> metastore;
 
     @Inject
     public DuckLakePageSourceProvider(
             TrinoFileSystemFactory fileSystemFactory,
             FileFormatDataSourceStats fileFormatDataSourceStats,
+            ParquetReaderConfig parquetReaderConfig,
+            JdbcDuckLakeMetastore metastore)
+    {
+        this(fileSystemFactory, fileFormatDataSourceStats, parquetReaderConfig, Optional.of(metastore));
+    }
+
+    /**
+     * A provider without access to the catalog database, which reads data files only.
+     */
+    @VisibleForTesting
+    public DuckLakePageSourceProvider(
+            TrinoFileSystemFactory fileSystemFactory,
+            FileFormatDataSourceStats fileFormatDataSourceStats,
             ParquetReaderConfig parquetReaderConfig)
+    {
+        this(fileSystemFactory, fileFormatDataSourceStats, parquetReaderConfig, Optional.empty());
+    }
+
+    private DuckLakePageSourceProvider(
+            TrinoFileSystemFactory fileSystemFactory,
+            FileFormatDataSourceStats fileFormatDataSourceStats,
+            ParquetReaderConfig parquetReaderConfig,
+            Optional<JdbcDuckLakeMetastore> metastore)
     {
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.fileFormatDataSourceStats = requireNonNull(fileFormatDataSourceStats, "fileFormatDataSourceStats is null");
         this.parquetReaderOptions = parquetReaderConfig.toParquetReaderOptions();
+        this.metastore = requireNonNull(metastore, "metastore is null");
     }
 
     @Override
@@ -152,7 +183,6 @@ public class DuckLakePageSourceProvider
         if (split instanceof DuckLakeRowCountSplit rowCountSplit) {
             return rowCountPageSource(rowCountSplit, columns);
         }
-        DuckLakeSplit duckLakeSplit = (DuckLakeSplit) split;
         DuckLakeTableHandle tableHandle = (DuckLakeTableHandle) table;
         List<DuckLakeColumnHandle> requestedColumns = columns.stream()
                 .map(DuckLakeColumnHandle.class::cast)
@@ -168,6 +198,14 @@ public class DuckLakePageSourceProvider
             }
         }
 
+        if (split instanceof DuckLakeInlinedSplit inlinedSplit) {
+            // The rows are filtered by the engine, which applies every predicate left unenforced
+            // for a table holding inlined rows.
+            JdbcDuckLakeMetastore catalog = metastore.orElseThrow(() -> new IllegalStateException("Inlined rows cannot be read without the catalog database"));
+            return new DuckLakeInlinedPageSource(catalog, inlinedSplit, requestedColumns);
+        }
+        DuckLakeSplit duckLakeSplit = (DuckLakeSplit) split;
+
         TupleDomain<DuckLakeColumnHandle> effectivePredicate = tableHandle.unenforcedConstraint()
                 .intersect(dynamicFilter.getCurrentPredicate().transformKeys(DuckLakeColumnHandle.class::cast));
         if (effectivePredicate.isNone()) {
@@ -180,13 +218,15 @@ public class DuckLakePageSourceProvider
         TupleDomain<HiveColumnHandle> parquetPredicate = toParquetPredicate(effectivePredicate.simplify(DOMAIN_COMPACTION_THRESHOLD), nameMapping);
 
         Optional<DuckLakeDeleteFileHandle> deleteFile = duckLakeSplit.deleteFile();
+        Optional<DuckLakeInlinedDeletions> inlinedDeletions = duckLakeSplit.inlinedDeletions();
+        boolean hasDeletions = deleteFile.isPresent() || inlinedDeletions.isPresent();
 
         ImmutableList.Builder<HiveColumnHandle> hiveColumnsBuilder = ImmutableList.builderWithExpectedSize(dataColumns.size() + 1);
         dataColumns.stream()
                 .map(column -> toHiveColumnHandle(column, nameMapping))
                 .forEach(hiveColumnsBuilder::add);
         // the row index is read to apply positional deletes and to identify rows a merge changes
-        if (deleteFile.isPresent() || rowIdRequested) {
+        if (hasDeletions || rowIdRequested) {
             hiveColumnsBuilder.add(PARQUET_ROW_INDEX_COLUMN);
         }
         List<HiveColumnHandle> hiveColumns = hiveColumnsBuilder.build();
@@ -201,11 +241,11 @@ public class DuckLakePageSourceProvider
                 .withMaxReadBlockRowCount(getParquetMaxReadBlockRowCount(session))
                 // row skipping via the column index would break the row-index alignment needed to apply positional
                 // deletes; row-group pruning remains safe because the row-index column is absolute within the file
-                .withUseColumnIndex(deleteFile.isEmpty() && !rowIdRequested && isParquetUseColumnIndex(session))
+                .withUseColumnIndex(!hasDeletions && !rowIdRequested && isParquetUseColumnIndex(session))
                 .withIgnoreStatistics(isParquetIgnoreStatistics(session))
                 .build();
 
-        if (deleteFile.isPresent()) {
+        if (hasDeletions) {
             AggregatedMemoryContext splitMemoryContext = newAggregatedMemoryContext(memoryContext);
             LocalMemoryContext dataFileMemoryContext = splitMemoryContext.newLocalMemoryContext(DuckLakePageSourceProvider.class.getSimpleName());
             ConnectorPageSource pageSource = createParquetPageSource(inputFile, duckLakeSplit, dataColumns, hiveColumns, parquetPredicate, options, dataFileMemoryContext::setBytes);
@@ -214,7 +254,21 @@ public class DuckLakePageSourceProvider
             // Every split of the data file loads the whole delete file, so a file split into
             // several row-group sets re-reads its delete file once per split. The positions are
             // file-absolute, so each split simply ignores the ones outside the rows it reads.
-            Supplier<LongOpenHashSet> deletedPositions = Suppliers.memoize(() -> readDeletedPositions(fileSystem, deleteFile.get(), splitMemoryContext, deletedPositionsMemoryContext, deleteFileReadStatistics));
+            //
+            // Positions deleted inline in the catalog database apply alongside the delete file's.
+            // DuckDB may record a position in both, which the set absorbs.
+            Supplier<LongOpenHashSet> deletedPositions = Suppliers.memoize(() -> {
+                LongOpenHashSet positions = deleteFile
+                        .map(file -> readDeletedPositions(fileSystem, file, tableHandle.snapshotId(), splitMemoryContext, deletedPositionsMemoryContext, deleteFileReadStatistics))
+                        .orElseGet(LongOpenHashSet::new);
+                inlinedDeletions.ifPresent(deletions -> {
+                    for (int index = 0; index < deletions.size(); index++) {
+                        positions.add(deletions.position(index));
+                    }
+                    deletedPositionsMemoryContext.setBytes(estimatedRetainedSizeOfLongSet(positions.size()));
+                });
+                return positions;
+            });
             pageSource = TransformConnectorPageSource.create(
                     pageSource,
                     page -> filterDeletedRows(page, deletedPositions.get(), rowIndexChannel));
@@ -310,13 +364,18 @@ public class DuckLakePageSourceProvider
      * it does not enforce is applied by the engine, which would then have to project the column it
      * reads;
      * <li>the split is a metadata-only whole-file split, whose record count is the exact number of
-     * visible rows after deletes.
+     * visible rows after deletes. A file with rows deleted inline in the catalog database never is
+     * one, because those deletions may repeat positions of its delete file, and neither is one whose
+     * delete file may hold deletions newer than the snapshot read, which do not apply; the rows of
+     * such a file are counted by reading which of them are left.
      * </ul>
      */
     private static boolean isRowCountOnly(List<DuckLakeColumnHandle> columns, TupleDomain<DuckLakeColumnHandle> effectivePredicate, DuckLakeSplit split)
     {
         return columns.isEmpty()
                 && effectivePredicate.isAll()
+                && split.inlinedDeletions().isEmpty()
+                && split.deleteFile().map(DuckLakeDeleteFileHandle::exactDeleteCount).orElse(true)
                 && split.rowGroupMetadata().isEmpty()
                 && split.start() == 0
                 && split.length() == split.fileSizeBytes();
@@ -536,10 +595,16 @@ public class DuckLakePageSourceProvider
      * from the single data file the delete file belongs to. The retained size of the loaded
      * positions is accounted in {@code deletedPositionsMemoryContext}, which stays open until
      * the enclosing page source is closed.
+     * <p>
+     * A delete file DuckDB wrote over an earlier one, or when it flushed inlined rows or
+     * deletions, also has a {@code _ducklake_internal_snapshot_id} column giving the snapshot each
+     * deletion was made in, and is registered from the oldest of them on. As in DuckDB, a deletion
+     * of a snapshot newer than the one read does not apply.
      */
     private LongOpenHashSet readDeletedPositions(
             TrinoFileSystem fileSystem,
             DuckLakeDeleteFileHandle deleteFile,
+            long snapshotId,
             AggregatedMemoryContext memoryContext,
             LocalMemoryContext deletedPositionsMemoryContext,
             DeleteFileReadStatistics readStatistics)
@@ -547,6 +612,15 @@ public class DuckLakePageSourceProvider
         HiveColumnHandle positionColumn = new HiveColumnHandle(
                 "pos",
                 0,
+                DuckLakeTypes.toHiveType(BIGINT),
+                BIGINT,
+                Optional.empty(),
+                HiveColumnHandle.ColumnType.REGULAR,
+                Optional.empty());
+        // read by name, so that it reads as NULL in a delete file without it
+        HiveColumnHandle snapshotColumn = new HiveColumnHandle(
+                DELETE_FILE_SNAPSHOT_COLUMN,
+                1,
                 DuckLakeTypes.toHiveType(BIGINT),
                 BIGINT,
                 Optional.empty(),
@@ -562,7 +636,7 @@ public class DuckLakePageSourceProvider
                 inputFile,
                 0,
                 deleteFile.fileSizeBytes(),
-                ImmutableList.of(positionColumn),
+                ImmutableList.of(positionColumn, snapshotColumn),
                 ImmutableList.of(TupleDomain.all()),
                 true, // resolve columns by name
                 DateTimeZone.UTC,
@@ -580,9 +654,13 @@ public class DuckLakePageSourceProvider
                         continue;
                     }
                     Block block = page.getBlock(0);
+                    Block snapshots = page.getBlock(1);
                     for (int position = 0; position < block.getPositionCount(); position++) {
                         if (block.isNull(position)) {
                             throw new TrinoException(DUCKLAKE_BAD_DATA, "Delete file %s contains a null position".formatted(deleteFile.path()));
+                        }
+                        if (!snapshots.isNull(position) && BIGINT.getLong(snapshots, position) > snapshotId) {
+                            continue;
                         }
                         deletedPositions.add(BIGINT.getLong(block, position));
                     }
@@ -601,7 +679,7 @@ public class DuckLakePageSourceProvider
             readerMemoryContext.close();
         }
         if (rowCount != deleteFile.deleteCount()) {
-            // guards against delete files whose rows are only partially visible at the snapshot
+            // guards against a delete file that does not match its catalog entry
             throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Delete file %s contains %s positions but the catalog records %s deleted rows".formatted(deleteFile.path(), rowCount, deleteFile.deleteCount()));
         }
         deletedPositionsMemoryContext.setBytes(estimatedRetainedSizeOfLongSet(deletedPositions.size()));

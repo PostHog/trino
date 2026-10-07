@@ -72,6 +72,26 @@ public final class DuckLakeSnapshotChanges
     }
 
     /**
+     * Whether the changes record that inlined rows of the table were flushed into data files. Only
+     * the entries naming a flush are looked at, so a change type this connector does not know does
+     * not keep a reader from asking.
+     */
+    public static boolean recordsInlinedDataFlush(String changesMade, long tableId)
+    {
+        for (String change : splitChanges(changesMade)) {
+            int separator = change.indexOf(':');
+            if (separator < 0) {
+                continue;
+            }
+            String type = change.substring(0, separator);
+            if ((type.equals("inline_flush") || type.equals("flushed_inlined")) && change.substring(separator + 1).equals(Long.toString(tableId))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Splits on the commas separating entries, which are the ones outside a quoted name. A created
      * schema, table or view is recorded under its quoted name, and a name may hold a comma.
      */
