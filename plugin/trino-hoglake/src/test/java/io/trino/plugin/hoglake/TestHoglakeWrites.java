@@ -13,7 +13,9 @@
  */
 package io.trino.plugin.hoglake;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableMap;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.airlift.bootstrap.Bootstrap;
@@ -63,9 +65,11 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static com.google.common.collect.MoreCollectors.onlyElement;
 import static io.trino.plugin.hoglake.HoglakeConfig.DEFAULT_MAX_SPLIT_SIZE;
+import static io.trino.spi.StandardErrorCode.INVALID_COLUMN_PROPERTY;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.assertions.Assert.assertEventually;
+import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -236,6 +240,16 @@ final class TestHoglakeWrites
                 }
                 else if (path.endsWith("/alter")) {
                     var operation = mapper.readTree(exchange.getRequestBody()).path("ops").get(0);
+                    if (Set.of("add_column", "add_column_with_metadata").contains(operation.path("op").asText())) {
+                        HoglakeDtos.Table table = tables.get(name);
+                        List<HoglakeDtos.Column> columns = new ArrayList<>(table.columns());
+                        columns.add(materialize(mapper.treeToValue(operation.path("column"), HoglakeDtos.ColumnDefinition.class), columns.size(), new AtomicLong(maxFieldId(columns) + 1)));
+                        HoglakeDtos.Table added = new HoglakeDtos.Table(name, table.namespace(), table.tableUuid(), columns, table.recordCount(), table.fileCount(), table.fileSizeBytes());
+                        tables.put(name, added);
+                        snapshot++;
+                        respond(exchange, 200, added);
+                        return;
+                    }
                     if (operation.path("op").asText().equals("promote_column")) {
                         HoglakeDtos.Table table = tables.get(name);
                         List<HoglakeDtos.Column> columns = table.columns().stream()
@@ -355,6 +369,14 @@ final class TestHoglakeWrites
                 respond(exchange, 404, Map.of());
             }
         }
+    }
+
+    private static long maxFieldId(List<HoglakeDtos.Column> columns)
+    {
+        return columns.stream()
+                .mapToLong(column -> Math.max(column.fieldId(), maxFieldId(column.children())))
+                .max()
+                .orElse(0);
     }
 
     private static HoglakeDtos.Column materialize(HoglakeDtos.ColumnDefinition definition, int ordinal, AtomicLong nextId)
@@ -595,6 +617,72 @@ final class TestHoglakeWrites
         finally {
             idempotentMutation = false;
         }
+    }
+
+    @Test
+    void testShreddingColumnProperty()
+            throws IOException
+    {
+        String declaration = "{\"type\": \"object\", \"fields\": [{\"name\": \"$browser\", \"type\": \"string\"}, {\"name\": \"$set\", \"type\": \"object\", \"fields\": [{\"name\": \"plan\", \"type\": \"string\"}]}]}";
+        schemaEvolution = true;
+        try {
+            runner.execute("CREATE TABLE declared_events (id bigint, properties variant WITH (shredding = '" + declaration + "'))");
+            runner.execute("ALTER TABLE declared_events ADD COLUMN extra variant WITH (shredding = '{\"type\": \"int64\"}')");
+        }
+        finally {
+            schemaEvolution = false;
+        }
+
+        // The catalog stores the declarations in the columns' parameters
+        List<HoglakeDtos.Column> columns = tables.get("declared_events").columns();
+        JsonNode stored = mapper.valueToTree(columns.get(1).typeParams());
+        assertThat(stored).isEqualTo(mapper.readTree("{\"shredding\": " + declaration + "}"));
+        JsonNode added = mapper.valueToTree(columns.get(2).typeParams());
+        assertThat(added).isEqualTo(mapper.readTree("{\"shredding\": {\"type\": \"int64\"}}"));
+
+        // SHOW CREATE TABLE shows them, and both its statement and LIKE create columns with the same declarations
+        String statement = (String) runner.execute("SHOW CREATE TABLE declared_events").getOnlyValue();
+        assertThat(statement).contains(
+                "shredding = '{\"type\":\"object\",\"fields\":[{\"name\":\"$browser\",\"type\":\"string\"}",
+                "shredding = '{\"type\":\"int64\"}'");
+        runner.execute(statement.replace("declared_events", "recreated_events"));
+        runner.execute("CREATE TABLE copied_events (LIKE declared_events)");
+        for (String copy : List.of("recreated_events", "copied_events")) {
+            assertThat(tables.get(copy).columns()).extracting(HoglakeDtos.Column::typeParams)
+                    .isEqualTo(columns.stream().map(HoglakeDtos.Column::typeParams).toList());
+        }
+
+        // Writes follow them
+        runner.execute("INSERT INTO declared_events VALUES (1, CAST(JSON '{\"$browser\": \"Chrome\", \"$set\": {\"plan\": \"free\"}}' AS variant), CAST(JSON '7' AS variant))");
+        List<SchemaElement> schema = writtenSchema("declared_events");
+        assertThat(schema).extracting(SchemaElement::getName).contains("typed_value", "$browser", "$set", "plan");
+        SchemaElement extra = schema.stream().filter(element -> element.getName().equals("extra")).collect(onlyElement());
+        assertThat(schema.subList(schema.indexOf(extra) + 1, schema.indexOf(extra) + 4)).extracting(SchemaElement::getName)
+                .containsExactly("metadata", "value", "typed_value");
+        assertQuery(
+                "SELECT CAST(properties['$browser'] AS varchar), CAST(properties['$set']['plan'] AS varchar), CAST(extra AS bigint) FROM declared_events",
+                "VALUES ('Chrome', 'free', BIGINT '7')");
+
+        // Declarations that cannot be written are refused before the server is asked to create anything
+        int creationsBefore = creations.size();
+        Map<String, String> refusals = ImmutableMap.of(
+                "id bigint WITH (shredding = '{\"type\": \"string\"}')", "Only a VARIANT column has a shredded layout: id",
+                "v variant WITH (shredding = '{')", "Invalid shredding property of column v: Unexpected end-of-input",
+                "v variant WITH (shredding = '{\"type\": \"text\"}')", "Invalid shredding property of column v: $ has an unknown type: text");
+        refusals.forEach((column, message) -> assertTrinoExceptionThrownBy(() -> runner.execute("CREATE TABLE refused_declaration (" + column + ")"))
+                .hasErrorCode(INVALID_COLUMN_PROPERTY)
+                .hasMessageStartingWith(message));
+        assertThat(tables).doesNotContainKey("refused_declaration");
+        assertThat(creations).hasSize(creationsBefore);
+        assertThatThrownBy(() -> runner.execute("CREATE TABLE refused_declaration (v variant WITH (shreding = '{}'))"))
+                .hasMessageContaining("column property 'shreding' does not exist");
+        assertTrinoExceptionThrownBy(() -> runner.execute("ALTER TABLE declared_events ADD COLUMN other bigint WITH (shredding = '{\"type\": \"string\"}')"))
+                .hasErrorCode(INVALID_COLUMN_PROPERTY)
+                .hasMessage("Only a VARIANT column has a shredded layout: other");
+        assertTrinoExceptionThrownBy(() -> runner.execute("ALTER TABLE declared_events ADD COLUMN other variant WITH (shredding = '{')"))
+                .hasErrorCode(INVALID_COLUMN_PROPERTY)
+                .hasMessageStartingWith("Invalid shredding property of column other: Unexpected end-of-input");
+        assertThat(tables.get("declared_events").columns()).hasSize(3);
     }
 
     /**
