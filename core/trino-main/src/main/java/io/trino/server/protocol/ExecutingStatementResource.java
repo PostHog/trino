@@ -21,16 +21,13 @@ import io.airlift.log.Logger;
 import io.airlift.units.Duration;
 import io.trino.Session;
 import io.trino.client.ProtocolHeaders;
-import io.trino.exchange.ExchangeManagerRegistry;
 import io.trino.execution.QueryManager;
 import io.trino.execution.QueryResultRetention;
-import io.trino.operator.DirectExchangeClientSupplier;
 import io.trino.server.ExternalUriInfo;
 import io.trino.server.ForStatementResource;
 import io.trino.server.ServerConfig;
 import io.trino.server.security.ResourceSecurity;
 import io.trino.spi.QueryId;
-import io.trino.spi.block.BlockEncodingSerde;
 import jakarta.annotation.PreDestroy;
 import jakarta.ws.rs.BeanParam;
 import jakarta.ws.rs.DELETE;
@@ -74,12 +71,8 @@ public class ExecutingStatementResource
     private static final Duration MAX_WAIT_TIME = new Duration(1, SECONDS);
     private final QueryManager queryManager;
     private final QueryResultRetention resultRetention;
-    private final DirectExchangeClientSupplier directExchangeClientSupplier;
-    private final ExchangeManagerRegistry exchangeManagerRegistry;
-    private final BlockEncodingSerde blockEncodingSerde;
-    private final QueryInfoUrlFactory queryInfoUrlFactory;
+    private final ProtocolQueryFactory queryFactory;
     private final BoundedExecutor responseExecutor;
-    private final ScheduledExecutorService timeoutExecutor;
 
     private final ConcurrentMap<QueryId, Query> queries = new ConcurrentHashMap<>();
     private final ScheduledExecutorService queryPurger = newSingleThreadScheduledExecutor(threadsNamed("execution-query-purger"));
@@ -90,23 +83,15 @@ public class ExecutingStatementResource
     public ExecutingStatementResource(
             QueryManager queryManager,
             QueryResultRetention resultRetention,
-            DirectExchangeClientSupplier directExchangeClientSupplier,
-            ExchangeManagerRegistry exchangeManagerRegistry,
-            BlockEncodingSerde blockEncodingSerde,
-            QueryInfoUrlFactory queryInfoUrlTemplate,
+            ProtocolQueryFactory queryFactory,
             @ForStatementResource BoundedExecutor responseExecutor,
-            @ForStatementResource ScheduledExecutorService timeoutExecutor,
             PreparedStatementEncoder preparedStatementEncoder,
             ServerConfig serverConfig)
     {
         this.queryManager = requireNonNull(queryManager, "queryManager is null");
         this.resultRetention = requireNonNull(resultRetention, "resultRetention is null");
-        this.directExchangeClientSupplier = requireNonNull(directExchangeClientSupplier, "directExchangeClientSupplier is null");
-        this.exchangeManagerRegistry = requireNonNull(exchangeManagerRegistry, "exchangeManagerRegistry is null");
-        this.blockEncodingSerde = requireNonNull(blockEncodingSerde, "blockEncodingSerde is null");
-        this.queryInfoUrlFactory = requireNonNull(queryInfoUrlTemplate, "queryInfoUrlTemplate is null");
+        this.queryFactory = requireNonNull(queryFactory, "queryFactory is null");
         this.responseExecutor = requireNonNull(responseExecutor, "responseExecutor is null");
-        this.timeoutExecutor = requireNonNull(timeoutExecutor, "timeoutExecutor is null");
         this.preparedStatementEncoder = requireNonNull(preparedStatementEncoder, "preparedStatementEncoder is null");
         this.compressionEnabled = serverConfig.isQueryResultsCompressionEnabled();
 
@@ -145,6 +130,11 @@ public class ExecutingStatementResource
     public void stop()
     {
         queryPurger.shutdownNow();
+    }
+
+    public boolean hasQuery(QueryId queryId)
+    {
+        return queries.containsKey(queryId);
     }
 
     @GET
@@ -189,11 +179,6 @@ public class ExecutingStatementResource
         throw new NotFoundException("Query not found");
     }
 
-    public boolean hasQuery(QueryId queryId)
-    {
-        return queries.containsKey(queryId);
-    }
-
     protected Query getQuery(QueryId queryId, String slug, long token)
     {
         Query query = queries.get(queryId);
@@ -218,16 +203,7 @@ public class ExecutingStatementResource
             throw new NotFoundException("Query not found");
         }
 
-        query = queries.computeIfAbsent(queryId, _ -> Query.create(
-                session,
-                querySlug,
-                queryManager,
-                queryInfoUrlFactory.getQueryInfoUrl(queryId),
-                directExchangeClientSupplier,
-                exchangeManagerRegistry,
-                responseExecutor,
-                timeoutExecutor,
-                blockEncodingSerde));
+        query = queries.computeIfAbsent(queryId, _ -> queryFactory.createQuery(session, querySlug));
         return query;
     }
 
