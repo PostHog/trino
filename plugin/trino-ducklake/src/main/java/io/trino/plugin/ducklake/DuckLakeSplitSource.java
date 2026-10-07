@@ -229,7 +229,8 @@ final class DuckLakeSplitSource
                     // Every split of the file carries the whole-file byte range but reads only its
                     // own row groups, so key on those to spread the file's splits across workers.
                     affinityProvider.getKey(file.path(), group.startingPosition(), group.compressedBytes()),
-                    file.inlinedDeletions()));
+                    file.inlinedDeletions(),
+                    file.rowSnapshotFilter()));
         }
         return splits.build();
     }
