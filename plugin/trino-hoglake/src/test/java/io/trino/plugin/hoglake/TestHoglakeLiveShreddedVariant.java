@@ -274,6 +274,19 @@ final class TestHoglakeLiveShreddedVariant
                     .hasMessageContaining("variant column 'r.x' is nested, and only a top-level variant column can declare type_params.shredding");
             assertThat(client.getTable("test", "invalid_layout")).isEmpty();
             assertThat(client.getTable("test", "nested_layout")).isEmpty();
+
+            // SQL declares a layout when it creates a table or adds a column, and the server keeps it
+            runner.execute("CREATE TABLE sql_declared (id bigint, properties variant WITH (shredding = '{\"type\": \"object\", \"fields\": [{\"name\": \"$browser\", \"type\": \"string\"}]}'))");
+            runner.execute("ALTER TABLE sql_declared ADD COLUMN extra variant WITH (shredding = '{\"type\": \"int64\"}')");
+            assertThat((String) runner.execute("SHOW CREATE TABLE sql_declared").getOnlyValue()).contains(
+                    "shredding = '{\"type\":\"object\",\"fields\":[{\"name\":\"$browser\",\"type\":\"string\"}]}'",
+                    "shredding = '{\"type\":\"int64\"}'");
+            snapshot = client.getCatalog().headSnapshotId();
+            runner.execute("INSERT INTO sql_declared VALUES (1, CAST(JSON '{\"$browser\": \"Chrome\"}' AS variant), CAST(JSON '7' AS variant))");
+            assertThat(typedValueCounts(fileSystem, filesAddedAfter(client, "sql_declared", snapshot)))
+                    .containsEntry("properties.typed_value.$browser.typed_value", 1L)
+                    .containsEntry("extra.typed_value", 1L);
+            assertRows(runner, "SELECT CAST(properties['$browser'] AS varchar), CAST(extra AS bigint) FROM sql_declared", "VALUES ('Chrome', BIGINT '7')");
         }
         finally {
             fileSystemFactory.destroy();

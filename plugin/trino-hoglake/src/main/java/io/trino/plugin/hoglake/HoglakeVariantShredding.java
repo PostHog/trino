@@ -14,8 +14,12 @@
 package io.trino.plugin.hoglake;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.StreamReadFeature;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.google.common.base.Utf8;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -27,7 +31,9 @@ import io.trino.parquet.variant.VariantShreddingSchema.PrimitiveValue;
 import io.trino.parquet.variant.VariantShreddingSchema.ShreddedType;
 import io.trino.parquet.variant.VariantShreddingSchema.ShreddedValue;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
+import io.trino.spi.ErrorCodeSupplier;
 import io.trino.spi.TrinoException;
+import io.trino.spi.connector.ColumnMetadata;
 
 import java.io.UncheckedIOException;
 import java.util.Iterator;
@@ -37,8 +43,10 @@ import java.util.Optional;
 import java.util.Set;
 
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_VARIANT_SHREDDING;
+import static io.trino.spi.StandardErrorCode.INVALID_COLUMN_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.Decimals.MAX_PRECISION;
+import static io.trino.spi.type.VariantType.VARIANT;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -63,14 +71,35 @@ import static java.util.Objects.requireNonNull;
  * {@code timestamptz_ns}, {@code binary}, {@code string} and {@code uuid}. A
  * {@code variant} field is shredded without a type, into its own value column.
  * Values of other types stay in the value columns. Only top-level columns can be
- * shredded, because Hoglake reads shredded files only in top-level columns.
+ * shredded, because Hoglake reads shredded files only in top-level columns. A field
+ * name has no NUL character or unpaired surrogate, which the catalog cannot store.
+ *
+ * <p>Objects and arrays nest at most {@value #MAX_DEPTH} deep. Two more limits keep the
+ * footer of every data file within what readers accept. A declaration has at most
+ * {@value #MAX_FIELDS} fields and arrays, counted together, since each gives every data
+ * file columns of its own. And the names on the way to a field are at most
+ * {@value #MAX_PATH_NAME_BYTES} bytes of UTF-8, since the footer repeats them once for
+ * each column below them.
+ *
+ * <p>SQL declares a layout with the {@value #PROPERTY} column property when it
+ * creates the column, in {@code CREATE TABLE} or {@code ADD COLUMN}. A declaration
+ * cannot change afterwards.
  */
 final class HoglakeVariantShredding
 {
+    // The column property of SQL, and the key in the type_params of the catalog
+    static final String PROPERTY = "shredding";
+    static final String TYPE_PARAM = "shredding";
     static final int MAX_DEPTH = 16;
     static final int MAX_FIELDS = 1000;
+    static final int MAX_PATH_NAME_BYTES = 1024;
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    // A declaration is exactly one JSON value with unique keys, as one written by hand
+    // for the column property must be
+    private static final ObjectMapper MAPPER = JsonMapper.builder()
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
+            .build();
     private static final Map<String, ShreddedType> PRIMITIVE_TYPES = ImmutableMap.<String, ShreddedType>builder()
             .put("boolean", ShreddedType.BOOLEAN)
             .put("int8", ShreddedType.INT8)
@@ -102,11 +131,11 @@ final class HoglakeVariantShredding
      */
     static Optional<String> declaration(HoglakeDtos.Column column)
     {
-        if (!column.type().equals("variant") || column.typeParams() == null || column.typeParams().get("shredding") == null) {
+        if (!column.type().equals("variant") || column.typeParams() == null || column.typeParams().get(TYPE_PARAM) == null) {
             return Optional.empty();
         }
         try {
-            return Optional.of(MAPPER.writeValueAsString(column.typeParams().get("shredding")));
+            return Optional.of(MAPPER.writeValueAsString(column.typeParams().get(TYPE_PARAM)));
         }
         catch (JsonProcessingException e) {
             // The parameters were parsed from JSON
@@ -141,41 +170,73 @@ final class HoglakeVariantShredding
      */
     static VariantShreddingSchema schema(HoglakeColumnHandle column)
     {
-        JsonNode declaration;
-        try {
-            declaration = MAPPER.readTree(column.variantShredding().orElseThrow());
-        }
-        catch (JsonProcessingException e) {
-            throw new TrinoException(HOGLAKE_INVALID_VARIANT_SHREDDING, "Invalid type_params.shredding of column %s: not JSON".formatted(column.name()), e);
-        }
-        ShreddedValue value = new Parser(column).value(declaration, "$", 0, ImmutableSet.of());
-        try {
-            return VariantShreddingSchema.of(value);
-        }
-        catch (IllegalArgumentException e) {
-            throw invalid(column, e.getMessage());
-        }
+        Parser parser = new Parser(HOGLAKE_INVALID_VARIANT_SHREDDING, "type_params.shredding of column " + column.name());
+        return parser.schema(parser.read(column.variantShredding().orElseThrow()));
     }
 
-    private static TrinoException invalid(HoglakeColumnHandle column, String message)
+    /**
+     * The {@code type_params} that declare the layout of a new column from its
+     * {@value #PROPERTY} column property, or empty if it has none. The server checks
+     * them as well, but a server without that check would store any.
+     */
+    static Optional<Map<String, Object>> typeParams(ColumnMetadata column)
     {
-        return new TrinoException(HOGLAKE_INVALID_VARIANT_SHREDDING, "Invalid type_params.shredding of column %s: %s".formatted(column.name(), message));
+        Object property = column.getProperties().get(PROPERTY);
+        if (property == null) {
+            return Optional.empty();
+        }
+        if (!column.getType().equals(VARIANT)) {
+            throw new TrinoException(INVALID_COLUMN_PROPERTY, "Only a VARIANT column has a shredded layout: " + column.getName());
+        }
+        Parser parser = new Parser(INVALID_COLUMN_PROPERTY, "shredding property of column " + column.getName());
+        JsonNode declaration = parser.read((String) property);
+        parser.schema(declaration);
+        return Optional.of(ImmutableMap.of(TYPE_PARAM, declaration));
     }
 
+    /**
+     * Reads one declaration, and refuses it with the error code and the subject it was
+     * created with. A parser counts the fields of one declaration only.
+     */
     private static final class Parser
     {
-        private final HoglakeColumnHandle column;
+        private final ErrorCodeSupplier errorCode;
+        private final String subject;
         private int fields;
 
-        private Parser(HoglakeColumnHandle column)
+        private Parser(ErrorCodeSupplier errorCode, String subject)
         {
-            this.column = requireNonNull(column, "column is null");
+            this.errorCode = requireNonNull(errorCode, "errorCode is null");
+            this.subject = requireNonNull(subject, "subject is null");
+        }
+
+        private JsonNode read(String json)
+        {
+            try {
+                return MAPPER.readTree(json);
+            }
+            catch (JsonProcessingException e) {
+                // The original message says what is wrong, such as a duplicate key, without the location
+                throw new TrinoException(errorCode, "Invalid %s: %s".formatted(subject, e.getOriginalMessage()), e);
+            }
+        }
+
+        private VariantShreddingSchema schema(JsonNode declaration)
+        {
+            ShreddedValue value = value(declaration, "$", 0, 0, ImmutableSet.of());
+            try {
+                return VariantShreddingSchema.of(value);
+            }
+            catch (IllegalArgumentException e) {
+                throw invalid(e.getMessage());
+            }
         }
 
         /**
+         * @param nameBytes the UTF-8 length of the field names on the way to the node
          * @param keys the keys that the JSON object can have besides those of its type
          */
-        private ShreddedValue value(JsonNode node, String path, int depth, Set<String> keys)
+        private ShreddedValue value(JsonNode node, String path, int depth, int nameBytes, Set<String> keys)
         {
             if (!node.isObject()) {
                 throw invalid(path, "is not a JSON object");
@@ -199,27 +260,30 @@ final class HoglakeVariantShredding
                     }
                     ImmutableList.Builder<ObjectField> objectFields = ImmutableList.builder();
                     for (JsonNode field : fieldsNode) {
-                        fields++;
-                        if (fields > MAX_FIELDS) {
-                            throw invalid("$", "has more than %s fields".formatted(MAX_FIELDS));
-                        }
+                        count();
                         JsonNode name = field.get("name");
                         if (!field.isObject() || name == null || !name.isTextual()) {
                             throw invalid(path, "has a field without a name");
                         }
+                        // Checked before the name goes into a path, so a long one is never copied
+                        int fieldNameBytes = nameBytes + nameBytes(path, name.textValue());
+                        if (fieldNameBytes > MAX_PATH_NAME_BYTES) {
+                            throw invalid(path, "has a field whose name, with the names above it, is longer than %s bytes".formatted(MAX_PATH_NAME_BYTES));
+                        }
                         String fieldPath = path + "." + name.textValue();
-                        objectFields.add(new ObjectField(name.textValue(), value(field, fieldPath, depth + 1, ImmutableSet.of("name"))));
+                        objectFields.add(new ObjectField(name.textValue(), value(field, fieldPath, depth + 1, fieldNameBytes, ImmutableSet.of("name"))));
                     }
                     yield new ShreddedValue(Optional.of(new ObjectValue(objectFields.build())));
                 }
                 case "array" -> {
                     checkKeys(node, path, keys, "element");
                     checkDepth(path, depth);
+                    count();
                     JsonNode element = node.get("element");
                     if (element == null) {
                         throw invalid(path, "has no element");
                     }
-                    yield new ShreddedValue(Optional.of(new ArrayValue(value(element, path + "[*]", depth + 1, ImmutableSet.of()))));
+                    yield new ShreddedValue(Optional.of(new ArrayValue(value(element, path + "[*]", depth + 1, nameBytes, ImmutableSet.of()))));
                 }
                 default -> new ShreddedValue(Optional.of(primitive(node, path, type, keys)));
             };
@@ -271,6 +335,36 @@ final class HoglakeVariantShredding
             }
         }
 
+        /**
+         * The UTF-8 length of a field name. The catalog stores declarations as JSONB,
+         * which has no NUL character, and UTF-8 has no unpaired surrogates, so a name
+         * with either would not be stored as it was declared.
+         */
+        private int nameBytes(String path, String name)
+        {
+            if (name.indexOf('\0') >= 0) {
+                throw invalid(path, "has a field name with a NUL character");
+            }
+            try {
+                return Utf8.encodedLength(name);
+            }
+            catch (IllegalArgumentException e) {
+                throw invalid(path, "has a field name with an unpaired surrogate");
+            }
+        }
+
+        /**
+         * Counts an object field or an array, each of which gives every data file columns
+         * of its own.
+         */
+        private void count()
+        {
+            fields++;
+            if (fields > MAX_FIELDS) {
+                throw invalid("$", "has more than %s fields and arrays".formatted(MAX_FIELDS));
+            }
+        }
+
         private void checkDepth(String path, int depth)
         {
             if (depth >= MAX_DEPTH) {
@@ -280,7 +374,12 @@ final class HoglakeVariantShredding
 
         private TrinoException invalid(String path, String message)
         {
-            return HoglakeVariantShredding.invalid(column, path + " " + message);
+            return invalid(path + " " + message);
+        }
+
+        private TrinoException invalid(String message)
+        {
+            return new TrinoException(errorCode, "Invalid %s: %s".formatted(subject, message));
         }
     }
 }

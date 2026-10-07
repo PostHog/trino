@@ -181,6 +181,16 @@ public class HoglakeConnector
     }
 
     @Override
+    public List<PropertyMetadata<?>> getColumnProperties()
+    {
+        return List.of(PropertyMetadata.stringProperty(
+                HoglakeVariantShredding.PROPERTY,
+                "Shredded layout of a top-level VARIANT column, as a JSON declaration",
+                null,
+                false));
+    }
+
+    @Override
     public boolean isSingleStatementWritesOnly()
     {
         return false;

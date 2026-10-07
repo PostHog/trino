@@ -55,7 +55,9 @@ import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.connector.SourcePage;
 import io.trino.spi.metrics.Metrics;
 import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.Decimals;
 import io.trino.spi.type.Int128;
@@ -115,10 +117,12 @@ public class DuckLakePageSourceProvider
     private static final String MISSING_COLUMN_NAME_PREFIX = "$ducklake_missing_column$";
     private static final int LONG_OPEN_HASH_SET_INSTANCE_SIZE = instanceSize(LongOpenHashSet.class);
     /**
-     * The column of a delete file giving the snapshot each deletion was made in, which only some
-     * delete files have.
+     * The column giving the snapshot each row was written in, which only some files have: a delete
+     * file DuckDB wrote over an earlier one or when it flushed inlined data gives the snapshot of
+     * each deletion, and a data file it wrote when it merged adjacent files or flushed inlined rows
+     * gives the snapshot each row was inserted in.
      */
-    private static final String DELETE_FILE_SNAPSHOT_COLUMN = "_ducklake_internal_snapshot_id";
+    private static final String SNAPSHOT_COLUMN = "_ducklake_internal_snapshot_id";
     /**
      * Positions of a page produced for a scan that reads row counts only. A page of no columns
      * holds no data, so this only bounds the position count to an {@code int}.
@@ -129,6 +133,18 @@ public class DuckLakePageSourceProvider
      * file magic. The catalog records the length of the footer without them.
      */
     private static final int PARQUET_POST_SCRIPT_SIZE = Integer.BYTES + 4;
+    /**
+     * The snapshot each row of a data file was inserted in, read by name like the column of a
+     * delete file. Never requested by the engine.
+     */
+    private static final HiveColumnHandle ROW_SNAPSHOT_COLUMN = new HiveColumnHandle(
+            SNAPSHOT_COLUMN,
+            0,
+            DuckLakeTypes.toHiveType(BIGINT),
+            BIGINT,
+            Optional.empty(),
+            HiveColumnHandle.ColumnType.REGULAR,
+            Optional.empty());
 
     private final TrinoFileSystemFactory fileSystemFactory;
     private final FileFormatDataSourceStats fileFormatDataSourceStats;
@@ -220,18 +236,32 @@ public class DuckLakePageSourceProvider
         Optional<DuckLakeDeleteFileHandle> deleteFile = duckLakeSplit.deleteFile();
         Optional<DuckLakeInlinedDeletions> inlinedDeletions = duckLakeSplit.inlinedDeletions();
         boolean hasDeletions = deleteFile.isPresent() || inlinedDeletions.isPresent();
+        OptionalLong rowSnapshotFilter = duckLakeSplit.rowSnapshotFilter();
 
-        ImmutableList.Builder<HiveColumnHandle> hiveColumnsBuilder = ImmutableList.builderWithExpectedSize(dataColumns.size() + 1);
+        ImmutableList.Builder<HiveColumnHandle> hiveColumnsBuilder = ImmutableList.builderWithExpectedSize(dataColumns.size() + 2);
         dataColumns.stream()
                 .map(column -> toHiveColumnHandle(column, nameMapping))
                 .forEach(hiveColumnsBuilder::add);
         // the row index is read to apply positional deletes and to identify rows a merge changes
-        if (hasDeletions || rowIdRequested) {
+        boolean hasRowIndexChannel = hasDeletions || rowIdRequested;
+        int rowIndexChannel = dataColumns.size();
+        if (hasRowIndexChannel) {
             hiveColumnsBuilder.add(PARQUET_ROW_INDEX_COLUMN);
         }
+        // The snapshot of each row is read, after the row index, to leave out the rows of
+        // snapshots newer than the one read. The column is never handed to the engine, and the
+        // row index stays the position of the row in the file, which is what deletes refer to.
+        int snapshotChannel = hasRowIndexChannel ? rowIndexChannel + 1 : rowIndexChannel;
+        if (rowSnapshotFilter.isPresent()) {
+            hiveColumnsBuilder.add(ROW_SNAPSHOT_COLUMN);
+            // Row groups and pages holding only newer rows are skipped by their statistics. DuckDB
+            // writes the rows of a merged file in the order of the files merged, oldest first, so
+            // the rows of newer snapshots tend to fill row groups of their own.
+            parquetPredicate = parquetPredicate.intersect(TupleDomain.withColumnDomains(ImmutableMap.of(
+                    ROW_SNAPSHOT_COLUMN, Domain.create(ValueSet.ofRanges(Range.lessThanOrEqual(BIGINT, rowSnapshotFilter.orElseThrow())), false))));
+        }
         List<HiveColumnHandle> hiveColumns = hiveColumnsBuilder.build();
-        int rowIndexChannel = dataColumns.size();
-        boolean hasRowIndexChannel = hiveColumns.size() > dataColumns.size();
+        boolean hasHiddenChannels = hiveColumns.size() > dataColumns.size();
 
         TrinoFileSystem fileSystem = fileSystemFactory.create(session);
         TrinoInputFile inputFile = fileSystem.newInputFile(Location.of(duckLakeSplit.path()), duckLakeSplit.fileSizeBytes());
@@ -271,15 +301,20 @@ public class DuckLakePageSourceProvider
             });
             pageSource = TransformConnectorPageSource.create(
                     pageSource,
-                    page -> filterDeletedRows(page, deletedPositions.get(), rowIndexChannel));
+                    page -> filterDeletedRows(filterNewerRows(page, rowSnapshotFilter, snapshotChannel), deletedPositions.get(), rowIndexChannel));
             return new MemoryContextClosingPageSource(
-                    projectRequestedColumns(requestedColumns, rowIndexChannel, hasRowIndexChannel, duckLakeSplit.dataFileId(), pageSource),
+                    projectRequestedColumns(requestedColumns, rowIndexChannel, hasHiddenChannels, duckLakeSplit.dataFileId(), pageSource),
                     splitMemoryContext,
                     deleteFileReadStatistics);
         }
 
         ConnectorPageSource pageSource = createParquetPageSource(inputFile, duckLakeSplit, dataColumns, hiveColumns, parquetPredicate, options, memoryContext);
-        return projectRequestedColumns(requestedColumns, rowIndexChannel, hasRowIndexChannel, duckLakeSplit.dataFileId(), pageSource);
+        if (rowSnapshotFilter.isPresent()) {
+            pageSource = TransformConnectorPageSource.create(
+                    pageSource,
+                    page -> filterNewerRows(page, rowSnapshotFilter, snapshotChannel));
+        }
+        return projectRequestedColumns(requestedColumns, rowIndexChannel, hasHiddenChannels, duckLakeSplit.dataFileId(), pageSource);
     }
 
     /**
@@ -290,21 +325,22 @@ public class DuckLakePageSourceProvider
     private static ConnectorPageSource projectRequestedColumns(
             List<DuckLakeColumnHandle> requestedColumns,
             int rowIndexChannel,
-            boolean hasRowIndexChannel,
+            boolean hasHiddenChannels,
             long dataFileId,
             ConnectorPageSource pageSource)
     {
         boolean needsTransform = requestedColumns.stream()
                 .anyMatch(column -> column.isUnsignedInteger() || column.isUnsignedBigint() || column.isInt128());
         // the row index is read to apply deletes and to build row identifiers, and is projected
-        // away again unless the engine asked for the identifier itself
-        if (!hasRowIndexChannel && !needsTransform) {
+        // away again unless the engine asked for the identifier itself; the snapshot of each row
+        // is read to filter rows and always projected away
+        if (!hasHiddenChannels && !needsTransform) {
             return pageSource;
         }
         TransformConnectorPageSource.Builder transform = TransformConnectorPageSource.builder();
-        if (hasRowIndexChannel) {
+        if (hasHiddenChannels) {
             // the projection is needed even when it selects the leading channels unchanged,
-            // because it is what drops the row index the reader added
+            // because it is what drops the columns the reader added
             transform.forceTransforms();
         }
         int dataChannel = 0;
@@ -366,8 +402,9 @@ public class DuckLakePageSourceProvider
      * <li>the split is a metadata-only whole-file split, whose record count is the exact number of
      * visible rows after deletes. A file with rows deleted inline in the catalog database never is
      * one, because those deletions may repeat positions of its delete file, and neither is one whose
-     * delete file may hold deletions newer than the snapshot read, which do not apply; the rows of
-     * such a file are counted by reading which of them are left.
+     * delete file may hold deletions newer than the snapshot read, which do not apply, nor one holding
+     * rows inserted after the snapshot read, which are not visible; the rows of such a file are
+     * counted by reading which of them are left.
      * </ul>
      */
     private static boolean isRowCountOnly(List<DuckLakeColumnHandle> columns, TupleDomain<DuckLakeColumnHandle> effectivePredicate, DuckLakeSplit split)
@@ -375,6 +412,7 @@ public class DuckLakePageSourceProvider
         return columns.isEmpty()
                 && effectivePredicate.isAll()
                 && split.inlinedDeletions().isEmpty()
+                && split.rowSnapshotFilter().isEmpty()
                 && split.deleteFile().map(DuckLakeDeleteFileHandle::exactDeleteCount).orElse(true)
                 && split.rowGroupMetadata().isEmpty()
                 && split.start() == 0
@@ -443,9 +481,20 @@ public class DuckLakePageSourceProvider
         // A file resolved through a name mapping carries no identifiers of its own, and one is
         // only reached here when the catalog has no mapping for it, so its identifiers are what
         // name its columns.
-        ParquetPageSourceFactory.ColumnsForFile columnsForFile = split.nameMapping().isPresent()
+        ParquetPageSourceFactory.ColumnsForFile resolveColumns = split.nameMapping().isPresent()
                 ? (_, columns) -> columns
                 : (fileSchema, columns) -> columnsByFieldId(fileSchema, dataColumns, columns);
+        ParquetPageSourceFactory.ColumnsForFile columnsForFile = resolveColumns;
+        if (split.rowSnapshotFilter().isPresent()) {
+            // Read by name, a missing column would read as NULL and leave out every row. DuckDB
+            // fails such a read too.
+            columnsForFile = (fileSchema, columns) -> {
+                if (!DuckLakeFieldIds.columnNames(fileSchema).contains(SNAPSHOT_COLUMN)) {
+                    throw new TrinoException(DUCKLAKE_BAD_DATA, "Data file %s holds rows newer than snapshot %s, but has no %s column to tell them apart".formatted(split.path(), split.rowSnapshotFilter().orElseThrow(), SNAPSHOT_COLUMN));
+                }
+                return resolveColumns.apply(fileSchema, columns);
+            };
+        }
         // New splits supply only their assigned row groups. The byte range continues to select
         // row groups for splits serialized by an older coordinator.
         return ParquetPageSourceFactory.createPageSource(
@@ -571,6 +620,33 @@ public class DuckLakePageSourceProvider
         return !(type instanceof ArrayType) && !(type instanceof MapType) && !(type instanceof RowType) && !type.equals(UuidType.UUID);
     }
 
+    /**
+     * Leaves out the rows inserted in a snapshot newer than the one read, as DuckDB does with a
+     * {@code _ducklake_internal_snapshot_id <= snapshot} filter on the column. Like that filter, it
+     * leaves out a row whose snapshot is NULL, which DuckDB never writes.
+     */
+    private static SourcePage filterNewerRows(SourcePage page, OptionalLong rowSnapshotFilter, int snapshotChannel)
+    {
+        if (rowSnapshotFilter.isEmpty()) {
+            return page;
+        }
+        long maxSnapshot = rowSnapshotFilter.orElseThrow();
+        int positionCount = page.getPositionCount();
+        Block snapshots = page.getBlock(snapshotChannel);
+        int[] retained = new int[positionCount];
+        int retainedCount = 0;
+        for (int position = 0; position < positionCount; position++) {
+            if (!snapshots.isNull(position) && BIGINT.getLong(snapshots, position) <= maxSnapshot) {
+                retained[retainedCount] = position;
+                retainedCount++;
+            }
+        }
+        if (retainedCount < positionCount) {
+            page.selectPositions(retained, 0, retainedCount);
+        }
+        return page;
+    }
+
     private static SourcePage filterDeletedRows(SourcePage page, LongOpenHashSet deletedPositions, int rowIndexChannel)
     {
         int positionCount = page.getPositionCount();
@@ -619,7 +695,7 @@ public class DuckLakePageSourceProvider
                 Optional.empty());
         // read by name, so that it reads as NULL in a delete file without it
         HiveColumnHandle snapshotColumn = new HiveColumnHandle(
-                DELETE_FILE_SNAPSHOT_COLUMN,
+                SNAPSHOT_COLUMN,
                 1,
                 DuckLakeTypes.toHiveType(BIGINT),
                 BIGINT,

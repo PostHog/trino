@@ -327,7 +327,8 @@ infer unsigned or JSON catalog types from values. Unsigned 64-bit data requires
 block conversion between decimal values and physical unsigned INT64, including
 inside containers; this adds CPU and allocation cost. Unsigned predicates remain
 residuals. Statistics remain field-ID keyed and are populated by the existing
-server hydrator. Native VARIANT writes are unshredded.
+server hydrator. VARIANT columns are written unshredded unless they declare a
+shredded layout, see [](hoglake-shredded-variant).
 
 An insert registers all its files in one catalog commit. Its table UUID and read
 snapshot guard against concurrent table replacement or schema changes. Concurrent
@@ -454,9 +455,9 @@ Schema properties, custom owners, and `DROP SCHEMA ... CASCADE` are unsupported.
 A namespace containing tables or views cannot be dropped. Deletion sends the
 namespace identity returned by the server, so concurrent name reuse conflicts.
 
-ADD COLUMN appends a nullable column using the existing writable scalar types.
-Column positions, defaults, column properties, and nested-field changes are
-unsupported. Rename preserves the field ID. Drop retires the field ID; a later
+ADD COLUMN appends a nullable top-level column of any writable type.
+Column positions, defaults, column properties other than `shredding`, and
+nested-field changes are unsupported. Rename preserves the field ID. Drop retires the field ID; a later
 column with the same name receives a new ID. Existing Parquet files remain
 readable by field ID, with nulls for columns absent from the file. ADD and RENAME
 are refused while live files lack field IDs or have pending or failed hydration; hydrate, rewrite,
@@ -611,6 +612,65 @@ NUL is rejected. These annotations do not configure storage. Requires the server
 use: old DDL writers cannot preserve new versioned metadata. Old replicas
 refuse metadata operations, and existing metadata-free operations remain compatible.
 
+
+(hoglake-shredded-variant)=
+### Shredded VARIANT columns
+
+A top-level `VARIANT` column can declare a shredded layout with the `shredding`
+column property, when `CREATE TABLE` or `ALTER TABLE ... ADD COLUMN` creates the
+column. Writes then store the declared object fields and array elements in
+Parquet columns of their own, following the Parquet Variant shredding
+specification, and reads of a declared field can skip the columns of the others:
+
+```sql
+CREATE TABLE events (
+    id BIGINT,
+    properties VARIANT WITH (shredding = '{"type": "object", "fields": [
+        {"name": "$browser", "type": "string"},
+        {"name": "$screen_width", "type": "int64"},
+        {"name": "price", "type": "double"},
+        {"name": "tags", "type": "array", "element": {"type": "string"}}]}'));
+```
+
+The value is a JSON declaration, which the catalog stores in the column's
+`type_params.shredding`. Each node has a `type`:
+
+- `object` lists its `fields`, at least one. Each field has a `name`, a variant
+  key in its original case; no two fields of an object can differ only by case,
+  and a name cannot contain a NUL character or an unpaired surrogate.
+- `array` has an `element`.
+- `variant` stores a field in a value column of its own, without a type.
+- `boolean`, `int8`, `int16`, `int32`, `int64`, `float`, `double`, `date`,
+  `time`, `timestamp`, `timestamp_ns`, `timestamptz`, `timestamptz_ns`,
+  `binary`, `string` and `uuid` are the Variant primitive types. `decimal4`,
+  `decimal8` and `decimal16` also take an integer `precision`, at most 9, 18 and
+  38, and an integer `scale`.
+
+Objects and arrays nest at most 16 deep. A declaration has at most 1000 fields
+and arrays, counted together, and the names on the way to a field are at most
+1024 bytes of UTF-8. Each field and array adds columns to every data file, and
+the file's footer repeats the names of each column, so these limits keep the
+footer within what readers accept. A value that does not match the type
+of its field stays in the value column, so reads always return the original
+values. Integers go into a declared integer field of any width that holds them,
+and decimals into a decimal field of the same scale whose precision holds them.
+When JSON is cast to `VARIANT`, numbers with a fraction become `DOUBLE` values,
+integers become `INTEGER` or `BIGINT` values, and only integers outside `BIGINT`
+become decimals. So a `double` field holds the fractions of JSON-sourced
+numbers, and a decimal field holds values cast from SQL `DECIMAL`, for example
+in a `ROW`.
+
+The connector refuses an invalid declaration with `INVALID_COLUMN_PROPERTY`
+before it calls the server. The server checks declarations too; one it refuses
+reaches the client as `INVALID_ARGUMENTS`. `SHOW CREATE TABLE` shows the
+declaration as the catalog stores it, and `CREATE TABLE ... (LIKE ...)` copies
+it. `CREATE TABLE ... AS SELECT` cannot declare a layout, so a replacement with
+`CREATE OR REPLACE TABLE ... AS SELECT` creates its `VARIANT` columns without
+one; to keep a layout, create the table with its columns, then insert. A
+declaration cannot change after the column is created: no `ALTER` statement
+changes it, and a different layout needs a new column. Files written before
+keep their layout, because reads use the layout of each file. Nested `VARIANT`
+fields cannot declare a layout.
 
 ### Abandoned upload cleanup
 
