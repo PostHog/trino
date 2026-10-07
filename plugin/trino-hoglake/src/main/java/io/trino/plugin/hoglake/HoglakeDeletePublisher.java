@@ -113,6 +113,7 @@ final class HoglakeDeletePublisher
                     appendBytes = Math.addExact(appendBytes, 4L * fragment.length() + 256);
                     appendMemory.setBytes(appendBytes);
                     HoglakeDtos.FileRegistration append = new ObjectMapper().readValue(fragment.getBytes(Long.BYTES, fragment.length() - Long.BYTES), HoglakeDtos.FileRegistration.class);
+                    HoglakeFileFormats.checkWriterFile(append.fileFormat(), append.path());
                     HoglakeDtos.FileRegistration previous = appends.putIfAbsent(append.path(), append);
                     if (previous != null && !previous.equals(append)) {
                         throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Conflicting MERGE append fragments");

@@ -70,8 +70,24 @@ public final class HoglakeDtos
             @JsonProperty("name") String name,
             @JsonProperty("columns") List<ColumnDefinition> columns) {}
 
+    public static final class ParquetFileFormatFilter
+    {
+        @Override
+        public boolean equals(Object value)
+        {
+            return "parquet".equals(value);
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return 0;
+        }
+    }
+
     public record FileRegistration(
             @JsonProperty("path") String path,
+            @JsonInclude(value = JsonInclude.Include.CUSTOM, valueFilter = ParquetFileFormatFilter.class) @JsonProperty("file_format") String fileFormat,
             @JsonProperty("record_count") long recordCount,
             @JsonProperty("file_size_bytes") long fileSizeBytes,
             @JsonProperty("footer_size") long footerSize,
@@ -79,7 +95,13 @@ public final class HoglakeDtos
     {
         public FileRegistration
         {
+            fileFormat = fileFormat == null ? "parquet" : fileFormat;
             partitionValues = partitionValues == null ? List.of() : Collections.unmodifiableList(new ArrayList<>(partitionValues));
+        }
+
+        public FileRegistration(String path, long recordCount, long fileSizeBytes, long footerSize, List<String> partitionValues)
+        {
+            this(path, "parquet", recordCount, fileSizeBytes, footerSize, partitionValues);
         }
 
         public FileRegistration(String path, long recordCount, long fileSizeBytes, long footerSize)

@@ -166,10 +166,12 @@ public class HoglakeSplitManager
     static List<HoglakeDtos.ScanFile> prunedScan(HoglakeClient client, HoglakeTableHandle handle)
     {
         Set<Long> statsFields = HoglakeFilePruner.prunableFieldIds(handle.constraint());
-        List<HoglakeDtos.ScanFile> catalogFiles = client.planningScan(handle.schemaName(), handle.tableName(), handle.snapshotId(), statsFields);
+        List<HoglakeDtos.ScanFile> catalogFiles = client.planningScan(handle.schemaName(), handle.tableName(), handle.snapshotId(), statsFields).stream()
+                .map(HoglakeSplitManager::validateScanFile)
+                .toList();
         if (!statsFields.isEmpty()) {
             catalogFiles = catalogFiles.stream()
-                    .filter(file -> file.dataFile() == null || HoglakeFilePruner.mayContain(handle.constraint(), file.dataFile()))
+                    .filter(file -> HoglakeFilePruner.mayContain(handle.constraint(), file.dataFile()))
                     .toList();
         }
         return withStaged(handle, catalogFiles);
@@ -180,8 +182,18 @@ public class HoglakeSplitManager
         Map<Long, HoglakeDtos.DeleteFile> deletes = handle.stagedDeletes().stream()
                 .collect(Collectors.toMap(HoglakeDtos.DeleteFile::dataFileId, file -> file));
         return Stream.concat(catalogFiles.stream(), handle.stagedFiles().stream())
+                .map(HoglakeSplitManager::validateScanFile)
                 .map(file -> new HoglakeDtos.ScanFile(file.dataFile(), deletes.getOrDefault(file.dataFile().dataFileId(), file.deleteFile())))
                 .toList();
+    }
+
+    private static HoglakeDtos.ScanFile validateScanFile(HoglakeDtos.ScanFile file)
+    {
+        if (file == null || file.dataFile() == null) {
+            throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "hoglake scan returned a null entry");
+        }
+        HoglakeFileFormats.checkDataFile(file.dataFile().fileFormat(), file.dataFile().path());
+        return file;
     }
 
     /**
@@ -344,6 +356,7 @@ public class HoglakeSplitManager
         if (dataFile == null) {
             throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "hoglake scan returned an entry without a data file");
         }
+        HoglakeFileFormats.checkDataFile(dataFile.fileFormat(), dataFile.path());
         OptionalLong footerSize = dataFile.footerSize() == null ? OptionalLong.empty() : OptionalLong.of(dataFile.footerSize());
         HoglakeDtos.DeleteFile deleteFile = file.deleteFile();
         if (deleteFile == null) {
@@ -376,6 +389,7 @@ public class HoglakeSplitManager
         return new HoglakeSplit(
                 dataFile.dataFileId(),
                 dataFile.path(),
+                dataFile.fileFormat(),
                 dataFile.fileSizeBytes(),
                 dataFile.recordCount(),
                 deleteFilePath,

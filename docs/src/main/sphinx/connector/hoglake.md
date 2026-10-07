@@ -101,6 +101,44 @@ are provided by the shared cache infrastructure.
 | `uuid` | `UUID` |
 | `decimal(p,s)` | `DECIMAL(p,s)` |
 
+## Storage format compatibility
+
+The connector reads and writes Parquet only. Hoglake records the table's default data
+format in the `write.format.default` table property and the format of each registered
+object in `file_format`. An absent table property or incoming file-registration field
+means `parquet` for compatibility with older clients. Scan responses must always include
+`file_format`; a scan data file that omits the format is rejected as an invalid response.
+Outgoing Parquet registrations omit `file_format` so servers that strictly validate the
+older request shape continue to accept them. Non-Parquet registrations carry an explicit
+value, although this connector rejects them before publication.
+
+| Hoglake format | Read | Write and CTAS target | `DELETE`, `UPDATE`, and `MERGE` |
+| --- | --- | --- | --- |
+| absent or `parquet` | Supported | Supported | Supported |
+| `clickhouse-mergetree-packed` | Not supported | Not supported | Not supported |
+| Any other value | Not supported | Not supported | Not supported |
+
+A table with an unsupported `write.format.default` value is rejected before planning,
+including when it has no files. The connector also validates every scan file before
+statistics pruning and carries `file_format` in each split for a second check on the
+worker. A malformed or mixed-format table therefore fails explicitly; unsupported
+files are never skipped or passed to the Parquet reader. The table property is compared
+case-insensitively, so `PARQUET` is Parquet; the file format of a scan data file must be
+exactly `parquet`. `CREATE OR REPLACE TABLE` cannot replace a table with an unsupported
+format, and `CREATE TABLE` and `ALTER TABLE ... SET PROPERTIES` cannot set one.
+
+Operations that never read data remain available on a table with an unsupported format,
+so its columns can still be listed in `information_schema` and it can be renamed,
+truncated and dropped. The server can still refuse some of these changes for such a
+table.
+
+The split field is required rather than defaulted. A current coordinator always emits
+it, while a current worker rejects a split from an older coordinator that omits it
+instead of assuming Parquet and potentially opening an unsupported file. Older workers
+may likewise reject the new field. Do not run mixed connector versions during this
+change: drain active queries and restart or upgrade the coordinator and all workers
+together.
+
 ## Row-level deletes
 
 Hoglake pairs a data file with its live deletion vector at the snapshot being

@@ -74,7 +74,7 @@ final class HoglakeTransactionState
         }
         List<HoglakeDtos.ScanFile> files = changes.appends.entrySet().stream().map(entry -> {
             HoglakeDtos.FileRegistration file = entry.getValue();
-            return new HoglakeDtos.ScanFile(new HoglakeDtos.DataFile(entry.getKey(), file.path(), "parquet", file.recordCount(), file.fileSizeBytes(), file.footerSize(), 0, "pending", snapshot()), null);
+            return new HoglakeDtos.ScanFile(new HoglakeDtos.DataFile(entry.getKey(), file.path(), file.fileFormat(), file.recordCount(), file.fileSizeBytes(), file.footerSize(), 0, "pending", snapshot()), null);
         }).toList();
         List<HoglakeDtos.DeleteFile> deletes = changes.deletes.values().stream()
                 .map(file -> new HoglakeDtos.DeleteFile(0, file.dataFileId(), file.path(), file.deleteCount(), file.fileSizeBytes(), snapshot()))
@@ -90,6 +90,7 @@ final class HoglakeTransactionState
         for (HoglakeDtos.Append append : request.appends()) {
             TableChanges changes = table(append.namespace(), append.table(), append.expectedTableUuid());
             for (HoglakeDtos.FileRegistration file : append.files()) {
+                HoglakeFileFormats.checkWriterFile(file.fileFormat(), file.path());
                 if (changes.paths.containsKey(file.path())) {
                     continue;
                 }

@@ -29,6 +29,7 @@ import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures.FileColumn;
 import io.trino.spi.Page;
 import io.trino.spi.Plugin;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorContext;
@@ -63,6 +64,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static com.google.common.collect.MoreCollectors.onlyElement;
 import static io.trino.plugin.hoglake.HoglakeConfig.DEFAULT_MAX_SPLIT_SIZE;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.assertions.Assert.assertEventually;
@@ -297,7 +299,7 @@ final class TestHoglakeWrites
                     for (HoglakeDtos.FileRegistration file : append.files()) {
                         assertThat(file.recordCount()).isPositive();
                         assertThat(file.footerSize()).isPositive();
-                        files.get(append.table()).add(new HoglakeDtos.ScanFile(new HoglakeDtos.DataFile(nextFileId++, file.path(), "parquet", file.recordCount(), file.fileSizeBytes(), file.footerSize(), count, "pending", snapshot + 1), null));
+                        files.get(append.table()).add(new HoglakeDtos.ScanFile(new HoglakeDtos.DataFile(nextFileId++, file.path(), file.fileFormat(), file.recordCount(), file.fileSizeBytes(), file.footerSize(), count, "pending", snapshot + 1), null));
                         count += file.recordCount();
                         bytes += file.fileSizeBytes();
                     }
@@ -342,7 +344,7 @@ final class TestHoglakeWrites
                     for (HoglakeDtos.FileRegistration file : append.files()) {
                         assertThat(file.recordCount()).isPositive();
                         assertThat(file.footerSize()).isPositive();
-                        files.get(append.table()).add(new HoglakeDtos.ScanFile(new HoglakeDtos.DataFile(nextFileId++, file.path(), "parquet", file.recordCount(), file.fileSizeBytes(), file.footerSize(), count, "pending", snapshot + 1), null));
+                        files.get(append.table()).add(new HoglakeDtos.ScanFile(new HoglakeDtos.DataFile(nextFileId++, file.path(), file.fileFormat(), file.recordCount(), file.fileSizeBytes(), file.footerSize(), count, "pending", snapshot + 1), null));
                         count += file.recordCount();
                         bytes += file.fileSizeBytes();
                     }
@@ -414,7 +416,7 @@ final class TestHoglakeWrites
                 snapshot++;
                 for (var node : request.path("files")) {
                     HoglakeDtos.FileRegistration file = mapper.treeToValue(node, HoglakeDtos.FileRegistration.class);
-                    registered.add(new HoglakeDtos.ScanFile(new HoglakeDtos.DataFile(nextFileId++, file.path(), "parquet", file.recordCount(), file.fileSizeBytes(), file.footerSize(), count, "pending", snapshot), null));
+                    registered.add(new HoglakeDtos.ScanFile(new HoglakeDtos.DataFile(nextFileId++, file.path(), file.fileFormat(), file.recordCount(), file.fileSizeBytes(), file.footerSize(), count, "pending", snapshot), null));
                     count += file.recordCount();
                     bytes += file.fileSizeBytes();
                 }
@@ -453,6 +455,103 @@ final class TestHoglakeWrites
         }
         if (server != null) {
             server.stop(0);
+        }
+    }
+
+    @Test
+    void testPackedMergeTreeTablesAreRejectedBeforeDataOperations()
+    {
+        String tableName = "packed_format_guard";
+        String parquetTableName = "parquet_format_guard";
+        String copyName = "packed_format_guard_copy";
+        String packedUuid = UUID.randomUUID().toString();
+        tables.put(tableName, new HoglakeDtos.Table(
+                tableName,
+                "test",
+                packedUuid,
+                List.of(new HoglakeDtos.Column(1, 0, "id", "long", Map.of(), true)),
+                0,
+                0,
+                0,
+                null,
+                null,
+                null,
+                Map.of(HoglakeFileFormats.WRITE_FORMAT_DEFAULT_PROPERTY, HoglakeFileFormats.CLICKHOUSE_MERGETREE_PACKED)));
+        files.put(tableName, new ArrayList<>());
+        tables.put(parquetTableName, new HoglakeDtos.Table(
+                parquetTableName,
+                "test",
+                UUID.randomUUID().toString(),
+                List.of(new HoglakeDtos.Column(1, 0, "id", "long", Map.of(), true)),
+                0,
+                0,
+                0));
+        files.put(parquetTableName, new ArrayList<>());
+        int commitsBefore = commits;
+        try {
+            for (String sql : List.of(
+                    "SELECT count(*) FROM " + tableName,
+                    "INSERT INTO " + tableName + " VALUES 1",
+                    "DELETE FROM " + tableName + " WHERE id = 1",
+                    "UPDATE " + tableName + " SET id = 2 WHERE id = 1",
+                    "MERGE INTO " + tableName + " target USING (VALUES 1) source(id) ON target.id = source.id WHEN MATCHED THEN DELETE",
+                    "CREATE TABLE " + copyName + " AS SELECT * FROM " + tableName,
+                    "CREATE OR REPLACE TABLE " + tableName + " AS SELECT BIGINT '1' AS id",
+                    "CREATE OR REPLACE TABLE " + tableName + " (id bigint)")) {
+                assertThatThrownBy(() -> runner.execute(sql))
+                        .describedAs(sql)
+                        .hasMessageContaining("uses unsupported format 'clickhouse-mergetree-packed'")
+                        .hasMessageContaining("supports only 'parquet'");
+            }
+            for (String format : List.of("clickhouse-mergetree-packed", "CLICKHOUSE-MERGETREE-PACKED", "orc")) {
+                assertThatThrownBy(() -> runner.execute(
+                        "CREATE TABLE " + copyName + " (id bigint) WITH (extra_properties = MAP(ARRAY['write.format.default'], ARRAY['" + format + "']))"))
+                        .describedAs(format)
+                        .hasMessageContaining("uses unsupported format '" + format + "'")
+                        .hasMessageContaining("supports only 'parquet'");
+                assertThatThrownBy(() -> runner.execute(
+                        "CREATE TABLE " + copyName + " WITH (extra_properties = MAP(ARRAY['write.format.default'], ARRAY['" + format + "'])) AS SELECT * FROM " + parquetTableName))
+                        .describedAs(format)
+                        .hasMessageContaining("uses unsupported format '" + format + "'")
+                        .hasMessageContaining("supports only 'parquet'");
+            }
+
+            // Each data entry point refuses on its own, not only through the
+            // table metadata the engine reads first during analysis.
+            HoglakeMetadata metadata = new HoglakeMetadata(client);
+            var session = ConnectorTestFixtures.session();
+            var handle = metadata.getTableHandle(session, new SchemaTableName("test", tableName), Optional.empty(), Optional.empty());
+            assertThat(handle).isNotNull();
+            var columns = List.copyOf(metadata.getColumnHandles(session, handle).values());
+            assertThatThrownBy(() -> metadata.getTableMetadata(session, handle))
+                    .isInstanceOfSatisfying(TrinoException.class, e -> assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                    .hasMessageContaining("uses unsupported format 'clickhouse-mergetree-packed'");
+            assertThatThrownBy(() -> metadata.beginInsert(session, handle, columns, RetryMode.NO_RETRIES))
+                    .isInstanceOfSatisfying(TrinoException.class, e -> assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                    .hasMessageContaining("uses unsupported format 'clickhouse-mergetree-packed'");
+            assertThatThrownBy(() -> metadata.beginMerge(session, handle, Map.of(), RetryMode.NO_RETRIES))
+                    .isInstanceOfSatisfying(TrinoException.class, e -> assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                    .hasMessageContaining("uses unsupported format 'clickhouse-mergetree-packed'");
+            assertThatThrownBy(() -> runner.execute(
+                    "ALTER TABLE " + parquetTableName + " SET PROPERTIES extra_properties = MAP(ARRAY['write.format.default'], ARRAY['clickhouse-mergetree-packed'])"))
+                    .hasMessageContaining("uses unsupported format 'clickhouse-mergetree-packed'")
+                    .hasMessageContaining("supports only 'parquet'");
+            assertThat(commits).isEqualTo(commitsBefore);
+            assertThat(files.get(tableName)).isEmpty();
+            assertThat(tables).doesNotContainKey(copyName);
+            assertThat(tables.get(tableName).tableUuid()).isEqualTo(packedUuid);
+
+            // Resolving a handle does not read data, so DROP TABLE still removes the table.
+            runner.execute("DROP TABLE " + tableName);
+            assertThat(tables).doesNotContainKey(tableName);
+        }
+        finally {
+            files.remove(tableName);
+            tables.remove(tableName);
+            files.remove(parquetTableName);
+            tables.remove(parquetTableName);
+            files.remove(copyName);
+            tables.remove(copyName);
         }
     }
 

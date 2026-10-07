@@ -78,6 +78,7 @@ final class TestHoglakeWriteClient
             var append = body.path("appends").get(0);
             assertThat(append.path("expected_table_uuid").asText()).isEqualTo(COMMIT.appends().getFirst().expectedTableUuid());
             var file = append.path("files").get(0);
+            assertThat(file.has("file_format")).isFalse();
             assertThat(file.path("record_count").asLong()).isEqualTo(3);
             assertThat(file.path("file_size_bytes").asLong()).isEqualTo(1000);
             assertThat(file.path("footer_size").asLong()).isEqualTo(200);
@@ -87,6 +88,36 @@ final class TestHoglakeWriteClient
         finally {
             server.stop(0);
         }
+    }
+
+    @Test
+    void testFileRegistrationDefaultsToParquet()
+            throws Exception
+    {
+        HoglakeDtos.FileRegistration file = new ObjectMapper().readValue(
+                """
+                {"path":"s3://example.com/data/file.parquet","record_count":3,"file_size_bytes":1000,"footer_size":200}
+                """,
+                HoglakeDtos.FileRegistration.class);
+
+        assertThat(file.fileFormat()).isEqualTo("parquet");
+        assertThat(file.partitionValues()).isEmpty();
+    }
+
+    @Test
+    void testNonParquetFileRegistrationIncludesFormat()
+    {
+        var file = new HoglakeDtos.FileRegistration(
+                "s3://example.com/data/data.packed",
+                HoglakeFileFormats.CLICKHOUSE_MERGETREE_PACKED,
+                3,
+                1000,
+                0,
+                List.of());
+
+        var json = new ObjectMapper().valueToTree(file);
+
+        assertThat(json.path("file_format").asText()).isEqualTo("clickhouse-mergetree-packed");
     }
 
     @Test

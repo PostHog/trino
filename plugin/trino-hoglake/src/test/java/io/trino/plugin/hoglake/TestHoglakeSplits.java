@@ -15,6 +15,7 @@ package io.trino.plugin.hoglake;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.airlift.json.JsonCodec;
 import io.airlift.units.DataSize;
 import io.trino.filesystem.cache.CacheSplitAffinityProvider;
@@ -32,6 +33,7 @@ import java.util.OptionalLong;
 
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -65,6 +67,7 @@ class TestHoglakeSplits
 
         HoglakeSplit bare = splits.get(0);
         assertThat(bare.path()).isEqualTo("s3://lake/t/a.parquet");
+        assertThat(bare.dataFileFormat()).isEqualTo("parquet");
         assertThat(bare.fileSizeBytes()).isEqualTo(2048);
         assertThat(bare.recordCount()).isEqualTo(25);
         assertThat(bare.deleteFilePath()).isEmpty();
@@ -133,6 +136,64 @@ class TestHoglakeSplits
                     codec.fromJson(codec.toJson(split));
             assertThat(deserialized).isEqualTo(split);
         }
+    }
+
+    @Test
+    void splitWithoutAFormatIsRejectedDuringWorkerDispatch()
+            throws Exception
+    {
+        JsonCodec<HoglakeSplit> codec = JsonCodec.jsonCodec(HoglakeSplit.class);
+        HoglakeSplit split = HoglakeSplitManager.toSplits(List.of(new HoglakeDtos.ScanFile(DATA_FILE, null))).getFirst();
+        ObjectNode serialized = (ObjectNode) new ObjectMapper().readTree(codec.toJson(split));
+        assertThat(serialized.path("dataFileFormat").asText()).isEqualTo("parquet");
+        serialized.remove("dataFileFormat");
+
+        assertThatThrownBy(() -> codec.fromJson(serialized.toString()))
+                .hasRootCauseInstanceOf(NullPointerException.class)
+                .hasRootCauseMessage("dataFileFormat is null");
+    }
+
+    @Test
+    void unsupportedDataFileFormatIsRejectedDuringSplitPlanning()
+    {
+        HoglakeDtos.DataFile packed = new HoglakeDtos.DataFile(
+                12,
+                "s3://lake/t/data.packed",
+                HoglakeFileFormats.CLICKHOUSE_MERGETREE_PACKED,
+                25,
+                2048,
+                null,
+                0,
+                "provided",
+                3);
+
+        assertThatThrownBy(() -> HoglakeSplitManager.toSplits(List.of(new HoglakeDtos.ScanFile(packed, null))))
+                .isInstanceOfSatisfying(TrinoException.class, e ->
+                        assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                .hasMessageContaining("s3://lake/t/data.packed")
+                .hasMessageContaining("clickhouse-mergetree-packed")
+                .hasMessageContaining("supports only 'parquet'");
+    }
+
+    @Test
+    void scanDataFileWithoutAFormatIsAnInvalidResponse()
+    {
+        HoglakeDtos.DataFile missingFormat = new HoglakeDtos.DataFile(
+                12,
+                "s3://lake/t/missing-format",
+                null,
+                25,
+                2048,
+                321L,
+                0,
+                "provided",
+                3);
+
+        assertThatThrownBy(() -> HoglakeSplitManager.toSplits(List.of(new HoglakeDtos.ScanFile(missingFormat, null))))
+                .isInstanceOfSatisfying(TrinoException.class, e ->
+                        assertThat(e.getErrorCode()).isEqualTo(HOGLAKE_INVALID_RESPONSE.toErrorCode()))
+                .hasMessageContaining("s3://lake/t/missing-format")
+                .hasMessageContaining("has no file_format");
     }
 
     /**
