@@ -456,6 +456,8 @@ public class JdbcDuckLakeMetastore
         // 1 = 0 rather than the false literal, which not every catalog database spells the same way
         String partiallyVisibleCondition = "1 = 0";
         if (dataFileHasPartialMax()) {
+            // the record count of a data file holding rows of newer snapshots counts them too, and
+            // the page source leaves them out
             partiallyVisibleCondition = "(f.partial_max IS NOT NULL AND f.partial_max > :snapshot)";
         }
         // A delete file that tags each deletion with the snapshot that made it applies only the

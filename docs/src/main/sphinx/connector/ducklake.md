@@ -158,6 +158,16 @@ change under it without failing the commit. The result is then computed from
 the snapshot the statement started at, which is what reading a snapshot means,
 rather than from the newest one.
 
+DuckDB writes a data file holding the rows of several snapshots when it merges
+adjacent files with `ducklake_merge_adjacent_files` or flushes inlined rows,
+tags each row with the snapshot that inserted it, and registers the file from
+the oldest of those snapshots on, replacing the files or rows it was written
+from. A query reading a snapshot older than the newest row of such a file, as
+one does when a compaction or a flush commits while it runs, reads only the
+rows of its snapshot and older ones from the file, as DuckDB does. A deletion
+recorded for a snapshot newer than the one read is not applied either.
+`SELECT count(*)` reads such a file rather than answering from the catalog.
+
 A query fails with `DUCKLAKE_UNSUPPORTED_CHANGE_TYPE` when another writer
 recorded a kind of change this connector does not know. The connector cannot
 decide whether committing on top of that snapshot is safe, so it refuses rather
@@ -359,7 +369,3 @@ rows. Flush the inlined data with DuckDB first.
   in the file path (`ducklake_name_mapping.is_partition`), or maps the fields
   nested inside the column, fail. Other columns of such a table can be read.
 - Encrypted data files are not supported.
-- A data file that DuckDB flushed from inlined data and that holds rows of a
-  snapshot newer than the one a query reads fails the query. This can happen
-  when a flush lands while a query is planned. Delete files are not affected:
-  as in DuckDB, a deletion they record for a newer snapshot is not applied.

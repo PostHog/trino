@@ -227,6 +227,8 @@ public class DuckLakeSplitManager
                             entry.deleteCount(),
                             !mayHoldNewerDeletions(handle, dataFile, entry)));
             long recordCount = dataFile.recordCount() - deleteFile.map(DuckLakeDeleteFileHandle::deleteCount).orElse(0L);
+            // the rows of newer snapshots are counted too, so the count of such a file is not exact
+            OptionalLong rowSnapshotFilter = rowSnapshotFilter(handle, dataFile);
             Optional<DuckLakeInlinedDeletions> inlinedDeletions = Optional.ofNullable(deletions.inlinedDeletions().get(dataFile.dataFileId()))
                     .map(DuckLakeInlinedDeletions::new);
             String path = PathResolver.resolve(handle.tableLocation(), dataFile.path(), dataFile.pathIsRelative());
@@ -242,7 +244,8 @@ public class DuckLakeSplitManager
             if (metadataOnly) {
                 // File pruning has enforced the remaining predicate. Keep exact catalog counts
                 // and avoid fetching any footer for a scan that needs no stored column. A file with
-                // rows deleted inline has no exact count, and its split reads which rows are left.
+                // rows deleted inline, or with rows of snapshots newer than the one read, has no
+                // exact count, and its split reads which rows are left.
                 files.add(new DuckLakeSplit(
                         dataFile.dataFileId(),
                         path,
@@ -258,7 +261,8 @@ public class DuckLakeSplitManager
                         SplitWeight.standard(),
                         Optional.empty(),
                         Optional.empty(),
-                        inlinedDeletions));
+                        inlinedDeletions,
+                        rowSnapshotFilter));
                 continue;
             }
             files.add(new DuckLakeSplit(
@@ -276,7 +280,8 @@ public class DuckLakeSplitManager
                     SplitWeight.standard(),
                     Optional.empty(),
                     Optional.empty(),
-                    inlinedDeletions));
+                    inlinedDeletions,
+                    rowSnapshotFilter));
         }
         List<DuckLakeSplit> retainedFiles = files.build();
         if (metadataOnly || retainedFiles.isEmpty()) {
@@ -433,13 +438,35 @@ public class DuckLakeSplitManager
         if (dataFile.encryptionKey().isPresent()) {
             throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Data file %s of table %s is encrypted, which is not supported".formatted(dataFile.path(), handle.schemaTableName()));
         }
-        // A partial file holds rows written across several snapshots, each row tagged with an
-        // embedded snapshot id. Rows newer than the snapshot being read have to be filtered out
-        // by that column, but only when the file holds any: partialMax is the newest snapshot in
-        // the file, so when it is at or below the snapshot being read the whole file is visible.
+    }
+
+    /**
+     * The newest snapshot whose rows of the data file are visible, present when the file also
+     * holds rows of newer snapshots, which the page source then leaves out.
+     * <p>
+     * DuckDB writes a file holding the rows of several snapshots when it merges adjacent files or
+     * flushes inlined rows. Each row carries the snapshot it was inserted in, in the
+     * {@code _ducklake_internal_snapshot_id} column of the file, and the file is registered from
+     * the oldest of those snapshots on, with the newest recorded as its partial_max, replacing the
+     * files or inlined rows it was written from. A reader of a snapshot between the two sees the
+     * file, and DuckDB reads only its rows of that snapshot and older ones
+     * ({@code SetSnapshotFilter}, called by {@code DuckLakeMetadataManager::GetFilesForTable},
+     * and the filter {@code DuckLakeMultiFileReader::InitializeReader} adds on the column). When
+     * partial_max is at or below the snapshot read, every row of the file is visible and nothing
+     * is filtered. DuckDB also bounds such a file from below, but only when it lists the rows
+     * inserted between two snapshots, which this connector does not do.
+     * <p>
+     * A row-level change reads such a file the same way, and identifies the rows it changes by
+     * their position in the file, which leaving out rows does not move. It cannot commit what it
+     * read: the rows it left out were inserted into the table after the snapshot it read, which
+     * makes its commit conflict, so it never writes deletions computed without them.
+     */
+    private static OptionalLong rowSnapshotFilter(DuckLakeTableHandle handle, DuckLakeDataFileEntry dataFile)
+    {
         if (dataFile.partialMax().isPresent() && dataFile.partialMax().orElseThrow() > handle.snapshotId()) {
-            throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Data file %s of table %s holds rows newer than snapshot %s, which is not supported".formatted(dataFile.path(), handle.schemaTableName(), handle.snapshotId()));
+            return OptionalLong.of(handle.snapshotId());
         }
+        return OptionalLong.empty();
     }
 
     private static void validateDeleteFile(DuckLakeTableHandle handle, DuckLakeDeleteFileEntry deleteFile)
