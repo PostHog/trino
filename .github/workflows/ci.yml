@@ -895,7 +895,7 @@ jobs:
           version=$(../../mvnw -f ../../pom.xml --quiet help:evaluate -Dexpression=project.version -DforceStdout --raw-streams)
           docker save "product-tests-trino:${version}-amd64" | gzip > ../../product-tests-trino-image.tar.gz
       - name: Product tests artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: product tests and server tarball
           path: |
@@ -904,7 +904,7 @@ jobs:
             product-tests-trino-image.tar.gz
           retention-days: 1
       - name: Product test distribution
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: product test distribution
           path: |
@@ -967,11 +967,11 @@ jobs:
         with:
           cache: 'false'
       - name: Product tests artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: product tests and server tarball
       - name: Product test distribution
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: product test distribution
           path: testing/trino-product-tests/target
@@ -1092,7 +1092,7 @@ jobs:
           fi
       - name: Upload JUnit suite logs
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pt (${{ matrix.suite }})
           path: logs/

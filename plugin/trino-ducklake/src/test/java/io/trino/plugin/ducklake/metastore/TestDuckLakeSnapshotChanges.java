@@ -29,6 +29,21 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 final class TestDuckLakeSnapshotChanges
 {
     @Test
+    void testRecordsInlinedDataFlush()
+    {
+        // both spellings DuckDB has used, matched on the exact table
+        assertThat(DuckLakeSnapshotChanges.recordsInlinedDataFlush("deleted_from_table:1,inline_flush:1", 1)).isTrue();
+        assertThat(DuckLakeSnapshotChanges.recordsInlinedDataFlush("flushed_inlined:12", 12)).isTrue();
+        assertThat(DuckLakeSnapshotChanges.recordsInlinedDataFlush("inline_flush:12", 1)).isFalse();
+        assertThat(DuckLakeSnapshotChanges.recordsInlinedDataFlush("inline_flush:1", 12)).isFalse();
+        assertThat(DuckLakeSnapshotChanges.recordsInlinedDataFlush("inlined_insert:1,inlined_delete:1", 1)).isFalse();
+        // a name holding the text of a flush entry is not one
+        assertThat(DuckLakeSnapshotChanges.recordsInlinedDataFlush("created_table:\"main\".\"a,inline_flush:1\"", 1)).isFalse();
+        // a change type this connector does not know is no reason to fail a read
+        assertThat(DuckLakeSnapshotChanges.recordsInlinedDataFlush("some_future_change:1,inline_flush:1", 1)).isTrue();
+    }
+
+    @Test
     void testUnrelatedTablesNeverConflict()
     {
         assertThat(parse("inserted_into_table:1").conflictWith(parse("altered_table:2,dropped_table:3,deleted_from_table:4"))).isEmpty();
