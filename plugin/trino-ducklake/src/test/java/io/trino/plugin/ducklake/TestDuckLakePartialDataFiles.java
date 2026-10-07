@@ -93,6 +93,26 @@ final class TestDuckLakePartialDataFiles
                 "INSERT INTO flushed_events VALUES (1, 'one'), (2, 'two'), (3, 'three')",
                 "INSERT INTO flushed_events VALUES (4, 'four'), (5, 'five')",
                 "DELETE FROM flushed_events WHERE id = 2",
+                "CALL lake.set_option('data_inlining_row_limit', 0)",
+
+                // many row groups, so that a file is read by several splits
+                "CREATE TABLE merged_row_groups (id BIGINT, v VARCHAR)",
+                "CALL lake.set_option('parquet_row_group_size', 2048, table_name => 'merged_row_groups')",
+                "INSERT INTO merged_row_groups SELECT range, 'a' || range FROM range(0, 10000)",
+                "INSERT INTO merged_row_groups SELECT range, 'b' || range FROM range(10000, 20000)",
+
+                // a file per partition and insert, so that a merge combines files whose row
+                // identifiers are not adjacent and writes each row's identifier into the file
+                "CREATE TABLE merged_partitioned_writes (id BIGINT, p INTEGER, v VARCHAR)",
+                "ALTER TABLE merged_partitioned_writes SET PARTITIONED BY (p)",
+                "INSERT INTO merged_partitioned_writes SELECT range, range % 2, 'a' || range FROM range(0, 100)",
+                "INSERT INTO merged_partitioned_writes SELECT range, range % 2, 'b' || range FROM range(100, 200)",
+
+                // inlined rows, flushed and then merged with a later file by a test
+                "CALL lake.set_option('data_inlining_row_limit', 100)",
+                "CREATE TABLE flushed_merged (id INTEGER, v VARCHAR)",
+                "INSERT INTO flushed_merged VALUES (1, 'one'), (2, 'two')",
+                "INSERT INTO flushed_merged VALUES (3, 'three')",
                 "CALL lake.set_option('data_inlining_row_limit', 0)");
     }
 
@@ -190,6 +210,86 @@ final class TestDuckLakePartialDataFiles
         assertQuery("SELECT count(*), sum(id) FROM merged_writes", "VALUES (270, 40500)");
     }
 
+    /**
+     * A merged file of many row groups, read by a split per few of them, at a snapshot older than
+     * its newest rows and than deletions DuckDB then makes from it. Each split leaves out the newer
+     * rows of its own row groups, skipping the row groups holding only those, and no deletion of
+     * a newer snapshot applies.
+     */
+    @Test
+    void testMergedFileReadByRowGroupSplits()
+            throws SQLException
+    {
+        Session smallSplits = Session.builder(getSession())
+                .setCatalogSessionProperty(getSession().getCatalog().orElseThrow(), "max_split_size", "1kB")
+                .build();
+        readPinnedToSnapshot(smallSplits, () -> catalog.executeInDuckDb(
+                "INSERT INTO merged_row_groups SELECT range, 'c' || range FROM range(20000, 30000)",
+                "CALL ducklake_merge_adjacent_files('lake', 'merged_row_groups')",
+                "DELETE FROM merged_row_groups WHERE id % 3 = 0"), (session, snapshot) -> {
+            assertPartialFiles("merged_row_groups", snapshot, 1);
+            assertQuery(session, "SELECT count(*), min(id), max(id), sum(id) FROM merged_row_groups", "VALUES (20000, 0, 19999, 199990000)");
+            assertMatchesDuckDb(session, snapshot, "SELECT count(*), min(id), max(id), sum(id) FROM merged_row_groups");
+            assertMatchesDuckDb(session, snapshot, "SELECT count(*) FROM merged_row_groups");
+            assertMatchesDuckDb(session, snapshot, "SELECT count(*), sum(id) FROM merged_row_groups WHERE id > 15000");
+            assertMatchesDuckDb(session, snapshot, "SELECT count(v) FROM merged_row_groups WHERE v LIKE 'b%'");
+        });
+        assertMatchesDuckDb(getSession(), "SELECT count(*), min(id), max(id), sum(id) FROM merged_row_groups");
+    }
+
+    /**
+     * A row-level change of a merged file holding the identifier of each row, because the files
+     * it was merged from did not hold adjacent ones. Deletions name a row by its position in the
+     * file, as DuckDB's do, whatever identifier the file records for it.
+     */
+    @Test
+    void testRowLevelChangesOfMergedFileWithRowIdentifiers()
+            throws SQLException
+    {
+        catalog.executeInDuckDb(
+                "INSERT INTO merged_partitioned_writes SELECT range, range % 2, 'c' || range FROM range(200, 300)",
+                "CALL ducklake_merge_adjacent_files('lake', 'merged_partitioned_writes')");
+        long tableId = metastoreLong("SELECT table_id FROM ducklake_table WHERE table_name = 'merged_partitioned_writes' AND end_snapshot IS NULL");
+        // one file per partition, each holding its rows' identifiers rather than a first one
+        assertThat(metastoreLong("SELECT count(*) FROM ducklake_data_file WHERE table_id = %s AND end_snapshot IS NULL AND partial_max IS NOT NULL AND row_id_start IS NULL".formatted(tableId)))
+                .isEqualTo(2);
+
+        assertUpdate("DELETE FROM merged_partitioned_writes WHERE id % 10 = 0", 30);
+        assertMatchesDuckDb(getSession(), "SELECT id, p, v FROM merged_partitioned_writes ORDER BY id");
+        assertUpdate("UPDATE merged_partitioned_writes SET v = 'u' || v WHERE id % 10 = 5", 30);
+        assertMatchesDuckDb(getSession(), "SELECT id, p, v FROM merged_partitioned_writes ORDER BY id");
+        // a second change, over the delete files the first ones wrote
+        assertUpdate("DELETE FROM merged_partitioned_writes WHERE id % 10 = 7", 30);
+        assertMatchesDuckDb(getSession(), "SELECT id, p, v FROM merged_partitioned_writes ORDER BY id");
+        assertQuery("SELECT count(*), sum(id) FROM merged_partitioned_writes", "VALUES (240, 35940)");
+    }
+
+    /**
+     * A file flushed from inlined rows, merged with a later file while a transaction reads a
+     * snapshot older than both. The merged file carries the snapshot of each flushed row on, and
+     * the transaction reads the rows it saw inline, without those inserted since. A flush that
+     * deleted rows leaves a delete file, which keeps a merge from taking the file, so none is.
+     */
+    @Test
+    void testFlushedFileMergedAtAnOlderSnapshot()
+            throws SQLException
+    {
+        readPinnedToSnapshot(() -> catalog.executeInDuckDb(
+                "CALL lake.set_option('data_inlining_row_limit', 100)",
+                "INSERT INTO flushed_merged VALUES (4, 'four')",
+                "CALL lake.set_option('data_inlining_row_limit', 0)",
+                "CALL ducklake_flush_inlined_data('lake', table_name => 'flushed_merged')",
+                "INSERT INTO flushed_merged VALUES (5, 'five')",
+                "CALL ducklake_merge_adjacent_files('lake', 'flushed_merged')"), (session, snapshot) -> {
+            assertPartialFiles("flushed_merged", snapshot, 1);
+            assertQuery(session, "SELECT id, v FROM flushed_merged", "VALUES (1, 'one'), (2, 'two'), (3, 'three')");
+            assertMatchesDuckDb(session, snapshot, "SELECT id, v FROM flushed_merged ORDER BY id");
+            assertMatchesDuckDb(session, snapshot, "SELECT count(*) FROM flushed_merged");
+        });
+        assertQuery("SELECT id, v FROM flushed_merged", "VALUES (1, 'one'), (2, 'two'), (3, 'three'), (4, 'four'), (5, 'five')");
+        assertMatchesDuckDb(getSession(), "SELECT id, v FROM flushed_merged ORDER BY id");
+    }
+
     private interface CatalogChange
     {
         void apply()
@@ -209,8 +309,14 @@ final class TestDuckLakePartialDataFiles
     private void readPinnedToSnapshot(CatalogChange change, PinnedRead read)
             throws SQLException
     {
+        readPinnedToSnapshot(getSession(), change, read);
+    }
+
+    private void readPinnedToSnapshot(Session base, CatalogChange change, PinnedRead read)
+            throws SQLException
+    {
         long snapshot = newestSnapshot();
-        inTransaction(session -> {
+        newTransaction().execute(base, session -> {
             // the transaction reads the snapshot current when it first reads the catalog
             assertQuery(session, "SELECT id FROM snapshot_pin", "VALUES 1, 2, 3");
             try {
