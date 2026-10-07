@@ -16,6 +16,7 @@ package io.trino.plugin.hoglake;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import io.trino.parquet.variant.VariantPaths;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
@@ -23,6 +24,7 @@ import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -123,6 +125,7 @@ public record HoglakeColumnHandle(
                 .setType(type)
                 .setNullable(nullable)
                 .setComment(Optional.ofNullable(comment))
+                .setProperties(variantShredding.<Map<String, Object>>map(declaration -> ImmutableMap.of(HoglakeVariantShredding.PROPERTY, declaration)).orElse(ImmutableMap.of()))
                 .build();
     }
 

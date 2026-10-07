@@ -181,11 +181,11 @@ public class HoglakeMetadata
     @Override
     public void addColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnMetadata column, ColumnPosition position)
     {
-        if (!(position instanceof ColumnPosition.Last) || !column.isNullable() || !column.getProperties().isEmpty()) {
-            throw new TrinoException(NOT_SUPPORTED, "Hoglake ADD COLUMN supports nullable columns at the end, without column properties");
+        if (!(position instanceof ColumnPosition.Last) || !column.isNullable()) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake ADD COLUMN supports nullable columns at the end");
         }
+        HoglakeDtos.ColumnDefinition definition = columnDefinition(column);
         checkWriteSchemaSupport(client.getCatalog(), List.of(column.getType()));
-        HoglakeDtos.ColumnDefinition definition = HoglakeTypes.columnDefinition(column.getName(), column.getType(), true).withComment(column.getComment().orElse(null));
         if (column.getComment().isPresent()) {
             checkMetadataSupport();
         }
@@ -471,12 +471,26 @@ public class HoglakeMetadata
 
     private static List<HoglakeDtos.ColumnDefinition> columnDefinitions(ConnectorTableMetadata metadata)
     {
-        if (metadata.getProperties().keySet().stream().anyMatch(key -> !Set.of("partitioning", "sorted_by", "extra_properties").contains(key)) || metadata.getColumns().stream().anyMatch(column -> !column.getProperties().isEmpty())) {
+        if (metadata.getProperties().keySet().stream().anyMatch(key -> !Set.of("partitioning", "sorted_by", "extra_properties").contains(key)) ||
+                metadata.getColumns().stream().anyMatch(column -> !Set.of(HoglakeVariantShredding.PROPERTY).containsAll(column.getProperties().keySet()))) {
             throw new TrinoException(NOT_SUPPORTED, "Unsupported Hoglake table or column properties");
         }
         return metadata.getColumns().stream()
-                .map(column -> HoglakeTypes.columnDefinition(column.getName(), column.getType(), column.isNullable()).withComment(column.getComment().orElse(null)))
+                .map(HoglakeMetadata::columnDefinition)
                 .toList();
+    }
+
+    /**
+     * The catalog definition of a new column, with the layout its {@code shredding}
+     * property declares.
+     */
+    private static HoglakeDtos.ColumnDefinition columnDefinition(ColumnMetadata column)
+    {
+        HoglakeDtos.ColumnDefinition definition = HoglakeTypes.columnDefinition(column.getName(), column.getType(), column.isNullable())
+                .withComment(column.getComment().orElse(null));
+        return HoglakeVariantShredding.typeParams(column)
+                .map(definition::withTypeParams)
+                .orElse(definition);
     }
 
     @Override

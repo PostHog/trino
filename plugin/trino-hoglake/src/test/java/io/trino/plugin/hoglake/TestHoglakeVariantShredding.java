@@ -13,6 +13,9 @@
  */
 package io.trino.plugin.hoglake;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import io.trino.parquet.variant.VariantShreddingSchema.ArrayValue;
 import io.trino.parquet.variant.VariantShreddingSchema.ObjectField;
@@ -22,9 +25,12 @@ import io.trino.parquet.variant.VariantShreddingSchema.ShreddedType;
 import io.trino.parquet.variant.VariantShreddingSchema.ShreddedValue;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.TrinoException;
+import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.Type;
 import org.junit.jupiter.api.Test;
 
+import java.io.UncheckedIOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -33,9 +39,11 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_VARIANT_SHREDDING;
+import static io.trino.spi.StandardErrorCode.INVALID_COLUMN_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VariantType.VARIANT;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -158,7 +166,12 @@ class TestHoglakeVariantShredding
         assertInvalid("{\"type\": \"array\", \"element\": " + deepest + "}", "$" + "[*]".repeat(HoglakeVariantShredding.MAX_DEPTH) + " is nested more than 16 levels deep");
 
         HoglakeVariantShredding.schema(column(objectWithFields(HoglakeVariantShredding.MAX_FIELDS)));
-        assertInvalid(objectWithFields(HoglakeVariantShredding.MAX_FIELDS + 1), "$ has more than 1000 fields");
+        assertInvalid(objectWithFields(HoglakeVariantShredding.MAX_FIELDS + 1), "$ has more than 1000 fields and arrays");
+        // An array counts as a field does: each gives every data file columns of its own, so
+        // nested arrays would otherwise multiply the columns of a field
+        String array = "\"type\": \"array\", \"element\": {\"type\": \"string\"}";
+        HoglakeVariantShredding.schema(column(objectWithFields(HoglakeVariantShredding.MAX_FIELDS - 1).replaceFirst("\"type\": \"string\"", array)));
+        assertInvalid(objectWithFields(HoglakeVariantShredding.MAX_FIELDS).replaceFirst("\"type\": \"string\"", array), "$ has more than 1000 fields and arrays");
     }
 
     private static String objectWithFields(int count)
@@ -183,6 +196,108 @@ class TestHoglakeVariantShredding
         assertThatThrownBy(() -> new HoglakeColumnHandle("id", 1, BIGINT, true, List.of(), "long", null, List.of(), Optional.of("{\"type\": \"string\"}")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("Only a VARIANT column has a shredded layout: id");
+    }
+
+    @Test
+    void testColumnProperty()
+    {
+        ObjectMapper mapper = new ObjectMapper();
+        assertThat(HoglakeVariantShredding.typeParams(ColumnMetadata.builder().setName("v").setType(VARIANT).build())).isEmpty();
+        String declaration = "{\"type\": \"object\", \"fields\": [{\"name\": \"$browser\", \"type\": \"string\"}, {\"name\": \"price\", \"type\": \"decimal8\", \"precision\": 18, \"scale\": 2}]}";
+        assertThat(HoglakeVariantShredding.typeParams(columnWithProperty("v", VARIANT, declaration)))
+                .hasValueSatisfying(params -> {
+                    JsonNode actual = mapper.valueToTree(params);
+                    JsonNode expected = mapper.valueToTree(Map.of("shredding", parse(mapper, declaration)));
+                    assertThat(actual).isEqualTo(expected);
+                });
+
+        assertInvalidProperty(columnWithProperty("id", BIGINT, "{\"type\": \"string\"}"), "Only a VARIANT column has a shredded layout: id");
+        // A value written by hand must be exactly one JSON value, with unique keys, and the message says what is wrong
+        assertInvalidProperty(columnWithProperty("v", VARIANT, "{"), "Invalid shredding property of column v: Unexpected end-of-input");
+        assertInvalidProperty(columnWithProperty("v", VARIANT, "{\"type\": \"string\"} {}"), "Invalid shredding property of column v: Trailing token");
+        assertInvalidProperty(columnWithProperty("v", VARIANT, "{\"type\": \"string\", \"type\": \"int64\"}"), "Invalid shredding property of column v: Duplicate field 'type'");
+        assertInvalidProperty(columnWithProperty("v", VARIANT, ""), "Invalid shredding property of column v: $ is not a JSON object");
+        // The rules of a declaration in the catalog, with the messages of the property
+        assertInvalidProperty(columnWithProperty("v", VARIANT, "{\"type\": \"text\"}"), "Invalid shredding property of column v: $ has an unknown type: text");
+        assertInvalidProperty(
+                columnWithProperty("v", VARIANT, "{\"type\": \"object\", \"fields\": [{\"name\": \"plan\", \"type\": \"string\"}, {\"name\": \"Plan\", \"type\": \"string\"}]}"),
+                "Invalid shredding property of column v: Shredded VARIANT object $ has fields that differ only by case: plan and Plan");
+    }
+
+    private static JsonNode parse(ObjectMapper mapper, String json)
+    {
+        try {
+            return mapper.readTree(json);
+        }
+        catch (JsonProcessingException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private static ColumnMetadata columnWithProperty(String name, Type type, String declaration)
+    {
+        return ColumnMetadata.builder()
+                .setName(name)
+                .setType(type)
+                .setProperties(Map.of(HoglakeVariantShredding.PROPERTY, declaration))
+                .build();
+    }
+
+    /**
+     * Asserts the refusal of a property, by the start of its message.
+     */
+    private static void assertInvalidProperty(ColumnMetadata column, String message)
+    {
+        assertThatThrownBy(() -> HoglakeVariantShredding.typeParams(column))
+                .isInstanceOfSatisfying(TrinoException.class, e -> assertThat(e.getErrorCode()).isEqualTo(INVALID_COLUMN_PROPERTY.toErrorCode()))
+                .hasMessageStartingWith(message);
+    }
+
+    @Test
+    void testFieldNames()
+    {
+        // The catalog stores a declaration as JSONB, which has no NUL character, and UTF-8 has no unpaired surrogates
+        assertInvalid(objectWith("a\\u0000b"), "$ has a field name with a NUL character");
+        assertInvalid(objectWith("\\ud800"), "$ has a field name with an unpaired surrogate");
+        assertInvalid(objectWith("\\ud800a"), "$ has a field name with an unpaired surrogate");
+        assertInvalid(objectWith("a\\udc00"), "$ has a field name with an unpaired surrogate");
+        assertInvalidProperty(
+                columnWithProperty("v", VARIANT, "{\"type\": \"object\", \"fields\": [{\"name\": \"\\ud800\", \"type\": \"string\"}, {\"name\": \"\\udc00\", \"type\": \"string\"}]}"),
+                "Invalid shredding property of column v: $ has a field name with an unpaired surrogate");
+        assertThat(HoglakeVariantShredding.schema(column(objectWith("\\ud83d\\ude00"))).value())
+                .isEqualTo(object(field("\ud83d\ude00", primitive(ShreddedType.STRING))));
+
+        // The names on the way to a field are counted in bytes of UTF-8, up to 1024: a name of
+        // characters of each width at the cap, and one byte over it
+        for (String character : ImmutableList.of("a", "\u00e9", "\u20ac", "\ud83d\ude00")) {
+            int width = character.getBytes(UTF_8).length;
+            String name = character.repeat(1024 / width) + "a".repeat(1024 % width);
+            HoglakeVariantShredding.schema(column(objectWith(name)));
+            assertInvalid(objectWith(name + "a"), "$ has a field whose name, with the names above it, is longer than 1024 bytes");
+        }
+        String parent = "p".repeat(1000);
+        HoglakeVariantShredding.schema(column(objectWith(parent, "c".repeat(24))));
+        assertInvalid(objectWith(parent, "c".repeat(25)), "$." + parent + " has a field whose name, with the names above it, is longer than 1024 bytes");
+        // An array adds no name
+        HoglakeVariantShredding.schema(column("{\"type\": \"array\", \"element\": " + objectWith("a".repeat(1024)) + "}"));
+        assertInvalid(
+                "{\"type\": \"object\", \"fields\": [{\"name\": \"" + parent + "\", \"type\": \"array\", \"element\": " + objectWith("c".repeat(25)) + "}]}",
+                "$." + parent + "[*] has a field whose name, with the names above it, is longer than 1024 bytes");
+        assertInvalidProperty(
+                columnWithProperty("v", VARIANT, objectWith("a".repeat(2000))),
+                "Invalid shredding property of column v: $ has a field whose name, with the names above it, is longer than 1024 bytes");
+    }
+
+    /**
+     * An object of one field, whose name is the last of the names, under objects with the other names.
+     */
+    private static String objectWith(String... names)
+    {
+        String node = "{\"type\": \"string\"}";
+        for (int index = names.length - 1; index >= 0; index--) {
+            node = "{\"type\": \"object\", \"fields\": [{\"name\": \"%s\", %s]}".formatted(names[index], node.substring(1));
+        }
+        return node;
     }
 
     @Test
