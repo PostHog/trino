@@ -294,6 +294,79 @@ class TestVariant
     }
 
     @Test
+    void testFieldRemapperWithNonMinimalEncodings()
+    {
+        // The encoding only requires field ids, offsets, and element counts to fit in their widths, so other
+        // writers can use wider encodings than Trino. For example, a writer can size the field ids of every
+        // object for the whole metadata dictionary, even when an object only uses small field ids.
+        List<Slice> fieldNames = IntStream.range(0, 278)
+                .mapToObj(fieldId -> utf8Slice("k%03d".formatted(fieldId)))
+                .toList();
+        Metadata metadata = Metadata.of(fieldNames);
+        List<ObjectField> fields = List.of(new ObjectField(235, Variant.ofInt(42)));
+        Map<String, Object> expectedObject = Map.of("k235", 42);
+
+        // field ids wider than the largest field id in the object
+        assertFieldRemapping(Variant.from(metadata, encodeObjectWithLayout(false, 2, 1, fields)), expectedObject);
+        assertFieldRemapping(Variant.from(metadata, encodeObjectWithLayout(false, 4, 1, fields)), expectedObject);
+        // field offsets wider than the object values
+        assertFieldRemapping(Variant.from(metadata, encodeObjectWithLayout(false, 1, 2, fields)), expectedObject);
+        // large field count
+        assertFieldRemapping(Variant.from(metadata, encodeObjectWithLayout(true, 1, 1, fields)), expectedObject);
+
+        Variant object = Variant.from(metadata, encodeObjectWithLayout(false, 1, 1, fields));
+        // element offsets wider than the array elements
+        assertFieldRemapping(Variant.from(metadata, encodeArrayWithLayout(false, 2, List.of(object))), List.of(expectedObject));
+        // large element count
+        assertFieldRemapping(Variant.from(metadata, encodeArrayWithLayout(true, 1, List.of(object))), List.of(expectedObject));
+
+        // minimal field ids that need 2 bytes, but fit in 1 byte after remapping
+        assertFieldRemapping(
+                Variant.from(metadata, encodeObjectWithLayout(false, 2, 1, List.of(new ObjectField(270, Variant.ofInt(42))))),
+                Map.of("k270", 42));
+
+        // The remapper stops looking for field names once it has found every name in the dictionary,
+        // so it does not see the wider field ids of the second object until it rewrites the value.
+        // The dictionary is not sorted, so the field ids also change when the array is remapped on its own.
+        Metadata unsortedMetadata = Metadata.of(List.of(utf8Slice("c"), utf8Slice("b")));
+        Variant array = Variant.from(unsortedMetadata, encodeArrayWithLayout(false, 1, List.of(
+                Variant.from(unsortedMetadata, encodeObjectWithLayout(false, 1, 1, List.of(new ObjectField(1, Variant.ofInt(1)), new ObjectField(0, Variant.ofInt(3))))),
+                Variant.from(unsortedMetadata, encodeObjectWithLayout(false, 2, 1, List.of(new ObjectField(1, Variant.ofInt(2))))))));
+        assertFieldRemapping(array, List.of(Map.of("b", 1, "c", 3), Map.of("b", 2)));
+    }
+
+    private static void assertFieldRemapping(Variant value, Object expected)
+    {
+        assertThat(value.toObject()).isEqualTo(expected);
+        Variant expectedValue = Variant.fromObject(expected);
+
+        // the minimally encoded value keeps its size, so only it can use the fast path
+        assertThat(isSameSizeRemap(expectedValue)).isTrue();
+        assertThat(isSameSizeRemap(value)).isFalse();
+
+        // "a" sorts before the field names of the value, so all field ids of the value change, and
+        // the remapped value must have the same encoding as the remapped minimally encoded value
+        Variant object = Variant.ofObject(Map.of(utf8Slice("a"), value));
+        Variant expectedObject = Variant.ofObject(Map.of(utf8Slice("a"), expectedValue));
+        assertThat(object.metadata()).isEqualTo(expectedObject.metadata());
+        assertThat(object.data()).isEqualTo(expectedObject.data());
+        assertThat(object.toObject()).isEqualTo(Map.of("a", expected));
+
+        assertThat(Variant.ofArray(List.of(value)).toObject()).isEqualTo(List.of(expected));
+
+        assertEqualAndSameHash(value, expectedValue);
+    }
+
+    private static boolean isSameSizeRemap(Variant value)
+    {
+        Metadata.Builder metadataBuilder = Metadata.builder();
+        metadataBuilder.addFieldName(utf8Slice("a"));
+        VariantFieldRemapper remapper = VariantFieldRemapper.create(value, metadataBuilder);
+        remapper.finalize(metadataBuilder.buildSorted().sortedFieldIdMapping());
+        return remapper.isSameSizeRemap();
+    }
+
+    @Test
     void testDecimal()
     {
         for (String string : List.of("0", "1", "-1", "123456789", "123456700", "-123456789", "-123456700")) {
