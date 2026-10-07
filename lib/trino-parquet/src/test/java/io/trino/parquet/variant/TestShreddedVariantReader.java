@@ -389,6 +389,23 @@ public class TestShreddedVariantReader
                 .hasMessageContaining("VARIANT value is truncated");
     }
 
+    @Test
+    public void testPrunedLookupValidatesDictionary()
+            throws IOException
+    {
+        // Dictionary ["a", "b", "c"] with offsets 0, 2, 1, 3, which decrease, and an object whose field 1 is 5
+        ParquetDataSource dataSource = writeUnshreddedVariants(
+                ImmutableList.of(new byte[] {0x01, 0x03, 0x00, 0x02, 0x01, 0x03, 'a', 'b', 'c'}),
+                ImmutableList.of(new byte[] {0x02, 0x01, 0x01, 0x00, 0x05, 0x14, 0x05, 0x00, 0x00, 0x00}));
+        assertThatThrownBy(() -> readPhysicalColumn(dataSource, "v", ParquetReaderOptions.defaultOptions()))
+                .isInstanceOf(ParquetCorruptionException.class)
+                .hasMessageContaining("Dictionary offsets must not decrease");
+        // A lookup reads the dictionary in place, and checks it like a whole read
+        assertThatThrownBy(() -> readPhysicalColumn(dataSource, "v", ParquetReaderOptions.defaultOptions(), Optional.of(VariantPaths.of(List.of(List.of(key("b")))))))
+                .isInstanceOf(ParquetCorruptionException.class)
+                .hasMessageContaining("Dictionary offsets must not decrease");
+    }
+
     /// Writes a VARIANT group with only `metadata` and `value` columns, which the
     /// shredded reader also reads.
     private static ParquetDataSource writeUnshreddedVariants(List<byte[]> metadata, List<byte[]> values)

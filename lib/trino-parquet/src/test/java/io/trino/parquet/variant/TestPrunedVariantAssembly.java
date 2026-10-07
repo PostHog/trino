@@ -16,6 +16,7 @@ package io.trino.parquet.variant;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.slice.Slice;
+import io.trino.parquet.ParquetCorruptionException;
 import io.trino.parquet.ParquetDataSource;
 import io.trino.parquet.ParquetReaderOptions;
 import io.trino.parquet.reader.FileParquetDataSource;
@@ -29,6 +30,9 @@ import io.trino.parquet.variant.VariantShreddingSchema.ShreddedValue;
 import io.trino.parquet.writer.ParquetWriterOptions;
 import io.trino.spi.Page;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.RowBlockBuilder;
+import io.trino.spi.type.RowType;
+import io.trino.spi.variant.Metadata;
 import io.trino.spi.variant.Variant;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.Types;
@@ -49,10 +53,16 @@ import static io.trino.parquet.variant.ShreddedVariantTestUtils.evaluate;
 import static io.trino.parquet.variant.ShreddedVariantTestUtils.key;
 import static io.trino.parquet.variant.ShreddedVariantTestUtils.readPhysicalColumn;
 import static io.trino.parquet.variant.ShreddedVariantTestUtils.readVariants;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.RowType.field;
+import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VariantType.VARIANT;
 import static io.trino.spi.variant.Header.BasicType.OBJECT;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.BINARY;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
 import static org.apache.parquet.schema.Type.Repetition.OPTIONAL;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /// Pruned reads of `properties-shape.parquet` and `properties-shape-mixed.parquet`,
 /// which DuckDB 1.5.5 wrote with object fields in field id order and a false
@@ -185,6 +195,60 @@ public class TestPrunedVariantAssembly
         }
         assertThat(rowsWithWideObject).isEqualTo(161);
         assertThat(column.assembler().rowsWithNewMetadata()).isEqualTo(rowsWithWideObject);
+    }
+
+    @Test
+    public void testNestedPartialObjectThatIsNotAnObject()
+            throws IOException
+    {
+        // Object field "o" is shredded with field "x", and its value column holds an int32
+        // instead of a partially shredded object
+        MessageType messageType = Types.buildMessage()
+                .optionalGroup()
+                .required(BINARY).named("metadata")
+                .optional(BINARY).named("value")
+                .optionalGroup()
+                .requiredGroup()
+                .optional(BINARY).named("value")
+                .optionalGroup()
+                .requiredGroup().optional(BINARY).named("value").optional(INT64).named("typed_value").named("x")
+                .named("typed_value")
+                .named("o")
+                .named("typed_value")
+                .named("v")
+                .named("test");
+        RowType x = RowType.from(List.of(field("value", VARBINARY), field("typed_value", BIGINT)));
+        RowType o = RowType.from(List.of(field("value", VARBINARY), field("typed_value", RowType.from(List.of(field("x", x))))));
+        RowType v = RowType.from(List.of(field("metadata", VARBINARY), field("value", VARBINARY), field("typed_value", RowType.from(List.of(field("o", o))))));
+        RowBlockBuilder builder = v.createBlockBuilder(null, 1);
+        builder.buildEntry(group -> {
+            VARBINARY.writeSlice(group.get(0), Metadata.of(List.of(utf8Slice("o"), utf8Slice("x"))).toSlice());
+            group.get(1).appendNull();
+            ((RowBlockBuilder) group.get(2)).buildEntry(typedValue -> ((RowBlockBuilder) typedValue.getFirst()).buildEntry(object -> {
+                VARBINARY.writeSlice(object.get(0), Variant.ofInt(5).data());
+                ((RowBlockBuilder) object.get(1)).buildEntry(fields -> ((RowBlockBuilder) fields.getFirst()).buildEntry(field -> {
+                    field.get(0).appendNull();
+                    BIGINT.writeLong(field.get(1), 7);
+                }));
+            }));
+        });
+        Slice file = writeParquetFile(
+                ParquetWriterOptions.builder().build(),
+                messageType,
+                ImmutableMap.of(
+                        List.of("v", "metadata"), VARBINARY,
+                        List.of("v", "value"), VARBINARY,
+                        List.of("v", "typed_value", "o", "value"), VARBINARY,
+                        List.of("v", "typed_value", "o", "typed_value", "x", "value"), VARBINARY,
+                        List.of("v", "typed_value", "o", "typed_value", "x", "typed_value"), BIGINT),
+                ImmutableList.of(new Page(builder.build())));
+
+        // A pruned read checks the nested value column, which it reads anyway, like a whole read
+        for (Optional<VariantPaths> paths : List.of(Optional.<VariantPaths>empty(), Optional.of(VariantPaths.of(ImmutableList.of(ImmutableList.of(key("o"), key("x"))))))) {
+            assertThatThrownBy(() -> readPhysicalColumn(new TestingParquetDataSource(file, OPTIONS), "v", OPTIONS, paths))
+                    .isInstanceOf(ParquetCorruptionException.class)
+                    .hasMessageContaining("Shredded VARIANT object has a value that is not an object");
+        }
     }
 
     private static Variant wideObject(int id)

@@ -20,6 +20,7 @@ import java.util.Arrays;
 
 import static io.trino.spi.variant.Header.arrayHeader;
 import static io.trino.spi.variant.Header.objectHeader;
+import static io.trino.spi.variant.VariantUtils.getOffsetSize;
 import static io.trino.spi.variant.VariantUtils.writeOffset;
 import static java.lang.Math.max;
 
@@ -32,7 +33,11 @@ import static java.lang.Math.max;
 /// large container only above 255 elements.
 final class PrunedVariantWriter
 {
-    private byte[] buffer = new byte[256];
+    private static final int INITIAL_SIZE = 256;
+    // A buffer that a large value grew is not kept for the next rows
+    private static final int MAX_RETAINED_SIZE = 1024 * 1024;
+
+    private byte[] buffer = new byte[INITIAL_SIZE];
     private Slice slice = Slices.wrappedBuffer(buffer);
     private int size;
 
@@ -45,6 +50,10 @@ final class PrunedVariantWriter
     {
         size = 0;
         elementCount = 0;
+        if (buffer.length > MAX_RETAINED_SIZE) {
+            buffer = new byte[INITIAL_SIZE];
+            slice = Slices.wrappedBuffer(buffer);
+        }
     }
 
     public int size()
@@ -111,8 +120,8 @@ final class PrunedVariantWriter
             maxFieldId = max(maxFieldId, elementIds[element]);
         }
         boolean large = count > 255;
-        int idSize = byteSize(maxFieldId);
-        int offsetSize = byteSize(dataLength);
+        int idSize = getOffsetSize(maxFieldId);
+        int offsetSize = getOffsetSize(dataLength);
         int headerSize = 1 + (large ? Integer.BYTES : 1) + count * idSize + (count + 1) * offsetSize;
         moveData(dataStart, dataLength, headerSize);
 
@@ -133,7 +142,7 @@ final class PrunedVariantWriter
         int count = elementCount - mark;
         int dataLength = size - dataStart;
         boolean large = count > 255;
-        int offsetSize = byteSize(dataLength);
+        int offsetSize = getOffsetSize(dataLength);
         int headerSize = 1 + (large ? Integer.BYTES : 1) + (count + 1) * offsetSize;
         moveData(dataStart, dataLength, headerSize);
 
@@ -175,19 +184,5 @@ final class PrunedVariantWriter
             buffer = Arrays.copyOf(buffer, max(capacity, buffer.length * 2));
             slice = Slices.wrappedBuffer(buffer);
         }
-    }
-
-    private static int byteSize(int value)
-    {
-        if (value <= 0xFF) {
-            return 1;
-        }
-        if (value <= 0xFFFF) {
-            return 2;
-        }
-        if (value <= 0xFFFFFF) {
-            return 3;
-        }
-        return 4;
     }
 }

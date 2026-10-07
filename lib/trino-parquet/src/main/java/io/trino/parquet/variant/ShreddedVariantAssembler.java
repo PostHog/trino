@@ -147,6 +147,9 @@ import static java.util.Objects.requireNonNull;
 /// `value`: a metadata dictionary that sets `sorted_strings` but is not sorted, and
 /// object fields that are not in field name order. Lookups that trust either one miss
 /// keys. The lookups of keys on paths trust neither.
+///
+/// An assembler reuses its buffers between rows, so it is not thread-safe: each reader
+/// uses its own.
 public final class ShreddedVariantAssembler
 {
     private static final int MISSING = 0;
@@ -494,7 +497,7 @@ public final class ShreddedVariantAssembler
                     if (plan.path().whole()) {
                         yield NEEDS_METADATA;
                     }
-                    yield writeObject((ObjectPlan) plan.typedValue().orElseThrow(), object, value, position, row);
+                    yield writeObject((ObjectPlan) plan.typedValue().orElseThrow(), object, value, position, row, topLevel);
                 }
                 case BoundArray array -> {
                     if (plan.path().whole()) {
@@ -515,22 +518,12 @@ public final class ShreddedVariantAssembler
         return writeUntyped(plan.path(), data, 0, row);
     }
 
-    private int writeObject(ObjectPlan plan, BoundObject object, BoundValue group, int position, RowContext row)
+    private int writeObject(ObjectPlan plan, BoundObject object, BoundValue group, int position, RowContext row, boolean topLevel)
             throws ParquetCorruptionException
     {
         // The keys that no shredded field holds are found in the partially shredded object
-        Slice partialObject = null;
+        Slice partialObject = partialObject(plan, group, position, row, topLevel);
         int[] residualStarts = plan.residualStarts();
-        if (!plan.residualNames().isEmpty()) {
-            Block valueBlock = group.value().block();
-            if (!valueBlock.isNull(position)) {
-                partialObject = valueData(valueBlock, position);
-                if (getBasicType(partialObject.getByte(0)) != OBJECT) {
-                    throw new ParquetCorruptionException(dataSourceId, "Shredded VARIANT object has a value that is not an object");
-                }
-                row.lookup().find(partialObject, 0, plan.residualNames(), residualStarts);
-            }
-        }
 
         int dataStart = writer.size();
         int mark = writer.beginContainer();
@@ -560,6 +553,30 @@ public final class ShreddedVariantAssembler
         }
         writer.endObject(mark, dataStart);
         return WRITTEN;
+    }
+
+    /// Returns the partially shredded object of a typed object, or null if the group has
+    /// none, and finds in it the keys of the paths that no shredded field holds. A nested
+    /// `value` column is read with its `typed_value`, so it is always checked, as in a
+    /// whole read. The top-level one is read only when a key needs it.
+    private Slice partialObject(ObjectPlan plan, BoundValue group, int position, RowContext row, boolean topLevel)
+            throws ParquetCorruptionException
+    {
+        if (plan.residualNames().isEmpty() && topLevel) {
+            return null;
+        }
+        Block valueBlock = group.value().block();
+        if (valueBlock.isNull(position)) {
+            return null;
+        }
+        Slice partialObject = valueData(valueBlock, position);
+        if (getBasicType(partialObject.getByte(0)) != OBJECT) {
+            throw new ParquetCorruptionException(dataSourceId, "Shredded VARIANT object has a value that is not an object");
+        }
+        if (!plan.residualNames().isEmpty()) {
+            row.lookup().find(partialObject, 0, plan.residualNames(), plan.residualStarts());
+        }
+        return partialObject;
     }
 
     private int writeArray(ArrayPlan plan, BoundArray array, int position, RowContext row)
@@ -687,7 +704,7 @@ public final class ShreddedVariantAssembler
                     }
                     yield readPrimitive(primitive.primitive(), primitive.block(), position);
                 }
-                case BoundObject object -> readPrunedObject((ObjectPlan) plan.typedValue().orElseThrow(), object, value, position, row);
+                case BoundObject object -> readPrunedObject((ObjectPlan) plan.typedValue().orElseThrow(), object, value, position, row, topLevel);
                 case BoundArray array -> {
                     if (!topLevel) {
                         checkNoUntypedValue(!value.value().block().isNull(position));
@@ -715,21 +732,11 @@ public final class ShreddedVariantAssembler
         return Optional.of(readPrunedUntyped(plan.path(), valueData(valueBlock, position), 0, row));
     }
 
-    private Variant readPrunedObject(ObjectPlan plan, BoundObject object, BoundValue group, int position, RowContext row)
+    private Variant readPrunedObject(ObjectPlan plan, BoundObject object, BoundValue group, int position, RowContext row, boolean topLevel)
             throws ParquetCorruptionException
     {
-        Slice partialObject = null;
+        Slice partialObject = partialObject(plan, group, position, row, topLevel);
         int[] residualStarts = plan.residualStarts();
-        if (!plan.residualNames().isEmpty()) {
-            Block valueBlock = group.value().block();
-            if (!valueBlock.isNull(position)) {
-                partialObject = valueData(valueBlock, position);
-                if (getBasicType(partialObject.getByte(0)) != OBJECT) {
-                    throw new ParquetCorruptionException(dataSourceId, "Shredded VARIANT object has a value that is not an object");
-                }
-                row.lookup().find(partialObject, 0, plan.residualNames(), residualStarts);
-            }
-        }
         Map<Slice, Variant> fields = new HashMap<>();
         for (KeyPlan key : plan.keys()) {
             if (key.shreddedField() >= 0) {
@@ -901,17 +908,36 @@ public final class ShreddedVariantAssembler
                         residualNames.add(key.name());
                     }
                 }
-                yield new ObjectPlan(keys.build(), residualNames.build(), new int[residualCount]);
+                yield new ObjectPlan(keys.build(), residualNames.build());
             }
             case ArrayValue array -> new ArrayPlan(path.elements().map(elements -> valuePlan(array.element(), elements)));
         }));
     }
 
-    /// A node of [VariantPaths], with the keys below it in field name order.
-    ///
-    /// @param id the field id of the key of this node in the metadata of pruned values
-    private record PathNode(Slice name, int id, boolean whole, List<PathNode> keys, List<Slice> keyNames, int[] keyStarts, Optional<PathNode> elements)
+    /// A node of [VariantPaths], with the keys below it in field name order, and the
+    /// starts of their values that a lookup finds, which the assembler reuses for each row.
+    private static final class PathNode
     {
+        private final Slice name;
+        private final int id;
+        private final boolean whole;
+        private final List<PathNode> keys;
+        private final List<Slice> keyNames;
+        private final int[] keyStarts;
+        private final Optional<PathNode> elements;
+
+        /// @param id the field id of the key of this node in the metadata of pruned values
+        private PathNode(Slice name, int id, boolean whole, List<PathNode> keys, Optional<PathNode> elements)
+        {
+            this.name = requireNonNull(name, "name is null");
+            this.id = id;
+            this.whole = whole;
+            this.keys = ImmutableList.copyOf(keys);
+            this.keyNames = keys.stream().map(PathNode::name).collect(toImmutableList());
+            this.keyStarts = new int[keys.size()];
+            this.elements = requireNonNull(elements, "elements is null");
+        }
+
         static PathNode of(VariantPaths paths, Map<String, Integer> ids)
         {
             return of(EMPTY_SLICE, -1, paths, ids);
@@ -923,14 +949,42 @@ public final class ShreddedVariantAssembler
                     .map(entry -> of(utf8Slice(entry.getKey()), ids.get(entry.getKey()), entry.getValue(), ids))
                     .sorted(comparing(PathNode::name))
                     .collect(toImmutableList());
-            return new PathNode(
-                    name,
-                    id,
-                    paths.whole(),
-                    keys,
-                    keys.stream().map(PathNode::name).collect(toImmutableList()),
-                    new int[keys.size()],
-                    paths.elements().map(elements -> of(EMPTY_SLICE, -1, elements, ids)));
+            return new PathNode(name, id, paths.whole(), keys, paths.elements().map(elements -> of(EMPTY_SLICE, -1, elements, ids)));
+        }
+
+        public Slice name()
+        {
+            return name;
+        }
+
+        public int id()
+        {
+            return id;
+        }
+
+        public boolean whole()
+        {
+            return whole;
+        }
+
+        public List<PathNode> keys()
+        {
+            return keys;
+        }
+
+        public List<Slice> keyNames()
+        {
+            return keyNames;
+        }
+
+        public int[] keyStarts()
+        {
+            return keyStarts;
+        }
+
+        public Optional<PathNode> elements()
+        {
+            return elements;
         }
     }
 
@@ -947,9 +1001,37 @@ public final class ShreddedVariantAssembler
             implements TypedPlan {}
 
     /// The keys of an object on the paths, in field name order, and the names of the keys
-    /// that no shredded field holds, which are looked up in the partially shredded object.
-    private record ObjectPlan(List<KeyPlan> keys, List<Slice> residualNames, int[] residualStarts)
-            implements TypedPlan {}
+    /// that no shredded field holds, which are looked up in the partially shredded object,
+    /// with the starts of their values, which the assembler reuses for each row.
+    private static final class ObjectPlan
+            implements TypedPlan
+    {
+        private final List<KeyPlan> keys;
+        private final List<Slice> residualNames;
+        private final int[] residualStarts;
+
+        private ObjectPlan(List<KeyPlan> keys, List<Slice> residualNames)
+        {
+            this.keys = ImmutableList.copyOf(keys);
+            this.residualNames = ImmutableList.copyOf(residualNames);
+            this.residualStarts = new int[residualNames.size()];
+        }
+
+        public List<KeyPlan> keys()
+        {
+            return keys;
+        }
+
+        public List<Slice> residualNames()
+        {
+            return residualNames;
+        }
+
+        public int[] residualStarts()
+        {
+            return residualStarts;
+        }
+    }
 
     /// A key of an object on the paths, held by the shredded field with index
     /// `shreddedField`, or else by the partially shredded object.
@@ -1050,7 +1132,10 @@ public final class ShreddedVariantAssembler
                 throws ParquetCorruptionException
         {
             if (!lookupReady) {
-                lookup.reset(metadata());
+                // Like the metadata of a whole read, which the lookup reads in place
+                Slice metadata = metadata();
+                validateDictionaryOffsets(metadata);
+                lookup.reset(metadata);
                 lookupReady = true;
             }
             return lookup;
