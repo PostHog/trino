@@ -169,7 +169,7 @@ final class HoglakeParquetFields
     {
         GroupColumnIO list = asGroup(column, physical);
         if (list.getChildrenCount() == 1) {
-            ColumnIO element = getArrayElementColumn(list.getChild(0));
+            ColumnIO element = getArrayElementColumn(((ArrayType) column.type()).getElementType(), list.getChild(0));
             // The elements repeat below the list
             if (element.getRepetitionLevel() > physical.getRepetitionLevel()) {
                 return element;
