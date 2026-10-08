@@ -45,7 +45,7 @@ import static io.trino.execution.ParameterExtractor.bindParameters;
 import static io.trino.metadata.MetadataUtil.createQualifiedObjectName;
 import static io.trino.metadata.MetadataUtil.getRequiredCatalogHandle;
 import static io.trino.spi.StandardErrorCode.TABLE_ALREADY_EXISTS;
-import static io.trino.sql.SqlFormatterUtil.getFormattedSql;
+import static io.trino.sql.SqlFormatterUtil.getFormattedSqlForStorage;
 import static io.trino.sql.analyzer.SemanticExceptions.semanticException;
 import static io.trino.sql.tree.CreateView.Security.INVOKER;
 import static java.util.Objects.requireNonNull;
@@ -107,14 +107,14 @@ public class CreateViewTask
             throw semanticException(TABLE_ALREADY_EXISTS, statement, "Table already exists: '%s'", name);
         }
 
-        String sql = getFormattedSql(statement.getQuery(), sqlParser);
+        String sql = getFormattedSqlForStorage(statement.getQuery(), sqlParser);
 
         Analysis analysis = analyzerFactory.createAnalyzer(session, parameters, parameterLookup, stateMachine.getWarningCollector(), stateMachine.getPlanOptimizersStatsCollector())
                 .analyze(statement);
 
         List<ViewColumn> columns = analysis.getOutputDescriptor(statement.getQuery())
                 .getVisibleFields().stream()
-                .map(field -> new ViewColumn(field.getName().get(), field.getType().getTypeId(), Optional.empty()))
+                .map(field -> ViewColumn.fromType(field.getName().get(), field.getType(), Optional.empty()))
                 .collect(toImmutableList());
 
         // use DEFINER security by default
