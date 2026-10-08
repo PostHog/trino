@@ -32,6 +32,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Map;
 
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.plugin.catalogstore.posthog.CatalogVersions.computeCatalogVersion;
 import static io.trino.testing.TestingNames.randomNameSuffix;
@@ -116,6 +117,34 @@ final class TestPostHogManagedCatalogStore
 
         assertThat(catalog.properties()).containsExactlyInAnyOrderEntriesOf(properties);
         assertThat(catalog.version()).isEqualTo(computeCatalogVersion(new CatalogName("org_29"), new ConnectorName("tpch"), properties));
+    }
+
+    @Test
+    void testNodeSettingDecidesTheFilesystemCacheOfHoglakeCatalogs()
+    {
+        String cellId = newCell();
+        TestingCatalogPublisher publisher = publisher(cellId, 1);
+        Map<String, String> hoglake = ImmutableMap.of("hoglake.catalog", "org_29", "fs.cache.enabled", "false");
+        Map<String, String> hoglakeWithoutSetting = ImmutableMap.of("hoglake.catalog", "org_30");
+        Map<String, String> other = ImmutableMap.of("fs.cache.enabled", "false");
+        publisher.publishCatalog("op-1", "org_29", "hoglake", hoglake);
+        publisher.publishCatalog("op-2", "org_30", "hoglake", hoglakeWithoutSetting);
+        publisher.publishCatalog("op-3", "org_31", "ducklake", other);
+
+        Map<String, CatalogProperties> cached = catalogsByName(managedStore(cellId, ImmutableMap.of("catalog-store.hoglake-filesystem-cache-enabled", "true")));
+        assertThat(cached.get("org_29").properties()).containsExactlyInAnyOrderEntriesOf(ImmutableMap.of("hoglake.catalog", "org_29", "fs.cache.enabled", "true"));
+        assertThat(cached.get("org_30").properties()).containsExactlyInAnyOrderEntriesOf(ImmutableMap.of("hoglake.catalog", "org_30", "fs.cache.enabled", "true"));
+        assertThat(cached.get("org_31").properties()).containsExactlyInAnyOrderEntriesOf(other);
+        // the version stays the published one, so it still identifies the published row
+        assertThat(cached.get("org_29").version()).isEqualTo(computeCatalogVersion(new CatalogName("org_29"), new ConnectorName("hoglake"), hoglake));
+
+        Map<String, CatalogProperties> uncached = catalogsByName(managedStore(cellId, ImmutableMap.of("catalog-store.hoglake-filesystem-cache-enabled", "false")));
+        assertThat(uncached.get("org_29").properties()).containsEntry("fs.cache.enabled", "false");
+        assertThat(uncached.get("org_30").properties()).containsEntry("fs.cache.enabled", "false");
+
+        Map<String, CatalogProperties> published = catalogsByName(managedStore(cellId));
+        assertThat(published.get("org_29").properties()).containsExactlyInAnyOrderEntriesOf(hoglake);
+        assertThat(published.get("org_30").properties()).containsExactlyInAnyOrderEntriesOf(hoglakeWithoutSetting);
     }
 
     /**
@@ -314,12 +343,24 @@ final class TestPostHogManagedCatalogStore
 
     private RevisionedCatalogStore managedStore(String cellId)
     {
+        return managedStore(cellId, ImmutableMap.of());
+    }
+
+    private RevisionedCatalogStore managedStore(String cellId, Map<String, String> extraProperties)
+    {
         CatalogStore store = getOnlyElement(new PostHogCatalogStorePlugin().getCatalogStoreFactories())
                 .create(ImmutableMap.<String, String>builder()
                         .putAll(database.storeProperties(cellId))
                         .put("catalog-store.read-only", "true")
+                        .putAll(extraProperties)
                         .buildOrThrow());
         return (RevisionedCatalogStore) store;
+    }
+
+    private static Map<String, CatalogProperties> catalogsByName(RevisionedCatalogStore store)
+    {
+        return store.fetchSnapshot().catalogs().stream()
+                .collect(toImmutableMap(catalog -> catalog.name().toString(), catalog -> catalog));
     }
 
     private long rowCount(String cellId)

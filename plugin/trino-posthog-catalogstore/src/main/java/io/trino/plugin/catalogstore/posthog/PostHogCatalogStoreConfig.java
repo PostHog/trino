@@ -37,6 +37,7 @@ public class PostHogCatalogStoreConfig
     private File connectionPasswordFile;
     private boolean readOnly;
     private Duration snapshotTimeout = new Duration(5, SECONDS);
+    private Boolean hoglakeFilesystemCacheEnabled;
 
     @NotEmpty
     public String getCellId()
@@ -135,6 +136,26 @@ public class PostHogCatalogStoreConfig
     {
         this.snapshotTimeout = snapshotTimeout;
         return this;
+    }
+
+    @NotNull
+    public Optional<Boolean> getHoglakeFilesystemCacheEnabled()
+    {
+        return Optional.ofNullable(hoglakeFilesystemCacheEnabled);
+    }
+
+    @Config("catalog-store.hoglake-filesystem-cache-enabled")
+    @ConfigDescription("Sets fs.cache.enabled on every hoglake catalog this node loads, whatever the published value; unset keeps the published value")
+    public PostHogCatalogStoreConfig setHoglakeFilesystemCacheEnabled(Boolean hoglakeFilesystemCacheEnabled)
+    {
+        this.hoglakeFilesystemCacheEnabled = hoglakeFilesystemCacheEnabled;
+        return this;
+    }
+
+    @AssertTrue(message = "catalog-store.hoglake-filesystem-cache-enabled requires catalog-store.read-only")
+    public boolean isHoglakeFilesystemCacheConfigurationValid()
+    {
+        return hoglakeFilesystemCacheEnabled == null || readOnly;
     }
 
     @AssertTrue(message = "catalog-store.connection-password and catalog-store.connection-password-file cannot both be set")

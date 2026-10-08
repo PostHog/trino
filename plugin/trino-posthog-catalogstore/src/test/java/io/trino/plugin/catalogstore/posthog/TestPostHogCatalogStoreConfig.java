@@ -51,7 +51,8 @@ final class TestPostHogCatalogStoreConfig
                 .setConnectionPassword(null)
                 .setConnectionPasswordFile(null)
                 .setReadOnly(false)
-                .setSnapshotTimeout(new Duration(5, SECONDS)));
+                .setSnapshotTimeout(new Duration(5, SECONDS))
+                .setHoglakeFilesystemCacheEnabled(null));
     }
 
     /**
@@ -98,6 +99,7 @@ final class TestPostHogCatalogStoreConfig
                 .put("catalog-store.connection-user", "alice")
                 .put("catalog-store.read-only", "true")
                 .put("catalog-store.snapshot-timeout", "9s")
+                .put("catalog-store.hoglake-filesystem-cache-enabled", "true")
                 .buildOrThrow();
     }
 
@@ -108,6 +110,7 @@ final class TestPostHogCatalogStoreConfig
         assertThat(config.getConnectionUser()).isEqualTo(Optional.of("alice"));
         assertThat(config.isReadOnly()).isTrue();
         assertThat(config.getSnapshotTimeout()).isEqualTo(new Duration(9, SECONDS));
+        assertThat(config.getHoglakeFilesystemCacheEnabled()).isEqualTo(Optional.of(true));
     }
 
     @Test
@@ -129,6 +132,24 @@ final class TestPostHogCatalogStoreConfig
                         .setConnectionPasswordFile(passwordFile),
                 "connectionPasswordConfigurationValid",
                 "catalog-store.connection-password and catalog-store.connection-password-file cannot both be set",
+                AssertTrue.class);
+    }
+
+    /**
+     * Only the read-only store applies the setting, so a writable store must not accept it and
+     * silently ignore it.
+     */
+    @Test
+    void testHoglakeFilesystemCacheRequiresReadOnly()
+    {
+        assertValidates(validConfig()
+                .setReadOnly(true)
+                .setHoglakeFilesystemCacheEnabled(true));
+        assertFailsValidation(
+                validConfig()
+                        .setHoglakeFilesystemCacheEnabled(false),
+                "hoglakeFilesystemCacheConfigurationValid",
+                "catalog-store.hoglake-filesystem-cache-enabled requires catalog-store.read-only",
                 AssertTrue.class);
     }
 

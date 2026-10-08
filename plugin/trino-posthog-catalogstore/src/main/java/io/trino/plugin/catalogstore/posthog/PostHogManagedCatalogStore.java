@@ -31,7 +31,9 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 
@@ -80,6 +82,9 @@ public class PostHogManagedCatalogStore
 
     private static final JsonCodec<Map<String, String>> PROPERTIES_CODEC = mapJsonCodec(String.class, String.class);
 
+    private static final ConnectorName HOGLAKE_CONNECTOR = new ConnectorName("hoglake");
+    private static final String FILESYSTEM_CACHE_PROPERTY = "fs.cache.enabled";
+
     private static final String SELECT_CATALOGS_SQL =
             """
             SELECT catalog_name, connector_name, catalog_version, properties
@@ -104,6 +109,7 @@ public class PostHogManagedCatalogStore
     private final String cellId;
     private final PostHogCatalogStoreConnectionFactory connectionFactory;
     private final int snapshotTimeoutSeconds;
+    private final Optional<Boolean> hoglakeFilesystemCacheEnabled;
 
     @Inject
     public PostHogManagedCatalogStore(PostHogCatalogStoreConfig config, PostHogCatalogStoreConnectionFactory connectionFactory)
@@ -112,6 +118,7 @@ public class PostHogManagedCatalogStore
         this.cellId = requireNonNull(config.getCellId(), "cellId is null");
         this.connectionFactory = requireNonNull(connectionFactory, "connectionFactory is null");
         this.snapshotTimeoutSeconds = toIntExact(config.getSnapshotTimeout().roundTo(SECONDS));
+        this.hoglakeFilesystemCacheEnabled = config.getHoglakeFilesystemCacheEnabled();
     }
 
     @Override
@@ -249,6 +256,22 @@ public class PostHogManagedCatalogStore
         }
     }
 
+    /**
+     * Whether a hoglake catalog caches its files is a property of the node: it needs a cache manager
+     * that this node's configuration loads, so the node's setting wins over the published value. The
+     * version stays the published one. Workers receive these properties from the coordinator, and a
+     * changed setting reaches a catalog when its node restarts.
+     */
+    private Map<String, String> withNodeOverrides(ConnectorName connector, Map<String, String> properties)
+    {
+        if (hoglakeFilesystemCacheEnabled.isEmpty() || !connector.equals(HOGLAKE_CONNECTOR)) {
+            return ImmutableMap.copyOf(properties);
+        }
+        Map<String, String> overridden = new HashMap<>(properties);
+        overridden.put(FILESYSTEM_CACHE_PROPERTY, String.valueOf(hoglakeFilesystemCacheEnabled.get()));
+        return ImmutableMap.copyOf(overridden);
+    }
+
     private CatalogProperties readCatalog(ResultSet resultSet)
             throws SQLException
     {
@@ -257,12 +280,13 @@ public class PostHogManagedCatalogStore
         String catalogVersion = resultSet.getString("catalog_version");
         String properties = resultSet.getString("properties");
         try {
+            ConnectorName connector = new ConnectorName(connectorName);
             return new CatalogProperties(
                     new CatalogName(catalogName),
                     new CatalogVersion(catalogVersion),
-                    new ConnectorName(connectorName),
-                    // Properties are used exactly as stored, so secret references are resolved by this node and never by the store
-                    ImmutableMap.copyOf(PROPERTIES_CODEC.fromJson(properties)));
+                    connector,
+                    // Properties are used as stored, so secret references are resolved by this node and never by the store
+                    withNodeOverrides(connector, PROPERTIES_CODEC.fromJson(properties)));
         }
         catch (RuntimeException e) {
             // Never silently drop the row: a catalog that cannot be read is not a catalog that was deleted
