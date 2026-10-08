@@ -340,9 +340,10 @@ final class TestHoglakeVariantPushdown
     @Test
     void localVariableOfEngine()
     {
-        // The engine binds the non-trivial operand of BETWEEN SYMMETRIC to a local variable
+        // The engine binds the non-trivial operand of BETWEEN SYMMETRIC to a local variable,
+        // but the independent subscript on v can still be pruned and pushed down.
         String query = "SELECT CAST(v['a'] AS varchar), (id + 1) BETWEEN SYMMETRIC id AND 10 FROM events";
-        assertThat(explain(query)).doesNotContain("pruned to");
+        assertThat(explain(query)).contains("pruned to");
         assertThat(rows(query)).containsExactlyInAnyOrder(
                 List.of("1", true),
                 List.of("one", true),

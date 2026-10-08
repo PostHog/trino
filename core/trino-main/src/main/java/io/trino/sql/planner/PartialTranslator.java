@@ -101,7 +101,7 @@ public final class PartialTranslator
             // so its lambda follows the same rule as Lambda. The captured values are
             // evaluated outside the lambda, and the caller replaces the symbols they
             // reference, so they are extracted like any other expression.
-            bind.values().forEach(this::process);
+            bind.values().forEach(value -> process(value, boundSymbols));
             return null;
         }
     }
