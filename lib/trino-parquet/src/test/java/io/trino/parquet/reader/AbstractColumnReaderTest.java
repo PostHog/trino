@@ -57,6 +57,7 @@ import static io.trino.parquet.ParquetEncoding.PLAIN_DICTIONARY;
 import static io.trino.parquet.ParquetEncoding.RLE;
 import static io.trino.parquet.ParquetEncoding.RLE_DICTIONARY;
 import static io.trino.parquet.ParquetTypeUtils.getParquetEncoding;
+import static io.trino.parquet.reader.AbstractColumnReader.shouldProduceDictionaryForType;
 import static io.trino.parquet.reader.TestingColumnReader.DataPageVersion.V1;
 import static io.trino.parquet.reader.TestingColumnReader.getDictionaryPage;
 import static io.trino.parquet.reader.TestingRowRanges.toRowRange;
