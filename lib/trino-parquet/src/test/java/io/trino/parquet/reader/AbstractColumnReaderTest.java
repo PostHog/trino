@@ -102,7 +102,7 @@ public abstract class AbstractColumnReaderTest
         reader.prepareNextRead(2);
         Block actual = reader.readPrimitive().getBlock();
         assertThat(actual.mayHaveNull()).isFalse();
-        if (shouldProduceDictionaryForType(field.getType())) {
+        if (format.expectsDictionaryBlock()) {
             assertThat(actual).isInstanceOf(RunLengthEncodedBlock.class);
         }
         format.assertBlock(values, actual);
@@ -126,7 +126,7 @@ public abstract class AbstractColumnReaderTest
         reader.prepareNextRead(2);
         Block actual = reader.readPrimitive().getBlock();
         assertThat(actual.mayHaveNull()).isTrue();
-        if (shouldProduceDictionaryForType(field.getType())) {
+        if (format.expectsDictionaryBlock()) {
             assertThat(actual).isInstanceOf(DictionaryBlock.class);
         }
         format.assertBlock(values, actual);
@@ -149,7 +149,7 @@ public abstract class AbstractColumnReaderTest
         reader.setPageReader(getPageReaderMock(List.of(page), dictionaryPage), Optional.empty());
         reader.prepareNextRead(2);
         Block actual = reader.readPrimitive().getBlock();
-        if (shouldProduceDictionaryForType(field.getType())) {
+        if (format.expectsDictionaryBlock()) {
             assertThat(actual).isInstanceOf(DictionaryBlock.class);
             assertThat(actual.mayHaveNull()).isTrue();
         }
@@ -173,7 +173,7 @@ public abstract class AbstractColumnReaderTest
         reader.setPageReader(getPageReaderMock(List.of(page), dictionaryPage, true), Optional.empty());
         reader.prepareNextRead(2);
         Block actual = reader.readPrimitive().getBlock();
-        if (shouldProduceDictionaryForType(field.getType())) {
+        if (format.expectsDictionaryBlock()) {
             assertThat(actual).isInstanceOf(RunLengthEncodedBlock.class);
             assertThat(actual.mayHaveNull()).isFalse();
         }
@@ -225,7 +225,7 @@ public abstract class AbstractColumnReaderTest
         reader.prepareNextRead(2);
         Block block2 = reader.readPrimitive().getBlock();
 
-        if (shouldProduceDictionaryForType(field.getType())) {
+        if (format.expectsDictionaryBlock()) {
             assertThat(block1).isInstanceOf(DictionaryBlock.class);
             assertThat(block2).isInstanceOf(DictionaryBlock.class);
 
@@ -385,12 +385,14 @@ public abstract class AbstractColumnReaderTest
         Block actual2 = readBlock(reader, 3);
         Block actual3 = readBlock(reader, 4);
 
-        if (shouldProduceDictionaryForType(field.getType())) {
+        if (format.expectsDictionaryBlock()) {
             assertThat(actual1).isInstanceOf(DictionaryBlock.class);
             assertThat(actual2).isInstanceOf(DictionaryBlock.class);
             assertThat(actual3).isInstanceOf(DictionaryBlock.class);
 
-            assertThat(((DictionaryBlock) actual1).getDictionary().mayHaveNull()).isTrue();
+            Block dictionary = ((DictionaryBlock) actual1).getDictionary();
+            assertThat(dictionary.mayHaveNull()).isTrue();
+            assertThat(dictionary.isNull(dictionary.getPositionCount() - 1)).isTrue();
             assertThat(((DictionaryBlock) actual1).getDictionary())
                     .isEqualTo(((DictionaryBlock) actual2).getDictionary());
 

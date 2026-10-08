@@ -6065,6 +6065,15 @@ public abstract class BaseIcebergConnectorTest
     }
 
     @Test
+    public void testProjectionPushdownWithBetweenSymmetric()
+    {
+        try (TestTable table = newTrinoTable("test_projection_between_symmetric", "(value integer, bounds row(low integer, high integer))")) {
+            assertUpdate("INSERT INTO " + table.getName() + " VALUES (5, ROW(0, 10)), (5, ROW(10, 0)), (20, ROW(0, 10))", 3);
+            assertQuery("SELECT value + 1 BETWEEN SYMMETRIC bounds.low AND bounds.high FROM " + table.getName(), "VALUES true, true, false");
+        }
+    }
+
+    @Test
     public void testProjectionPushdownAfterRename()
     {
         assertUpdate("CREATE TABLE projection_pushdown_after_rename (id INT, a ROW(b INT, c ROW (d INT)))");
@@ -9740,6 +9749,28 @@ public abstract class BaseIcebergConnectorTest
         }
         finally {
             assertUpdate("DROP TABLE IF EXISTS test_bucketed_select");
+        }
+    }
+
+    @Test
+    public void testBucketedJoinOnDecimal()
+    {
+        try (TestTable table = newTrinoTable(
+                "test_bucketed_join_decimal_",
+                "WITH (partitioning = ARRAY['bucket(short_key, 13)', 'bucket(long_key, 17)']) AS " +
+                        "SELECT CAST(orderkey AS decimal(18, 0)) short_key, CAST(orderkey AS decimal(38, 0)) long_key FROM tpch.tiny.orders")) {
+            Session session = Session.builder(getSession())
+                    .setSystemProperty(JOIN_DISTRIBUTION_TYPE, "PARTITIONED")
+                    .setCatalogSessionProperty(ICEBERG_CATALOG, BUCKET_EXECUTION_ENABLED, "true")
+                    .build();
+            assertQuery(
+                    session,
+                    "SELECT count(*) FROM " + table.getName() + " JOIN (SELECT CAST(orderkey AS decimal(18, 0)) short_key FROM tpch.tiny.lineitem) USING (short_key)",
+                    "VALUES 60175");
+            assertQuery(
+                    session,
+                    "SELECT count(*) FROM " + table.getName() + " JOIN (SELECT CAST(orderkey AS decimal(38, 0)) long_key FROM tpch.tiny.lineitem) USING (long_key)",
+                    "VALUES 60175");
         }
     }
 
