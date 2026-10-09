@@ -1429,7 +1429,7 @@ public class DuckLakeMetadata
     }
 
     @Override
-    public void createView(ConnectorSession session, SchemaTableName viewName, ConnectorViewDefinition definition, Map<String, Object> viewProperties, boolean replace)
+    public void createView(ConnectorSession session, SchemaTableName viewName, ConnectorViewDefinition definition, Map<String, Object> viewProperties, SaveMode saveMode)
     {
         if (!viewProperties.isEmpty()) {
             throw new TrinoException(NOT_SUPPORTED, "This connector does not support view properties");
@@ -1443,7 +1443,10 @@ public class DuckLakeMetadata
             }
             Optional<DuckLakeCommit.ViewIdentity> existing = commit.findView(viewName.getSchemaName(), viewName.getTableName());
             if (existing.isPresent()) {
-                if (!replace) {
+                if (saveMode == SaveMode.IGNORE) {
+                    return null;
+                }
+                if (saveMode == SaveMode.FAIL) {
                     throw new TrinoException(ALREADY_EXISTS, "View already exists: " + viewName);
                 }
                 commit.endView(existing.get().viewId());
