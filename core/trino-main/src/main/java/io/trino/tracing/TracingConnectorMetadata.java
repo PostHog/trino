@@ -820,6 +820,7 @@ public class TracingConnectorMetadata
         }
     }
 
+    @Deprecated
     @Override
     public Optional<ConnectorOutputMetadata> finishMerge(ConnectorSession session, ConnectorMergeTableHandle tableHandle, List<ConnectorTableHandle> sourceTableHandles, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics, MemoryContext memoryContext)
     {
@@ -835,6 +836,15 @@ public class TracingConnectorMetadata
         Span span = startSpan("createView", viewName);
         try (var _ = scopedSpan(span)) {
             delegate.createView(session, viewName, definition, viewProperties, replace);
+        }
+    }
+
+    @Override
+    public void createView(ConnectorSession session, SchemaTableName viewName, ConnectorViewDefinition definition, Map<String, Object> viewProperties, SaveMode saveMode)
+    {
+        Span span = startSpan("createView", viewName);
+        try (var _ = scopedSpan(span)) {
+            delegate.createView(session, viewName, definition, viewProperties, saveMode);
         }
     }
 

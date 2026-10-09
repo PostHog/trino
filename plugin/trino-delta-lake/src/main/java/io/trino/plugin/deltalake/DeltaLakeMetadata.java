@@ -51,6 +51,7 @@ import io.trino.plugin.deltalake.metastore.DeltaLakeMetastore;
 import io.trino.plugin.deltalake.metastore.DeltaLakeTableMetadataScheduler;
 import io.trino.plugin.deltalake.metastore.DeltaLakeTableMetadataScheduler.TableUpdateInfo;
 import io.trino.plugin.deltalake.metastore.DeltaMetastoreTable;
+import io.trino.plugin.deltalake.metastore.FileSystemCredentials;
 import io.trino.plugin.deltalake.metastore.HiveMetastoreBackedDeltaLakeMetastore;
 import io.trino.plugin.deltalake.metastore.NotADeltaLakeTableException;
 import io.trino.plugin.deltalake.metastore.VendedCredentialsHandle;
@@ -370,6 +371,7 @@ import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.TypeUtils.blockToNativeValue;
+import static io.trino.spi.type.TypeUtils.containsType;
 import static io.trino.spi.type.TypeUtils.isFloatingPointNaN;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -492,7 +494,7 @@ public class DeltaLakeMetadata
     private final TransactionLogReaderFactory transactionLogReaderFactory;
     private final ConnectorExpressionEvaluator evaluator;
     private final DeltaLakeTableCredentialsProvider tableCredentialsProvider;
-    private final Map<VendedCredentialsHandle, Optional<DeltaLakeTableCredentials>> tableCredentialsMap = new ConcurrentHashMap<>();
+    private final Map<VendedCredentialsHandle, Optional<FileSystemCredentials>> tableCredentialsMap = new ConcurrentHashMap<>();
 
     private record QueriedTable(SchemaTableName schemaTableName, long version)
     {
@@ -749,13 +751,12 @@ public class DeltaLakeMetadata
 
     public Optional<DeltaLakeTableCredentials> getTableCredentials(VendedCredentialsHandle vendedCredentialsHandle)
     {
-        Optional<DeltaLakeTableCredentials> credentials = tableCredentialsMap.get(vendedCredentialsHandle);
-        if (credentials != null && credentials.isPresent() && credentials.get().fileSystemCredentials().isValid()) {
-            return credentials;
+        Optional<FileSystemCredentials> credentials = tableCredentialsMap.get(vendedCredentialsHandle);
+        if (credentials == null || credentials.isEmpty() || !credentials.get().isValid()) {
+            credentials = tableCredentialsProvider.getTableCredentials(vendedCredentialsHandle);
+            tableCredentialsMap.put(vendedCredentialsHandle, credentials);
         }
-        credentials = tableCredentialsProvider.getTableCredentials(vendedCredentialsHandle);
-        tableCredentialsMap.put(vendedCredentialsHandle, credentials);
-        return credentials;
+        return credentials.map(fileSystemCredentials -> DeltaLakeTableCredentials.of(vendedCredentialsHandle, fileSystemCredentials));
     }
 
     @Override
@@ -1878,16 +1879,7 @@ public class DeltaLakeMetadata
 
     private static boolean containsTimestampType(Type type)
     {
-        if (type instanceof ArrayType arrayType) {
-            return containsTimestampType(arrayType.getElementType());
-        }
-        if (type instanceof MapType mapType) {
-            return containsTimestampType(mapType.getKeyType()) || containsTimestampType(mapType.getValueType());
-        }
-        if (type instanceof RowType rowType) {
-            return rowType.getFields().stream().anyMatch(field -> containsTimestampType(field.getType()));
-        }
-        return type instanceof TimestampType;
+        return containsType(type, TimestampType.class::isInstance);
     }
 
     @Override
