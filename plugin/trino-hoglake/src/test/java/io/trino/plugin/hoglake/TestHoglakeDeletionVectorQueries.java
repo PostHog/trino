@@ -28,6 +28,7 @@ import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.session.PropertyMetadata;
 import io.trino.spi.transaction.IsolationLevel;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.MaterializedRow;
@@ -167,6 +168,12 @@ final class TestHoglakeDeletionVectorQueries
                         {
                             @Override
                             public void shutdown() {}
+
+                            @Override
+                            public List<PropertyMetadata<?>> getSessionProperties()
+                            {
+                                return new HoglakeSessionProperties(new HoglakeConfig()).getSessionProperties();
+                            }
 
                             @Override
                             public ConnectorTransactionHandle beginTransaction(IsolationLevel isolationLevel, boolean readOnly, boolean autoCommit)

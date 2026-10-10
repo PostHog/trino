@@ -84,6 +84,7 @@ import static io.trino.parquet.ParquetTypeUtils.getDescriptors;
 import static io.trino.parquet.ParquetTypeUtils.lookupColumnByName;
 import static io.trino.parquet.predicate.PredicateUtils.buildPredicate;
 import static io.trino.parquet.predicate.PredicateUtils.getFilteredRowGroups;
+import static io.trino.plugin.hoglake.HoglakeSessionProperties.isVariantPathAssemblyEnabled;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -245,7 +246,8 @@ public class HoglakePageSourceProvider
                     hoglakeColumns,
                     predicate.simplify(DOMAIN_COMPACTION_THRESHOLD),
                     resources,
-                    options);
+                    options,
+                    isVariantPathAssemblyEnabled(session));
             // The page source adopts the owner. Its aggregate already reports
             // allocations directly to the engine, including lazy reader loads.
             return pageSource;
@@ -422,10 +424,12 @@ public class HoglakePageSourceProvider
             List<HoglakeColumnHandle> columns,
             TupleDomain<HoglakeColumnHandle> predicate,
             HoglakeSplitResources resources,
-            ParquetReaderOptions options)
+            ParquetReaderOptions options,
+            boolean variantPathAssembly)
             throws IOException
     {
         FileMetadata fileMetadata = parquetMetadata.getFileMetaData();
+        boolean variantNullIsSqlNull = writesSqlNullAsVariantNull(fileMetadata.getCreatedBy());
         MessageType fileSchema = fileMetadata.getSchema();
 
         // Bind each requested catalog column to a file column.
@@ -470,10 +474,19 @@ public class HoglakePageSourceProvider
             if (shreddings.get(i).isPresent()) {
                 VariantShreddingSchema shredding = shreddings.get(i).get();
                 Field field = constructField(shredding.physicalType(), lookupColumnByName(messageColumn, bindings.get(i).get().getName())).orElseThrow();
-                adaptations.add(new HoglakePageSource.ShreddedVariantColumn(
-                        parquetColumns.size(),
-                        new ShreddedVariantAssembler(shredding, dataSource.getId()),
-                        writesSqlNullAsVariantNull(fileMetadata.getCreatedBy())));
+                if (variantPathAssembly) {
+                    // The assembler builds only the paths of the column, and reads SQL NULLs itself
+                    adaptations.add(new HoglakePageSource.ShreddedVariantColumn(
+                            parquetColumns.size(),
+                            new ShreddedVariantAssembler(shredding, column.variantPathTree(), variantNullIsSqlNull, dataSource.getId()),
+                            false));
+                }
+                else {
+                    adaptations.add(new HoglakePageSource.ShreddedVariantColumn(
+                            parquetColumns.size(),
+                            new ShreddedVariantAssembler(shredding, dataSource.getId()),
+                            variantNullIsSqlNull));
+                }
                 parquetColumns.add(new Column(column.name(), field));
                 continue;
             }
@@ -483,7 +496,7 @@ public class HoglakePageSourceProvider
                 if (HoglakeUnsigned.needsConversion(column)) {
                     adaptations.add(new HoglakePageSource.UnsignedColumn(parquetColumns.size(), column));
                 }
-                else if (column.type().equals(VARIANT) && writesSqlNullAsVariantNull(fileMetadata.getCreatedBy())) {
+                else if (column.type().equals(VARIANT) && variantNullIsSqlNull) {
                     adaptations.add(new HoglakePageSource.VariantNullAsSqlNullColumn(parquetColumns.size()));
                 }
                 else {

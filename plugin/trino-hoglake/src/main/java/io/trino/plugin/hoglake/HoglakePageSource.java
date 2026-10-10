@@ -84,6 +84,13 @@ public class HoglakePageSource
      * range or the predicate prunes all of them, else 0.
      */
     public static final String RANGE_WITH_NO_ROW_GROUPS = "rangeWithNoRowGroups";
+    /**
+     * The rows of pushed-down VARIANT subscripts that were built with new
+     * metadata, because a subscript reads an object or an array of the row
+     * whole, or, for subscripts with an empty key, every row. Other rows are
+     * built without decoding their objects.
+     */
+    public static final String VARIANT_SLOW_PATH_ROWS = "variantSlowPathRows";
 
     /**
      * Either "channel i of the reader page" or "all nulls of this type".
@@ -393,7 +400,17 @@ public class HoglakePageSource
     @Override
     public Metrics getMetrics()
     {
-        return splitMetrics.mergeWith(parquetReader.getMetrics());
+        Metrics metrics = splitMetrics.mergeWith(parquetReader.getMetrics());
+        if (!hasShreddedColumns) {
+            return metrics;
+        }
+        long slowPathRows = 0;
+        for (ColumnAdaptation column : columns) {
+            if (column instanceof ShreddedVariantColumn shredded) {
+                slowPathRows += shredded.assembler().rowsWithNewMetadata();
+            }
+        }
+        return metrics.mergeWith(new Metrics(ImmutableMap.of(VARIANT_SLOW_PATH_ROWS, new LongCount(slowPathRows))));
     }
 
     static Metrics splitMetrics(boolean footerCacheHit, int rowGroupsRead)

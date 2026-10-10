@@ -20,6 +20,7 @@ import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.parquet.ParquetReaderOptions;
+import io.trino.plugin.base.metrics.LongCount;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures.FileColumn;
 import io.trino.plugin.hoglake.testing.PuffinDeletionVectorFixtures;
@@ -137,6 +138,57 @@ class TestHoglakeShreddedVariant
         assertThat(readVariantBytes(file, 2)).containsExactly(
                 null,
                 variantBytes(Variant.ofObject(Map.of(utf8Slice("a"), Variant.NULL_VALUE))));
+    }
+
+    @Test
+    void prunedDuckDbVariantNullIsSqlNull()
+    {
+        // The assembler of a pruned column reads a top-level variant null of DuckDB as SQL NULL
+        byte[] file = write(
+                Arrays.asList(
+                        row(METADATA, Variant.NULL_VALUE.data(), null),
+                        row(METADATA, null, typedValue(Variant.NULL_VALUE, "Chrome")),
+                        null),
+                Optional.of(DUCKDB_CREATED_BY));
+        HoglakeColumnHandle pruned = COLUMN.withVariantPaths(List.of(List.of(HoglakeVariantPathStep.objectKey("a"))));
+        TrinoFileSystemFactory fileSystem = ConnectorTestFixtures.memoryFileSystem(Map.of(PATH, file));
+        assertThat(read(fileSystem, new HoglakeSplit(PATH, file.length, 3, Optional.empty(), 0), List.of(pruned))).containsExactly(
+                Arrays.asList((Object) null),
+                List.of(variantBytes(Variant.ofObject(Map.of(utf8Slice("a"), Variant.NULL_VALUE)))),
+                Arrays.asList((Object) null));
+    }
+
+    @Test
+    void prunedColumnsReportSlowPathRows()
+            throws IOException
+    {
+        // A path that reads an object whole builds the row with new metadata
+        Variant object = Variant.ofObject(Map.of(utf8Slice("x"), Variant.ofLong(1)));
+        byte[] file = write(
+                List.of(
+                        row(METADATA, null, typedValue(Variant.ofLong(1), "Chrome")),
+                        // The object in the value column of field "a" refers to the metadata of the row
+                        row(object.metadata().toSlice(), null, typedValue(object, null))),
+                Optional.empty());
+        HoglakeColumnHandle pruned = COLUMN.withVariantPaths(List.of(List.of(HoglakeVariantPathStep.objectKey("a"))));
+        ConnectorPageSource pageSource = new HoglakePageSourceProvider(ConnectorTestFixtures.memoryFileSystem(Map.of(PATH, file))).createPageSource(
+                HoglakeTransactionHandle.INSTANCE,
+                ConnectorTestFixtures.session(),
+                new HoglakeSplit(PATH, file.length, 2, Optional.empty(), 0),
+                new HoglakeTableHandle("analytics", "shredded_variant_test", 1, "uuid-shredded-variant-test", List.of()),
+                Optional.empty(),
+                List.of((ColumnHandle) pruned),
+                DynamicFilter.EMPTY,
+                MemoryContext.NO_LIMIT);
+        try {
+            assertThat(ConnectorTestFixtures.readAll(pageSource, List.of(VARIANT)).stream().map(row -> variantBytes((Variant) row.getFirst())).toList()).containsExactly(
+                    variantBytes(objectWithA(1)),
+                    variantBytes(Variant.ofObject(Map.of(utf8Slice("a"), object))));
+            assertThat(pageSource.getMetrics().getMetrics().get(HoglakePageSource.VARIANT_SLOW_PATH_ROWS)).isEqualTo(new LongCount(1));
+        }
+        finally {
+            pageSource.close();
+        }
     }
 
     @Test
