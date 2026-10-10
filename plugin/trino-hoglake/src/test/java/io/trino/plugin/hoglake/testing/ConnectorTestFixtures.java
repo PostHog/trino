@@ -18,6 +18,8 @@ import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.filesystem.memory.MemoryFileSystemFactory;
 import io.trino.parquet.writer.ParquetWriter;
 import io.trino.parquet.writer.ParquetWriterOptions;
+import io.trino.plugin.hoglake.HoglakeConfig;
+import io.trino.plugin.hoglake.HoglakeSessionProperties;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
@@ -25,6 +27,7 @@ import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.SourcePage;
 import io.trino.spi.security.ConnectorIdentity;
+import io.trino.spi.session.PropertyMetadata;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.MapType;
@@ -84,6 +87,20 @@ public final class ConnectorTestFixtures
 
     public static ConnectorSession session()
     {
+        return session(Map.of());
+    }
+
+    /**
+     * A session with the given connector session properties, and the defaults of
+     * the others.
+     */
+    public static ConnectorSession session(Map<String, Object> properties)
+    {
+        Map<String, Object> values = new HashMap<>();
+        for (PropertyMetadata<?> property : new HoglakeSessionProperties(new HoglakeConfig()).getSessionProperties()) {
+            values.put(property.getName(), property.getDefaultValue());
+        }
+        values.putAll(properties);
         return new ConnectorSession()
         {
             @Override
@@ -131,7 +148,10 @@ public final class ConnectorTestFixtures
             @Override
             public <T> T getProperty(String name, Class<T> type)
             {
-                throw new UnsupportedOperationException("no session properties in tests");
+                if (!values.containsKey(name)) {
+                    throw new IllegalArgumentException("Unknown session property: " + name);
+                }
+                return type.cast(values.get(name));
             }
         };
     }

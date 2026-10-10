@@ -147,7 +147,7 @@ final class TestHoglakeWrites
                                 new HoglakePageSourceProvider(storage),
                                 new HoglakePageSinkProvider(storage, "test"),
                                 new Bootstrap().quiet().initialize().getInstance(LifeCycleManager.class),
-                                Set.of());
+                                Set.of(new HoglakeSessionProperties(new HoglakeConfig())));
                     }
                 });
             }

@@ -17,6 +17,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ListMultimap;
 import com.google.errorprone.annotations.CheckReturnValue;
 import com.google.errorprone.annotations.FormatMethod;
@@ -74,8 +75,10 @@ import org.joda.time.DateTimeZone;
 import java.io.Closeable;
 import java.io.IOException;
 import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -105,6 +108,7 @@ import static java.lang.Math.max;
 import static java.lang.Math.min;
 import static java.lang.Math.toIntExact;
 import static java.lang.String.format;
+import static java.util.Comparator.comparingLong;
 import static java.util.Objects.checkFromIndexSize;
 import static java.util.Objects.checkIndex;
 import static java.util.Objects.requireNonNull;
@@ -230,6 +234,45 @@ public class ParquetReader
             boolean forceSelectedPositionsPushdown)
             throws IOException
     {
+        this(fileCreatedBy,
+                columnFields,
+                appendRowNumberColumn,
+                rowGroups,
+                dataSource,
+                timeZone,
+                memoryContext,
+                options,
+                exceptionTransform,
+                parquetPredicate,
+                writeValidation,
+                decryptionContext,
+                forceSelectedPositionsPushdown,
+                ImmutableSet.of());
+    }
+
+    /// @param separatelyPlannedColumns columns whose data the reader reads in their own
+    ///         ranges, which are never merged with the ranges of other columns. A column
+    ///         that a query may not read, because the caller reads its channel only for
+    ///         some pages, then does not make the reads of the other columns larger, and
+    ///         reading it does not read the other columns.
+    public ParquetReader(
+            Optional<String> fileCreatedBy,
+            List<Column> columnFields,
+            boolean appendRowNumberColumn,
+            List<RowGroupInfo> rowGroups,
+            ParquetDataSource dataSource,
+            DateTimeZone timeZone,
+            AggregatedMemoryContext memoryContext,
+            ParquetReaderOptions options,
+            Function<Exception, RuntimeException> exceptionTransform,
+            Optional<TupleDomainParquetPredicate> parquetPredicate,
+            Optional<ParquetWriteValidation> writeValidation,
+            Optional<FileDecryptionContext> decryptionContext,
+            boolean forceSelectedPositionsPushdown,
+            Set<ColumnPath> separatelyPlannedColumns)
+            throws IOException
+    {
+        requireNonNull(separatelyPlannedColumns, "separatelyPlannedColumns is null");
         this.fileCreatedBy = requireNonNull(fileCreatedBy, "fileCreatedBy is null");
         requireNonNull(columnFields, "columnFields is null");
         this.columnFields = ImmutableList.copyOf(columnFields);
@@ -267,6 +310,7 @@ public class ParquetReader
 
         this.exceptionTransform = exceptionTransform;
         ListMultimap<ChunkKey, DiskRange> ranges = ArrayListMultimap.create();
+        Set<ChunkKey> separateChunks = new HashSet<>();
         Map<String, LongCount> codecMetrics = new HashMap<>();
         for (int rowGroup = 0; rowGroup < rowGroups.size(); rowGroup++) {
             PrunedBlockMetadata blockMetadata = rowGroups.get(rowGroup).prunedBlockMetadata();
@@ -282,6 +326,9 @@ public class ParquetReader
                 FilteredOffsetIndex filteredOffsetIndex = null;
                 if (blockRowRanges[rowGroup] != null) {
                     filteredOffsetIndex = getFilteredOffsetIndex(blockRowRanges[rowGroup], rowGroup, rowGroupRowCount, columnPath);
+                }
+                if (separatelyPlannedColumns.contains(columnPath)) {
+                    separateChunks.add(new ChunkKey(columnId, rowGroup));
                 }
                 if (filteredOffsetIndex == null) {
                     DiskRange range = new DiskRange(startingPosition, totalLength);
@@ -306,7 +353,40 @@ public class ParquetReader
             }
         }
         this.codecMetrics = ImmutableMap.copyOf(codecMetrics);
-        this.chunkReaders = dataSource.planRead(ranges, memoryContext);
+        if (separateChunks.isEmpty()) {
+            this.chunkReaders = dataSource.planRead(ranges, memoryContext);
+        }
+        else {
+            this.chunkReaders = planReadWithSeparateChunks(ranges, separateChunks);
+        }
+    }
+
+    /// Plans the reads of the chunks so that no read covers the bytes of a separate chunk
+    /// and of another chunk: each separate chunk is read on its own, and the other chunks
+    /// are read in groups that the separate chunks divide, so that a merged read does not
+    /// span a separate chunk either.
+    private Map<ChunkKey, ChunkedInputStream> planReadWithSeparateChunks(ListMultimap<ChunkKey, DiskRange> ranges, Set<ChunkKey> separateChunks)
+    {
+        List<Map.Entry<ChunkKey, DiskRange>> entries = new ArrayList<>(ranges.entries());
+        entries.sort(comparingLong(entry -> entry.getValue().offset()));
+        ImmutableMap.Builder<ChunkKey, ChunkedInputStream> chunkReaders = ImmutableMap.builder();
+        ListMultimap<ChunkKey, DiskRange> group = ArrayListMultimap.create();
+        for (Map.Entry<ChunkKey, DiskRange> entry : entries) {
+            if (separateChunks.contains(entry.getKey())) {
+                chunkReaders.putAll(dataSource.planRead(group, memoryContext));
+                group = ArrayListMultimap.create();
+            }
+            else {
+                group.put(entry.getKey(), entry.getValue());
+            }
+        }
+        chunkReaders.putAll(dataSource.planRead(group, memoryContext));
+        for (ChunkKey chunk : separateChunks) {
+            ListMultimap<ChunkKey, DiskRange> chunkRanges = ArrayListMultimap.create();
+            chunkRanges.putAll(chunk, ranges.get(chunk));
+            chunkReaders.putAll(dataSource.planRead(chunkRanges, memoryContext));
+        }
+        return chunkReaders.buildOrThrow();
     }
 
     @Override
