@@ -311,7 +311,8 @@ public final class ParquetTypeUtils
                     repetitionLevel,
                     definitionLevel,
                     required,
-                    // Mark the leaves as optional, so that reading variant as JSON gets an empty entry when the variant value is null
+                    // ParquetReader.readVariantAsJson walks one entry per variant position. When the variant group is optional,
+                    // marking the leaves as optional gives one entry per position, with an empty entry for a null variant.
                     new PrimitiveField(valueField.getType(), false, valueField.getDescriptor(), valueField.getId()),
                     new PrimitiveField(metadataField.getType(), false, metadataField.getDescriptor(), metadataField.getId())));
         }

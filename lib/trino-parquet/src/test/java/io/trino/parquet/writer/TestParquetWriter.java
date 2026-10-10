@@ -115,6 +115,7 @@ import static io.trino.spi.type.UuidType.javaUuidToTrinoUuid;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VariantType.VARIANT;
+import static io.trino.type.JsonType.JSON;
 import static java.lang.Float.floatToRawIntBits;
 import static java.lang.Math.toIntExact;
 import static java.util.stream.Collectors.toList;
@@ -136,6 +137,7 @@ public class TestParquetWriter
             .required(BINARY).named("value")
             .named("v")
             .named("trino_schema");
+    private static final RowType VARIANT_ROW_TYPE = rowType(field("v", VARIANT), field("i", INTEGER));
 
     @Test
     public void testCreatedByIsParsable()
@@ -981,7 +983,7 @@ public class TestParquetWriter
     public void testVariantMetadataFirstRoundTrip()
             throws IOException
     {
-        // The Parquet spec orders the metadata field before the value field
+        // The spec identifies the fields by name. This file lists metadata before value, as in the spec's example schema.
         List<Variant> values = ImmutableList.of(
                 Variant.ofObject(ImmutableMap.of(Slices.utf8Slice("key"), Variant.ofString("value"))),
                 Variant.ofInt(42),
@@ -989,6 +991,33 @@ public class TestParquetWriter
 
         assertThat(writeAndReadColumn(VARIANT_SCHEMA, ImmutableMap.of(), VARIANT, variantBlock(values)))
                 .containsExactlyElementsOf(values);
+    }
+
+    @Test
+    public void testVariantMetadataFirstShortStringReadAsJson()
+            throws IOException
+    {
+        // A short string whose length is a multiple of 4 has a value header that also passes the metadata version check,
+        // so reading the fields swapped returns an empty string instead of failing
+        List<Variant> values = ImmutableList.of(Variant.ofString("abcd"), Variant.ofString("abcdefgh"));
+
+        assertThat(writeAndReadColumn(VARIANT_SCHEMA, ImmutableMap.of(), JSON, variantBlock(values)))
+                .containsExactly("\"abcd\"", "\"abcdefgh\"");
+    }
+
+    @Test
+    public void testVariantMetadataFirstReadAsJson()
+            throws IOException
+    {
+        // The reader grows its batches from a single row, so the null is followed by a value in the same batch
+        List<Variant> values = Arrays.asList(
+                Variant.ofObject(ImmutableMap.of(Slices.utf8Slice("key"), Variant.ofString("value"))),
+                null,
+                Variant.ofInt(42),
+                Variant.ofString("hello"));
+
+        assertThat(writeAndReadColumn(VARIANT_SCHEMA, ImmutableMap.of(), JSON, variantBlock(values)))
+                .containsExactly("{\"key\":\"value\"}", null, "42", "\"hello\"");
     }
 
     @Test
@@ -1069,7 +1098,6 @@ public class TestParquetWriter
                 .optional(INT32).named("i")
                 .named("r")
                 .named("trino_schema");
-        RowType rowType = rowType(field("v", VARIANT), field("i", INTEGER));
         // The reader grows its batches from a single row, so the null variant and the null row are each followed by a value in the same batch
         List<List<Object>> values = Arrays.asList(
                 Arrays.asList(Variant.ofInt(1), 1),
@@ -1077,20 +1105,33 @@ public class TestParquetWriter
                 Arrays.asList(Variant.ofString("hello"), 3),
                 null,
                 Arrays.asList(Variant.ofInt(4), 4));
-        RowBlockBuilder blockBuilder = rowType.createBlockBuilder(null, values.size());
-        for (List<Object> row : values) {
-            if (row == null) {
-                blockBuilder.appendNull();
-            }
-            else {
-                blockBuilder.buildEntry(fieldBuilders -> {
-                    writeVariant(fieldBuilders.get(0), (Variant) row.get(0));
-                    INTEGER.writeLong(fieldBuilders.get(1), (Integer) row.get(1));
-                });
-            }
-        }
 
-        assertThat(writeAndReadColumn(schema, ImmutableMap.of(ImmutableList.of("r", "i"), INTEGER), rowType, blockBuilder.build()))
+        assertThat(writeAndReadColumn(schema, ImmutableMap.of(ImmutableList.of("r", "i"), INTEGER), VARIANT_ROW_TYPE, variantRowBlock(values)))
+                .containsExactlyElementsOf(values);
+    }
+
+    @Test
+    public void testVariantRowRequiredFieldRoundTrip()
+            throws IOException
+    {
+        MessageType schema = Types.buildMessage()
+                .optionalGroup()
+                .requiredGroup().as(variantType(Header.VERSION))
+                .required(BINARY).named("metadata")
+                .required(BINARY).named("value")
+                .named("v")
+                .optional(INT32).named("i")
+                .named("r")
+                .named("trino_schema");
+        // The reader grows its batches from a single row, so each null row is followed by a value in the same batch
+        List<List<Object>> values = Arrays.asList(
+                Arrays.asList(Variant.ofInt(1), 1),
+                null,
+                Arrays.asList(Variant.ofString("hello"), 3),
+                null,
+                Arrays.asList(Variant.ofInt(4), 4));
+
+        assertThat(writeAndReadColumn(schema, ImmutableMap.of(ImmutableList.of("r", "i"), INTEGER), VARIANT_ROW_TYPE, variantRowBlock(values)))
                 .containsExactlyElementsOf(values);
     }
 
@@ -1186,6 +1227,23 @@ public class TestParquetWriter
             }
             else {
                 blockBuilder.buildEntry(elementBuilder -> array.forEach(element -> writeVariant(elementBuilder, element)));
+            }
+        }
+        return blockBuilder.build();
+    }
+
+    private static Block variantRowBlock(List<List<Object>> values)
+    {
+        RowBlockBuilder blockBuilder = VARIANT_ROW_TYPE.createBlockBuilder(null, values.size());
+        for (List<Object> row : values) {
+            if (row == null) {
+                blockBuilder.appendNull();
+            }
+            else {
+                blockBuilder.buildEntry(fieldBuilders -> {
+                    writeVariant(fieldBuilders.get(0), (Variant) row.get(0));
+                    INTEGER.writeLong(fieldBuilders.get(1), (Integer) row.get(1));
+                });
             }
         }
         return blockBuilder.build();
