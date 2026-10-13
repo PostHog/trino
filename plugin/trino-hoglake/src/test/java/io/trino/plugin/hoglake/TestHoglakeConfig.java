@@ -38,7 +38,8 @@ class TestHoglakeConfig
                 .setCatalog("hoglake")
                 .setRequestTimeout("2m")
                 .setMaxSplitSize(DataSize.of(256, MEGABYTE))
-                .setParquetFooterCacheMaxSize(DataSize.of(64, MEGABYTE)));
+                .setParquetFooterCacheMaxSize(DataSize.of(64, MEGABYTE))
+                .setVariantPathAssemblyEnabled(true));
     }
 
     @Test
@@ -49,13 +50,15 @@ class TestHoglakeConfig
                         "hoglake.catalog", "lake",
                         "hoglake.client.request-timeout", "45s",
                         "hoglake.max-split-size", "1GB",
-                        "hoglake.parquet-footer-cache.max-size", "16MB"),
+                        "hoglake.parquet-footer-cache.max-size", "16MB",
+                        "hoglake.variant-path-assembly-enabled", "false"),
                 new HoglakeConfig()
                         .setUri("http://localhost:8080")
                         .setCatalog("lake")
                         .setRequestTimeout("45s")
                         .setMaxSplitSize(DataSize.of(1, GIGABYTE))
-                        .setParquetFooterCacheMaxSize(DataSize.of(16, MEGABYTE)));
+                        .setParquetFooterCacheMaxSize(DataSize.of(16, MEGABYTE))
+                        .setVariantPathAssemblyEnabled(false));
     }
 
     @Test

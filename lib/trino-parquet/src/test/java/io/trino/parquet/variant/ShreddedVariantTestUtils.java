@@ -90,10 +90,16 @@ final class ShreddedVariantTestUtils
     static PhysicalColumn readPhysicalColumn(ParquetDataSource dataSource, String column, ParquetReaderOptions options, Optional<VariantPaths> paths)
             throws IOException
     {
+        return readPhysicalColumn(dataSource, column, options, paths, false);
+    }
+
+    static PhysicalColumn readPhysicalColumn(ParquetDataSource dataSource, String column, ParquetReaderOptions options, Optional<VariantPaths> paths, boolean topLevelVariantNullIsSqlNull)
+            throws IOException
+    {
         ParquetMetadata metadata = MetadataReader.readFooter(dataSource, Optional.empty());
         VariantShreddingSchema whole = parseSchema(metadata, column, dataSource);
         VariantShreddingSchema schema = paths.map(whole::prune).orElse(whole);
-        ShreddedVariantAssembler assembler = new ShreddedVariantAssembler(schema, dataSource.getId());
+        ShreddedVariantAssembler assembler = new ShreddedVariantAssembler(schema, paths, topLevelVariantNullIsSqlNull, dataSource.getId());
 
         ImmutableList.Builder<Block> blocks = ImmutableList.builder();
         ImmutableList.Builder<Optional<Variant>> variants = ImmutableList.builder();

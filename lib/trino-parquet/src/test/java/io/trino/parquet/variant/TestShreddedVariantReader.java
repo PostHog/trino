@@ -15,6 +15,7 @@ package io.trino.parquet.variant;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Sets;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.trino.parquet.ParquetCorruptionException;
@@ -40,14 +41,17 @@ import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.Types;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
@@ -58,6 +62,7 @@ import static io.trino.parquet.variant.ShreddedVariantTestFiles.CaseKind.ERROR;
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.CaseKind.NO_FILES;
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.DUCKDB;
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.DUCKDB_FIXTURES;
+import static io.trino.parquet.variant.ShreddedVariantTestFiles.DUCKDB_PROPERTIES_FIXTURES;
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.PARQUET_TESTING;
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.loadParquetTestingCases;
 import static io.trino.parquet.variant.ShreddedVariantTestUtils.assertSameVariant;
@@ -65,11 +70,13 @@ import static io.trino.parquet.variant.ShreddedVariantTestUtils.assertSameVarian
 import static io.trino.parquet.variant.ShreddedVariantTestUtils.comparable;
 import static io.trino.parquet.variant.ShreddedVariantTestUtils.evaluate;
 import static io.trino.parquet.variant.ShreddedVariantTestUtils.key;
+import static io.trino.parquet.variant.ShreddedVariantTestUtils.objectFields;
 import static io.trino.parquet.variant.ShreddedVariantTestUtils.parseSchema;
 import static io.trino.parquet.variant.ShreddedVariantTestUtils.readPhysicalColumn;
 import static io.trino.parquet.variant.ShreddedVariantTestUtils.readVariantFile;
 import static io.trino.parquet.variant.ShreddedVariantTestUtils.readVariants;
 import static io.trino.parquet.variant.ShreddedVariantTestUtils.toVariants;
+import static io.trino.parquet.variant.ShreddedVariantTestUtils.variantType;
 import static io.trino.plugin.base.util.JsonUtils.parseJson;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
@@ -382,6 +389,23 @@ public class TestShreddedVariantReader
                 .hasMessageContaining("VARIANT value is truncated");
     }
 
+    @Test
+    public void testPrunedLookupValidatesDictionary()
+            throws IOException
+    {
+        // Dictionary ["a", "b", "c"] with offsets 0, 2, 1, 3, which decrease, and an object whose field 1 is 5
+        ParquetDataSource dataSource = writeUnshreddedVariants(
+                ImmutableList.of(new byte[] {0x01, 0x03, 0x00, 0x02, 0x01, 0x03, 'a', 'b', 'c'}),
+                ImmutableList.of(new byte[] {0x02, 0x01, 0x01, 0x00, 0x05, 0x14, 0x05, 0x00, 0x00, 0x00}));
+        assertThatThrownBy(() -> readPhysicalColumn(dataSource, "v", ParquetReaderOptions.defaultOptions()))
+                .isInstanceOf(ParquetCorruptionException.class)
+                .hasMessageContaining("Dictionary offsets must not decrease");
+        // A lookup reads the dictionary in place, and checks it like a whole read
+        assertThatThrownBy(() -> readPhysicalColumn(dataSource, "v", ParquetReaderOptions.defaultOptions(), Optional.of(VariantPaths.of(List.of(List.of(key("b")))))))
+                .isInstanceOf(ParquetCorruptionException.class)
+                .hasMessageContaining("Dictionary offsets must not decrease");
+    }
+
     /// Writes a VARIANT group with only `metadata` and `value` columns, which the
     /// shredded reader also reads.
     private static ParquetDataSource writeUnshreddedVariants(List<byte[]> metadata, List<byte[]> values)
@@ -475,15 +499,127 @@ public class TestShreddedVariantReader
     private static void assertPrunedPaths(Path file, List<List<VariantPaths.Step>> paths)
             throws IOException
     {
-        List<Optional<Variant>> whole = readVariants(file, "v");
-        List<Optional<Variant>> pruned = readPhysicalColumn(file, "v", ParquetReaderOptions.defaultOptions(), Optional.of(VariantPaths.of(paths))).variants();
+        assertPrunedPaths(file, "v", readVariants(file, "v"), paths);
+    }
+
+    private static void assertPrunedPaths(Path file, String column, List<Optional<Variant>> whole, List<List<VariantPaths.Step>> paths)
+            throws IOException
+    {
+        VariantPaths tree = VariantPaths.of(paths);
+        List<Optional<Variant>> pruned = readPhysicalColumn(file, column, ParquetReaderOptions.defaultOptions(), Optional.of(tree)).variants();
         assertThat(pruned).hasSameSizeAs(whole);
         for (int row = 0; row < whole.size(); row++) {
+            assertThat(pruned.get(row).isPresent()).as("%s row %s paths %s", file.getFileName(), row, paths).isEqualTo(whole.get(row).isPresent());
             for (List<VariantPaths.Step> path : paths) {
                 assertThat(evaluate(pruned.get(row), path))
                         .as("%s row %s path %s", file.getFileName(), row, path)
                         .isEqualTo(evaluate(whole.get(row), path));
             }
+            if (pruned.get(row).isPresent()) {
+                assertOnlyPaths(pruned.get(row).get(), whole.get(row).orElseThrow(), tree, "%s row %s paths %s".formatted(file.getFileName(), row, paths));
+            }
+        }
+    }
+
+    /// Checks that the objects on the paths have only the keys that the paths name, that
+    /// other values keep their type, and that arrays keep their length.
+    private static void assertOnlyPaths(Variant pruned, Variant whole, VariantPaths paths, String description)
+    {
+        assertThat(variantType(pruned)).as(description).isEqualTo(variantType(whole));
+        if (paths.whole()) {
+            assertSameVariant(pruned, whole, description);
+            return;
+        }
+        switch (pruned.basicType()) {
+            case OBJECT -> {
+                Map<String, Variant> prunedFields = objectFields(pruned);
+                Map<String, Variant> wholeFields = objectFields(whole);
+                assertThat(prunedFields.keySet()).as(description).isEqualTo(Sets.intersection(wholeFields.keySet(), paths.keys().keySet()));
+                prunedFields.forEach((name, value) -> assertOnlyPaths(value, wholeFields.get(name), paths.keys().get(name), description + "." + name));
+            }
+            case ARRAY -> {
+                assertThat(pruned.getArrayLength()).as(description).isEqualTo(whole.getArrayLength());
+                for (int index = 0; index < pruned.getArrayLength(); index++) {
+                    if (paths.elements().isPresent()) {
+                        assertOnlyPaths(pruned.getArrayElement(index), whole.getArrayElement(index), paths.elements().get(), description + "[" + index + "]");
+                    }
+                    else {
+                        assertThat(pruned.getArrayElement(index).isNull()).as(description).isTrue();
+                    }
+                }
+            }
+            case PRIMITIVE, SHORT_STRING -> assertSameVariant(pruned, whole, description);
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("prunedFiles")
+    public void testPrunedPaths(Path file, String column)
+            throws IOException
+    {
+        List<Optional<Variant>> whole = readVariants(file, column);
+        for (List<List<VariantPaths.Step>> paths : generatedPaths(whole)) {
+            assertPrunedPaths(file, column, whole, paths);
+        }
+    }
+
+    public static Stream<Arguments> prunedFiles()
+    {
+        Stream<Arguments> parquetTesting = loadParquetTestingCases().stream()
+                .filter(testCase -> testCase.kind() != NO_FILES && testCase.kind() != ERROR)
+                .map(testCase -> Arguments.of(PARQUET_TESTING.resolve(testCase.parquetFile().orElseThrow()), "var"));
+        Stream<Arguments> duckDb = Stream.concat(DUCKDB_FIXTURES.stream(), DUCKDB_PROPERTIES_FIXTURES.stream())
+                .map(fixture -> Arguments.of(DUCKDB.resolve(fixture + ".parquet"), "v"));
+        return Stream.concat(parquetTesting, duckDb);
+    }
+
+    /// Sets of paths of depth one and two from the keys of the values, with array
+    /// elements, a key that no value has, and paths that read a node whole and below it.
+    private static List<List<List<VariantPaths.Step>>> generatedPaths(List<Optional<Variant>> values)
+    {
+        Set<List<VariantPaths.Step>> firstLevel = new LinkedHashSet<>();
+        Set<List<VariantPaths.Step>> secondLevel = new LinkedHashSet<>();
+        for (Optional<Variant> value : values) {
+            value.ifPresent(variant -> collectPaths(variant, ImmutableList.of(), firstLevel, secondLevel));
+        }
+        firstLevel.add(ImmutableList.of(key("absent")));
+        ImmutableList.Builder<List<List<VariantPaths.Step>>> paths = ImmutableList.builder();
+        firstLevel.forEach(path -> paths.add(ImmutableList.of(path)));
+        secondLevel.forEach(path -> {
+            paths.add(ImmutableList.of(path));
+            // The first step whole, and a path below it
+            paths.add(ImmutableList.of(path.subList(0, 1), path));
+        });
+        paths.add(ImmutableList.copyOf(firstLevel));
+        if (!secondLevel.isEmpty()) {
+            paths.add(ImmutableList.copyOf(secondLevel));
+            paths.add(ImmutableList.<List<VariantPaths.Step>>builder().addAll(secondLevel).add(ImmutableList.of(key("absent"))).build());
+        }
+        return paths.build();
+    }
+
+    private static void collectPaths(Variant variant, List<VariantPaths.Step> prefix, Set<List<VariantPaths.Step>> firstLevel, Set<List<VariantPaths.Step>> secondLevel)
+    {
+        Set<List<VariantPaths.Step>> paths = prefix.isEmpty() ? firstLevel : secondLevel;
+        switch (variant.basicType()) {
+            case OBJECT -> objectFields(variant).forEach((name, value) -> {
+                List<VariantPaths.Step> path = ImmutableList.<VariantPaths.Step>builder().addAll(prefix).add(key(name)).build();
+                paths.add(path);
+                if (prefix.isEmpty()) {
+                    paths.add(ImmutableList.<VariantPaths.Step>builder().addAll(prefix).add(key(name), key("absent")).build());
+                    collectPaths(value, path, firstLevel, secondLevel);
+                }
+            });
+            case ARRAY -> {
+                List<VariantPaths.Step> path = ImmutableList.<VariantPaths.Step>builder().addAll(prefix).add(new VariantPaths.ArrayElement()).build();
+                paths.add(path);
+                if (prefix.isEmpty()) {
+                    for (int index = 0; index < variant.getArrayLength(); index++) {
+                        collectPaths(variant.getArrayElement(index), path, firstLevel, secondLevel);
+                    }
+                }
+            }
+            case PRIMITIVE, SHORT_STRING -> {}
         }
     }
 

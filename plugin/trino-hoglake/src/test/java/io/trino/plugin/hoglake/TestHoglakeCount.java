@@ -34,6 +34,7 @@ import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilterSnapshot;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.session.PropertyMetadata;
 import io.trino.spi.transaction.IsolationLevel;
 import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.TimeZoneKey;
@@ -223,6 +224,12 @@ final class TestHoglakeCount
                         {
                             @Override
                             public void shutdown() {}
+
+                            @Override
+                            public List<PropertyMetadata<?>> getSessionProperties()
+                            {
+                                return new HoglakeSessionProperties(new HoglakeConfig()).getSessionProperties();
+                            }
 
                             @Override
                             public ConnectorTransactionHandle beginTransaction(IsolationLevel isolationLevel, boolean readOnly, boolean autoCommit)
