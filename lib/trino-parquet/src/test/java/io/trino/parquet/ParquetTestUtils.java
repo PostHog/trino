@@ -14,6 +14,7 @@
 package io.trino.parquet;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.trino.memory.context.AggregatedMemoryContext;
@@ -36,6 +37,7 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.format.CompressionCodec;
+import org.apache.parquet.hadoop.metadata.ColumnPath;
 import org.apache.parquet.io.MessageColumnIO;
 import org.apache.parquet.schema.MessageType;
 import org.joda.time.DateTimeZone;
@@ -48,6 +50,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
+import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Throwables.throwIfUnchecked;
@@ -184,6 +187,22 @@ public class ParquetTestUtils
             DateTimeZone timeZone)
             throws IOException
     {
+        return createParquetReader(input, parquetMetadata, options, memoryContext, types, columnNames, predicate, forceSelectedPositionsPushdown, timeZone, ImmutableSet.of());
+    }
+
+    public static ParquetReader createParquetReader(
+            ParquetDataSource input,
+            ParquetMetadata parquetMetadata,
+            ParquetReaderOptions options,
+            AggregatedMemoryContext memoryContext,
+            List<Type> types,
+            List<String> columnNames,
+            TupleDomain<String> predicate,
+            boolean forceSelectedPositionsPushdown,
+            DateTimeZone timeZone,
+            Set<ColumnPath> separatelyPlannedColumns)
+            throws IOException
+    {
         FileMetadata fileMetaData = parquetMetadata.getFileMetaData();
         MessageType fileSchema = fileMetaData.getSchema();
         MessageColumnIO messageColumnIO = getColumnIO(fileSchema, fileSchema);
@@ -227,7 +246,8 @@ public class ParquetTestUtils
                 Optional.of(parquetPredicate),
                 Optional.empty(),
                 Optional.empty(),
-                forceSelectedPositionsPushdown);
+                forceSelectedPositionsPushdown,
+                separatelyPlannedColumns);
     }
 
     public static List<Page> generateInputPages(List<Type> types, int positionsPerPage, int pageCount)

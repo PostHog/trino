@@ -46,6 +46,7 @@ import static io.trino.parquet.variant.ShreddedVariantTestFiles.CaseKind.NO_FILE
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.CaseKind.SINGLE_ROW;
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.DUCKDB;
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.DUCKDB_FIXTURES;
+import static io.trino.parquet.variant.ShreddedVariantTestFiles.DUCKDB_PROPERTIES_FIXTURES;
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.PARQUET_TESTING;
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.loadParquetTestingCases;
 import static java.lang.Math.toIntExact;
@@ -134,6 +135,19 @@ public class TestShreddedVariantFixtures
             assertThat(Files.readAllLines(DUCKDB.resolve(fixture + ".duckdb.jsonl")))
                     .as("DuckDB read-back of %s", fixture)
                     .hasSize(toIntExact(footer.getNum_rows()));
+        }
+        for (String fixture : DUCKDB_PROPERTIES_FIXTURES) {
+            expectedFiles.add(fixture + ".parquet");
+
+            FileMetaData footer = assertParquetFooter(DUCKDB.resolve(fixture + ".parquet")).getParquetMetadata();
+            assertThat(footer.getCreated_by()).isEqualTo(DUCKDB_CREATED_BY);
+            assertThat(footer.getNum_rows()).isEqualTo(2100);
+            assertThat(footer.getRow_groups()).hasSize(2);
+            // Only "$browser" is shredded
+            List<SchemaElement> schema = footer.getSchema();
+            int variantColumn = childIndex(schema, 0, "v");
+            assertThat(schema.get(variantColumn).getLogicalType().isSetVARIANT()).isTrue();
+            assertThat(childNames(schema, childIndex(schema, variantColumn, "typed_value"))).containsExactly("$browser");
         }
         assertThat(listFileNames(DUCKDB)).containsExactlyInAnyOrderElementsOf(expectedFiles.build());
     }
