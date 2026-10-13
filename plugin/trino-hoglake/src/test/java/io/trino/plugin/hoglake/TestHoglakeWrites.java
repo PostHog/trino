@@ -1101,15 +1101,17 @@ final class TestHoglakeWrites
                 .setWorkerCount(2)
                 .setCoordinatorProperties(Map.of(
                         "node-scheduler.include-coordinator", "false",
-                        "query.max-memory-per-node", "1MB"))
+                        "query.max-memory-per-node", "2MB"))
                 .build()) {
             installConnector(distributed);
             runner.execute("CREATE TABLE delete_memory (id bigint)");
             runner.execute("INSERT INTO delete_memory VALUES 1, 2, 3");
             runner.execute("INSERT INTO delete_memory VALUES 4, 5, 6");
             int before = commits;
-            // Workers have the normal memory limit. Only coordinator publication
-            // is constrained, exercising the finishMerge memory-context forwarding.
+            // Workers have the normal memory limit. The coordinator reserves 1MB
+            // for the local exchange (upstream now charges exchange buffers to the
+            // memory pool), so give it 2MB total and leave the same effective 1MB
+            // for publication, exercising the finishMerge memory-context forwarding.
             assertThatThrownBy(() -> distributed.execute("DELETE FROM delete_memory WHERE id % 2 = 0"))
                     .hasMessageContaining("Insufficient memory to finish table write");
             assertThat(commits).isEqualTo(before);
