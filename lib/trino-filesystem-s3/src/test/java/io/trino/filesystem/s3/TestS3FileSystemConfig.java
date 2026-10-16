@@ -15,6 +15,10 @@ package io.trino.filesystem.s3;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.net.HostAndPort;
+import io.airlift.configuration.ConfigurationFactory;
+import io.airlift.configuration.ConfigurationInspector;
+import io.airlift.configuration.ConfigurationInspector.ConfigAttribute;
+import io.airlift.configuration.ConfigurationMetadata;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.filesystem.s3.S3FileSystemConfig.ObjectCannedAcl;
@@ -28,6 +32,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 import java.util.Set;
 
+import static io.airlift.configuration.ConfigBinder.configBinder;
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
@@ -39,6 +44,8 @@ import static io.trino.filesystem.s3.S3FileSystemConfig.RetryMode.STANDARD;
 import static io.trino.filesystem.s3.S3FileSystemConfig.SignerType.Aws4Signer;
 import static io.trino.filesystem.s3.S3FileSystemConfig.StorageClassType.STANDARD_IA;
 import static java.util.concurrent.TimeUnit.MINUTES;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 
 public class TestS3FileSystemConfig
 {
@@ -181,6 +188,33 @@ public class TestS3FileSystemConfig
                 .setStsRegion("us-west-2"));
 
         assertFullMapping(properties, expected);
+    }
+
+    @Test
+    public void testAwsCredentialsRedacted()
+    {
+        var metadata = ConfigurationMetadata.getValidConfigurationMetadata(S3FileSystemConfig.class);
+        assertThat(metadata.getAttributes().get("AwsAccessKey").isSecuritySensitive()).isTrue();
+        assertThat(metadata.getAttributes().get("AwsSecretKey").isSecuritySensitive()).isTrue();
+
+        Map<String, String> properties = ImmutableMap.of(
+                "s3.aws-access-key", "synthetic-access-key-id",
+                "s3.aws-secret-key", "synthetic-secret-key");
+        try (var configurationFactory = new ConfigurationFactory(properties)) {
+            configurationFactory.registerConfigurationClasses(binder -> configBinder(binder).bindConfig(S3FileSystemConfig.class));
+            S3FileSystemConfig config = configurationFactory.build(S3FileSystemConfig.class);
+            assertThat(config.getAwsAccessKey()).isEqualTo(properties.get("s3.aws-access-key"));
+            assertThat(config.getAwsSecretKey()).isEqualTo(properties.get("s3.aws-secret-key"));
+
+            assertThat(new ConfigurationInspector().inspect(configurationFactory))
+                    .singleElement()
+                    .satisfies(record -> assertThat(record.getAttributes().stream().toList())
+                            .filteredOn(attribute -> properties.containsKey(attribute.getPropertyName()))
+                            .extracting(ConfigAttribute::getPropertyName, ConfigAttribute::getDefaultValue, ConfigAttribute::getCurrentValue)
+                            .containsExactlyInAnyOrder(
+                                    tuple("s3.aws-access-key", "[REDACTED]", "[REDACTED]"),
+                                    tuple("s3.aws-secret-key", "[REDACTED]", "[REDACTED]")));
+        }
     }
 
     @Test

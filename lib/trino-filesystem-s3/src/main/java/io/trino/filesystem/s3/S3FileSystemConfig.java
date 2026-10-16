@@ -208,6 +208,7 @@ public class S3FileSystemConfig
     }
 
     @Config("s3.aws-access-key")
+    @ConfigSecuritySensitive
     public S3FileSystemConfig setAwsAccessKey(String awsAccessKey)
     {
         this.awsAccessKey = awsAccessKey;
