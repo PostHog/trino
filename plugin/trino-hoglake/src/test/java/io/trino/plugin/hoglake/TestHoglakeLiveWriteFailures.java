@@ -43,6 +43,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.TransactionBuilder.transaction;
+import static io.trino.testing.assertions.Assert.assertEqualsIgnoreOrder;
 import static io.trino.testing.assertions.Assert.assertEventually;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -169,8 +170,9 @@ final class TestHoglakeLiveWriteFailures
             proxy.dropAfterCommit = true;
             proxy.failAfter("/commit");
             assertThat(runner.execute(mixed).getUpdateCount()).hasValue(3);
-            assertThat(runner.execute("SELECT * FROM merge_recovery").getMaterializedRows())
-                    .containsExactlyInAnyOrderElementsOf(runner.execute("VALUES (BIGINT '1', 'updated'), (BIGINT '3', 'new')").getMaterializedRows());
+            assertEqualsIgnoreOrder(
+                    runner.execute("SELECT * FROM merge_recovery").getMaterializedRows(),
+                    runner.execute("VALUES (BIGINT '1', 'updated'), (BIGINT '3', 'new')").getMaterializedRows());
             proxy.failBeforeCommit = true;
             assertThat(runner.execute("UPDATE merge_recovery SET id=id+10").getUpdateCount()).hasValue(2);
             assertThat(runner.execute("SELECT count(*) FROM merge_recovery").getOnlyValue()).isEqualTo(2L);

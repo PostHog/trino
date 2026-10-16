@@ -48,6 +48,7 @@ import static io.trino.parquet.variant.ShreddedVariantTestFiles.DUCKDB;
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.DUCKDB_FIXTURES;
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.PARQUET_TESTING;
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.loadParquetTestingCases;
+import static io.trino.testing.assertions.Assert.assertEqualsIgnoreOrder;
 import static java.lang.Math.toIntExact;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -110,7 +111,7 @@ public class TestShreddedVariantFixtures
         }
 
         referencedFiles.addAll(PARQUET_TESTING_UNREFERENCED_FILES);
-        assertThat(listFileNames(PARQUET_TESTING)).containsExactlyInAnyOrderElementsOf(referencedFiles);
+        assertEqualsIgnoreOrder(listFileNames(PARQUET_TESTING), referencedFiles);
     }
 
     @Test
@@ -135,7 +136,7 @@ public class TestShreddedVariantFixtures
                     .as("DuckDB read-back of %s", fixture)
                     .hasSize(toIntExact(footer.getNum_rows()));
         }
-        assertThat(listFileNames(DUCKDB)).containsExactlyInAnyOrderElementsOf(expectedFiles.build());
+        assertEqualsIgnoreOrder(listFileNames(DUCKDB), expectedFiles.build());
     }
 
     @Test

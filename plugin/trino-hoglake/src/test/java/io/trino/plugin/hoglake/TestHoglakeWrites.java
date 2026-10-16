@@ -68,6 +68,7 @@ import static io.trino.plugin.hoglake.HoglakeConfig.DEFAULT_MAX_SPLIT_SIZE;
 import static io.trino.spi.StandardErrorCode.INVALID_COLUMN_PROPERTY;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.testing.TestingSession.testSessionBuilder;
+import static io.trino.testing.assertions.Assert.assertEqualsIgnoreOrder;
 import static io.trino.testing.assertions.Assert.assertEventually;
 import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
@@ -512,8 +513,9 @@ final class TestHoglakeWrites
     {
         runner.execute("CREATE TABLE nested_values (a array(bigint), m map(varchar, array(integer)), r row(x tinyint, y smallint), ts timestamp(9))");
         runner.execute("INSERT INTO nested_values VALUES (ARRAY[1, NULL, 3], MAP(ARRAY['k'], ARRAY[ARRAY[4, NULL]]), ROW(TINYINT '-128', SMALLINT '32767'), TIMESTAMP '1969-12-31 23:59:59.999999999'), (ARRAY[], MAP(), NULL, NULL), (NULL, NULL, ROW(NULL, NULL), NULL)");
-        assertThat(runner.execute("SELECT a, m, r, ts FROM nested_values").getMaterializedRows())
-                .containsExactlyInAnyOrderElementsOf(runner.execute("VALUES (ARRAY[BIGINT '1', NULL, BIGINT '3'], MAP(ARRAY['k'], ARRAY[ARRAY[4, NULL]]), CAST(ROW(TINYINT '-128', SMALLINT '32767') AS row(x tinyint, y smallint)), TIMESTAMP '1969-12-31 23:59:59.999999999'), (CAST(ARRAY[] AS array(bigint)), CAST(MAP() AS map(varchar,array(integer))), NULL, NULL), (NULL, NULL, CAST(ROW(NULL, NULL) AS row(x tinyint, y smallint)), NULL)").getMaterializedRows());
+        assertEqualsIgnoreOrder(
+                runner.execute("SELECT a, m, r, ts FROM nested_values").getMaterializedRows(),
+                runner.execute("VALUES (ARRAY[BIGINT '1', NULL, BIGINT '3'], MAP(ARRAY['k'], ARRAY[ARRAY[4, NULL]]), CAST(ROW(TINYINT '-128', SMALLINT '32767') AS row(x tinyint, y smallint)), TIMESTAMP '1969-12-31 23:59:59.999999999'), (CAST(ARRAY[] AS array(bigint)), CAST(MAP() AS map(varchar,array(integer))), NULL, NULL), (NULL, NULL, CAST(ROW(NULL, NULL) AS row(x tinyint, y smallint)), NULL)").getMaterializedRows());
         assertThatThrownBy(() -> runner.execute("INSERT INTO nested_values (ts) VALUES TIMESTAMP '3000-01-01 00:00:00.000000001'"))
                 .hasMessageContaining("cannot be represented losslessly");
         runner.execute("CREATE TABLE variants AS SELECT CAST(42 AS variant) AS v, CAST(ROW(CAST(7 AS variant)) AS row(x variant)) AS r");
@@ -1277,6 +1279,6 @@ final class TestHoglakeWrites
 
     private void assertQuery(String actual, String expected)
     {
-        assertThat(runner.execute(actual).getMaterializedRows()).containsExactlyInAnyOrderElementsOf(runner.execute(expected).getMaterializedRows());
+        assertEqualsIgnoreOrder(runner.execute(actual).getMaterializedRows(), runner.execute(expected).getMaterializedRows());
     }
 }
