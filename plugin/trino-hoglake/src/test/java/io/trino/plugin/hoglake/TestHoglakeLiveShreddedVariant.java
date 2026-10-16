@@ -57,6 +57,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.MoreCollectors.onlyElement;
 import static io.trino.testing.TestingSession.testSessionBuilder;
+import static io.trino.testing.assertions.Assert.assertEqualsIgnoreOrder;
 import static io.trino.testing.assertions.Assert.assertEventually;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -204,8 +205,9 @@ final class TestHoglakeLiveShreddedVariant
             Session withoutPushdown = Session.builder(runner.getDefaultSession())
                     .setSystemProperty("complex_expression_pushdown", "false")
                     .build();
-            assertThat(runner.execute(withoutPushdown, FIELDS.formatted("events")).getMaterializedRows())
-                    .containsExactlyInAnyOrderElementsOf(runner.execute(FIELDS.formatted("events")).getMaterializedRows());
+            assertEqualsIgnoreOrder(
+                    runner.execute(withoutPushdown, FIELDS.formatted("events")).getMaterializedRows(),
+                    runner.execute(FIELDS.formatted("events")).getMaterializedRows());
 
             // The input repeats each value many times, as dictionary and run-length encoded blocks
             snapshot = client.getCatalog().headSnapshotId();
@@ -308,12 +310,12 @@ final class TestHoglakeLiveShreddedVariant
     {
         List<MaterializedRow> rows = runner.execute(query.formatted("events")).getMaterializedRows();
         assertThat(rows).isNotEmpty();
-        assertThat(rows).containsExactlyInAnyOrderElementsOf(runner.execute(query.formatted("events_plain")).getMaterializedRows());
+        assertEqualsIgnoreOrder(rows, runner.execute(query.formatted("events_plain")).getMaterializedRows());
     }
 
     private static void assertRows(QueryRunner runner, String actual, String expected)
     {
-        assertThat(runner.execute(actual).getMaterializedRows()).containsExactlyInAnyOrderElementsOf(runner.execute(expected).getMaterializedRows());
+        assertEqualsIgnoreOrder(runner.execute(actual).getMaterializedRows(), runner.execute(expected).getMaterializedRows());
     }
 
     private static void assertDeclaration(HoglakeClient client, String column)

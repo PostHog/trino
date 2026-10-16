@@ -35,6 +35,7 @@ import java.util.function.Consumer;
 
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.TransactionBuilder.transaction;
+import static io.trino.testing.assertions.Assert.assertEqualsIgnoreOrder;
 import static io.trino.testing.assertions.Assert.assertEventually;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -229,8 +230,9 @@ final class TestHoglakeLiveWrites
             assertThat(runner.execute(merge).getUpdateCount()).hasValue(3);
             assertThat(client.getCatalog().headSnapshotId()).isEqualTo(beforeMerge + 1);
             assertThat(runner.execute("SELECT count(*) FROM mutations").getOnlyValue()).isEqualTo(10000L);
-            assertThat(runner.execute("SELECT id, label, untouched FROM mutations WHERE id IN (1, 2, 3, 40000)").getMaterializedRows())
-                    .containsExactlyInAnyOrderElementsOf(runner.execute("VALUES (BIGINT '1', 'updated', BIGINT '10'), (BIGINT '40000', 'inserted', BIGINT '42')").getMaterializedRows());
+            assertEqualsIgnoreOrder(
+                    runner.execute("SELECT id, label, untouched FROM mutations WHERE id IN (1, 2, 3, 40000)").getMaterializedRows(),
+                    runner.execute("VALUES (BIGINT '1', 'updated', BIGINT '10'), (BIGINT '40000', 'inserted', BIGINT '42')").getMaterializedRows());
             assertThat(client.scan("test", "mutations", beforeMerge)).usingRecursiveComparison().ignoringFieldsMatchingRegexes(".*statsState").isEqualTo(beforeMergeFiles);
             long beforeAmbiguous = client.getCatalog().headSnapshotId();
             assertThatThrownBy(() -> runner.execute("MERGE INTO mutations t USING (VALUES 1, 1) s(id) ON t.id=s.id WHEN MATCHED THEN UPDATE SET label='ambiguous'"))
@@ -316,14 +318,16 @@ final class TestHoglakeLiveWrites
             assertThat(client.getTable("evolved", "records").orElseThrow().columns().get(1).fieldId()).isEqualTo(labelId);
             runner.execute("ALTER TABLE evolved.records DROP COLUMN discarded");
             runner.execute("INSERT INTO evolved.records VALUES (2, 'new', 12.34)");
-            assertThat(runner.execute("SELECT * FROM evolved.records").getMaterializedRows())
-                    .containsExactlyInAnyOrderElementsOf(runner.execute("VALUES (BIGINT '1', 'old', CAST(NULL AS decimal(12,2))), (BIGINT '2', 'new', DECIMAL '12.34')").getMaterializedRows());
+            assertEqualsIgnoreOrder(
+                    runner.execute("SELECT * FROM evolved.records").getMaterializedRows(),
+                    runner.execute("VALUES (BIGINT '1', 'old', CAST(NULL AS decimal(12,2))), (BIGINT '2', 'new', DECIMAL '12.34')").getMaterializedRows());
             assertEventually(() -> assertThat(client.scan("evolved", "records", client.getCatalog().headSnapshotId()))
                     .allMatch(file -> file.dataFile().statsState().equals("provided")));
             runner.execute("ALTER TABLE evolved.records ADD COLUMN label varchar");
             runner.execute("INSERT INTO evolved.records (id, label) VALUES (3, 'reused')");
-            assertThat(runner.execute("SELECT id, renamed, label FROM evolved.records").getMaterializedRows())
-                    .containsExactlyInAnyOrderElementsOf(runner.execute("VALUES (BIGINT '1', 'old', NULL), (BIGINT '2', 'new', NULL), (BIGINT '3', NULL, 'reused')").getMaterializedRows());
+            assertEqualsIgnoreOrder(
+                    runner.execute("SELECT id, renamed, label FROM evolved.records").getMaterializedRows(),
+                    runner.execute("VALUES (BIGINT '1', 'old', NULL), (BIGINT '2', 'new', NULL), (BIGINT '3', NULL, 'reused')").getMaterializedRows());
             assertThatThrownBy(() -> runner.execute("ALTER TABLE evolved.records ALTER COLUMN id SET DATA TYPE double"))
                     .hasMessageContaining("Unsupported Hoglake column type change");
             assertThatThrownBy(() -> runner.execute("DROP SCHEMA evolved"))
@@ -336,11 +340,13 @@ final class TestHoglakeLiveWrites
             runner.execute("CREATE TABLE measurements (id bigint NOT NULL, label varchar, amount decimal(12,2))");
             runner.execute("INSERT INTO measurements VALUES (1, 'hello', 12.34), (2, NULL, -0.01)");
             runner.execute("INSERT INTO measurements (label, id) VALUES ('omitted', 3)");
-            assertThat(runner.execute("SELECT * FROM measurements").getMaterializedRows())
-                    .containsExactlyInAnyOrderElementsOf(runner.execute("VALUES (BIGINT '1', 'hello', DECIMAL '12.34'), (BIGINT '2', NULL, DECIMAL '-0.01'), (BIGINT '3', 'omitted', CAST(NULL AS decimal(12,2)))").getMaterializedRows());
+            assertEqualsIgnoreOrder(
+                    runner.execute("SELECT * FROM measurements").getMaterializedRows(),
+                    runner.execute("VALUES (BIGINT '1', 'hello', DECIMAL '12.34'), (BIGINT '2', NULL, DECIMAL '-0.01'), (BIGINT '3', 'omitted', CAST(NULL AS decimal(12,2)))").getMaterializedRows());
             runner.execute("CREATE TABLE copied AS SELECT * FROM measurements");
-            assertThat(runner.execute("SELECT * FROM copied").getMaterializedRows())
-                    .containsExactlyInAnyOrderElementsOf(runner.execute("SELECT * FROM measurements").getMaterializedRows());
+            assertEqualsIgnoreOrder(
+                    runner.execute("SELECT * FROM copied").getMaterializedRows(),
+                    runner.execute("SELECT * FROM measurements").getMaterializedRows());
             runner.execute("INSERT INTO copied SELECT * FROM copied");
             assertThat(runner.execute("SELECT count(*) FROM copied").getOnlyValue()).isEqualTo(6L);
             runner.execute("CREATE TABLE empty_table AS SELECT * FROM copied WITH NO DATA");
@@ -358,8 +364,9 @@ final class TestHoglakeLiveWrites
                         DECIMAL '123456789012345678901234567890.12345678' AS long_decimal
                     """;
             runner.execute("CREATE TABLE scalar_types AS " + scalarValues);
-            assertThat(runner.execute("SELECT * FROM scalar_types").getMaterializedRows())
-                    .containsExactlyInAnyOrderElementsOf(runner.execute(scalarValues).getMaterializedRows());
+            assertEqualsIgnoreOrder(
+                    runner.execute("SELECT * FROM scalar_types").getMaterializedRows(),
+                    runner.execute(scalarValues).getMaterializedRows());
             runner.execute("INSERT INTO scalar_types " + scalarValues);
             runner.execute("INSERT INTO scalar_types VALUES (NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL)");
             assertThat(runner.execute("SELECT count(*) FROM scalar_types WHERE ts IS NOT NULL").getOnlyValue()).isEqualTo(2L);
@@ -381,8 +388,9 @@ final class TestHoglakeLiveWrites
                     assertThat(result.path("unconvertible_schema").asLong()).isZero();
                 }
                 assertThat(client.scan("test", "scalar_types", client.getCatalog().headSnapshotId())).hasSizeLessThan(filesBefore);
-                assertThat(runner.execute("SELECT * FROM scalar_types").getMaterializedRows())
-                        .containsExactlyInAnyOrderElementsOf(beforeCompaction);
+                assertEqualsIgnoreOrder(
+                        runner.execute("SELECT * FROM scalar_types").getMaterializedRows(),
+                        beforeCompaction);
             }
             if (distributed) {
                 assertThat(runner.execute("SELECT count(*) FROM system.runtime.nodes WHERE state = 'active'").getOnlyValue()).isEqualTo(3L);
