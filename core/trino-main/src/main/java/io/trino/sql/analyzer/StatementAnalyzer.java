@@ -743,16 +743,6 @@ class StatementAnalyzer
             analysis.setUpdateType("REFRESH MATERIALIZED VIEW");
 
             CatalogHandle catalogHandle = getRequiredCatalogHandle(metadata, session, refreshMaterializedView, name.catalogName());
-            if (metadata.delegateMaterializedViewRefreshToConnector(session, name)) {
-                analysis.setDelegatedRefreshMaterializedView(name);
-                analysis.setUpdateTarget(
-                        catalogHandle.getVersion(),
-                        name,
-                        Optional.empty(),
-                        Optional.empty());
-                return createAndAssignScope(refreshMaterializedView, scope);
-            }
-
             QualifiedName storageName = getMaterializedViewStorageTableName(view)
                     .orElseThrow(() -> semanticException(TABLE_NOT_FOUND, refreshMaterializedView, "Storage Table for materialized view '%s' does not exist", name));
 
