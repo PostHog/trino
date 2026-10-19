@@ -1,4 +1,28 @@
-# Shared catalog-store tests
+# PostHog catalog store
+
+## Delegated catalog requests
+
+A read-only (`catalog-store.read-only=true`) coordinator rejects `CREATE CATALOG`
+and `DROP CATALOG`, because an external writer publishes its catalogs. With
+`catalog-store.delegate.endpoint` set, it forwards those statements instead, on
+behalf of the user who ran them, to the control plane that publishes the
+catalogs. The statement returns once the published change has arrived through
+catalog synchronization and the user can see the new catalog.
+
+| Property | Default | Description |
+| --- | --- | --- |
+| `catalog-store.delegate.endpoint` | (unset) | Base URL; requests go to `{endpoint}/create` and `{endpoint}/drop`. Unset keeps mutations rejected. |
+| `catalog-store.delegate.token-file` | (required with an endpoint) | File holding the bearer token, re-read on every request. |
+| `catalog-store.delegate.allow-insecure-http` | `false` | Allow `http` on a trusted private route; otherwise `https` is required. |
+| `catalog-store.delegate.request-timeout` | `15s` | Budget for one request to the control plane. |
+| `catalog-store.delegate.visibility-timeout` | `3m` | How long an accepted request waits for the change to arrive on this coordinator. |
+
+The writable store refuses delegation at startup. Redirects are not followed,
+responses are bounded to 64 KiB, and request bodies never appear in errors or
+logs. The query text Trino records for every `CREATE CATALOG` masks all
+property values as `'***'`.
+
+## Shared catalog-store tests
 
 `TestPostHogCatalogStoreDurability` exercises real coordinators against PostgreSQL.
 It covers startup reuse, absent live synchronization, stale drops, conflicting

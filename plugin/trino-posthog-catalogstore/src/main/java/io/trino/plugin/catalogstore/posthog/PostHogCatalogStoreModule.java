@@ -16,9 +16,13 @@ package io.trino.plugin.catalogstore.posthog;
 import com.google.inject.Binder;
 import com.google.inject.Scopes;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
+import io.airlift.units.DataSize;
+import io.airlift.units.Duration;
 import io.trino.spi.catalog.CatalogStore;
 
 import static io.airlift.configuration.ConfigBinder.configBinder;
+import static io.airlift.http.client.HttpClientBinder.httpClientBinder;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 public class PostHogCatalogStoreModule
         extends AbstractConfigurationAwareModule
@@ -30,7 +34,21 @@ public class PostHogCatalogStoreModule
         binder.bind(PostHogCatalogStoreConnectionFactory.class).in(Scopes.SINGLETON);
         // The two stores are different implementations, not one store with a mode: a managed reader
         // publishes revisions and writes nothing, and the writable store behaves as it always has
-        if (buildConfigObject(PostHogCatalogStoreConfig.class).isReadOnly()) {
+        PostHogCatalogStoreConfig config = buildConfigObject(PostHogCatalogStoreConfig.class);
+        if (config.isReadOnly() && config.getDelegateEndpoint().isPresent()) {
+            // Mutations are forwarded to the control plane. Only the managed store delegates: the
+            // writable store applies them itself, which the configuration refuses to combine
+            Duration requestTimeout = config.getDelegateRequestTimeout();
+            httpClientBinder(binder)
+                    .bindHttpClient("catalog-store.delegate", ForCatalogRequests.class)
+                    .withConfigDefaults(client -> client
+                            .setConnectTimeout(new Duration(Math.min(requestTimeout.toMillis(), 2_000), MILLISECONDS))
+                            .setRequestTimeout(requestTimeout)
+                            .setMaxResponseContentLength(DataSize.ofBytes(CatalogRequestClient.MAX_RESPONSE_BYTES)));
+            binder.bind(CatalogRequestClient.class).in(Scopes.SINGLETON);
+            binder.bind(CatalogStore.class).to(DelegatingManagedCatalogStore.class).in(Scopes.SINGLETON);
+        }
+        else if (config.isReadOnly()) {
             binder.bind(CatalogStore.class).to(PostHogManagedCatalogStore.class).in(Scopes.SINGLETON);
         }
         else {
