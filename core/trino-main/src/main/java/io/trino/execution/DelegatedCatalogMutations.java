@@ -17,6 +17,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
 import com.google.inject.Inject;
+import io.airlift.log.Logger;
 import io.trino.Session;
 import io.trino.connector.CatalogStoreManager;
 import io.trino.metadata.Catalog;
@@ -34,11 +35,12 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
+import static com.google.common.util.concurrent.Futures.immediateFailedFuture;
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.trino.spi.StandardErrorCode.CATALOG_NOT_AVAILABLE;
 import static java.util.Objects.requireNonNull;
-import static java.util.concurrent.Executors.newSingleThreadScheduledExecutor;
+import static java.util.concurrent.Executors.newScheduledThreadPool;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
 /**
@@ -50,6 +52,8 @@ import static java.util.concurrent.TimeUnit.NANOSECONDS;
  */
 public class DelegatedCatalogMutations
 {
+    private static final Logger log = Logger.get(DelegatedCatalogMutations.class);
+
     @VisibleForTesting
     static final Duration POLL_INTERVAL = Duration.ofMillis(500);
 
@@ -57,7 +61,8 @@ public class DelegatedCatalogMutations
     private final CatalogManager catalogManager;
     private final AccessControl accessControl;
     private final Duration pollInterval;
-    private final ScheduledExecutorService executor = newSingleThreadScheduledExecutor(daemonThreadsNamed("delegated-catalog-wait-%s"));
+    // Each poll can call access control, which may be remote, so waits do not share one thread
+    private final ScheduledExecutorService executor = newScheduledThreadPool(4, daemonThreadsNamed("delegated-catalog-wait-%s"));
 
     @Inject
     public DelegatedCatalogMutations(Optional<CatalogStoreManager> catalogStoreManager, CatalogManager catalogManager, AccessControl accessControl)
@@ -100,16 +105,29 @@ public class DelegatedCatalogMutations
     }
 
     /**
-     * Completes once the catalog is active on this coordinator and the user of the statement is
-     * allowed to see it, or fails with {@code CATALOG_NOT_AVAILABLE} after the timeout.
+     * Whether the catalog is active on this coordinator and the user of the session may see it.
      */
-    public ListenableFuture<Void> awaitCreated(QueryStateMachine stateMachine, CatalogName catalogName, Duration timeout)
+    public boolean isAvailable(Session session, CatalogName catalogName)
+    {
+        return isActive(catalogName) &&
+                accessControl.filterCatalogs(session.toSecurityContext(), Set.of(catalogName.toString())).contains(catalogName.toString());
+    }
+
+    /**
+     * Completes once the catalog is active on this coordinator and the user of the statement is
+     * allowed to see it, or fails with {@code CATALOG_NOT_AVAILABLE} after the timeout. When the
+     * store changed nothing (IF NOT EXISTS matched an existing catalog) and that catalog is present
+     * here but failed to load, waiting cannot help, so that fails at once.
+     */
+    public ListenableFuture<Void> awaitCreated(QueryStateMachine stateMachine, CatalogName catalogName, boolean changed, Duration timeout)
     {
         Session session = stateMachine.getSession();
+        if (!changed && catalogManager.getCatalog(catalogName).map(Catalog::isFailed).orElse(false)) {
+            return immediateFailedFuture(new TrinoException(CATALOG_NOT_AVAILABLE, "Catalog '%s' exists but failed to load on this coordinator".formatted(catalogName)));
+        }
         return await(
                 stateMachine,
-                () -> isActive(catalogName) &&
-                        accessControl.filterCatalogs(session.toSecurityContext(), Set.of(catalogName.toString())).contains(catalogName.toString()),
+                () -> isAvailable(session, catalogName),
                 timeout,
                 () -> {
                     if (catalogManager.getCatalog(catalogName).map(Catalog::isFailed).orElse(false)) {
@@ -132,9 +150,24 @@ public class DelegatedCatalogMutations
                 () -> new TrinoException(CATALOG_NOT_AVAILABLE, "Catalog '%s' was accepted for removal but is still present on this coordinator; retry the statement shortly".formatted(catalogName)));
     }
 
+    /**
+     * A check that fails, such as an access control call that times out, is a check that does not
+     * hold yet: the next poll asks again, and the deadline still bounds the wait.
+     */
+    private static boolean holds(BooleanSupplier condition)
+    {
+        try {
+            return condition.getAsBoolean();
+        }
+        catch (RuntimeException e) {
+            log.debug(e, "Delegated catalog check failed, polling again");
+            return false;
+        }
+    }
+
     private ListenableFuture<Void> await(QueryStateMachine stateMachine, BooleanSupplier condition, Duration timeout, Supplier<TrinoException> timeoutFailure)
     {
-        if (condition.getAsBoolean()) {
+        if (holds(condition)) {
             return immediateVoidFuture();
         }
 
@@ -156,7 +189,7 @@ public class DelegatedCatalogMutations
                     return;
                 }
                 try {
-                    if (condition.getAsBoolean()) {
+                    if (holds(condition)) {
                         result.set(null);
                         return;
                     }

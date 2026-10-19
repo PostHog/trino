@@ -22,6 +22,7 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.catalog.DelegatedCatalogStore;
 import io.trino.spi.connector.ConnectorName;
+import io.trino.spi.security.AccessDeniedException;
 import io.trino.sql.PlannerContext;
 import io.trino.sql.tree.CreateCatalog;
 import io.trino.sql.tree.Expression;
@@ -80,8 +81,9 @@ public class CreateCatalogTask
         accessControl.checkCanCreateCatalog(session.toSecurityContext(), catalog.toString());
 
         Optional<DelegatedCatalogStore> delegatedCatalogStore = delegatedCatalogMutations.delegatedCatalogStore();
-        if (delegatedCatalogStore.isPresent() && statement.isNotExists() && delegatedCatalogMutations.isActive(catalog)) {
-            // Already here: an idempotent per-connection CREATE CATALOG IF NOT EXISTS stays local
+        if (delegatedCatalogStore.isPresent() && statement.isNotExists() && delegatedCatalogMutations.isAvailable(session, catalog)) {
+            // Already here and usable by this user: an idempotent per-connection CREATE CATALOG IF
+            // NOT EXISTS stays local. A catalog the user cannot use goes to the store, which decides
             return immediateVoidFuture();
         }
 
@@ -105,6 +107,9 @@ public class CreateCatalogTask
                         INVALID_CATALOG_PROPERTY,
                         "catalog property");
             }
+            catch (AccessDeniedException e) {
+                throw e;
+            }
             catch (TrinoException _) {
                 // The engine's message quotes the expression, which for a catalog can be a credential
                 throw new TrinoException(INVALID_CATALOG_PROPERTY, extractLocation(property), "Invalid value for catalog property '%s'".formatted(propertyName), null);
@@ -115,8 +120,8 @@ public class CreateCatalogTask
         ConnectorName connectorName = new ConnectorName(statement.getConnectorName().toString());
         if (delegatedCatalogStore.isPresent()) {
             DelegatedCatalogStore store = delegatedCatalogStore.get();
-            store.createCatalog(session.getIdentity(), catalog, connectorName, properties, statement.isNotExists());
-            return delegatedCatalogMutations.awaitCreated(stateMachine, catalog, store.visibilityTimeout());
+            DelegatedCatalogStore.CatalogRequestResult result = store.createCatalog(session.getIdentity(), catalog, connectorName, properties, statement.isNotExists());
+            return delegatedCatalogMutations.awaitCreated(stateMachine, catalog, result.changed(), store.visibilityTimeout());
         }
         plannerContext.getMetadata().createCatalog(session, catalog, connectorName, properties, statement.isNotExists());
         return immediateVoidFuture();

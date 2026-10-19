@@ -138,17 +138,17 @@ public class TestCreateCatalogQueryTextRedaction
     @Test
     public void testExecuteImmediate()
     {
-        QueryResults results = run("EXECUTE IMMEDIATE 'CREATE CATALOG redaction_immediate USING tpch WITH (\"tpch.splits-per-node\" = ''8282'')'");
+        QueryResults results = run("EXECUTE IMMEDIATE 'CREATE CATALOG redaction_immediate USING tpch WITH (\"tpch.splits-per-node\" = ''738264915'')'");
         assertThat(results.getError()).isNull();
-        assertThat(assertRedacted(results.getId(), "8282"))
+        assertThat(assertRedacted(results.getId(), "738264915"))
                 .startsWith("EXECUTE IMMEDIATE")
                 .contains("redaction_immediate")
                 .contains("''***''");
 
         // Placeholders are not supported in catalog properties; the rejected statement is replaced as a whole
-        results = run("EXECUTE IMMEDIATE 'CREATE CATALOG redaction_parameter USING tpch WITH (\"tpch.splits-per-node\" = ?)' USING '9393'");
+        results = run("EXECUTE IMMEDIATE 'CREATE CATALOG redaction_parameter USING tpch WITH (\"tpch.splits-per-node\" = ?)' USING '582917364'");
         assertThat(results.getError()).isNotNull();
-        assertThat(assertRedacted(results.getId(), "9393")).isEqualTo(REDACTED_STATEMENT);
+        assertThat(assertRedacted(results.getId(), "582917364")).isEqualTo(REDACTED_STATEMENT);
 
         results = run("EXECUTE IMMEDIATE 'CREATE CATALOG redaction_immediate_failing USING tpch WITH (\"connection-password\" = ''" + SECRET + "'')'");
         assertThat(results.getError()).isNotNull();
@@ -162,6 +162,17 @@ public class TestCreateCatalogQueryTextRedaction
         assertThat(results.getError()).isNotNull();
         assertThat(results.getError().getErrorName()).isEqualTo("NOT_SUPPORTED");
         assertThat(results.getError().getMessage()).isEqualTo("CREATE CATALOG cannot be used in a prepared statement");
+        assertRedacted(results.getId(), SECRET);
+    }
+
+    @Test
+    public void testPrepareInsideExecuteImmediateIsRejected()
+    {
+        // EXECUTE IMMEDIATE unwraps to the PREPARE, which would otherwise return the statement to
+        // the client as a prepared statement and record it in query info unmasked
+        QueryResults results = run("EXECUTE IMMEDIATE 'PREPARE redaction_wrapped FROM CREATE CATALOG redaction_wrapped USING tpch WITH (\"connection-password\" = ''" + SECRET + "'')'");
+        assertThat(results.getError()).isNotNull();
+        assertThat(results.getError().getErrorName()).isEqualTo("NOT_SUPPORTED");
         assertRedacted(results.getId(), SECRET);
     }
 

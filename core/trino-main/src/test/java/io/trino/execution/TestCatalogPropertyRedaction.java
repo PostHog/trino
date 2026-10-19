@@ -41,13 +41,15 @@ final class TestCatalogPropertyRedaction
         assertThat(mayDefineCatalogProperties("EXPLAIN CREATE CATALOG c USING x")).isTrue();
 
         assertThat(mayDefineCatalogProperties("SELECT 1")).isFalse();
-        assertThat(mayDefineCatalogProperties("CREATE TABLE catalog (x int)")).isFalse();
+        assertThat(mayDefineCatalogProperties("CREATE TABLE catalog (x int)")).isTrue();
         assertThat(mayDefineCatalogProperties("SELECT * FROM create_catalog")).isFalse();
         assertThat(mayDefineCatalogProperties("SELECT xcreate catalogs")).isFalse();
         assertThat(mayDefineCatalogProperties("DROP CATALOG c")).isFalse();
-        assertThat(mayDefineCatalogProperties("CREATE /* unterminated CATALOG")).isFalse();
-        assertThat(mayDefineCatalogProperties("CREATE x CATALOG")).isFalse();
-        assertThat(mayDefineCatalogProperties("CREATE\u00e9CATALOG")).isFalse();
+        assertThat(mayDefineCatalogProperties("CATALOG then CREATE")).isFalse();
+        assertThat(mayDefineCatalogProperties("SELECT '--' ; CREATE/*x*/CATALOG c USING x")).isTrue();
+        assertThat(mayDefineCatalogProperties("CREATE /* unterminated CATALOG")).isTrue();
+        assertThat(mayDefineCatalogProperties("CREATE x CATALOG")).isTrue();
+        assertThat(mayDefineCatalogProperties("CREATE\u00e9CATALOG")).isTrue();
         assertThat(mayDefineCatalogProperties("CREATE/**/ /*a*/--b\n\tCATALOG")).isTrue();
     }
 
@@ -59,6 +61,7 @@ final class TestCatalogPropertyRedaction
         // a pattern alternating over comments took exponential time on exactly this shape
         String comments = "CREATE/*" + "*//*".repeat(200_000);
         assertThat(mayDefineCatalogProperties(comments)).isFalse();
+        assertThat(mayDefineCatalogProperties("CREATE ".repeat(200_000))).isFalse();
         assertThat(mayDefineCatalogProperties(comments + "*/CATALOG")).isTrue();
         assertThat(mayDefineCatalogProperties("CREATE ".repeat(200_000) + "x")).isFalse();
         assertThat(mayDefineCatalogProperties("CREATE --\n".repeat(200_000) + "CATALOG")).isTrue();

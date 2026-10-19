@@ -27,7 +27,6 @@ import io.trino.sql.tree.StringLiteral;
 
 import java.util.List;
 import java.util.Optional;
-import java.util.regex.Pattern;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.sql.SqlFormatter.formatSql;
@@ -45,13 +44,6 @@ public final class CatalogPropertyRedaction
 
     private static final NodeLocation UNKNOWN_LOCATION = new NodeLocation(1, 1);
 
-    // CREATE and CATALOG as whole words separated only by whitespace. Comments in between are found
-    // by the scan in mayDefineCatalogProperties: a pattern that alternates over comments backtracks
-    // exponentially on crafted text, and every client can send text to this check
-    private static final Pattern CREATE_CATALOG = Pattern.compile(
-            "(?<![\\p{Alnum}_])CREATE\\s+CATALOG(?![\\p{Alnum}_])",
-            Pattern.CASE_INSENSITIVE);
-
     private CatalogPropertyRedaction() {}
 
     /**
@@ -61,48 +53,27 @@ public final class CatalogPropertyRedaction
      */
     public static boolean mayDefineCatalogProperties(String sql)
     {
-        // Applied to the whole text, string literals included, so that it also sees a statement
-        // that is executed from a string, and it errs on the side of matching
-        return CREATE_CATALOG.matcher(sql).find() || createCatalogAcrossComments(sql);
-    }
-
-    /**
-     * One linear pass over words, whitespace and comments: true if a CREATE word is followed by a
-     * CATALOG word with only whitespace and comments between them.
-     */
-    private static boolean createCatalogAcrossComments(String sql)
-    {
+        // The word CREATE followed anywhere later by the word CATALOG. Applied to the whole text,
+        // string literals and comments included, so that it also sees a statement executed from a
+        // string, whatever quoting or comments surround it. One linear pass, since any client can
+        // send text to this check; it errs on the side of matching
         int length = sql.length();
-        boolean afterCreate = false;
+        boolean seenCreate = false;
         int position = 0;
         while (position < length) {
-            char current = sql.charAt(position);
-            if (Character.isWhitespace(current)) {
+            if (!isWordCharacter(sql.charAt(position))) {
+                position++;
+                continue;
+            }
+            int start = position;
+            while (position < length && isWordCharacter(sql.charAt(position))) {
                 position++;
             }
-            else if (sql.startsWith("/*", position)) {
-                int end = sql.indexOf("*/", position + 2);
-                position = end < 0 ? length : end + 2;
+            int wordLength = position - start;
+            if (seenCreate && wordLength == 7 && sql.regionMatches(true, start, "CATALOG", 0, 7)) {
+                return true;
             }
-            else if (sql.startsWith("--", position)) {
-                int end = sql.indexOf('\n', position + 2);
-                position = end < 0 ? length : end + 1;
-            }
-            else if (isWordCharacter(current)) {
-                int start = position;
-                while (position < length && isWordCharacter(sql.charAt(position))) {
-                    position++;
-                }
-                int wordLength = position - start;
-                if (afterCreate && wordLength == 7 && sql.regionMatches(true, start, "CATALOG", 0, 7)) {
-                    return true;
-                }
-                afterCreate = wordLength == 6 && sql.regionMatches(true, start, "CREATE", 0, 6);
-            }
-            else {
-                afterCreate = false;
-                position++;
-            }
+            seenCreate |= wordLength == 6 && sql.regionMatches(true, start, "CREATE", 0, 6);
         }
         return false;
     }
@@ -163,6 +134,9 @@ public final class CatalogPropertyRedaction
     private static Optional<Statement> redact(ExecuteImmediate executeImmediate, SqlParser sqlParser)
     {
         String innerSql = executeImmediate.getStatement().getValue();
+        if (!mayDefineCatalogProperties(innerSql)) {
+            return Optional.empty();
+        }
         String redactedInner;
         try {
             Optional<Statement> inner = redact(sqlParser.createStatement(innerSql), sqlParser);

@@ -70,16 +70,18 @@ public class QueryPreparer
                     executeImmediateStatement.getStatement().getValue(),
                     executeImmediateStatement.getStatement().getLocation().orElseThrow());
         }
-        else if (statement instanceof Prepare prepareStatement && CatalogPropertyRedaction.definesCatalogProperties(prepareStatement.getStatement(), sqlParser)) {
-            // A prepared statement travels in session headers and query info as plain text
-            throw new TrinoException(NOT_SUPPORTED, "CREATE CATALOG cannot be used in a prepared statement");
-        }
         else if (statement instanceof ExplainAnalyze explainAnalyzeStatement) {
             Statement innerStatement = explainAnalyzeStatement.getStatement();
             Optional<QueryType> innerQueryType = getQueryType(innerStatement);
             if (innerQueryType.isEmpty() || innerQueryType.get() == QueryType.DATA_DEFINITION) {
                 throw new TrinoException(NOT_SUPPORTED, "EXPLAIN ANALYZE doesn't support statement type: " + innerStatement.getClass().getSimpleName());
             }
+        }
+
+        // Checked on the statement that runs, so EXECUTE IMMEDIATE cannot wrap the PREPARE past it.
+        // A prepared statement travels in session headers and query info as plain text
+        if (statement instanceof Prepare prepareStatement && CatalogPropertyRedaction.definesCatalogProperties(prepareStatement.getStatement(), sqlParser)) {
+            throw new TrinoException(NOT_SUPPORTED, "CREATE CATALOG cannot be used in a prepared statement");
         }
 
         List<Expression> parameters = ImmutableList.of();

@@ -15,6 +15,7 @@ package io.trino.execution;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.inject.Binder;
 import com.google.inject.Key;
@@ -27,6 +28,9 @@ import io.trino.connector.InMemoryCatalogStore;
 import io.trino.exchange.ExchangeMetricsCollector;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.plugin.tpch.TpchPlugin;
+import io.trino.security.AccessControl;
+import io.trino.security.AllowAllAccessControl;
+import io.trino.security.SecurityContext;
 import io.trino.spi.NodeVersion;
 import io.trino.spi.TrinoException;
 import io.trino.spi.catalog.CatalogName;
@@ -59,9 +63,11 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
@@ -239,6 +245,60 @@ public class TestDelegatedCatalogTasks
     {
         getFutureValue(dropTask.execute(new DropCatalog(new NodeLocation(1, 1), new Identifier(CATALOG), true, false), stateMachine(), emptyList(), WarningCollector.NOOP));
         assertThat(store.requests).hasSize(1);
+    }
+
+    @Test
+    public void testWaitKeepsPollingUntilTheCallerIsAuthorized()
+    {
+        CatalogName catalogName = new CatalogName(CATALOG);
+        publish(catalogName);
+        AtomicInteger checks = new AtomicInteger();
+        // Two failing access checks, as from an unreachable policy service, then two that do not
+        // yet admit the caller: none of them may end the wait
+        AccessControl accessControl = new AllowAllAccessControl()
+        {
+            @Override
+            public Set<String> filterCatalogs(SecurityContext context, Set<String> catalogs)
+            {
+                int check = checks.incrementAndGet();
+                if (check <= 2) {
+                    throw new RuntimeException("policy service unavailable");
+                }
+                return check <= 4 ? ImmutableSet.of() : catalogs;
+            }
+        };
+        DelegatedCatalogMutations mutations = new DelegatedCatalogMutations(Optional.empty(), catalogManager, accessControl, Duration.ofMillis(20));
+        try {
+            getFutureValue(mutations.awaitCreated(stateMachine(), catalogName, true, Duration.ofSeconds(30)));
+            assertThat(checks.get()).isGreaterThanOrEqualTo(5);
+        }
+        finally {
+            mutations.stop();
+        }
+    }
+
+    @Test
+    public void testActiveCatalogTheCallerCannotSeeIsNotAvailable()
+    {
+        CatalogName catalogName = new CatalogName(CATALOG);
+        publish(catalogName);
+        AccessControl hidden = new AllowAllAccessControl()
+        {
+            @Override
+            public Set<String> filterCatalogs(SecurityContext context, Set<String> catalogs)
+            {
+                return ImmutableSet.of();
+            }
+        };
+        DelegatedCatalogMutations mutations = new DelegatedCatalogMutations(Optional.empty(), catalogManager, hidden, Duration.ofMillis(20));
+        try {
+            // IF NOT EXISTS must not succeed locally for another login's catalog
+            assertThat(mutations.isActive(catalogName)).isTrue();
+            assertThat(mutations.isAvailable(stateMachine().getSession(), catalogName)).isFalse();
+        }
+        finally {
+            mutations.stop();
+        }
     }
 
     private void publish(CatalogName catalogName)
