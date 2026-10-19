@@ -45,12 +45,12 @@ public final class CatalogPropertyRedaction
 
     private static final NodeLocation UNKNOWN_LOCATION = new NodeLocation(1, 1);
 
-    // CREATE and CATALOG as whole words, separated only by whitespace and comments. It is applied to
-    // the whole text, string literals included, so that it also sees a statement that is executed
-    // from a string, and it errs on the side of matching
+    // CREATE and CATALOG as whole words separated only by whitespace. Comments in between are found
+    // by the scan in mayDefineCatalogProperties: a pattern that alternates over comments backtracks
+    // exponentially on crafted text, and every client can send text to this check
     private static final Pattern CREATE_CATALOG = Pattern.compile(
-            "(?<![\\p{Alnum}_])CREATE(?:\\s|/\\*.*?\\*/|--[^\\n]*(?:\\n|$))+CATALOG(?![\\p{Alnum}_])",
-            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+            "(?<![\\p{Alnum}_])CREATE\\s+CATALOG(?![\\p{Alnum}_])",
+            Pattern.CASE_INSENSITIVE);
 
     private CatalogPropertyRedaction() {}
 
@@ -61,7 +61,55 @@ public final class CatalogPropertyRedaction
      */
     public static boolean mayDefineCatalogProperties(String sql)
     {
-        return CREATE_CATALOG.matcher(sql).find();
+        // Applied to the whole text, string literals included, so that it also sees a statement
+        // that is executed from a string, and it errs on the side of matching
+        return CREATE_CATALOG.matcher(sql).find() || createCatalogAcrossComments(sql);
+    }
+
+    /**
+     * One linear pass over words, whitespace and comments: true if a CREATE word is followed by a
+     * CATALOG word with only whitespace and comments between them.
+     */
+    private static boolean createCatalogAcrossComments(String sql)
+    {
+        int length = sql.length();
+        boolean afterCreate = false;
+        int position = 0;
+        while (position < length) {
+            char current = sql.charAt(position);
+            if (Character.isWhitespace(current)) {
+                position++;
+            }
+            else if (sql.startsWith("/*", position)) {
+                int end = sql.indexOf("*/", position + 2);
+                position = end < 0 ? length : end + 2;
+            }
+            else if (sql.startsWith("--", position)) {
+                int end = sql.indexOf('\n', position + 2);
+                position = end < 0 ? length : end + 1;
+            }
+            else if (isWordCharacter(current)) {
+                int start = position;
+                while (position < length && isWordCharacter(sql.charAt(position))) {
+                    position++;
+                }
+                int wordLength = position - start;
+                if (afterCreate && wordLength == 7 && sql.regionMatches(true, start, "CATALOG", 0, 7)) {
+                    return true;
+                }
+                afterCreate = wordLength == 6 && sql.regionMatches(true, start, "CREATE", 0, 6);
+            }
+            else {
+                afterCreate = false;
+                position++;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isWordCharacter(char character)
+    {
+        return character == '_' || (character < 128 && Character.isLetterOrDigit(character));
     }
 
     /**

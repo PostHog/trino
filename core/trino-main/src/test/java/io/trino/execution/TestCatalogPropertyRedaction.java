@@ -15,6 +15,7 @@ package io.trino.execution;
 
 import io.trino.sql.parser.SqlParser;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.util.Optional;
 
@@ -44,6 +45,23 @@ final class TestCatalogPropertyRedaction
         assertThat(mayDefineCatalogProperties("SELECT * FROM create_catalog")).isFalse();
         assertThat(mayDefineCatalogProperties("SELECT xcreate catalogs")).isFalse();
         assertThat(mayDefineCatalogProperties("DROP CATALOG c")).isFalse();
+        assertThat(mayDefineCatalogProperties("CREATE /* unterminated CATALOG")).isFalse();
+        assertThat(mayDefineCatalogProperties("CREATE x CATALOG")).isFalse();
+        assertThat(mayDefineCatalogProperties("CREATE\u00e9CATALOG")).isFalse();
+        assertThat(mayDefineCatalogProperties("CREATE/**/ /*a*/--b\n\tCATALOG")).isTrue();
+    }
+
+    @Test
+    @Timeout(10)
+    void testLexicalCheckIsLinear()
+    {
+        // Any client can send text to this check, so crafted text must not make it backtrack:
+        // a pattern alternating over comments took exponential time on exactly this shape
+        String comments = "CREATE/*" + "*//*".repeat(200_000);
+        assertThat(mayDefineCatalogProperties(comments)).isFalse();
+        assertThat(mayDefineCatalogProperties(comments + "*/CATALOG")).isTrue();
+        assertThat(mayDefineCatalogProperties("CREATE ".repeat(200_000) + "x")).isFalse();
+        assertThat(mayDefineCatalogProperties("CREATE --\n".repeat(200_000) + "CATALOG")).isTrue();
     }
 
     @Test
