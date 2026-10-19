@@ -22,6 +22,7 @@ import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.catalog.CatalogProperties;
 import io.trino.spi.catalog.CatalogStore;
 import io.trino.spi.catalog.CatalogStoreFactory;
+import io.trino.spi.catalog.DelegatedCatalogStore;
 import io.trino.spi.catalog.RevisionedCatalogStore;
 import io.trino.spi.classloader.ThreadContextClassLoader;
 import io.trino.spi.connector.ConnectorName;
@@ -152,6 +153,19 @@ public class CatalogStoreManager
         return configuredCatalogStore.get()
                 .filter(RevisionedCatalogStore.class::isInstance)
                 .map(RevisionedCatalogStore.class::cast);
+    }
+
+    /**
+     * The configured store if it hands catalog mutations to an external writer, so that
+     * {@code CREATE CATALOG} and {@code DROP CATALOG} are forwarded on behalf of the user instead of
+     * being applied by this coordinator. Empty for a store without that capability, and empty as
+     * long as no store is configured yet.
+     */
+    public Optional<DelegatedCatalogStore> delegatedCatalogStore()
+    {
+        return configuredCatalogStore.get()
+                .filter(DelegatedCatalogStore.class::isInstance)
+                .map(DelegatedCatalogStore.class::cast);
     }
 
     @VisibleForTesting
