@@ -24,6 +24,7 @@ import io.trino.sql.tree.Execute;
 import io.trino.sql.tree.ExecuteImmediate;
 import io.trino.sql.tree.ExplainAnalyze;
 import io.trino.sql.tree.Expression;
+import io.trino.sql.tree.Prepare;
 import io.trino.sql.tree.Statement;
 
 import java.util.List;
@@ -69,6 +70,10 @@ public class QueryPreparer
                     executeImmediateStatement.getStatement().getValue(),
                     executeImmediateStatement.getStatement().getLocation().orElseThrow());
         }
+        else if (statement instanceof Prepare prepareStatement && CatalogPropertyRedaction.definesCatalogProperties(prepareStatement.getStatement(), sqlParser)) {
+            // A prepared statement travels in session headers and query info as plain text
+            throw new TrinoException(NOT_SUPPORTED, "CREATE CATALOG cannot be used in a prepared statement");
+        }
         else if (statement instanceof ExplainAnalyze explainAnalyzeStatement) {
             Statement innerStatement = explainAnalyzeStatement.getStatement();
             Optional<QueryType> innerQueryType = getQueryType(innerStatement);
@@ -86,7 +91,30 @@ public class QueryPreparer
         }
         validateParameters(statement, parameters);
 
-        return new PreparedQuery(statement, parameters, prepareSql);
+        return new PreparedQuery(wrappedStatement, statement, parameters, prepareSql);
+    }
+
+    /**
+     * The text to record for a prepared query: the original text, unless the query defines catalog
+     * properties, in which case their values are masked. The query itself is executed unchanged.
+     */
+    public String recordedQueryText(PreparedQuery preparedQuery, String query)
+    {
+        return CatalogPropertyRedaction.redactedSql(preparedQuery.getWrappedStatement(), sqlParser).orElse(query);
+    }
+
+    /**
+     * Whether any of the statements is, or wraps, a {@code CREATE CATALOG}. Text that cannot be
+     * parsed is checked lexically.
+     */
+    public boolean definesCatalogProperties(Iterable<String> statements)
+    {
+        for (String sql : statements) {
+            if (CatalogPropertyRedaction.definesCatalogProperties(sql, sqlParser)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void validateParameters(Statement node, List<Expression> parameterValues)
@@ -102,15 +130,30 @@ public class QueryPreparer
 
     public static class PreparedQuery
     {
+        private final Statement wrappedStatement;
         private final Statement statement;
         private final List<Expression> parameters;
         private final Optional<String> prepareSql;
 
         public PreparedQuery(Statement statement, List<Expression> parameters, Optional<String> prepareSql)
         {
+            this(statement, statement, parameters, prepareSql);
+        }
+
+        public PreparedQuery(Statement wrappedStatement, Statement statement, List<Expression> parameters, Optional<String> prepareSql)
+        {
+            this.wrappedStatement = requireNonNull(wrappedStatement, "wrappedStatement is null");
             this.statement = requireNonNull(statement, "statement is null");
             this.parameters = ImmutableList.copyOf(requireNonNull(parameters, "parameters is null"));
             this.prepareSql = requireNonNull(prepareSql, "prepareSql is null");
+        }
+
+        /**
+         * The statement as submitted, before {@code EXECUTE} or {@code EXECUTE IMMEDIATE} was resolved.
+         */
+        public Statement getWrappedStatement()
+        {
+            return wrappedStatement;
         }
 
         public Statement getStatement()
