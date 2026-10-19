@@ -155,6 +155,14 @@
 
         <dependency>
             <groupId>${project.groupId}</groupId>
+            <artifactId>trino-postgresql</artifactId>
+            <version>${project.version}</version>
+            <type>zip</type>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>${project.groupId}</groupId>
             <artifactId>trino-resource-group-managers</artifactId>
             <version>${project.version}</version>
             <type>zip</type>
