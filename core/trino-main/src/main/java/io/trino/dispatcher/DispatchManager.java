@@ -47,6 +47,7 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.resourcegroups.SelectionContext;
 import io.trino.spi.resourcegroups.SelectionCriteria;
 import io.trino.spi.security.Identity;
+import io.trino.sql.parser.ParsingException;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.weakref.jmx.Flatten;
@@ -61,10 +62,13 @@ import java.util.concurrent.ScheduledExecutorService;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
+import static io.trino.execution.CatalogPropertyRedaction.REDACTED_STATEMENT;
+import static io.trino.execution.CatalogPropertyRedaction.mayDefineCatalogProperties;
 import static io.trino.execution.QueryState.FINISHING;
 import static io.trino.execution.QueryState.QUEUED;
 import static io.trino.execution.QueryState.RUNNING;
 import static io.trino.execution.QueryState.WAITING_FOR_RESOURCES;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.QUERY_TEXT_TOO_LARGE;
 import static io.trino.tracing.ScopedSpan.scopedSpan;
 import static io.trino.util.Failures.toFailure;
@@ -214,11 +218,24 @@ public class DispatchManager
     {
         Session session = null;
         PreparedQuery preparedQuery = null;
+        // The text kept about the query: query info, query listings and events. Until the query is
+        // parsed, anything that may define catalog properties is replaced as a whole
+        boolean mayDefineCatalogProperties = mayDefineCatalogProperties(query);
+        String recordedQuery = mayDefineCatalogProperties ? REDACTED_STATEMENT : query;
         try {
             if (query.length() > maxQueryLength) {
                 int queryLength = query.length();
                 query = query.substring(0, maxQueryLength);
+                if (!mayDefineCatalogProperties) {
+                    recordedQuery = query;
+                }
                 throw new TrinoException(QUERY_TEXT_TOO_LARGE, format("Query text length (%s) exceeds the maximum length (%s)", queryLength, maxQueryLength));
+            }
+
+            // A prepared statement supplied by the client is recorded with the session, so one that
+            // defines catalog properties is refused before the session exists
+            if (queryPreparer.definesCatalogProperties(sessionContext.getPreparedStatements().values())) {
+                throw new TrinoException(NOT_SUPPORTED, "CREATE CATALOG cannot be used in a prepared statement");
             }
 
             // decode session
@@ -229,6 +246,7 @@ public class DispatchManager
 
             // prepare query
             preparedQuery = queryPreparer.prepareQuery(session, query);
+            recordedQuery = queryPreparer.recordedQueryText(preparedQuery, query);
 
             // select resource group
             Optional<String> queryType = getQueryType(preparedQuery.getStatement()).map(Enum::name);
@@ -241,7 +259,7 @@ public class DispatchManager
                     sessionContext.getSource(),
                     sessionContext.getClientTags(),
                     sessionContext.getResourceEstimates(),
-                    query,
+                    recordedQuery,
                     queryType));
 
             // apply system default session properties (does not override user set properties)
@@ -250,7 +268,7 @@ public class DispatchManager
             DispatchQuery dispatchQuery = dispatchQueryFactory.createDispatchQuery(
                     session,
                     sessionContext.getTransactionId(),
-                    query,
+                    recordedQuery,
                     preparedQuery,
                     slug,
                     selectionContext.getResourceGroupId());
@@ -266,7 +284,12 @@ public class DispatchManager
                 }
             }
         }
-        catch (Throwable throwable) {
+        catch (Throwable failure) {
+            // A syntax error quotes the offending token, which can be a property value
+            Throwable throwable = failure;
+            if (mayDefineCatalogProperties && failure instanceof ParsingException parsingException) {
+                throwable = new ParsingException("Syntax error in a statement that may define catalog properties; details are hidden", null, parsingException.getLineNumber(), parsingException.getColumnNumber());
+            }
             // creation must never fail, so register a failed query in this case
             if (session == null) {
                 session = Session.builder(sessionPropertyManager)
@@ -277,7 +300,7 @@ public class DispatchManager
                         .build();
             }
             Optional<String> preparedSql = Optional.ofNullable(preparedQuery).flatMap(PreparedQuery::getPrepareSql);
-            DispatchQuery failedDispatchQuery = failedDispatchQueryFactory.createFailedDispatchQuery(session, query, preparedSql, Optional.empty(), throwable);
+            DispatchQuery failedDispatchQuery = failedDispatchQueryFactory.createFailedDispatchQuery(session, recordedQuery, preparedSql, Optional.empty(), throwable);
             queryCreated(failedDispatchQuery);
             // maintain proper order of calls such that EventListener has access to QueryInfo
             // - add query to tracker

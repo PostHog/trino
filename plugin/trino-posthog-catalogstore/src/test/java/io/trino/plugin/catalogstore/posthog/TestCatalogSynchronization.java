@@ -19,6 +19,8 @@ import com.google.inject.Key;
 import com.google.inject.Module;
 import com.google.inject.Provides;
 import com.google.inject.Singleton;
+import com.sun.net.httpserver.HttpServer;
+import io.airlift.json.JsonCodec;
 import io.trino.connector.CatalogHandle;
 import io.trino.connector.CatalogPruneTask;
 import io.trino.connector.CatalogStoreManager;
@@ -29,15 +31,23 @@ import io.trino.server.CatalogSyncResource.CatalogSyncStatus;
 import io.trino.spi.catalog.CatalogStore;
 import io.trino.spi.catalog.CatalogStoreFactory;
 import io.trino.testing.DistributedQueryRunner;
+import io.trino.testing.QueryRunner.MaterializedResultWithPlan;
 import io.trino.transaction.TransactionId;
 import io.trino.transaction.TransactionManager;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.net.InetSocketAddress;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.Iterables.getOnlyElement;
@@ -45,6 +55,7 @@ import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.assertions.Assert.assertEventually;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -319,6 +330,79 @@ final class TestCatalogSynchronization
     }
 
     /**
+     * The whole tenant path: the coordinator forwards CREATE CATALOG and DROP CATALOG to the control
+     * plane, which publishes the change through the store, and the statement returns once the
+     * change has arrived here through synchronization. The recorded query text never carries the
+     * property values the control plane received.
+     */
+    @Test
+    void testDelegatedCatalogRequestsArriveThroughSynchronization(@TempDir Path temporaryDirectory)
+            throws Exception
+    {
+        String cellId = newCell();
+        TestingCatalogPublisher publisher = publisher(cellId);
+        AtomicInteger operations = new AtomicInteger();
+        List<Map<String, Object>> requests = new CopyOnWriteArrayList<>();
+        JsonCodec<Map<String, Object>> codec = JsonCodec.mapJsonCodec(String.class, Object.class);
+
+        HttpServer controlPlane = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        controlPlane.createContext("/catalog-requests/v1/", exchange -> {
+            Map<String, Object> request = codec.fromJson(exchange.getRequestBody().readAllBytes());
+            requests.add(request);
+            String catalog = (String) request.get("catalog");
+            String response;
+            if (exchange.getRequestURI().getPath().endsWith("/create")) {
+                @SuppressWarnings("unchecked")
+                Map<String, String> properties = (Map<String, String>) request.get("properties");
+                publisher.publishCatalog("op-" + operations.incrementAndGet(), catalog, (String) request.get("connector"), properties);
+                response = "{\"catalog\":\"%s\",\"created\":true}".formatted(catalog);
+            }
+            else {
+                publisher.removeCatalog("op-" + operations.incrementAndGet(), catalog);
+                response = "{\"catalog\":\"%s\",\"dropped\":true}".formatted(catalog);
+            }
+            byte[] bytes = response.getBytes(UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        controlPlane.start();
+        Path tokenFile = Files.writeString(temporaryDirectory.resolve("token"), "synthetic-cell-token\n");
+
+        try (DistributedQueryRunner coordinator = coordinator(cellId, true, 0, ImmutableMap.of(
+                "catalog-store.delegate.endpoint", "http://127.0.0.1:%s/catalog-requests/v1".formatted(controlPlane.getAddress().getPort()),
+                "catalog-store.delegate.allow-insecure-http", "true",
+                "catalog-store.delegate.token-file", tokenFile.toString()))) {
+            assertEventually(() -> assertThat(catalogSyncStatus(coordinator).ready()).isTrue());
+
+            MaterializedResultWithPlan created = coordinator.executeWithPlan(
+                    coordinator.getDefaultSession(),
+                    "CREATE CATALOG ext_tenant__warehouse USING tpch WITH (\"tpch.splits-per-node\" = '3')");
+            assertThat(coordinator.execute("SELECT count(*) FROM ext_tenant__warehouse.tiny.nation").getOnlyValue()).isEqualTo(25L);
+            assertThat(requests).hasSize(1);
+            assertThat(requests.getFirst())
+                    .containsEntry("user", coordinator.getDefaultSession().getUser())
+                    .containsEntry("connector", "tpch")
+                    .containsEntry("properties", Map.of("tpch.splits-per-node", "3"))
+                    .containsEntry("if_not_exists", false);
+            assertThat(coordinator.getCoordinator().getQueryManager().getFullQueryInfo(created.queryId()).getQuery())
+                    .contains("\"tpch.splits-per-node\" = '***'");
+
+            // Once it is here, IF NOT EXISTS is answered locally
+            coordinator.execute("CREATE CATALOG IF NOT EXISTS ext_tenant__warehouse USING tpch WITH (\"tpch.splits-per-node\" = '3')");
+            assertThat(requests).hasSize(1);
+
+            coordinator.execute("DROP CATALOG ext_tenant__warehouse");
+            assertThat(requests).hasSize(2);
+            assertThat(requests.getLast()).containsEntry("if_exists", false);
+            assertThat(coordinator.execute("SHOW CATALOGS").getOnlyColumnAsSet()).doesNotContain("ext_tenant__warehouse");
+        }
+        finally {
+            controlPlane.stop(0);
+        }
+    }
+
+    /**
      * Replacing a catalog gives it a new version and therefore a new handle. A transaction that is
      * already bound to the old one has to keep working on it: it is still registered, its connector
      * is still there, and only once the transaction is over may the old handle be pruned. New work
@@ -466,9 +550,16 @@ final class TestCatalogSynchronization
     private DistributedQueryRunner coordinator(String cellId, boolean synchronizing, int workerCount)
             throws Exception
     {
+        return coordinator(cellId, synchronizing, workerCount, ImmutableMap.of());
+    }
+
+    private DistributedQueryRunner coordinator(String cellId, boolean synchronizing, int workerCount, Map<String, String> additionalStoreProperties)
+            throws Exception
+    {
         Map<String, String> storeProperties = ImmutableMap.<String, String>builder()
                 .putAll(database.storeProperties(cellId))
                 .put("catalog-store.read-only", "true")
+                .putAll(additionalStoreProperties)
                 .buildOrThrow();
         return DistributedQueryRunner.builder(testSessionBuilder().build())
                 .setWorkerCount(workerCount)

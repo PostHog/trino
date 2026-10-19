@@ -24,8 +24,10 @@ import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 
 import java.io.File;
+import java.net.URI;
 import java.util.Optional;
 
+import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
 public class PostHogCatalogStoreConfig
@@ -37,6 +39,11 @@ public class PostHogCatalogStoreConfig
     private File connectionPasswordFile;
     private boolean readOnly;
     private Duration snapshotTimeout = new Duration(5, SECONDS);
+    private URI delegateEndpoint;
+    private File delegateTokenFile;
+    private boolean delegateAllowInsecureHttp;
+    private Duration delegateRequestTimeout = new Duration(15, SECONDS);
+    private Duration delegateVisibilityTimeout = new Duration(3, MINUTES);
 
     @NotEmpty
     public String getCellId()
@@ -135,6 +142,87 @@ public class PostHogCatalogStoreConfig
     {
         this.snapshotTimeout = snapshotTimeout;
         return this;
+    }
+
+    public Optional<URI> getDelegateEndpoint()
+    {
+        return Optional.ofNullable(delegateEndpoint);
+    }
+
+    @Config("catalog-store.delegate.endpoint")
+    @ConfigDescription("Base URL of the control plane endpoint that CREATE CATALOG and DROP CATALOG are forwarded to; unset rejects them")
+    public PostHogCatalogStoreConfig setDelegateEndpoint(URI delegateEndpoint)
+    {
+        this.delegateEndpoint = delegateEndpoint;
+        return this;
+    }
+
+    public Optional<@FileExists File> getDelegateTokenFile()
+    {
+        return Optional.ofNullable(delegateTokenFile);
+    }
+
+    @Config("catalog-store.delegate.token-file")
+    @ConfigDescription("File holding the bearer token for the catalog request endpoint, re-read on every request")
+    public PostHogCatalogStoreConfig setDelegateTokenFile(File delegateTokenFile)
+    {
+        this.delegateTokenFile = delegateTokenFile;
+        return this;
+    }
+
+    public boolean isDelegateAllowInsecureHttp()
+    {
+        return delegateAllowInsecureHttp;
+    }
+
+    @Config("catalog-store.delegate.allow-insecure-http")
+    @ConfigDescription("Allow HTTP only on a trusted private route to the catalog request endpoint")
+    public PostHogCatalogStoreConfig setDelegateAllowInsecureHttp(boolean delegateAllowInsecureHttp)
+    {
+        this.delegateAllowInsecureHttp = delegateAllowInsecureHttp;
+        return this;
+    }
+
+    @NotNull
+    @MinDuration("1s")
+    public Duration getDelegateRequestTimeout()
+    {
+        return delegateRequestTimeout;
+    }
+
+    @Config("catalog-store.delegate.request-timeout")
+    @ConfigDescription("Budget for a single catalog request to the control plane")
+    public PostHogCatalogStoreConfig setDelegateRequestTimeout(Duration delegateRequestTimeout)
+    {
+        this.delegateRequestTimeout = delegateRequestTimeout;
+        return this;
+    }
+
+    @NotNull
+    @MinDuration("1s")
+    public Duration getDelegateVisibilityTimeout()
+    {
+        return delegateVisibilityTimeout;
+    }
+
+    @Config("catalog-store.delegate.visibility-timeout")
+    @ConfigDescription("How long an accepted catalog request waits for the published change to arrive on this coordinator")
+    public PostHogCatalogStoreConfig setDelegateVisibilityTimeout(Duration delegateVisibilityTimeout)
+    {
+        this.delegateVisibilityTimeout = delegateVisibilityTimeout;
+        return this;
+    }
+
+    @AssertTrue(message = "catalog-store.delegate.endpoint requires catalog-store.read-only=true")
+    public boolean isDelegateOnlyForReadOnlyStore()
+    {
+        return delegateEndpoint == null || readOnly;
+    }
+
+    @AssertTrue(message = "catalog-store.delegate.endpoint requires catalog-store.delegate.token-file")
+    public boolean isDelegateTokenFileConfigured()
+    {
+        return delegateEndpoint == null || delegateTokenFile != null;
     }
 
     @AssertTrue(message = "catalog-store.connection-password and catalog-store.connection-password-file cannot both be set")

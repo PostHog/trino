@@ -62,6 +62,11 @@ public class PrepareTask
             throw new TrinoException(NOT_SUPPORTED, "Invalid statement type for prepared statement: " + type);
         }
 
+        if (CatalogPropertyRedaction.definesCatalogProperties(statement, sqlParser)) {
+            // The prepared text is returned to the client and recorded in query info unmasked
+            throw new TrinoException(NOT_SUPPORTED, "CREATE CATALOG cannot be used in a prepared statement");
+        }
+
         String sql = getFormattedSql(statement, sqlParser);
         stateMachine.addPreparedStatement(prepare.getName().getValue(), sql);
         return immediateVoidFuture();
