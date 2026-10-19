@@ -21,10 +21,12 @@ import io.trino.metadata.Metadata;
 import io.trino.security.AccessControl;
 import io.trino.spi.TrinoException;
 import io.trino.spi.catalog.CatalogName;
+import io.trino.spi.catalog.DelegatedCatalogStore;
 import io.trino.sql.tree.DropCatalog;
 import io.trino.sql.tree.Expression;
 
 import java.util.List;
+import java.util.Optional;
 
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -36,12 +38,14 @@ public class DropCatalogTask
 {
     private final Metadata metadata;
     private final AccessControl accessControl;
+    private final DelegatedCatalogMutations delegatedCatalogMutations;
 
     @Inject
-    public DropCatalogTask(Metadata metadata, AccessControl accessControl)
+    public DropCatalogTask(Metadata metadata, AccessControl accessControl, DelegatedCatalogMutations delegatedCatalogMutations)
     {
         this.metadata = requireNonNull(metadata, "metadata is null");
         this.accessControl = requireNonNull(accessControl, "accessControl is null");
+        this.delegatedCatalogMutations = requireNonNull(delegatedCatalogMutations, "delegatedCatalogMutations is null");
     }
 
     @Override
@@ -66,6 +70,12 @@ public class DropCatalogTask
             throw new TrinoException(NOT_SUPPORTED, "Dropping system catalog is not allowed");
         }
         accessControl.checkCanDropCatalog(stateMachine.getSession().toSecurityContext(), catalogName);
+        Optional<DelegatedCatalogStore> delegatedCatalogStore = delegatedCatalogMutations.delegatedCatalogStore();
+        if (delegatedCatalogStore.isPresent()) {
+            DelegatedCatalogStore store = delegatedCatalogStore.get();
+            store.dropCatalog(stateMachine.getSession().getIdentity(), new CatalogName(catalogName), statement.isExists());
+            return delegatedCatalogMutations.awaitDropped(stateMachine, new CatalogName(catalogName), store.visibilityTimeout());
+        }
         metadata.dropCatalog(stateMachine.getSession(), new CatalogName(catalogName), statement.isExists());
         return immediateVoidFuture();
     }

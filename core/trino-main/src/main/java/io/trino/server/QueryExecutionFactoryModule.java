@@ -33,6 +33,7 @@ import io.trino.execution.CreateViewTask;
 import io.trino.execution.DataDefinitionExecution.DataDefinitionExecutionFactory;
 import io.trino.execution.DataDefinitionTask;
 import io.trino.execution.DeallocateTask;
+import io.trino.execution.DelegatedCatalogMutations;
 import io.trino.execution.DenyTask;
 import io.trino.execution.DropBranchTask;
 import io.trino.execution.DropCatalogTask;
@@ -148,6 +149,7 @@ public class QueryExecutionFactoryModule
         }
 
         binder.bind(DataDefinitionExecutionFactory.class).in(Scopes.SINGLETON);
+        binder.bind(DelegatedCatalogMutations.class).in(Scopes.SINGLETON);
         bindDataDefinitionTask(binder, executionBinder, AddColumn.class, AddColumnTask.class);
         bindDataDefinitionTask(binder, executionBinder, Call.class, CallTask.class);
         bindDataDefinitionTask(binder, executionBinder, Comment.class, CommentTask.class);
