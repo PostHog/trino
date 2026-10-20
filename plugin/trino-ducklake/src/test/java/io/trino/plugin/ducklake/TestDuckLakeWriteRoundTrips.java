@@ -14,6 +14,7 @@
 package io.trino.plugin.ducklake;
 
 import io.trino.Session;
+import io.trino.spi.security.Identity;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
 import org.junit.jupiter.api.Test;
@@ -22,6 +23,8 @@ import java.sql.SQLException;
 import java.util.List;
 import java.util.Set;
 
+import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.SELECT_COLUMN;
+import static io.trino.testing.TestingAccessControlManager.privilege;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.abort;
@@ -508,7 +511,7 @@ final class TestDuckLakeWriteRoundTrips
         try {
             assertThat(liveViewRow(view, "dialect")).isEqualTo(List.of("duckdb"));
 
-            assertUpdate("CREATE OR REPLACE VIEW %s AS SELECT id FROM %s WHERE id = 2".formatted(view, table));
+            assertUpdate("CREATE OR REPLACE VIEW %s SECURITY INVOKER AS SELECT id FROM %s WHERE id = 2".formatted(view, table));
 
             // the connector does not edit the row DuckDB wrote: it ends it and inserts its own,
             // so the catalog keeps a history of both. The query is stored as Trino formats it,
@@ -554,7 +557,7 @@ final class TestDuckLakeWriteRoundTrips
                 "CREATE TABLE %s (id INTEGER)".formatted(table),
                 "INSERT INTO %s VALUES (1), (2)".formatted(table));
         try {
-            assertUpdate("CREATE VIEW %s AS SELECT id FROM ducklake.main.%s WHERE id = 2".formatted(view, table));
+            assertUpdate("CREATE VIEW %s SECURITY INVOKER AS SELECT id FROM ducklake.main.%s WHERE id = 2".formatted(view, table));
 
             assertThat(liveViewRow(view, "sql")).isEqualTo(List.of(formattedViewQuery("{DUCKLAKE_CATALOG}.main." + table)));
             assertQuery("SELECT id FROM " + view, "VALUES 2");
@@ -567,7 +570,7 @@ final class TestDuckLakeWriteRoundTrips
             assertThat(catalog.rows("SELECT id::VARCHAR FROM " + view)).isEqualTo(List.of("2"));
 
             // replacing the view writes the placeholder again rather than the name it was given
-            assertUpdate("CREATE OR REPLACE VIEW %s AS SELECT id FROM ducklake.main.%s WHERE id = 1".formatted(view, table));
+            assertUpdate("CREATE OR REPLACE VIEW %s SECURITY INVOKER AS SELECT id FROM ducklake.main.%s WHERE id = 1".formatted(view, table));
             assertThat(liveViewRow(view, "sql")).isEqualTo(List.of(formattedViewQuery("{DUCKLAKE_CATALOG}.main." + table, 1)));
             assertQuery("SELECT id FROM " + view, "VALUES 1");
             assertThat(catalog.rows("SELECT id::VARCHAR FROM " + view)).isEqualTo(List.of("1"));
@@ -647,6 +650,68 @@ final class TestDuckLakeWriteRoundTrips
                 WHERE t.table_name = '%s' AND f.end_snapshot IS NULL
                 GROUP BY f.data_file_id
                 ORDER BY 1""".formatted(table));
+    }
+
+    /**
+     * The catalog database holds the view definition, and the owner and run mode are stored inside
+     * it. Nothing stops the owner of the catalog from editing that value to name another user, and
+     * Trino reads the owner back as a permission grant. A forged owner must not become a grant, so
+     * the definition is read as a run-as-invoker view whatever it records.
+     */
+    @Test
+    void testAForgedViewOwnerDoesNotBecomeAGrant()
+            throws SQLException
+    {
+        String table = "forge_source_" + randomNameSuffix();
+        String view = "forge_view_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + table + " AS SELECT 1 AS a", 1);
+        try {
+            assertUpdate("CREATE VIEW %s SECURITY INVOKER AS SELECT a FROM %s".formatted(view, table));
+
+            // rewrite the stored definition so the view claims to run as somebody else
+            String stored = catalog.scalar(
+                    "SELECT value FROM __ducklake_metadata_lake.ducklake_tag WHERE key = 'trino_view_definition'"
+                            + " AND end_snapshot IS NULL AND object_id = (SELECT view_id FROM __ducklake_metadata_lake.ducklake_view"
+                            + " WHERE view_name = '%s' AND end_snapshot IS NULL)".formatted(view));
+            assertThat(stored).contains("\"runAsInvoker\":true");
+            String forged = stored.replace(
+                    "\"runAsInvoker\":true",
+                    "\"runAsInvoker\":false,\"owner\":\"someone_else\"");
+            catalog.executeInMetastore(
+                    "UPDATE ducklake_tag SET value = $tag$%s$tag$ WHERE key = 'trino_view_definition'".formatted(forged)
+                            + " AND end_snapshot IS NULL AND object_id = "
+                            + "(SELECT view_id FROM ducklake_view WHERE view_name = '%s' AND end_snapshot IS NULL)".formatted(view));
+
+            // the row is left as it was written: the defence is on the read, not on the store the
+            // tenant owns, so the tenant still sees its own edit there
+            assertThat(catalog.scalar(
+                    "SELECT value FROM __ducklake_metadata_lake.ducklake_tag WHERE key = 'trino_view_definition'"
+                            + " AND end_snapshot IS NULL AND object_id = (SELECT view_id FROM __ducklake_metadata_lake.ducklake_view"
+                            + " WHERE view_name = '%s' AND end_snapshot IS NULL)".formatted(view)))
+                    .contains("\"owner\":\"someone_else\"");
+
+            // what Trino reads back is a run-as-invoker view. SHOW CREATE VIEW re-derives the
+            // security clause from the definition the connector returned, so it reports the run
+            // mode the connector actually handed over, not the one written in the tag
+            assertThat((String) computeScalar("SHOW CREATE VIEW " + view)).contains("SECURITY INVOKER");
+
+            // the view answers for the caller. Denying the caller SELECT on the source table is
+            // the discriminator: run as the caller the view is refused, while a view that ran as the
+            // owner named in the tag would answer, because that owner holds the table.
+            assertThat(query("SELECT a FROM " + view)).matches("VALUES 1");
+            Session other = Session.builder(getSession())
+                    .setIdentity(Identity.ofUser("someone_else"))
+                    .build();
+            assertThat(query(other, "SELECT a FROM " + view)).matches("VALUES 1");
+            assertAccessDenied(
+                    "SELECT a FROM " + view,
+                    ".*Cannot select from columns.*",
+                    privilege(getSession().getUser(), table, SELECT_COLUMN));
+        }
+        finally {
+            assertUpdate("DROP VIEW " + view);
+            assertUpdate("DROP TABLE " + table);
+        }
     }
 
     private List<String> liveViewRow(String view, String columns)
