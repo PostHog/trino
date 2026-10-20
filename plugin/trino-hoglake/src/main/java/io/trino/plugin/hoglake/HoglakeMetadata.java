@@ -157,7 +157,7 @@ public class HoglakeMetadata
     @Override
     public void createSchema(ConnectorSession session, String schemaName, Map<String, Object> properties, TrinoPrincipal owner)
     {
-        if (!properties.isEmpty() || owner.getType() != PrincipalType.USER || !owner.getName().equals(session.getUser())) {
+        if (!properties.isEmpty() || owner.getType() != PrincipalType.USER || !owner.getPrincipalName().equals(session.getUser())) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake schema properties and custom owners are not supported");
         }
         checkSchemaEvolutionSupport();
