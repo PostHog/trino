@@ -60,7 +60,6 @@ import org.apache.parquet.column.values.ValuesReader;
 import org.apache.parquet.io.ParquetDecodingException;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.LogicalTypeAnnotation.DecimalLogicalTypeAnnotation;
-import org.apache.parquet.schema.LogicalTypeAnnotation.IntLogicalTypeAnnotation;
 import org.apache.parquet.schema.PrimitiveType;
 import org.joda.time.DateTimeZone;
 
@@ -751,9 +750,13 @@ public final class ValueDecoders
             {
                 long[] buffer = new long[length];
                 delegate.read(buffer, 0, length);
-                // decoded values are epochMillis, convert to (packed epochMillisUtc, picosOfMilli)
+                // decoded values are epochMillis, convert to (packed epochMillisUtc, picosOfMilli=0)
                 for (int i = 0; i < length; i++) {
-                    encodeFixed12(packDateTimeWithZone(buffer[i], UTC_KEY), 0, values, i + offset);
+                    encodeFixed12(
+                            packDateTimeWithZone(buffer[i], UTC_KEY),
+                            0,
+                            values,
+                            i + offset);
                 }
             }
 
@@ -1174,7 +1177,6 @@ public final class ValueDecoders
     public ValueDecoder<long[]> getInt32ToLongDecoder(ParquetEncoding encoding)
     {
         ValueDecoder<int[]> delegate = getInt32Decoder(encoding);
-        boolean unsigned = field.getDescriptor().getPrimitiveType().getLogicalTypeAnnotation() instanceof IntLogicalTypeAnnotation integer && !integer.isSigned();
         return new ValueDecoder<>()
         {
             @Override
@@ -1189,7 +1191,7 @@ public final class ValueDecoders
                 int[] buffer = new int[length];
                 delegate.read(buffer, 0, length);
                 for (int i = 0; i < length; i++) {
-                    values[i + offset] = unsigned ? Integer.toUnsignedLong(buffer[i]) : buffer[i];
+                    values[i + offset] = buffer[i];
                 }
             }
 
