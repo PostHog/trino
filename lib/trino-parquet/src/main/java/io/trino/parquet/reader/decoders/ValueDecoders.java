@@ -751,9 +751,13 @@ public final class ValueDecoders
             {
                 long[] buffer = new long[length];
                 delegate.read(buffer, 0, length);
-                // decoded values are epochMillis, convert to (packed epochMillisUtc, picosOfMilli)
+                // decoded values are epochMillis, convert to (packed epochMillisUtc, picosOfMilli=0)
                 for (int i = 0; i < length; i++) {
-                    encodeFixed12(packDateTimeWithZone(buffer[i], UTC_KEY), 0, values, i + offset);
+                    encodeFixed12(
+                            packDateTimeWithZone(buffer[i], UTC_KEY),
+                            0,
+                            values,
+                            i + offset);
                 }
             }
 
