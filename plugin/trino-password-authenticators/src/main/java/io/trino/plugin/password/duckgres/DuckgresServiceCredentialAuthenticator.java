@@ -54,6 +54,9 @@ public class DuckgresServiceCredentialAuthenticator
         implements PasswordAuthenticator, LoadedConfiguration
 {
     private static final Pattern SERVICE_USERNAME = Pattern.compile("[a-z0-9][a-z0-9_-]{0,62}\\.svc_[a-f0-9]{24}");
+    // One catalog's canonical identity claim, exactly as Hogtower publishes it.
+    private static final Pattern CATALOG_IDENTITY_GROUP = Pattern.compile("external_identity_[0-9a-f]{32}_[0-9a-f]{32}");
+    private static final Set<String> TIER_GROUPS = Set.of("tier_free", "tier_growth", "tier_scale");
     private static final int MAX_RESPONSE_BYTES = 64 * 1024;
     private static final int MAX_TOKEN_BYTES = 8192;
     private static final JsonCodec<CredentialRequest> REQUEST_CODEC = jsonCodec(CredentialRequest.class);
@@ -99,9 +102,7 @@ public class DuckgresServiceCredentialAuthenticator
                     .build();
             CredentialResponse response = httpClient.execute(request, new CredentialResponseHandler());
             if (!user.equals(response.user()) || response.expiresAt() == null || !Instant.parse(response.expiresAt()).isAfter(Instant.now()) ||
-                    response.groups() == null || response.groups().size() != 2 ||
-                    !response.groups().contains("org_" + user.substring(0, user.indexOf('.')).replace('-', '_')) ||
-                    response.groups().stream().noneMatch(Set.of("tier_free", "tier_growth", "tier_scale")::contains)) {
+                    !isAuthorizedGroupSet(user, response.groups())) {
                 throw denied();
             }
             return Optional.of(Identity.forUser(user)
@@ -113,6 +114,35 @@ public class DuckgresServiceCredentialAuthenticator
             // Upstream errors can contain credentials or response bodies.
             throw denied();
         }
+    }
+
+    // A credential resolves to exactly one warehouse claim and exactly one tier claim.
+    // Extra groups are allowed only when each one is a catalog identity claim, because a
+    // catalog identity claim grants no warehouse-wide authority: it names one catalog, and
+    // the catalog access check consumes it separately. Any other extra group is refused, so
+    // an upstream response can never smuggle in an administrative claim.
+    private static boolean isAuthorizedGroupSet(String user, List<String> groups)
+    {
+        if (groups == null) {
+            return false;
+        }
+        int warehouseClaims = 0;
+        int tierClaims = 0;
+        for (String group : groups) {
+            if (group == null) {
+                return false;
+            }
+            if (group.equals("org_" + user.substring(0, user.indexOf('.')).replace('-', '_'))) {
+                warehouseClaims++;
+            }
+            else if (TIER_GROUPS.contains(group)) {
+                tierClaims++;
+            }
+            else if (!CATALOG_IDENTITY_GROUP.matcher(group).matches()) {
+                return false;
+            }
+        }
+        return warehouseClaims == 1 && tierClaims == 1;
     }
 
     @Override

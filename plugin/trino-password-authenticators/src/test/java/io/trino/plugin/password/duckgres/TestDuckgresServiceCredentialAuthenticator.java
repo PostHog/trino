@@ -194,6 +194,17 @@ class TestDuckgresServiceCredentialAuthenticator
     }
 
     @Test
+    void testAcceptsCatalogIdentityClaimsAlongsideTheWarehouseAndTierClaims()
+    {
+        var authenticator = new DuckgresServiceCredentialAuthenticator(config, httpClient);
+        String first = "external_identity_" + "a".repeat(32) + "_" + "b".repeat(32);
+        String second = "external_identity_" + "c".repeat(32) + "_" + "d".repeat(32);
+        response = response(USER, Instant.now().plusSeconds(900).toString(), List.of("org_example_team", "tier_scale", first, second));
+        assertThat(authenticator.createAuthenticatedIdentity(USER, SECRET).orElseThrow().getGroups())
+                .containsExactlyInAnyOrder("org_example_team", "tier_scale", first, second);
+    }
+
+    @Test
     void testDoesNotCacheRevocation()
     {
         var authenticator = new DuckgresServiceCredentialAuthenticator(config, httpClient);
@@ -228,6 +239,13 @@ class TestDuckgresServiceCredentialAuthenticator
                 response(USER, Instant.now().plusSeconds(900).toString(), List.of("org_other", "tier_scale")),
                 response(USER, Instant.now().plusSeconds(900).toString(), List.of("org_example_team", "tier_unknown")),
                 response(USER, Instant.now().plusSeconds(900).toString(), List.of("org_example_team", "tier_scale", "admin")),
+                response(USER, Instant.now().plusSeconds(900).toString(), List.of("org_example_team", "tier_scale", "external_identity_" + "0".repeat(32) + "_" + "1".repeat(32), "admin")),
+                response(USER, Instant.now().plusSeconds(900).toString(), List.of("org_example_team", "tier_scale", "external_identity_short")),
+                response(USER, Instant.now().plusSeconds(900).toString(), List.of("org_example_team", "tier_scale", "external_owner_aaa_bbb")),
+                response(USER, Instant.now().plusSeconds(900).toString(), List.of("org_example_team", "tier_scale", "tier_growth")),
+                response(USER, Instant.now().plusSeconds(900).toString(), List.of("org_example_team", "org_other", "tier_scale")),
+                response(USER, Instant.now().plusSeconds(900).toString(), List.of("tier_scale")),
+                response(USER, Instant.now().plusSeconds(900).toString(), List.of("org_example_team")),
                 "x".repeat(65537))) {
             response = body;
             assertDenied(authenticator);
