@@ -414,7 +414,7 @@
             <dependency>
                 <groupId>com.exasol</groupId>
                 <artifactId>exasol-jdbc</artifactId>
-                <version>26.2.9</version>
+                <version>26.2.10</version>
             </dependency>
 
             <dependency>
@@ -622,7 +622,7 @@
             <dependency>
                 <groupId>io.airlift</groupId>
                 <artifactId>aircompressor-v3</artifactId>
-                <version>3.12</version>
+                <version>3.13</version>
             </dependency>
 
             <dependency>
