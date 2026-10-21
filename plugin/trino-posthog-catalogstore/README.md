@@ -42,6 +42,11 @@ Validate future admissions against the current bound definitions.
 A failed application must not authorize a process-only catalog with the same name.
 The engine refuses publication over an actual process-only catalog.
 
+Delete existing external definitions with the old publisher before its cutover.
+Keep stored secrets and source credentials.
+Recreate the definitions after deployment.
+Old prefixed catalogs are not automatically renamed or removed.
+
 ## Delegated catalog requests
 
 A read-only (`catalog-store.read-only=true`) coordinator rejects `CREATE CATALOG`
