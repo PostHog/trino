@@ -298,7 +298,7 @@ final class TestDuckLakeWrites
         String view = "over_replaced_" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + table + " AS SELECT id FROM UNNEST(sequence(1, 3)) AS t(id)", 3);
         try {
-            assertUpdate("CREATE VIEW %s AS SELECT sum(id) AS total FROM %s".formatted(view, table));
+            assertUpdate("CREATE VIEW %s SECURITY INVOKER AS SELECT sum(id) AS total FROM %s".formatted(view, table));
             assertQuery("SELECT total FROM " + view, "VALUES 6");
 
             // the view names the table, not the identifier a replacement gives it
@@ -727,13 +727,13 @@ final class TestDuckLakeWrites
         String view = "view_" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + table + " AS SELECT id, id % 2 AS parity FROM UNNEST(sequence(1, 6)) AS t(id)", 6);
         try {
-            assertUpdate("CREATE VIEW %s AS SELECT id FROM %s WHERE parity = 0".formatted(view, table));
+            assertUpdate("CREATE VIEW %s SECURITY INVOKER AS SELECT id FROM %s WHERE parity = 0".formatted(view, table));
             assertQuery("SELECT id FROM " + view + " ORDER BY id", "VALUES 2, 4, 6");
             assertThat(computeActual("SHOW TABLES").getOnlyColumnAsSet()).contains(view);
             assertThat((String) computeScalar("SHOW CREATE VIEW " + view)).contains("CREATE VIEW", table);
 
             // replacing a view swaps what it selects without changing its name
-            assertUpdate("CREATE OR REPLACE VIEW %s AS SELECT id FROM %s WHERE parity = 1".formatted(view, table));
+            assertUpdate("CREATE OR REPLACE VIEW %s SECURITY INVOKER AS SELECT id FROM %s WHERE parity = 1".formatted(view, table));
             assertQuery("SELECT id FROM " + view + " ORDER BY id", "VALUES 1, 3, 5");
 
             assertUpdate("COMMENT ON VIEW %s IS 'odd ids'".formatted(view));
@@ -758,7 +758,7 @@ final class TestDuckLakeWrites
         String view = "stored_view_" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + table + " AS SELECT 1 AS a, 'x' AS b", 1);
         try {
-            assertUpdate("CREATE VIEW %s AS SELECT a AS renamed FROM %s".formatted(view, table));
+            assertUpdate("CREATE VIEW %s SECURITY INVOKER AS SELECT a AS renamed FROM %s".formatted(view, table));
 
             // the row is a DuckLake view like any other, naming the dialect its query is written in
             assertThat(duckDbRows("SELECT dialect, column_aliases FROM __ducklake_metadata_lake.ducklake_view "
@@ -778,12 +778,32 @@ final class TestDuckLakeWrites
     }
 
     @Test
+    void testRunAsDefinerViewIsRefused()
+    {
+        String table = "definer_source_" + randomNameSuffix();
+        String view = "definer_view_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + table + " AS SELECT 1 AS a", 1);
+        try {
+            // DEFINER is the default, so a bare CREATE VIEW is refused too
+            assertThatThrownBy(() -> assertUpdate("CREATE VIEW %s AS SELECT a FROM %s".formatted(view, table)))
+                    .hasMessageContaining("Run-as-definer views are not supported for DuckLake catalogs")
+                    .hasMessageContaining("SECURITY INVOKER");
+            assertThatThrownBy(() -> assertUpdate("CREATE VIEW %s SECURITY DEFINER AS SELECT a FROM %s".formatted(view, table)))
+                    .hasMessageContaining("Run-as-definer views are not supported for DuckLake catalogs");
+            assertThat(computeActual("SHOW TABLES").getOnlyColumnAsSet()).doesNotContain(view);
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
     void testAViewAndATableCannotShareAName()
     {
         String name = "clash_" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + name + " (a INTEGER)");
         try {
-            assertThatThrownBy(() -> assertUpdate("CREATE VIEW %s AS SELECT 1 AS a".formatted(name)))
+            assertThatThrownBy(() -> assertUpdate("CREATE VIEW %s SECURITY INVOKER AS SELECT 1 AS a".formatted(name)))
                     .hasMessageContaining("already exists");
         }
         finally {
@@ -791,7 +811,7 @@ final class TestDuckLakeWrites
         }
 
         String viewName = "clash_view_" + randomNameSuffix();
-        assertUpdate("CREATE VIEW %s AS SELECT 1 AS a".formatted(viewName));
+        assertUpdate("CREATE VIEW %s SECURITY INVOKER AS SELECT 1 AS a".formatted(viewName));
         try {
             assertThatThrownBy(() -> assertUpdate("CREATE TABLE %s (a INTEGER)".formatted(viewName)))
                     .hasMessageContaining("already exists");

@@ -362,6 +362,14 @@ rows. Flush the inlined data with DuckDB first.
   first.
 - `partitioning` is the only supported table property, and views take no
   properties.
+- A view runs as the user who queries it, so `CREATE VIEW` requires
+  `SECURITY INVOKER`. `DEFINER` is not implemented, because the connector
+  stores the view definition in the catalog database, which the owner of the
+  catalog can write to. A stored owner is therefore not a permission grant
+  that the connector can rely on. For the same reason a view is read as a
+  run-as-invoker view whatever its stored definition records. A tool that
+  creates views with `DEFINER` by default must be configured to use `INVOKER`
+  instead; for dbt, set `view_security: invoker`.
 - A view written in another engine's dialect is listed but cannot be queried
   from Trino, because its query text does not parse here.
 - A column with a non-`NULL` default value is not supported.

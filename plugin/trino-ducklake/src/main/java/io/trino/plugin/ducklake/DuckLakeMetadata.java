@@ -20,6 +20,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ListMultimap;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.airlift.json.JsonCodec;
+import io.airlift.log.Logger;
 import io.airlift.slice.Slice;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
@@ -141,6 +142,8 @@ import static java.util.stream.Collectors.joining;
 public class DuckLakeMetadata
         implements ConnectorMetadata
 {
+    private static final Logger log = Logger.get(DuckLakeMetadata.class);
+
     private static final String COMMENT_TAG_KEY = "comment";
     private static final String VIEW_DEFINITION_TAG_KEY = "trino_view_definition";
     private static final String TRINO_VIEW_DIALECT = "trino";
@@ -1434,6 +1437,13 @@ public class DuckLakeMetadata
         if (!viewProperties.isEmpty()) {
             throw new TrinoException(NOT_SUPPORTED, "This connector does not support view properties");
         }
+        // A DEFINER view records which user its query runs as, and Trino reads that back here as a
+        // permission grant. The definition lives in the catalog database, which the owner of the
+        // catalog can write to directly, so a stored owner is not trustworthy input. Reject the
+        // request rather than store a grant this connector cannot vouch for.
+        if (!definition.isRunAsInvoker()) {
+            throw new TrinoException(NOT_SUPPORTED, "Run-as-definer views are not supported for DuckLake catalogs: " + viewName + ". Add SECURITY INVOKER.");
+        }
         requireViewSupport();
         commit(commit -> {
             DuckLakeCommit.SchemaIdentity schema = commit.findSchema(viewName.getSchemaName())
@@ -1517,7 +1527,7 @@ public class DuckLakeMetadata
     public Optional<ConnectorViewDefinition> getView(ConnectorSession session, SchemaTableName viewName)
     {
         return metastore.findView(snapshotId(), viewName.getSchemaName(), viewName.getTableName())
-                .flatMap(this::toViewDefinition);
+                .flatMap(view -> toViewDefinition(view, true));
     }
 
     @Override
@@ -1525,7 +1535,15 @@ public class DuckLakeMetadata
     {
         ImmutableMap.Builder<SchemaTableName, ConnectorViewDefinition> views = ImmutableMap.builder();
         for (DuckLakeViewEntry view : metastore.listViews(snapshotId(), schemaName)) {
-            toViewDefinition(view).ifPresent(definition -> views.put(new SchemaTableName(view.schemaName(), view.viewName()), definition));
+            SchemaTableName viewName = new SchemaTableName(view.schemaName(), view.viewName());
+            try {
+                toViewDefinition(view).ifPresent(definition -> views.put(viewName, definition));
+            }
+            catch (TrinoException e) {
+                // A listing covers every view in the schema, so one unreadable definition is left
+                // out rather than failing the call for the rest of them.
+                log.warn(e, "Skipping view %s with an unreadable definition", viewName);
+            }
         }
         return views.buildKeepingLast();
     }
@@ -1558,14 +1576,68 @@ public class DuckLakeMetadata
      * Reads back the definition Trino stored beside the view. A view another engine defined has no
      * such definition, and is left out rather than guessed at: its query is written in a dialect
      * this connector cannot resolve the columns of.
+     * <p>
+     * The definition is read as a run-as-invoker view whatever it records. The owner and the run
+     * mode are stored in the catalog database, which the owner of the catalog can write to, so a
+     * stored owner is not a grant this connector can rely on. Coercing on read also covers a view
+     * written before this rule, and a definition edited in place to name a different user.
      */
     private Optional<ConnectorViewDefinition> toViewDefinition(DuckLakeViewEntry view)
+    {
+        return toViewDefinition(view, false);
+    }
+
+    /**
+     * @param reportCoercion logs a definition that is read as run-as-invoker although it records
+     *         a different run mode. Reading is where the stored owner is refused, so this log is the one
+     *         piece of evidence of a rewritten tag that the owner of the catalog cannot delete. Listing
+     *         every view of a schema is frequent, so only the single-view path asks for it.
+     */
+    private Optional<ConnectorViewDefinition> toViewDefinition(DuckLakeViewEntry view, boolean reportCoercion)
     {
         if (!view.dialect().equalsIgnoreCase(TRINO_VIEW_DIALECT)) {
             return Optional.empty();
         }
         return metastore.tag(snapshotId(), view.viewId(), VIEW_DEFINITION_TAG_KEY)
-                .map(viewDefinitionCodec::fromJson);
+                .map(definition -> decodeViewDefinition(view, definition))
+                .map(definition -> runAsInvoker(view, definition, reportCoercion));
+    }
+
+    /**
+     * Decodes a stored definition, reporting a tag that is not readable as a metadata error of this
+     * connector. The tag is a value the catalog holds rather than one the connector wrote last, so
+     * it can be unreadable, and a bare codec exception would surface as an internal error.
+     */
+    private ConnectorViewDefinition decodeViewDefinition(DuckLakeViewEntry view, String definition)
+    {
+        try {
+            return viewDefinitionCodec.fromJson(definition);
+        }
+        catch (IllegalArgumentException e) {
+            throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Unreadable definition for view %s.%s".formatted(view.schemaName(), view.viewName()), e);
+        }
+    }
+
+    private static ConnectorViewDefinition runAsInvoker(DuckLakeViewEntry view, ConnectorViewDefinition definition, boolean reportCoercion)
+    {
+        if (definition.isRunAsInvoker()) {
+            return definition;
+        }
+        if (reportCoercion) {
+            log.warn("Reading view %s.%s as SECURITY INVOKER although its stored definition runs as %s",
+                    view.schemaName(),
+                    view.viewName(),
+                    definition.getOwner().orElse("<no owner>"));
+        }
+        return new ConnectorViewDefinition(
+                definition.getOriginalSql(),
+                definition.getCatalog(),
+                definition.getSchema(),
+                definition.getColumns(),
+                definition.getComment(),
+                Optional.empty(),
+                true,
+                definition.getPath());
     }
 
     private void requireViewSupport()
