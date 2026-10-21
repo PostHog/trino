@@ -14,6 +14,7 @@
 package io.trino.spi.catalog;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.OptionalLong;
 
 import static java.util.Objects.requireNonNull;
@@ -38,6 +39,14 @@ import static java.util.Objects.requireNonNull;
  */
 public interface RevisionedCatalogStore
 {
+    /**
+     * The logical store identity, if this store exposes one.
+     */
+    default Optional<String> storeIdentity()
+    {
+        return Optional.empty();
+    }
+
     /**
      * Revision of the currently published state. This is polled frequently, so it must be cheap.
      *

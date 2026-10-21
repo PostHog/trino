@@ -45,15 +45,18 @@ import io.trino.spi.type.TypeManager;
 import io.trino.sql.planner.OptimizerConfig;
 import io.trino.transaction.TransactionManager;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.trino.connector.CatalogConnector.REQUIRED_IDENTITY_GROUP_PROPERTY;
 import static io.trino.connector.CatalogHandle.createInformationSchemaCatalogHandle;
 import static io.trino.connector.CatalogHandle.createRootCatalogHandle;
 import static io.trino.connector.CatalogHandle.createSystemTablesCatalogHandle;
+import static io.trino.security.CatalogIdentity.validateBinding;
 import static java.util.Objects.requireNonNull;
 
 @ThreadSafe
@@ -135,10 +138,16 @@ public class DefaultCatalogFactory
         checkArgument(connectorFactory != null, "No factory for connector '%s'. Available factories: %s", catalogProperties.connectorName(), connectorFactories.keySet());
 
         CatalogHandle catalogHandle = createRootCatalogHandle(catalogProperties.name(), catalogProperties.version());
+        String requiredIdentityGroup = catalogProperties.properties().get(REQUIRED_IDENTITY_GROUP_PROPERTY);
+        if (requiredIdentityGroup != null) {
+            validateBinding(catalogProperties.name(), requiredIdentityGroup);
+        }
+        Map<String, String> connectorProperties = new HashMap<>(catalogProperties.properties());
+        connectorProperties.remove(REQUIRED_IDENTITY_GROUP_PROPERTY);
         Connector connector = createConnector(
                 catalogProperties.name(),
                 connectorFactory,
-                secretsResolver.getResolvedConfiguration(catalogProperties.properties()));
+                secretsResolver.getResolvedConfiguration(connectorProperties));
 
         return createCatalog(
                 catalogHandle,

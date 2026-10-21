@@ -28,6 +28,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -109,6 +110,13 @@ public class TestingTransactionManager
     public Optional<CatalogHandle> getCatalogHandle(TransactionId transactionId, String catalogName)
     {
         return Optional.empty();
+    }
+
+    @Override
+    public boolean isCatalogIdentityAuthorized(TransactionId transactionId, String catalogName, Set<String> identityGroups)
+    {
+        checkArgument(transactions.containsKey(transactionId), "Unknown transaction");
+        return true;
     }
 
     @Override

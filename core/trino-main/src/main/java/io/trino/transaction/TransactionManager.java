@@ -23,6 +23,7 @@ import io.trino.spi.transaction.IsolationLevel;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import static io.trino.spi.StandardErrorCode.CATALOG_NOT_FOUND;
 
@@ -48,6 +49,8 @@ public interface TransactionManager
     List<CatalogInfo> getActiveCatalogs(TransactionId transactionId);
 
     Optional<CatalogHandle> getCatalogHandle(TransactionId transactionId, String catalogName);
+
+    boolean isCatalogIdentityAuthorized(TransactionId transactionId, String catalogName, Set<String> identityGroups);
 
     default CatalogMetadata getRequiredCatalogMetadata(TransactionId transactionId, String catalogName)
     {

@@ -32,6 +32,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Collection;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 
@@ -104,6 +105,12 @@ public class PostHogManagedCatalogStore
     private final String cellId;
     private final PostHogCatalogStoreConnectionFactory connectionFactory;
     private final int snapshotTimeoutSeconds;
+
+    @Override
+    public Optional<String> storeIdentity()
+    {
+        return Optional.of(cellId);
+    }
 
     @Inject
     public PostHogManagedCatalogStore(PostHogCatalogStoreConfig config, PostHogCatalogStoreConnectionFactory connectionFactory)

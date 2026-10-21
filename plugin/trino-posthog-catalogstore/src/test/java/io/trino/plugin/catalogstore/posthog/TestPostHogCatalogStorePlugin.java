@@ -19,6 +19,7 @@ import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.catalog.CatalogStore;
 import io.trino.spi.catalog.CatalogStoreFactory;
 import io.trino.spi.catalog.DelegatedCatalogStore;
+import io.trino.spi.catalog.RevisionedCatalogStore;
 import io.trino.spi.connector.ConnectorName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -67,6 +68,7 @@ final class TestPostHogCatalogStorePlugin
                 .put("catalog-store.delegate.visibility-timeout", "40s")
                 .buildOrThrow());
         assertThat(delegating).isInstanceOf(DelegatedCatalogStore.class);
+        assertThat(((RevisionedCatalogStore) delegating).storeIdentity()).contains("cell-1");
         assertThat(((DelegatedCatalogStore) delegating).visibilityTimeout()).isEqualTo(Duration.ofSeconds(40));
         // The store itself still writes nothing
         assertThatThrownBy(() -> delegating.removeCatalog(new CatalogName("ext_a__b")))
