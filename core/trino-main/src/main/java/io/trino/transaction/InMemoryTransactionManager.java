@@ -37,6 +37,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
@@ -57,6 +58,7 @@ import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.concurrent.MoreFutures.addExceptionCallback;
 import static io.airlift.units.Duration.succinctDuration;
 import static io.trino.metadata.CatalogManager.NO_CATALOGS;
+import static io.trino.security.CatalogIdentity.identityClaimsName;
 import static io.trino.spi.StandardErrorCode.ADMINISTRATIVELY_KILLED;
 import static io.trino.spi.StandardErrorCode.AUTOCOMMIT_WRITE_CONFLICT;
 import static io.trino.spi.StandardErrorCode.CATALOG_NOT_FOUND;
@@ -64,6 +66,7 @@ import static io.trino.spi.StandardErrorCode.MULTI_CATALOG_WRITE_CONFLICT;
 import static io.trino.spi.StandardErrorCode.READ_ONLY_VIOLATION;
 import static io.trino.spi.StandardErrorCode.TRANSACTION_ALREADY_ABORTED;
 import static io.trino.spi.StandardErrorCode.TRANSACTION_ALREADY_COMMITED;
+import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.stream.Collectors.toList;
@@ -193,6 +196,12 @@ public class InMemoryTransactionManager
     public Optional<CatalogHandle> getCatalogHandle(TransactionId transactionId, String catalogName)
     {
         return getTransactionMetadata(transactionId).tryRegisterCatalog(new CatalogName(catalogName));
+    }
+
+    @Override
+    public boolean isCatalogIdentityAuthorized(TransactionId transactionId, String catalogName, Set<String> identityGroups)
+    {
+        return getTransactionMetadata(transactionId).isCatalogIdentityAuthorized(catalogName, identityGroups);
     }
 
     @Override
@@ -428,6 +437,25 @@ public class InMemoryTransactionManager
             Optional<Catalog> catalog = registeredCatalogs.computeIfAbsent(catalogName, catalogManager::getCatalog);
             catalog.ifPresent(Catalog::verify);
             return catalog.map(Catalog::getCatalogHandle);
+        }
+
+        private synchronized boolean isCatalogIdentityAuthorized(String name, Set<String> identityGroups)
+        {
+            checkOpenTransaction();
+            // These policy-only names cannot identify an engine catalog.
+            if (name.isEmpty() || !name.equals(name.toLowerCase(ENGLISH))) {
+                return true;
+            }
+            CatalogName catalogName = new CatalogName(name);
+            Optional<String> retainedGroup = registeredCatalogs.computeIfAbsent(catalogName, catalogManager::getCatalog)
+                    .flatMap(Catalog::requiredIdentityGroup);
+            if (retainedGroup.isPresent()) {
+                return identityGroups.contains(retainedGroup.orElseThrow());
+            }
+            Optional<String> currentGroup = catalogManager.getCatalog(catalogName)
+                    .flatMap(Catalog::requiredIdentityGroup);
+            // A name claim never authorizes an unbound instance, including after removal.
+            return currentGroup.isEmpty() && !identityClaimsName(catalogName, identityGroups);
         }
 
         private synchronized CatalogMetadata getTransactionCatalogMetadata(CatalogHandle catalogHandle)

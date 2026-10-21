@@ -15,10 +15,12 @@ package io.trino.connector;
 
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Binder;
+import com.google.inject.Key;
 import com.google.inject.Module;
 import com.google.inject.Provides;
 import com.google.inject.Singleton;
 import io.trino.plugin.tpch.TpchPlugin;
+import io.trino.server.CatalogSyncResource;
 import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.catalog.CatalogProperties;
 import io.trino.spi.catalog.CatalogStore;
@@ -68,6 +70,36 @@ public class TestBrokenCatalogQueries
         if (queryRunner != null) {
             queryRunner.close();
             queryRunner = null;
+        }
+    }
+
+    @Test
+    public void testStoreCannotReplaceAProcessOnlyCatalogAtStartup()
+    {
+        assertThat(queryRunner.execute("SELECT connector_name FROM system.metadata.catalogs WHERE catalog_name = 'system'").getOnlyValue())
+                .isEqualTo("system");
+    }
+
+    @Test
+    public void testFailedStoredCatalogCanRecoverWithoutRestart()
+    {
+        try (StandaloneQueryRunner recovery = new StandaloneQueryRunner(
+                TEST_SESSION,
+                builder -> builder.setAdditionalModule(new BrokenCatalogStoreModule()).addProperty("catalog.store", "broken_at_startup"))) {
+            recovery.installPlugin(new TpchPlugin());
+            CoordinatorDynamicCatalogManager manager = recovery.getCoordinator().getInstance(Key.get(CoordinatorDynamicCatalogManager.class));
+            CatalogSyncResource resource = recovery.getCoordinator().getInstance(Key.get(CatalogSyncResource.class));
+            CatalogName name = new CatalogName(BROKEN_CATALOG);
+            assertThat(manager.getCatalog(name).orElseThrow().isFailed()).isTrue();
+            assertThat(manager.storeCatalogNames()).contains(name);
+            assertThat(resource.catalogSyncStatus().catalogInstances()).noneMatch(instance -> instance.name().equals(BROKEN_CATALOG));
+            assertThat(manager.applyPublishedCatalog(new CatalogProperties(name, new CatalogVersion("repaired"), new ConnectorName("tpch"), Map.of()))).isTrue();
+            assertThat(recovery.execute("SELECT count(*) FROM broken.tiny.region").getOnlyValue()).isEqualTo(5L);
+            assertThat(resource.catalogSyncStatus().catalogInstances()).anySatisfy(instance -> {
+                assertThat(instance.name()).isEqualTo(BROKEN_CATALOG);
+                assertThat(instance.version()).isEqualTo("repaired");
+                assertThat(instance.published()).isTrue();
+            });
         }
     }
 
@@ -181,6 +213,20 @@ public class TestBrokenCatalogQueries
                         public CatalogProperties loadProperties()
                         {
                             return BROKEN_CATALOG_PROPERTIES;
+                        }
+                    })
+                    .add(new StoredCatalog()
+                    {
+                        @Override
+                        public CatalogName name()
+                        {
+                            return new CatalogName("system");
+                        }
+
+                        @Override
+                        public CatalogProperties loadProperties()
+                        {
+                            return new CatalogProperties(new CatalogName("system"), new CatalogVersion("conflicting_system"), new ConnectorName("tpch"), Map.of());
                         }
                     })
                     .addAll(delegate.getCatalogs())

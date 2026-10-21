@@ -146,6 +146,9 @@ public class CoordinatorDynamicCatalogManager
                                 try {
                                     catalog = storedCatalog.loadProperties();
                                     verify(catalog.name().equals(storedCatalog.name()), "Catalog name does not match catalog properties");
+                                    if (activeCatalogs.containsKey(storedCatalog.name()) && !storeCatalogs.contains(storedCatalog.name())) {
+                                        throw new TrinoException(ALREADY_EXISTS, "The catalog name belongs to a process-only catalog");
+                                    }
                                     CatalogConnector newCatalog = catalogFactory.createCatalog(catalog);
                                     activeCatalogs.put(storedCatalog.name(), newCatalog.getCatalog());
                                     allCatalogs.put(newCatalog.getCatalogHandle(), new RegisteredCatalog(new RegistrationToken(), newCatalog));
@@ -155,8 +158,10 @@ public class CoordinatorDynamicCatalogManager
                                 catch (Throwable e) {
                                     CatalogVersion catalogVersion = catalog != null ? catalog.version() : new CatalogVersion("failed");
                                     ConnectorName connectorName = catalog != null ? catalog.connectorName() : new ConnectorName("unknown");
-                                    activeCatalogs.put(storedCatalog.name(), failedCatalog(storedCatalog.name(), catalogVersion, connectorName));
-                                    storeCatalogs.add(storedCatalog.name());
+                                    if (!activeCatalogs.containsKey(storedCatalog.name()) || storeCatalogs.contains(storedCatalog.name())) {
+                                        activeCatalogs.put(storedCatalog.name(), failedCatalog(storedCatalog.name(), catalogVersion, connectorName));
+                                        storeCatalogs.add(storedCatalog.name());
+                                    }
                                     log.error(e, "-- Failed to load catalog %s using connector %s --", storedCatalog.name(), connectorName);
                                 }
                                 return null;
@@ -207,6 +212,9 @@ public class CoordinatorDynamicCatalogManager
 
             CatalogHandle catalogHandle = createRootCatalogHandle(catalogProperties.name(), catalogProperties.version());
             Catalog activeCatalog = activeCatalogs.get(catalogProperties.name());
+            if (activeCatalog != null && !storeCatalogs.contains(catalogProperties.name())) {
+                throw new TrinoException(ALREADY_EXISTS, "The catalog name belongs to a process-only catalog");
+            }
             if (activeCatalog != null && activeCatalog.getCatalogHandle().equals(catalogHandle) && !activeCatalog.isFailed()) {
                 storeCatalogs.add(catalogProperties.name());
                 return false;

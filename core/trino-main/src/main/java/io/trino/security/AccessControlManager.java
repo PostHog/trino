@@ -87,6 +87,7 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Strings.isNullOrEmpty;
 import static com.google.common.base.Throwables.throwIfUnchecked;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.airlift.configuration.ConfigurationLoader.loadPropertiesFrom;
 import static io.trino.spi.StandardErrorCode.INVALID_COLUMN_MASK;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -427,7 +428,10 @@ public class AccessControlManager
         for (SystemAccessControl systemAccessControl : getSystemAccessControls()) {
             catalogs = systemAccessControl.filterCatalogs(securityContext.toSystemSecurityContext(), catalogs);
         }
-        return catalogs;
+        return catalogs.stream()
+                .filter(catalog -> transactionManager.isCatalogIdentityAuthorized(
+                        securityContext.getTransactionId(), catalog, securityContext.getIdentity().getGroups()))
+                .collect(toImmutableSet());
     }
 
     @Override
@@ -1636,6 +1640,10 @@ public class AccessControlManager
                 authorizationFail.update(1);
                 return false;
             }
+        }
+        if (!transactionManager.isCatalogIdentityAuthorized(securityContext.getTransactionId(), catalogName, securityContext.getIdentity().getGroups())) {
+            authorizationFail.update(1);
+            return false;
         }
         authorizationSuccess.update(1);
         return true;

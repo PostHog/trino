@@ -32,6 +32,7 @@ import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.connector.CatalogHandle.createRootCatalogHandle;
 import static io.trino.metadata.CatalogStatus.FAILING;
+import static io.trino.security.CatalogIdentity.validateBinding;
 import static io.trino.spi.StandardErrorCode.CATALOG_UNAVAILABLE;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -45,6 +46,7 @@ public class Catalog
     private final ConnectorServices informationSchemaConnector;
     private final ConnectorServices systemConnector;
     private final CatalogStatus catalogStatus;
+    private final Optional<String> requiredIdentityGroup;
 
     public Catalog(
             CatalogName catalogName,
@@ -55,6 +57,19 @@ public class Catalog
             ConnectorServices systemConnector,
             CatalogStatus catalogStatus)
     {
+        this(catalogName, catalogHandle, connectorName, catalogConnector, informationSchemaConnector, systemConnector, catalogStatus, Optional.empty());
+    }
+
+    public Catalog(
+            CatalogName catalogName,
+            CatalogHandle catalogHandle,
+            ConnectorName connectorName,
+            ConnectorServices catalogConnector,
+            ConnectorServices informationSchemaConnector,
+            ConnectorServices systemConnector,
+            CatalogStatus catalogStatus,
+            Optional<String> requiredIdentityGroup)
+    {
         this.catalogName = requireNonNull(catalogName, "catalogName is null");
         this.catalogHandle = requireNonNull(catalogHandle, "catalogHandle is null");
         checkArgument(!catalogHandle.getType().isInternal(), "Internal catalogName not allowed");
@@ -63,6 +78,8 @@ public class Catalog
         this.informationSchemaConnector = requireNonNull(informationSchemaConnector, "informationSchemaConnector is null");
         this.systemConnector = requireNonNull(systemConnector, "systemConnector is null");
         this.catalogStatus = requireNonNull(catalogStatus, "catalogStatus is null");
+        this.requiredIdentityGroup = requireNonNull(requiredIdentityGroup, "requiredIdentityGroup is null");
+        requiredIdentityGroup.ifPresent(group -> validateBinding(catalogName, group));
     }
 
     public static Catalog failedCatalog(CatalogName catalogName, CatalogVersion catalogVersion, ConnectorName connectorName)
@@ -79,6 +96,12 @@ public class Catalog
         this.informationSchemaConnector = null;
         this.systemConnector = null;
         this.catalogStatus = catalogStatus;
+        this.requiredIdentityGroup = Optional.empty();
+    }
+
+    public Optional<String> requiredIdentityGroup()
+    {
+        return requiredIdentityGroup;
     }
 
     public CatalogName getCatalogName()

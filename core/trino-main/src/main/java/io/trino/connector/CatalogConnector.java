@@ -26,6 +26,8 @@ import static java.util.Objects.requireNonNull;
 
 public class CatalogConnector
 {
+    public static final String REQUIRED_IDENTITY_GROUP_PROPERTY = "catalog.required-identity-group";
+
     private final CatalogHandle catalogHandle;
     private final ConnectorName connectorName;
     private final ConnectorServices catalogConnector;
@@ -56,7 +58,8 @@ public class CatalogConnector
                 catalogConnector,
                 informationSchemaConnector,
                 systemConnector,
-                OPERATIONAL);
+                OPERATIONAL,
+                catalogProperties.map(properties -> properties.properties().get(REQUIRED_IDENTITY_GROUP_PROPERTY)));
     }
 
     public CatalogHandle getCatalogHandle()
