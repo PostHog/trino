@@ -34,7 +34,8 @@ import static java.util.Objects.requireNonNull;
 /**
  * Delta Lake over tables in tenant buckets, with schemas and table registrations stored by PostHog.
  * <p>
- * The cross-query metastore cache stays off by default ({@code hive.metastore-cache-ttl=0s}),
+ * The cross-query metastore cache stays off by default ({@code hive.metastore-cache-ttl=0s}
+ * and {@code hive.metastore-stats-cache-ttl=0s}),
  * so a registration is visible to the next query on the same coordinator.
  * Every metastore lookup is one REST call; within one query Delta still caches it per transaction.
  */
@@ -51,7 +52,9 @@ public class PostHogExternalConnectorFactory
     private static final Map<String, String> FORCED = ImmutableMap.of("delta.security", "system");
     private static final Map<String, String> DEFAULTS = ImmutableMap.of(
             "delta.register-table-procedure.enabled", "true",
-            "hive.metastore-cache-ttl", "0s");
+            "hive.metastore-cache-ttl", "0s",
+            // the metastore has no statistics to cache, and a shared cache would drop the session user from requests
+            "hive.metastore-stats-cache-ttl", "0s");
 
     @Override
     public String getName()

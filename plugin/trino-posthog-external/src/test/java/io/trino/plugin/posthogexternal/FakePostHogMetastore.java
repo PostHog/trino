@@ -132,12 +132,14 @@ final class FakePostHogMetastore
     private synchronized void route(HttpExchange exchange, String method, String path)
             throws IOException
     {
-        Matcher matcher;
+        Matcher schemaPath = SCHEMA.matcher(path);
+        Matcher tablesPath = TABLES.matcher(path);
+        Matcher tablePath = TABLE.matcher(path);
         if (SCHEMAS.matcher(path).matches() && method.equals("GET")) {
             respond(exchange, 200, ImmutableMap.of("schemas", ImmutableList.copyOf(new TreeMap<>(schemas).keySet())));
         }
-        else if ((matcher = SCHEMA.matcher(path)).matches()) {
-            String schema = matcher.group(1);
+        else if (schemaPath.matches()) {
+            String schema = schemaPath.group(1);
             switch (method) {
                 case "GET" -> {
                     if (schemas.containsKey(schema)) {
@@ -174,8 +176,8 @@ final class FakePostHogMetastore
                 default -> error(exchange, 400, "invalid", "method");
             }
         }
-        else if ((matcher = TABLES.matcher(path)).matches() && method.equals("GET")) {
-            Map<String, JsonNode> tables = schemas.get(matcher.group(1));
+        else if (tablesPath.matches() && method.equals("GET")) {
+            Map<String, JsonNode> tables = schemas.get(tablesPath.group(1));
             if (tables == null) {
                 error(exchange, 404, "not_found", "no schema");
             }
@@ -183,9 +185,9 @@ final class FakePostHogMetastore
                 respond(exchange, 200, ImmutableMap.of("tables", ImmutableList.copyOf(new TreeMap<>(tables).keySet())));
             }
         }
-        else if ((matcher = TABLE.matcher(path)).matches()) {
-            Map<String, JsonNode> tables = schemas.get(matcher.group(1));
-            String name = matcher.group(2);
+        else if (tablePath.matches()) {
+            Map<String, JsonNode> tables = schemas.get(tablePath.group(1));
+            String name = tablePath.group(2);
             if (tables == null) {
                 error(exchange, 404, "not_found", "no schema");
                 return;

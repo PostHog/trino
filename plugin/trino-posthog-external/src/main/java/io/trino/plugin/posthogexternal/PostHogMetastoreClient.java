@@ -248,8 +248,7 @@ public class PostHogMetastoreClient
         String message = response.safeMessage();
         String request = response.method() + " " + response.path();
         throw switch (code) {
-            case "invalid", "limit_exceeded", "already_exists", "not_found", "not_empty" ->
-                    new TrinoException(GENERIC_USER_ERROR, "PostHog metastore refused %s (%s): %s".formatted(request, code, message));
+            case "invalid", "limit_exceeded", "already_exists", "not_found", "not_empty" -> new TrinoException(GENERIC_USER_ERROR, "PostHog metastore refused %s (%s): %s".formatted(request, code, message));
             default -> switch (response.status()) {
                 case 401, 403 -> new TrinoException(GENERIC_INTERNAL_ERROR, "PostHog metastore rejected this catalog's service credentials (HTTP %s) for %s".formatted(response.status(), request));
                 default -> new TrinoException(GENERIC_EXTERNAL_ERROR, "PostHog metastore failed %s with HTTP %s: %s".formatted(request, response.status(), message));

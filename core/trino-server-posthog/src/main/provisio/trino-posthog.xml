@@ -95,6 +95,16 @@
     </artifactSet>
 
     <!--
+        Tenant tables in their own buckets: connector.name=posthog_external, with schemas and
+        registrations stored by the control plane.
+    -->
+    <artifactSet to="plugin/posthog-external">
+        <artifact id="${project.groupId}:trino-posthog-external:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
+    <!--
         Iceberg parity. Both fork connectors are Iceberg-shaped, and keeping stock
         Iceberg on the same image is what makes a "does upstream do this too?" check
         a one-catalog experiment instead of a second image. trino-hdfs comes with it,
