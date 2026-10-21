@@ -68,6 +68,7 @@ final class TestPostHogManagedCatalogStore
     {
         String cellId = newCell();
         RevisionedCatalogStore store = managedStore(cellId);
+        assertThat(store.storeIdentity()).contains(cellId);
 
         // Nobody owns this cell yet: not an empty state, an unknown one
         new TestingCatalogPublisher(database, cellId, 1, PUBLISHER).createTables();

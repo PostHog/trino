@@ -1,5 +1,47 @@
 # PostHog catalog store
 
+## Catalog identity authorization
+
+`catalog.required-identity-group` binds a catalog instance to a canonical owner.
+The engine removes this property before creating the connector.
+An empty binding is invalid.
+
+The reserved format is `external_identity_<name-hash>_<owner-hash>`.
+Each hash contains 32 lowercase hexadecimal characters.
+The name hash contains the first 16 bytes of SHA-256 over the UTF-8 catalog name.
+The owner hash identifies the canonical owner.
+The publisher must include the canonical owner ID in that hash.
+The engine rejects malformed or mismatched reserved bindings.
+
+The identity must hold the required group for the actual instance retained by its transaction.
+The current authorization policy must also permit the operation.
+Replacing the visible name does not authorize another owner's retained instance.
+A newly bound name also rejects a retained unbound instance.
+A trusted identity's valid name claim rejects any unbound instance with that name.
+This check also applies after removal or ordinary name reuse.
+
+Credential rotation under the same canonical owner keeps the same identity group.
+
+Unbound catalogs retain their existing behavior without a matching name claim.
+An unrelated external name claim does not block ordinary authorization.
+Client headers or extra credentials cannot supply trusted name claims.
+The group provider supplies the identity groups.
+Revoke the name claim together with its generation grant in one group snapshot.
+
+The existing `/v1/catalog/sync` response reports `catalogIdentityVersion: 1`.
+It reports each active instance's name, content version, connector, binding, and store-publication status.
+Failed placeholders do not represent active instances.
+`catalogStoreIdentity` reports the managed store's configured cell identity.
+These fields contain no connector credentials.
+The synchronization revision alone does not prove that a particular instance matches a desired binding.
+
+Deploy this support to every coordinator before publishing bound catalogs.
+Include draining coordinators that can receive statements in existing transactions.
+Require matching live receipts before granting a newly bound name.
+Validate future admissions against the current bound definitions.
+A failed application must not authorize a process-only catalog with the same name.
+The engine refuses publication over an actual process-only catalog.
+
 ## Delegated catalog requests
 
 A read-only (`catalog-store.read-only=true`) coordinator rejects `CREATE CATALOG`

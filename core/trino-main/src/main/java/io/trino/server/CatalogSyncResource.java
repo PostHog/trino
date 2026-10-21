@@ -14,11 +14,13 @@
 package io.trino.server;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.inject.Inject;
 import io.airlift.node.NodeInfo;
 import io.trino.connector.CatalogSyncFailure;
 import io.trino.connector.CatalogSynchronizer;
 import io.trino.connector.CatalogSynchronizer.CatalogSyncState;
+import io.trino.connector.CoordinatorDynamicCatalogManager;
 import io.trino.execution.QueryIdGenerator;
 import io.trino.metadata.CatalogManager;
 import io.trino.security.AccessControlManager;
@@ -26,6 +28,7 @@ import io.trino.security.GroupProviderManager;
 import io.trino.server.security.PasswordAuthenticatorManager;
 import io.trino.server.security.ResourceSecurity;
 import io.trino.spi.NodeVersion;
+import io.trino.spi.catalog.CatalogName;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
@@ -33,9 +36,12 @@ import jakarta.ws.rs.Produces;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.server.security.ResourceSecurity.AccessType.MANAGEMENT_READ;
 import static jakarta.ws.rs.core.MediaType.APPLICATION_JSON;
+import static java.util.Comparator.comparing;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -104,8 +110,36 @@ public class CatalogSyncResource
                 boxed(state.lastSuccessMillis()),
                 boxed(state.lastSuccessMillis().stream().map(millis -> System.currentTimeMillis() - millis).findFirst()),
                 state.lastFailure().map(CatalogSyncFailure::name).orElse(null),
-                securityRevisions());
+                securityRevisions(),
+                1,
+                catalogSynchronizer.storeIdentity().orElse(null),
+                catalogInstances());
     }
+
+    private List<CatalogInstance> catalogInstances()
+    {
+        Set<CatalogName> storeCatalogNames;
+        if (catalogManager instanceof CoordinatorDynamicCatalogManager dynamicCatalogManager) {
+            storeCatalogNames = dynamicCatalogManager.storeCatalogNames();
+        }
+        else {
+            storeCatalogNames = ImmutableSet.of();
+        }
+        return catalogManager.getCatalogNames().stream()
+                .sorted(comparing(Object::toString))
+                .map(catalogManager::getCatalog)
+                .flatMap(Optional::stream)
+                .filter(catalog -> !catalog.isFailed())
+                .map(catalog -> new CatalogInstance(
+                        catalog.getCatalogName().toString(),
+                        catalog.getCatalogHandle().getVersion().toString(),
+                        catalog.getConnectorName().toString(),
+                        catalog.requiredIdentityGroup().orElse(null),
+                        storeCatalogNames.contains(catalog.getCatalogName())))
+                .collect(toImmutableList());
+    }
+
+    public record CatalogInstance(String name, String version, String connector, String requiredIdentityGroup, boolean published) {}
 
     /**
      * What the security components of this process have loaded. This is reported beside the
@@ -145,5 +179,8 @@ public class CatalogSyncResource
             Long lastSuccessMillis,
             Long lastSuccessAgeMillis,
             String lastFailure,
-            List<ComponentRevision> securityRevisions) {}
+            List<ComponentRevision> securityRevisions,
+            int catalogIdentityVersion,
+            String catalogStoreIdentity,
+            List<CatalogInstance> catalogInstances) {}
 }

@@ -134,6 +134,11 @@ public class CatalogSynchronizer
         return state.get();
     }
 
+    public Optional<String> storeIdentity()
+    {
+        return catalogStoreManager.revisionedCatalogStore().flatMap(RevisionedCatalogStore::storeIdentity);
+    }
+
     private void schedule(long delayMillis)
     {
         scheduleTask(this::runOnce, delayMillis);

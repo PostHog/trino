@@ -22,6 +22,7 @@ import io.trino.spi.transaction.IsolationLevel;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Used on workers.
@@ -79,6 +80,12 @@ public class NoOpTransactionManager
 
     @Override
     public Optional<CatalogHandle> getCatalogHandle(TransactionId transactionId, String catalogName)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public boolean isCatalogIdentityAuthorized(TransactionId transactionId, String catalogName, Set<String> identityGroups)
     {
         throw new UnsupportedOperationException();
     }

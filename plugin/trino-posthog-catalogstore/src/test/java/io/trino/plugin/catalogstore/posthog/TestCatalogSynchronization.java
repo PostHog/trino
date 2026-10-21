@@ -14,6 +14,7 @@
 package io.trino.plugin.catalogstore.posthog;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.inject.Binder;
 import com.google.inject.Key;
 import com.google.inject.Module;
@@ -21,6 +22,7 @@ import com.google.inject.Provides;
 import com.google.inject.Singleton;
 import com.sun.net.httpserver.HttpServer;
 import io.airlift.json.JsonCodec;
+import io.trino.Session;
 import io.trino.connector.CatalogHandle;
 import io.trino.connector.CatalogPruneTask;
 import io.trino.connector.CatalogStoreManager;
@@ -30,6 +32,7 @@ import io.trino.server.CatalogSyncResource;
 import io.trino.server.CatalogSyncResource.CatalogSyncStatus;
 import io.trino.spi.catalog.CatalogStore;
 import io.trino.spi.catalog.CatalogStoreFactory;
+import io.trino.spi.security.Identity;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner.MaterializedResultWithPlan;
 import io.trino.transaction.TransactionId;
@@ -52,9 +55,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
+import static io.trino.spi.StandardErrorCode.PERMISSION_DENIED;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.assertions.Assert.assertEventually;
+import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -84,6 +89,54 @@ final class TestCatalogSynchronization
     {
         database.close();
         database = null;
+    }
+
+    @Test
+    void testBoundCatalogReceiptDescribesTheInstalledInstance()
+            throws Exception
+    {
+        String cellId = newCell();
+        String ownerGroup = "synthetic_external_owner";
+        TestingCatalogPublisher publisher = publisher(cellId);
+        try (DistributedQueryRunner coordinator = coordinator(cellId, true, 1)) {
+            coordinator.getGroupProvider().setConfiguredGroupProvider(user -> user.equals("synthetic_reader") ? ImmutableSet.of(ownerGroup) : ImmutableSet.of());
+            long revision = publisher.publishCatalog("bound-add", "assets", "tpch", ImmutableMap.of("catalog.required-identity-group", ownerGroup));
+            assertEventually(() -> assertThat(catalogSyncStatus(coordinator).appliedRevision()).isEqualTo(revision));
+            CatalogSyncStatus status = catalogSyncStatus(coordinator);
+            assertThat(status.catalogIdentityVersion()).isEqualTo(1);
+            assertThat(status.catalogStoreIdentity()).isEqualTo(cellId);
+            assertThat(status.catalogInstances()).anySatisfy(instance -> {
+                assertThat(instance.name()).isEqualTo("assets");
+                assertThat(instance.requiredIdentityGroup()).isEqualTo(ownerGroup);
+                assertThat(instance.published()).isTrue();
+            });
+            Session owner = testSessionBuilder()
+                    .setIdentity(Identity.forUser("synthetic_reader").withGroups(ImmutableSet.of(ownerGroup)).build())
+                    .build();
+            assertThat(coordinator.execute(owner, "SELECT count(*) FROM assets.sf1.orders").getOnlyValue()).isEqualTo(1_500_000L);
+            assertTrinoExceptionThrownBy(() -> coordinator.execute("SELECT count(*) FROM assets.sf1.orders")).hasErrorCode(PERMISSION_DENIED);
+        }
+    }
+
+    @Test
+    void testAProcessOnlyCollisionNeverReportsTheProposedBinding()
+            throws Exception
+    {
+        String cellId = newCell();
+        TestingCatalogPublisher publisher = publisher(cellId);
+        try (DistributedQueryRunner coordinator = managedCoordinator(cellId)) {
+            assertEventually(() -> assertThat(catalogSyncStatus(coordinator).ready()).isTrue());
+            long revision = publisher.publishCatalog("conflicting-add", "system", "tpch", ImmutableMap.of("catalog.required-identity-group", "synthetic_external_owner"));
+            assertEventually(() -> assertThat(catalogSyncStatus(coordinator).lastFailure()).isEqualTo("CATALOGS_NOT_APPLIED"));
+            CatalogSyncStatus status = catalogSyncStatus(coordinator);
+            assertThat(status.appliedRevision()).isNotEqualTo(revision);
+            assertThat(status.catalogInstances()).anySatisfy(instance -> {
+                assertThat(instance.name()).isEqualTo("system");
+                assertThat(instance.requiredIdentityGroup()).isNull();
+                assertThat(instance.published()).isFalse();
+            });
+            assertThat(coordinator.execute("SELECT connector_name FROM system.metadata.catalogs WHERE catalog_name = 'system'").getOnlyValue()).isEqualTo("system");
+        }
     }
 
     @Test
