@@ -23,9 +23,12 @@ import io.trino.connector.CatalogStoreManager;
 import io.trino.metadata.Catalog;
 import io.trino.metadata.CatalogManager;
 import io.trino.security.AccessControl;
+import io.trino.security.SecurityContext;
 import io.trino.spi.TrinoException;
 import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.catalog.DelegatedCatalogStore;
+import io.trino.spi.security.GroupProvider;
+import io.trino.spi.security.Identity;
 import jakarta.annotation.PreDestroy;
 
 import java.time.Duration;
@@ -60,22 +63,24 @@ public class DelegatedCatalogMutations
     private final Optional<CatalogStoreManager> catalogStoreManager;
     private final CatalogManager catalogManager;
     private final AccessControl accessControl;
+    private final GroupProvider groupProvider;
     private final Duration pollInterval;
     // Each poll can call access control, which may be remote, so waits do not share one thread
     private final ScheduledExecutorService executor = newScheduledThreadPool(4, daemonThreadsNamed("delegated-catalog-wait-%s"));
 
     @Inject
-    public DelegatedCatalogMutations(Optional<CatalogStoreManager> catalogStoreManager, CatalogManager catalogManager, AccessControl accessControl)
+    public DelegatedCatalogMutations(Optional<CatalogStoreManager> catalogStoreManager, CatalogManager catalogManager, AccessControl accessControl, GroupProvider groupProvider)
     {
-        this(catalogStoreManager, catalogManager, accessControl, POLL_INTERVAL);
+        this(catalogStoreManager, catalogManager, accessControl, groupProvider, POLL_INTERVAL);
     }
 
     @VisibleForTesting
-    DelegatedCatalogMutations(Optional<CatalogStoreManager> catalogStoreManager, CatalogManager catalogManager, AccessControl accessControl, Duration pollInterval)
+    DelegatedCatalogMutations(Optional<CatalogStoreManager> catalogStoreManager, CatalogManager catalogManager, AccessControl accessControl, GroupProvider groupProvider, Duration pollInterval)
     {
         this.catalogStoreManager = requireNonNull(catalogStoreManager, "catalogStoreManager is null");
         this.catalogManager = requireNonNull(catalogManager, "catalogManager is null");
         this.accessControl = requireNonNull(accessControl, "accessControl is null");
+        this.groupProvider = requireNonNull(groupProvider, "groupProvider is null");
         this.pollInterval = requireNonNull(pollInterval, "pollInterval is null");
     }
 
@@ -110,7 +115,22 @@ public class DelegatedCatalogMutations
     public boolean isAvailable(Session session, CatalogName catalogName)
     {
         return isActive(catalogName) &&
-                accessControl.filterCatalogs(session.toSecurityContext(), Set.of(catalogName.toString())).contains(catalogName.toString());
+                accessControl.filterCatalogs(currentSecurityContext(session), Set.of(catalogName.toString())).contains(catalogName.toString());
+    }
+
+    /**
+     * The session's security context with the user's groups as the group provider reports them
+     * now. A session's groups are resolved when its query starts, and a control plane may grant a
+     * new catalog through a group that only exists once the catalog does; checked with the groups
+     * the waiting statement started with, that grant would never become visible to it.
+     */
+    private SecurityContext currentSecurityContext(Session session)
+    {
+        Identity identity = session.getIdentity();
+        Identity current = Identity.from(identity)
+                .withGroups(groupProvider.getGroups(identity.getUser()))
+                .build();
+        return new SecurityContext(session.getRequiredTransactionId(), current, session.getQueryId(), session.getStart());
     }
 
     /**
