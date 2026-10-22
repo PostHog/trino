@@ -41,6 +41,7 @@ import io.trino.spi.catalog.DelegatedCatalogStore;
 import io.trino.spi.connector.CatalogVersion;
 import io.trino.spi.connector.ConnectorName;
 import io.trino.spi.resourcegroups.ResourceGroupId;
+import io.trino.spi.security.GroupProvider;
 import io.trino.spi.security.Identity;
 import io.trino.sql.tree.CreateCatalog;
 import io.trino.sql.tree.DropCatalog;
@@ -267,10 +268,40 @@ public class TestDelegatedCatalogTasks
                 return check <= 4 ? ImmutableSet.of() : catalogs;
             }
         };
-        DelegatedCatalogMutations mutations = new DelegatedCatalogMutations(Optional.empty(), catalogManager, accessControl, Duration.ofMillis(20));
+        DelegatedCatalogMutations mutations = new DelegatedCatalogMutations(Optional.empty(), catalogManager, accessControl, _ -> ImmutableSet.of(), Duration.ofMillis(20));
         try {
             getFutureValue(mutations.awaitCreated(stateMachine(), catalogName, true, Duration.ofSeconds(30)));
             assertThat(checks.get()).isGreaterThanOrEqualTo(5);
+        }
+        finally {
+            mutations.stop();
+        }
+    }
+
+    @Test
+    public void testWaitSeesAGrantThroughAGroupTheSessionDidNotStartWith()
+    {
+        // The control plane grants a new catalog through a group that exists only once the catalog
+        // does, so the waiting statement's session never held it. The wait must ask the group
+        // provider again rather than check with the groups the statement started with.
+        CatalogName catalogName = new CatalogName(CATALOG);
+        publish(catalogName);
+        AtomicInteger lookups = new AtomicInteger();
+        GroupProvider groups = _ -> lookups.incrementAndGet() < 3 ? ImmutableSet.of() : ImmutableSet.of("catalog_grant");
+        AccessControl grantedThroughGroup = new AllowAllAccessControl()
+        {
+            @Override
+            public Set<String> filterCatalogs(SecurityContext context, Set<String> catalogs)
+            {
+                return context.getIdentity().getGroups().contains("catalog_grant") ? catalogs : ImmutableSet.of();
+            }
+        };
+        DelegatedCatalogMutations mutations = new DelegatedCatalogMutations(Optional.empty(), catalogManager, grantedThroughGroup, groups, Duration.ofMillis(20));
+        try {
+            QueryStateMachine stateMachine = stateMachine();
+            assertThat(stateMachine.getSession().getIdentity().getGroups()).doesNotContain("catalog_grant");
+            getFutureValue(mutations.awaitCreated(stateMachine, catalogName, true, Duration.ofSeconds(30)));
+            assertThat(lookups.get()).isGreaterThanOrEqualTo(3);
         }
         finally {
             mutations.stop();
@@ -290,7 +321,7 @@ public class TestDelegatedCatalogTasks
                 return ImmutableSet.of();
             }
         };
-        DelegatedCatalogMutations mutations = new DelegatedCatalogMutations(Optional.empty(), catalogManager, hidden, Duration.ofMillis(20));
+        DelegatedCatalogMutations mutations = new DelegatedCatalogMutations(Optional.empty(), catalogManager, hidden, _ -> ImmutableSet.of(), Duration.ofMillis(20));
         try {
             // IF NOT EXISTS must not succeed locally for another login's catalog
             assertThat(mutations.isActive(catalogName)).isTrue();
