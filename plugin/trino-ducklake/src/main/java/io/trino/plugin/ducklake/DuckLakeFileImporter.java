@@ -202,6 +202,14 @@ final class DuckLakeFileImporter
                 .putInt(1).putLong(handle.table().tableId())
                 .putBoolean(handle.allowMissing()).putBoolean(handle.ignoreExtraColumns())
                 .putBoolean(handle.hivePartitioning()).putBoolean(handle.replace()).putInt(files.size());
+        handle.replacementRange().ifPresent(range -> {
+            hash.putString("replacement_range_v1", UTF_8);
+            hash.putLong(range.column().columnId());
+            for (String value : ImmutableList.of(range.column().type().toString(), range.start(), range.end())) {
+                byte[] bytes = value.getBytes(UTF_8);
+                hash.putInt(bytes.length).putBytes(bytes);
+            }
+        });
         for (ImportedFile file : files) {
             byte[] path = file.file().path().getBytes(UTF_8);
             hash.putInt(path.length).putBytes(path).putLong(file.file().fileSizeBytes()).putString(file.footerHash(), UTF_8);

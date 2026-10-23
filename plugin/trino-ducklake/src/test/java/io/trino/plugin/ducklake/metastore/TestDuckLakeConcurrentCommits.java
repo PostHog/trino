@@ -33,6 +33,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -195,6 +196,35 @@ final class TestDuckLakeConcurrentCommits
         // reading the row again reaches the same conclusion, so the failure is not retried
         assertThat(attempts).hasValue(2);
         assertThat(dataFileCount(table)).isEqualTo(0);
+    }
+
+    @Test
+    void testRangeReplacementRejectsConcurrentInsertsAndDeletes()
+            throws Exception
+    {
+        String tableName = "range_conflict_" + randomNameSuffix();
+        createTable(tableName);
+        executeInDuckDb("INSERT INTO " + tableName + " VALUES (7), (8)");
+        long tableId = metastore.findTable(metastore.currentSnapshotId(), "main", tableName).orElseThrow().tableId();
+        long snapshotBeforeInsert = metastore.currentSnapshotId();
+        executeInDuckDb("INSERT INTO " + tableName + " VALUES (9)");
+        assertThatThrownBy(() -> metastore.commit(snapshotBeforeInsert, commit -> {
+            commit.setTableTag(tableId, "range_receipt", Optional.of("should_rollback"));
+            commit.recordDelete(tableId);
+            commit.recordInsert(tableId);
+            return null;
+        })).isInstanceOf(TrinoException.class).hasMessageContaining("another transaction inserted into it");
+
+        long snapshotBeforeDelete = metastore.currentSnapshotId();
+        executeInDuckDb("DELETE FROM " + tableName + " WHERE x = 7");
+        assertThatThrownBy(() -> metastore.commit(snapshotBeforeDelete, commit -> {
+            commit.setTableTag(tableId, "range_receipt", Optional.of("should_rollback"));
+            commit.recordDelete(tableId);
+            commit.recordInsert(tableId);
+            return null;
+        })).isInstanceOf(TrinoException.class).hasMessageContaining("another transaction deleted from it");
+        assertThat(duckDbRows("SELECT x FROM " + tableName + " ORDER BY x")).containsExactly(8L, 9L);
+        assertThat(catalog.scalar("SELECT count(*)::VARCHAR FROM __ducklake_metadata_lake.ducklake_tag WHERE object_id = " + tableId + " AND key = 'range_receipt'")).isEqualTo("0");
     }
 
     /**

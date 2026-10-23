@@ -157,6 +157,7 @@ public class DuckLakeMetadata
     private final JdbcDuckLakeMetastore metastore;
     private final String dataPath;
     private final boolean addFilesProcedureEnabled;
+    private final DuckLakeRangeReplacement rangeReplacement;
     private final Map<Long, DuckLakeRowCount> rowCounts = new ConcurrentHashMap<>();
     private final Map<TableSnapshot, DuckLakeInlinedSummary> inlinedSummaries = new ConcurrentHashMap<>();
     private final JsonCodec<DuckLakeDataFile> dataFileCodec;
@@ -180,11 +181,13 @@ public class DuckLakeMetadata
             DuckLakeWriterFactory writerFactory,
             FileFormatDataSourceStats fileFormatDataSourceStats,
             ParquetReaderOptions parquetReaderOptions,
-            boolean addFilesProcedureEnabled)
+            boolean addFilesProcedureEnabled,
+            DuckLakeRangeReplacement rangeReplacement)
     {
         this.metastore = requireNonNull(metastore, "metastore is null");
         this.dataPath = requireNonNull(dataPath, "dataPath is null");
         this.addFilesProcedureEnabled = addFilesProcedureEnabled;
+        this.rangeReplacement = requireNonNull(rangeReplacement, "rangeReplacement is null");
         this.dataFileCodec = requireNonNull(dataFileCodec, "dataFileCodec is null");
         this.mergeFragmentCodec = requireNonNull(mergeFragmentCodec, "mergeFragmentCodec is null");
         this.viewDefinitionCodec = requireNonNull(viewDefinitionCodec, "viewDefinitionCodec is null");
@@ -784,12 +787,16 @@ public class DuckLakeMetadata
         DuckLakeTableHandle table = (DuckLakeTableHandle) tableHandle;
         accessControl.checkCanInsertIntoTable(null, table.schemaTableName(), Optional.empty());
         boolean replace = Boolean.TRUE.equals(properties.get("replace"));
-        if (replace) {
+        Optional<DuckLakeReplacementRange> range = replacementRange(table, properties);
+        if (replace && range.isPresent()) {
+            throw new TrinoException(StandardErrorCode.INVALID_PROCEDURE_ARGUMENT, "replace and replace_range_column are mutually exclusive");
+        }
+        if (replace || range.isPresent()) {
             accessControl.checkCanDeleteFromTable(null, table.schemaTableName(), Optional.empty());
             verifyNoInlinedData(table, "replacing rows");
         }
         Object rawFiles = properties.get("files");
-        if (!(rawFiles instanceof List<?> values) || values.size() > 10000 || (!replace && values.isEmpty())) {
+        if (!(rawFiles instanceof List<?> values) || values.size() > 10000 || (!replace && range.isEmpty() && values.isEmpty())) {
             throw new TrinoException(StandardErrorCode.INVALID_PROCEDURE_ARGUMENT, "files must contain 1 to 10000 Parquet locations (an empty replacement is allowed)");
         }
         ImmutableList.Builder<String> files = ImmutableList.builder();
@@ -812,7 +819,24 @@ public class DuckLakeMetadata
                 Boolean.TRUE.equals(properties.get("allow_missing")),
                 Boolean.TRUE.equals(properties.get("ignore_extra_columns")),
                 Boolean.TRUE.equals(properties.get("hive_partitioning")),
-                replace));
+                replace,
+                range));
+    }
+
+    private Optional<DuckLakeReplacementRange> replacementRange(DuckLakeTableHandle table, Map<String, Object> properties)
+    {
+        String name = (String) properties.get("replace_range_column");
+        String start = (String) properties.get("replace_range_start");
+        String end = (String) properties.get("replace_range_end");
+        if (name == null && start == null && end == null) {
+            return Optional.empty();
+        }
+        if (name == null || start == null || end == null) {
+            throw new TrinoException(StandardErrorCode.INVALID_PROCEDURE_ARGUMENT, "replace_range_column, replace_range_start and replace_range_end must be specified together");
+        }
+        DuckLakeColumnHandle column = columnHandles(table).stream().filter(value -> value.name().equalsIgnoreCase(name)).findFirst()
+                .orElseThrow(() -> new TrinoException(StandardErrorCode.INVALID_PROCEDURE_ARGUMENT, "Replacement range column does not exist: " + name));
+        return Optional.of(new DuckLakeReplacementRange(column, start, end));
     }
 
     @Override
@@ -824,6 +848,9 @@ public class DuckLakeMetadata
         DuckLakeWriteTarget target = new DuckLakeWriteTarget(table.schemaTableName(), table.tableId(), table.tableLocation(), columns, writePartitioningOf(table));
         List<DuckLakeFileImporter.ImportedFile> imported = DuckLakeFileImporter.readFiles(
                 fileSystemFactory.create(session), dataPath, handle, columns, target.partitioning(), parquetReaderOptions, fileFormatDataSourceStats);
+        handle.replacementRange().ifPresent(range -> range.validateImportedFiles(imported));
+        Optional<DuckLakeRangeReplacement.Plan> rangePlan = handle.replacementRange().map(range -> rangeReplacement.plan(session, table, range));
+        List<RewrittenDeletes> rangeDeletes = rangePlan.map(plan -> rewriteDeleteFiles(session, target, plan.positions())).orElse(ImmutableList.of());
         String fingerprint = DuckLakeFileImporter.fingerprint(handle, imported);
         String receiptKey = "trino_import_" + handle.importId();
         long added = commit(commit -> {
@@ -851,6 +878,17 @@ public class DuckLakeMetadata
                 removeAllRows(commit, table.tableId());
                 commit.recordDelete(table.tableId());
             }
+            rangePlan.ifPresent(plan -> {
+                Set<Long> changed = ImmutableSet.<Long>builder().addAll(plan.wholeFiles()).addAll(plan.positions().keySet()).build();
+                commit.verifyDataFilesUnchanged(table.tableId(), changed);
+                commit.verifyDeleteFilesUnchanged(table.tableId(), plan.positions().keySet(), rangeDeletes.stream()
+                        .flatMap(value -> value.replacedDeleteFileId().stream()).collect(toImmutableSet()));
+                removeDataFiles(commit, table.tableId(), ImmutableList.copyOf(plan.wholeFiles()));
+                applyDeletes(commit, target, rangeDeletes);
+                // A replacement depends on every row in the interval, including the absence of
+                // rows in an empty interval. Record both sides even for a delete-only batch.
+                commit.recordDelete(table.tableId());
+            });
             Map<String, Long> mappings = new LinkedHashMap<>();
             Map<List<DuckLakeCommit.NameMappingColumn>, Long> mappingIds = new LinkedHashMap<>();
             for (DuckLakeFileImporter.ImportedFile file : imported) {

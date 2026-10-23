@@ -389,10 +389,52 @@ For an atomic replacement of the entire table contents, also pass
 table identity, schema, properties, and prior snapshots. Tables holding inlined
 rows or inlined deletions must be flushed with DuckDB before replacement.
 
-This procedure appends files or replaces the entire table. It does not merge
-primary keys, apply Delta Lake transaction logs, or atomically replace a selected
-range of rows. Each statement commits independently; enclosing separate `DELETE`
-and `add_files` statements in `BEGIN` does not make them one atomic publication.
+To replace a half-open interval atomically, specify all three range options
+instead of `replace`:
+
+```sql
+ALTER TABLE example.default.events EXECUTE add_files(
+    files => ARRAY['s3://example-bucket/imports/february/part-000.parquet'],
+    import_id => 'replace-february-2024',
+    replace_range_column => 'occurred_at',
+    replace_range_start => '2024-02-01 00:00:00',
+    replace_range_end => '2024-03-01 00:00:00'
+);
+```
+
+The interval is `start <= column < end`; existing `NULL` values and rows outside
+it are preserved. The bounds use the column type's catalog string format. The
+range must name an exactly ordered top-level scalar column, and the start must
+be less than the end. Range replacement requires delete permission and a table
+without inlined rows or inlined deletions. An empty file list clears just the
+interval. `replace` and range options cannot be combined.
+
+Every nonempty replacement file must have footer statistics or path constants
+proving that all of its rows are non-NULL and inside the interval. A missing
+proof, out-of-range row, or NULL fails the whole batch before deleting anything.
+The range column identity, type, and bounds are included in the import receipt;
+reusing the ID with different bounds fails.
+
+The coordinator uses catalog statistics to skip disjoint files and end wholly
+covered files without reading their rows. For boundary files, or files whose
+statistics cannot decide membership, it reads only the range column and row
+positions using the regular Parquet reader, preserving existing positional
+deletes. It writes new positional delete files for partial removals. Existing
+data files and incoming Parquet objects are not rewritten. Boundary scans run
+on the coordinator, with a 128MB reader budget and a limit of five million newly
+deleted boundary positions per invocation. Use smaller intervals or files
+aligned to intervals if these limits are reached.
+
+All removals, new delete-file references, incoming-file references, and the
+receipt commit in one snapshot. A concurrent insert, delete, schema change, or
+compaction of the target table causes a conflict rather than losing the other
+writer's changes; retry the entire statement with the same import ID. As with
+other writes, an unsuccessful attempt may leave unreferenced delete files that
+require orphan cleanup, but it publishes no partial table change.
+
+The procedure does not merge primary keys or apply Delta Lake transaction logs.
+Each statement commits independently; enclosing separate `DELETE` and
+`add_files` statements in `BEGIN` does not make them one atomic publication.
 
 ## Inlined data
 

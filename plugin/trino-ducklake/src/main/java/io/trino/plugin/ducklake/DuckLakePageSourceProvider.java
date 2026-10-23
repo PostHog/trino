@@ -215,6 +215,17 @@ public class DuckLakePageSourceProvider
             DynamicFilter dynamicFilter,
             MemoryContext memoryContext)
     {
+        return createPageSource(session, split, table, columns, dynamicFilter, memoryContext);
+    }
+
+    ConnectorPageSource createPageSource(
+            ConnectorSession session,
+            ConnectorSplit split,
+            ConnectorTableHandle table,
+            List<ColumnHandle> columns,
+            DynamicFilter dynamicFilter,
+            MemoryContext memoryContext)
+    {
         if (split instanceof DuckLakeRowCountSplit rowCountSplit) {
             return rowCountPageSource(rowCountSplit, columns);
         }

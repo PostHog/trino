@@ -19,6 +19,7 @@ import com.google.common.collect.ImmutableList;
 import io.trino.spi.connector.ConnectorTableExecuteHandle;
 
 import java.util.List;
+import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
@@ -29,7 +30,8 @@ public record DuckLakeAddFilesHandle(
         @JsonProperty boolean allowMissing,
         @JsonProperty boolean ignoreExtraColumns,
         @JsonProperty boolean hivePartitioning,
-        @JsonProperty boolean replace)
+        @JsonProperty boolean replace,
+        @JsonProperty Optional<DuckLakeReplacementRange> replacementRange)
         implements ConnectorTableExecuteHandle
 {
     @JsonCreator
@@ -38,5 +40,6 @@ public record DuckLakeAddFilesHandle(
         requireNonNull(table, "table is null");
         files = ImmutableList.copyOf(files);
         requireNonNull(importId, "importId is null");
+        requireNonNull(replacementRange, "replacementRange is null");
     }
 }

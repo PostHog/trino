@@ -306,6 +306,9 @@ final class TestDuckLakeAddFiles
             assertQuery("SELECT id FROM " + table + " WHERE id = 4095", "VALUES 4095");
             assertQuery("SELECT count(*) FROM " + table, "VALUES CAST(4096 AS BIGINT)");
             assertThat(catalog.rows("SELECT id::VARCHAR FROM " + table + " WHERE id = 4095")).containsExactly("4095");
+            assertUpdate(replaceRange(table, "clear_second_group", "id", "2048", "4096"));
+            assertQuery("SELECT count(*), min(id), max(id) FROM " + table, "VALUES (CAST(2048 AS BIGINT), 0, 2047)");
+            assertThat(catalog.rows("SELECT count(*)::VARCHAR, max(id)::VARCHAR FROM " + table)).containsExactly("2048", "2047");
         }
         finally {
             assertUpdate("DROP TABLE " + table);
@@ -351,6 +354,123 @@ final class TestDuckLakeAddFiles
         finally {
             assertUpdate("DROP TABLE " + table);
         }
+    }
+
+    @Test
+    void testAtomicRangeReplacementPreservesBoundaryAndNullRows()
+            throws Exception
+    {
+        String table = "range_import_" + randomNameSuffix();
+        String file = catalog.externalParquetFile(table + "/incoming");
+        catalog.executeInDuckDb("COPY (SELECT 20::INTEGER id UNION ALL SELECT 29) TO '%s' (FORMAT PARQUET)".formatted(file));
+        byte[] original = Files.readAllBytes(Path.of(file));
+        assertUpdate("CREATE TABLE " + table + " (id INTEGER)");
+        assertUpdate("INSERT INTO " + table + " VALUES (9), (10), (15), (19), (20), (29), (30), (NULL)", 8);
+        // Existing positional deletes must survive when the range creates a new delete file.
+        assertUpdate("DELETE FROM " + table + " WHERE id = 9", 1);
+        try {
+            String before = catalog.scalar("SELECT max(snapshot_id)::VARCHAR FROM ducklake_snapshots('lake')");
+            String statement = replaceRange(table, "range", "id", "20", "30", location(file));
+            assertUpdate(statement);
+            assertQuery("SELECT id FROM " + table, "VALUES 10, 15, 19, 20, 29, 30, CAST(NULL AS INTEGER)");
+            assertThat(catalog.rows("SELECT id::VARCHAR FROM " + table + " ORDER BY id NULLS LAST")).containsExactly("10", "15", "19", "20", "29", "30", "<null>");
+            String after = catalog.scalar("SELECT max(snapshot_id)::VARCHAR FROM ducklake_snapshots('lake')");
+            assertThat(Long.parseLong(after)).isEqualTo(Long.parseLong(before) + 1);
+            assertThat(Files.readAllBytes(Path.of(file))).isEqualTo(original);
+            assertUpdate(statement);
+            assertThat(catalog.scalar("SELECT max(snapshot_id)::VARCHAR FROM ducklake_snapshots('lake')")).isEqualTo(after);
+            assertQueryFails(replaceRange(table, "range", "id", "19", "30", location(file)), ".*import_id.*different.*");
+            assertUpdate(replaceRange(table, "clear", "id", "10", "20"));
+            assertQuery("SELECT id FROM " + table, "VALUES 20, 29, 30, CAST(NULL AS INTEGER)");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testRangeReplacementDropsWholeFilesWithoutDeleteFiles()
+            throws Exception
+    {
+        String table = "range_whole_" + randomNameSuffix();
+        String inside = catalog.externalParquetFile(table + "/inside");
+        String outside = catalog.externalParquetFile(table + "/outside");
+        String replacement = catalog.externalParquetFile(table + "/replacement");
+        catalog.executeInDuckDb(
+                "COPY (SELECT 11::INTEGER id UNION ALL SELECT 19) TO '%s' (FORMAT PARQUET)".formatted(inside),
+                "COPY (SELECT 5::INTEGER id UNION ALL SELECT 30) TO '%s' (FORMAT PARQUET)".formatted(outside),
+                "COPY (SELECT 12::INTEGER id) TO '%s' (FORMAT PARQUET)".formatted(replacement));
+        assertUpdate("CREATE TABLE " + table + " (id INTEGER)");
+        try {
+            assertUpdate(addFiles(table, "seed", false, location(inside), location(outside)));
+            assertUpdate(replaceRange(table, "replace", "id", "10", "20", location(replacement)));
+            assertQuery("SELECT * FROM " + table, "VALUES 5, 12, 30");
+            assertThat(catalog.scalar("SELECT count(*)::VARCHAR FROM __ducklake_metadata_lake.ducklake_delete_file d JOIN __ducklake_metadata_lake.ducklake_table t USING(table_id) WHERE t.table_name = '%s'".formatted(table))).isEqualTo("0");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testInvalidRangeBatchPublishesNothing()
+            throws Exception
+    {
+        String table = "range_invalid_" + randomNameSuffix();
+        String outside = catalog.externalParquetFile(table + "/outside");
+        String nullable = catalog.externalParquetFile(table + "/nullable");
+        catalog.executeInDuckDb(
+                "COPY (SELECT 10::INTEGER id UNION ALL SELECT 20) TO '%s' (FORMAT PARQUET)".formatted(outside),
+                "COPY (SELECT 12::INTEGER id UNION ALL SELECT NULL) TO '%s' (FORMAT PARQUET)".formatted(nullable));
+        assertUpdate("CREATE TABLE " + table + " (id INTEGER)");
+        assertUpdate("INSERT INTO " + table + " VALUES 11, 18, 30", 3);
+        try {
+            String snapshot = catalog.scalar("SELECT max(snapshot_id)::VARCHAR FROM ducklake_snapshots('lake')");
+            assertQueryFails(replaceRange(table, "outside", "id", "10", "20", location(outside)), ".*entirely inside.*");
+            assertQueryFails(replaceRange(table, "null", "id", "10", "20", location(nullable)), ".*non-NULL.*");
+            assertQueryFails(replaceRange(table, "reverse", "id", "20", "10"), ".*start must be less than end.*");
+            assertQueryFails(replaceRange(table, "equal", "id", "10", "10"), ".*start must be less than end.*");
+            assertQueryFails(replaceRange(table, "missing", "unknown", "10", "20"), ".*column does not exist.*");
+            String incomplete = addFiles(table, "incomplete", false);
+            assertQueryFails(incomplete.substring(0, incomplete.length() - 1) + ", replace_range_column => 'id')", ".*must be specified together.*");
+            String conflicting = replaceRange(table, "conflicting", "id", "10", "20");
+            assertQueryFails(conflicting.replace("replace => false", "replace => true"), ".*mutually exclusive.*");
+            assertAccessDenied(replaceRange(table, "permission", "id", "10", "20"), ".*Cannot delete from table.*", privilege(getSession().getUser(), table, DELETE_TABLE));
+            assertQuery("SELECT * FROM " + table, "VALUES 11, 18, 30");
+            assertThat(catalog.scalar("SELECT max(snapshot_id)::VARCHAR FROM ducklake_snapshots('lake')")).isEqualTo(snapshot);
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testTimestampRangeAndConcurrentRetries()
+            throws Exception
+    {
+        String table = "range_time_" + randomNameSuffix();
+        String file = catalog.externalParquetFile(table + "/incoming");
+        catalog.executeInDuckDb("COPY (SELECT TIMESTAMP '2024-02-15 00:00:00.123456' ts) TO '%s' (FORMAT PARQUET)".formatted(file));
+        assertUpdate("CREATE TABLE " + table + " (ts TIMESTAMP(6))");
+        assertUpdate("INSERT INTO " + table + " VALUES TIMESTAMP '2024-01-31 23:59:59.999999', TIMESTAMP '2024-02-01 00:00:00', TIMESTAMP '2024-03-01 00:00:00'", 3);
+        try (var executor = Executors.newFixedThreadPool(3)) {
+            String statement = replaceRange(table, "month", "ts", "2024-02-01 00:00:00", "2024-03-01 00:00:00", location(file));
+            var futures = IntStream.range(0, 3).mapToObj(_ -> executor.submit(() -> assertUpdate(statement))).toList();
+            for (var future : futures) {
+                future.get(30, TimeUnit.SECONDS);
+            }
+            assertQuery("SELECT * FROM " + table, "VALUES TIMESTAMP '2024-01-31 23:59:59.999999', TIMESTAMP '2024-02-15 00:00:00.123456', TIMESTAMP '2024-03-01 00:00:00'");
+            assertThat(catalog.rows("SELECT ts::VARCHAR FROM " + table + " ORDER BY ts")).containsExactly("2024-01-31 23:59:59.999999", "2024-02-15 00:00:00.123456", "2024-03-01 00:00:00");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    private static String replaceRange(String table, String importId, String column, String start, String end, String... files)
+    {
+        String statement = addFiles(table, importId, false, files);
+        return statement.substring(0, statement.length() - 1) + ", replace_range_column => '" + column + "', replace_range_start => '" + start + "', replace_range_end => '" + end + "')";
     }
 
     private String location(String file)

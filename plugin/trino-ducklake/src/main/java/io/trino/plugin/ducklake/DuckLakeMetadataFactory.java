@@ -37,6 +37,7 @@ public class DuckLakeMetadataFactory
     private final DuckLakeWriterFactory writerFactory;
     private final FileFormatDataSourceStats fileFormatDataSourceStats;
     private final ParquetReaderOptions parquetReaderOptions;
+    private final DuckLakeRangeReplacement rangeReplacement;
 
     @Inject
     public DuckLakeMetadataFactory(
@@ -48,7 +49,8 @@ public class DuckLakeMetadataFactory
             TrinoFileSystemFactory fileSystemFactory,
             DuckLakeWriterFactory writerFactory,
             FileFormatDataSourceStats fileFormatDataSourceStats,
-            ParquetReaderConfig parquetReaderConfig)
+            ParquetReaderConfig parquetReaderConfig,
+            DuckLakeRangeReplacement rangeReplacement)
     {
         this.metastore = requireNonNull(metastore, "metastore is null");
         this.dataPath = config.getDataPath();
@@ -60,6 +62,7 @@ public class DuckLakeMetadataFactory
         this.writerFactory = requireNonNull(writerFactory, "writerFactory is null");
         this.fileFormatDataSourceStats = requireNonNull(fileFormatDataSourceStats, "fileFormatDataSourceStats is null");
         this.parquetReaderOptions = parquetReaderConfig.toParquetReaderOptions();
+        this.rangeReplacement = requireNonNull(rangeReplacement, "rangeReplacement is null");
     }
 
     public DuckLakeMetadata create(ConnectorIdentity ignoredIdentity)
@@ -74,6 +77,7 @@ public class DuckLakeMetadataFactory
                 writerFactory,
                 fileFormatDataSourceStats,
                 parquetReaderOptions,
-                addFilesProcedureEnabled);
+                addFilesProcedureEnabled,
+                rangeReplacement);
     }
 }

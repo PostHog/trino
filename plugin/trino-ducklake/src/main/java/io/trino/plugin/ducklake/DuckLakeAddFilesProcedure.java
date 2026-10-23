@@ -42,6 +42,9 @@ public final class DuckLakeAddFilesProcedure
                         booleanProperty("allow_missing", "Read absent nullable columns as NULL", false, false),
                         booleanProperty("ignore_extra_columns", "Ignore file columns absent from the table", false, false),
                         booleanProperty("hive_partitioning", "Read partition values from Hive-style paths", false, false),
-                        booleanProperty("replace", "Replace the entire table contents in the registration snapshot", false, false)));
+                        booleanProperty("replace", "Replace the entire table contents in the registration snapshot", false, false),
+                        stringProperty("replace_range_column", "Top-level column defining the replacement interval", null, false),
+                        stringProperty("replace_range_start", "Inclusive lower bound in the column type's catalog string format", null, false),
+                        stringProperty("replace_range_end", "Exclusive upper bound in the column type's catalog string format", null, false)));
     }
 }
