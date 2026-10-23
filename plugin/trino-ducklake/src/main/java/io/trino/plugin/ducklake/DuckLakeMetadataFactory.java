@@ -29,6 +29,7 @@ public class DuckLakeMetadataFactory
 {
     private final JdbcDuckLakeMetastore metastore;
     private final String dataPath;
+    private final boolean addFilesProcedureEnabled;
     private final JsonCodec<DuckLakeDataFile> dataFileCodec;
     private final JsonCodec<DuckLakeMergeFragment> mergeFragmentCodec;
     private final JsonCodec<ConnectorViewDefinition> viewDefinitionCodec;
@@ -51,6 +52,7 @@ public class DuckLakeMetadataFactory
     {
         this.metastore = requireNonNull(metastore, "metastore is null");
         this.dataPath = config.getDataPath();
+        this.addFilesProcedureEnabled = config.isAddFilesProcedureEnabled();
         this.dataFileCodec = requireNonNull(dataFileCodec, "dataFileCodec is null");
         this.mergeFragmentCodec = requireNonNull(mergeFragmentCodec, "mergeFragmentCodec is null");
         this.viewDefinitionCodec = requireNonNull(viewDefinitionCodec, "viewDefinitionCodec is null");
@@ -71,6 +73,7 @@ public class DuckLakeMetadataFactory
                 fileSystemFactory,
                 writerFactory,
                 fileFormatDataSourceStats,
-                parquetReaderOptions);
+                parquetReaderOptions,
+                addFilesProcedureEnabled);
     }
 }

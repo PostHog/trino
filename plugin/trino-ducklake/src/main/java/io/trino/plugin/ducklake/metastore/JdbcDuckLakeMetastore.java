@@ -133,11 +133,12 @@ public class JdbcDuckLakeMetastore
     {
         // read outside the transaction, so that the commit itself needs one connection only
         boolean sortInfoSupported = sortInfoTableExists();
+        boolean nameMappingIsPartitionSupported = nameMappingHasIsPartition();
         RuntimeException conflict = null;
         for (int attempt = 0; attempt <= maxCommitRetries; attempt++) {
             try {
                 return jdbi.inTransaction(TransactionIsolationLevel.SERIALIZABLE, handle -> {
-                    DuckLakeCommit commit = new DuckLakeCommit(handle, metadataSchema, snapshotState(handle), sortInfoSupported);
+                    DuckLakeCommit commit = new DuckLakeCommit(handle, metadataSchema, snapshotState(handle), sortInfoSupported, nameMappingIsPartitionSupported);
                     T result = action.run(commit);
                     commit.verifyNoConflictSince(readSnapshotId);
                     commit.writeSnapshot();
@@ -204,6 +205,11 @@ public class JdbcDuckLakeMetastore
             Thread.currentThread().interrupt();
             throw new TrinoException(DUCKLAKE_COMMIT_FAILED, "Interrupted while retrying a DuckLake commit", e);
         }
+    }
+
+    public boolean fileRegistrationSupported()
+    {
+        return nameMappingTableExists() && tableExists("ducklake_column_mapping");
     }
 
     public Optional<String> formatVersion()
@@ -743,10 +749,6 @@ public class JdbcDuckLakeMetastore
 
         Map<Long, Map<Long, DuckLakeNameMappingEntry>> entriesByMappingId = new LinkedHashMap<>();
         for (NameMappingRow row : rows) {
-            if (row.parentColumn().isPresent()) {
-                // nested entries are only reachable through their top-level column
-                continue;
-            }
             boolean hasNestedFields = columnIdsWithChildren.getOrDefault(row.mappingId(), Set.of()).contains(row.columnId());
             DuckLakeNameMappingEntry entry = new DuckLakeNameMappingEntry(row.sourceName(), row.isPartition(), hasNestedFields);
             DuckLakeNameMappingEntry existing = entriesByMappingId
