@@ -29,7 +29,7 @@ import static java.lang.Math.toIntExact;
  * Parquet columns do not carry DuckLake field ids. Fields without an entry are not stored in
  * the file and read as NULL.
  *
- * @param columns top-level entries of the mapping, keyed by the DuckLake field id
+ * @param columns all field entries of the mapping, keyed by the DuckLake field id
  *         ({@code ducklake_name_mapping.target_field_id}, which is a {@code ducklake_column.column_id})
  */
 public record DuckLakeNameMapping(Map<Long, DuckLakeNameMappingEntry> columns)

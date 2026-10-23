@@ -661,20 +661,19 @@ final class TestDuckLakeReads
     }
 
     @Test
-    void testNameMappingOfNestedFieldsUnsupported()
+    void testNameMappingOfNestedFields()
     {
-        // the mapping maps the fields nested inside the struct column, which is not supported
-        assertQueryFails("SELECT s FROM mapped_nested", "Column 's' has a name mapping for its nested fields, which is not supported");
+        assertQuery("SELECT s.x, s.y FROM mapped_nested", "VALUES (10, 'a')");
         // other columns of the table are readable
         assertQuery("SELECT id FROM mapped_nested", "VALUES 1");
         assertQuery("SELECT count(*) FROM mapped_nested", "VALUES 1");
     }
 
     @Test
-    void testNameMappingOfHivePartitionUnsupported()
+    void testNameMappingOfHivePartition()
     {
-        // the values of the partition column are stored in the file path, which is not supported
-        assertQueryFails("SELECT part FROM mapped_hive", "Column 'part' is stored as a Hive partition value in the file path, which is not supported");
+        assertQuery("SELECT part FROM mapped_hive", "VALUES 5");
+        assertQuery("SELECT v FROM mapped_hive WHERE part = 5", "VALUES 'hello'");
         // other columns of the table are readable
         assertQuery("SELECT v FROM mapped_hive", "VALUES 'hello'");
         assertQuery("SELECT count(*) FROM mapped_hive", "VALUES 1");

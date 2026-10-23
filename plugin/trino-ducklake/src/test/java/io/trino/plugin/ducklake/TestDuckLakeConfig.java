@@ -57,6 +57,7 @@ final class TestDuckLakeConfig
                 .setConnectionPoolAcquisitionTimeout(new Duration(30, SECONDS))
                 .setMetadataSchema("public")
                 .setDataPath(null)
+                .setAddFilesProcedureEnabled(false)
                 .setFileStatisticsPruningEnabled(true)
                 .setMaxSplitSize(DataSize.of(64, MEGABYTE))
                 .setTargetMaxFileSize(DataSize.of(128, MEGABYTE))
@@ -112,6 +113,7 @@ final class TestDuckLakeConfig
                 .put("ducklake.metadata.connection-pool.acquisition-timeout", "5s")
                 .put("ducklake.metadata.schema", "ducklake")
                 .put("ducklake.data-path", "s3://bucket/prefix/")
+                .put("ducklake.add-files-procedure.enabled", "true")
                 .put("ducklake.file-statistics-pruning.enabled", "false")
                 .put("ducklake.max-split-size", "32MB")
                 .put("ducklake.target-max-file-size", "48MB")
@@ -130,6 +132,7 @@ final class TestDuckLakeConfig
         assertThat(config.getConnectionPoolAcquisitionTimeout()).isEqualTo(new Duration(5, SECONDS));
         assertThat(config.getMetadataSchema()).isEqualTo("ducklake");
         assertThat(config.getDataPath()).isEqualTo("s3://bucket/prefix/");
+        assertThat(config.isAddFilesProcedureEnabled()).isTrue();
         assertThat(config.isFileStatisticsPruningEnabled()).isFalse();
         assertThat(config.getMaxSplitSize()).isEqualTo(DataSize.of(32, MEGABYTE));
         assertThat(config.getTargetMaxFileSize()).isEqualTo(DataSize.of(48, MEGABYTE));

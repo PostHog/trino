@@ -393,7 +393,7 @@ public class DuckLakeSplitManager
      * Builds the domain implied by the file column statistics, or {@link Optional#empty()} when
      * the statistics do not constrain the column reliably (so the file must be kept).
      */
-    private static Optional<Domain> statisticsDomain(Type type, DuckLakeFileColumnStats stats, long recordCount)
+    static Optional<Domain> statisticsDomain(Type type, DuckLakeFileColumnStats stats, long recordCount)
     {
         try {
             return buildStatisticsDomain(type, stats, recordCount);

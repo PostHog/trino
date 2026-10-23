@@ -19,7 +19,7 @@ import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
 /**
- * A single top-level entry of a {@link DuckLakeNameMapping}: the Parquet column that supplies
+ * A single field entry of a {@link DuckLakeNameMapping}: the Parquet column that supplies
  * the values of one DuckLake field.
  *
  * @param sourceName name of the Parquet column in the data file, or the Hive partition key when
