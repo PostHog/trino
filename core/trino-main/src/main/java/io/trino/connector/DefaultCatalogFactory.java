@@ -52,11 +52,13 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.trino.connector.CatalogConnector.IDENTITY_MEMBER_GROUP_PROPERTY;
 import static io.trino.connector.CatalogConnector.REQUIRED_IDENTITY_GROUP_PROPERTY;
 import static io.trino.connector.CatalogHandle.createInformationSchemaCatalogHandle;
 import static io.trino.connector.CatalogHandle.createRootCatalogHandle;
 import static io.trino.connector.CatalogHandle.createSystemTablesCatalogHandle;
 import static io.trino.security.CatalogIdentity.validateBinding;
+import static io.trino.security.CatalogIdentity.validateMemberGroup;
 import static java.util.Objects.requireNonNull;
 
 @ThreadSafe
@@ -142,8 +144,10 @@ public class DefaultCatalogFactory
         if (requiredIdentityGroup != null) {
             validateBinding(catalogProperties.name(), requiredIdentityGroup);
         }
+        validateMemberGroup(Optional.ofNullable(requiredIdentityGroup), Optional.ofNullable(catalogProperties.properties().get(IDENTITY_MEMBER_GROUP_PROPERTY)));
         Map<String, String> connectorProperties = new HashMap<>(catalogProperties.properties());
         connectorProperties.remove(REQUIRED_IDENTITY_GROUP_PROPERTY);
+        connectorProperties.remove(IDENTITY_MEMBER_GROUP_PROPERTY);
         Connector connector = createConnector(
                 catalogProperties.name(),
                 connectorFactory,

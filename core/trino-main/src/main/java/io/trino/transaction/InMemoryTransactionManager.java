@@ -447,10 +447,13 @@ public class InMemoryTransactionManager
                 return true;
             }
             CatalogName catalogName = new CatalogName(name);
-            Optional<String> retainedGroup = registeredCatalogs.computeIfAbsent(catalogName, catalogManager::getCatalog)
-                    .flatMap(Catalog::requiredIdentityGroup);
+            Optional<Catalog> retained = registeredCatalogs.computeIfAbsent(catalogName, catalogManager::getCatalog);
+            Optional<String> retainedGroup = retained.flatMap(Catalog::requiredIdentityGroup);
             if (retainedGroup.isPresent()) {
-                return identityGroups.contains(retainedGroup.orElseThrow());
+                // The member group is the retained instance's own: it never carries over to another
+                // instance of the name, so a reused name is still bound to its new definition
+                return identityGroups.contains(retainedGroup.orElseThrow()) ||
+                        retained.flatMap(Catalog::identityMemberGroup).map(identityGroups::contains).orElse(false);
             }
             Optional<String> currentGroup = catalogManager.getCatalog(catalogName)
                     .flatMap(Catalog::requiredIdentityGroup);
