@@ -27,6 +27,10 @@ import static java.util.Objects.requireNonNull;
 public class CatalogConnector
 {
     public static final String REQUIRED_IDENTITY_GROUP_PROPERTY = "catalog.required-identity-group";
+    // A group whose members also satisfy the required identity group. The publisher names a group
+    // the catalog's users already hold, so a new catalog is usable before its identity group has
+    // reached every coordinator's group provider.
+    public static final String IDENTITY_MEMBER_GROUP_PROPERTY = "catalog.identity-member-group";
 
     private final CatalogHandle catalogHandle;
     private final ConnectorName connectorName;
@@ -59,7 +63,8 @@ public class CatalogConnector
                 informationSchemaConnector,
                 systemConnector,
                 OPERATIONAL,
-                catalogProperties.map(properties -> properties.properties().get(REQUIRED_IDENTITY_GROUP_PROPERTY)));
+                catalogProperties.map(properties -> properties.properties().get(REQUIRED_IDENTITY_GROUP_PROPERTY)),
+                catalogProperties.map(properties -> properties.properties().get(IDENTITY_MEMBER_GROUP_PROPERTY)));
     }
 
     public CatalogHandle getCatalogHandle()

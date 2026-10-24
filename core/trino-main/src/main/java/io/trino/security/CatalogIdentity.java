@@ -15,6 +15,7 @@ package io.trino.security;
 
 import io.trino.spi.catalog.CatalogName;
 
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -35,6 +36,20 @@ public final class CatalogIdentity
         if (group.startsWith(RESERVED_PREFIX)) {
             checkArgument(isNameClaim(catalogName, group), "Catalog identity group does not match the catalog name");
         }
+    }
+
+    /**
+     * A member group widens who satisfies a catalog's identity binding, so it is honoured only
+     * beside a required identity group, and it can never itself be an identity group: naming one
+     * would let a definition borrow another catalog's name claim.
+     */
+    public static void validateMemberGroup(Optional<String> requiredIdentityGroup, Optional<String> memberGroup)
+    {
+        memberGroup.ifPresent(group -> {
+            checkArgument(requiredIdentityGroup.isPresent(), "Catalog identity member group requires a catalog identity group");
+            checkArgument(!group.isBlank(), "Catalog identity member group is empty");
+            checkArgument(!group.startsWith(RESERVED_PREFIX), "Catalog identity member group must not be an identity group");
+        });
     }
 
     // Only the trusted identity groups supply a catalog name claim.
