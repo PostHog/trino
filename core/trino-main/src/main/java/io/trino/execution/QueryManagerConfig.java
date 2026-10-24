@@ -87,6 +87,8 @@ public class QueryManagerConfig
     private Optional<Duration> completedResultIdleTimeout = Optional.empty();
     private int maxQueryLength = 1_000_000;
     private int maxStageCount = 150;
+    // Repeated references to the same views or WITH queries are expanded in the plan, so its size can grow exponentially
+    private int maxInitialPlanNodes = 100_000;
     private int stageCountWarningThreshold = 50;
 
     private Duration clientTimeout = new Duration(5, MINUTES);
@@ -412,6 +414,20 @@ public class QueryManagerConfig
     public QueryManagerConfig setMaxStageCount(int maxStageCount)
     {
         this.maxStageCount = maxStageCount;
+        return this;
+    }
+
+    @Min(1)
+    public int getMaxInitialPlanNodes()
+    {
+        return maxInitialPlanNodes;
+    }
+
+    @Config("query.max-initial-plan-nodes")
+    @ConfigDescription("Maximum number of nodes in the query plan before optimization")
+    public QueryManagerConfig setMaxInitialPlanNodes(int maxInitialPlanNodes)
+    {
+        this.maxInitialPlanNodes = maxInitialPlanNodes;
         return this;
     }
 
