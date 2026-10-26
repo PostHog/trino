@@ -365,6 +365,9 @@ final class TestHoglakeVariantPushdown
         Session disabled = Session.builder(queryRunner.getDefaultSession())
                 .setCatalogSessionProperty("hoglake", "variant_path_assembly_enabled", "false")
                 .build();
+        Session eagerResidual = Session.builder(queryRunner.getDefaultSession())
+                .setCatalogSessionProperty("hoglake", "variant_lazy_residual_enabled", "false")
+                .build();
         List<String> queries = List.of(
                 "SELECT CAST(v['$Browser'] AS varchar) AS browser, count(*) FROM events WHERE CAST(v['$Browser'] AS varchar) IS NOT NULL GROUP BY 1",
                 "SELECT id FROM events WHERE CAST(v['$Browser'] AS varchar) = 'Chrome'",
@@ -373,9 +376,10 @@ final class TestHoglakeVariantPushdown
                 "SELECT id, v FROM events");
         for (String query : queries) {
             assertEqualsIgnoreOrder(rows(query), rows(disabled, query), query);
+            assertEqualsIgnoreOrder(rows(query), rows(eagerResidual, query), query);
         }
         // The same errors, for the first row of each table
-        for (Session session : List.of(queryRunner.getDefaultSession(), disabled)) {
+        for (Session session : List.of(queryRunner.getDefaultSession(), disabled, eagerResidual)) {
             assertThatThrownBy(() -> queryRunner.execute(session, "SELECT v['a'] FROM mixed"))
                     .hasMessageContaining("VARIANT value is int32, not an object");
             assertThatThrownBy(() -> queryRunner.execute(session, "SELECT v['a']['b'] FROM events WHERE id = 0"))

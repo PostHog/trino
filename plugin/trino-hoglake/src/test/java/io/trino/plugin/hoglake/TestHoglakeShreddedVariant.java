@@ -31,6 +31,7 @@ import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.connector.SourcePage;
+import io.trino.spi.metrics.Metrics;
 import io.trino.spi.type.RowType;
 import io.trino.spi.variant.Metadata;
 import io.trino.spi.variant.Variant;
@@ -52,6 +53,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -363,6 +365,195 @@ class TestHoglakeShreddedVariant
                 .mapToObj(a -> variantBytes(objectWithA(a)))
                 .toList());
         assertThat(prunedResult.bytes()).isLessThan(whole.bytes() / 4);
+    }
+
+    @Test
+    void prunedReadSkipsResidual()
+            throws IOException
+    {
+        // Large distinct residual objects, which a column pruned to the shredded "$Browser" does not need
+        List<List<Object>> rows = new ArrayList<>();
+        for (long a = 0; a < 8; a++) {
+            Variant residual = Variant.ofObject(Map.of(utf8Slice("big"), Variant.ofString("%d%s".formatted(a, "z".repeat(64 * 1024)))));
+            rows.add(row(residual.metadata().toSlice(), residual.data(), typedValue(Variant.ofLong(a), "Chrome")));
+        }
+        byte[] file = write(rows, Optional.empty());
+        HoglakeColumnHandle pruned = COLUMN.withVariantPaths(List.of(List.of(HoglakeVariantPathStep.objectKey("$Browser"))));
+
+        LazyRead lazy = readLazily(file, 8, ParquetReaderOptions.builder().withSmallFileThreshold(DataSize.ofBytes(0)).build(), pruned, Map.of(), Optional.empty());
+        assertThat(lazy.values()).containsOnly(variantBytes(Variant.ofObject(Map.of(utf8Slice("$Browser"), Variant.ofString("Chrome")))));
+        // Only the column chunks of "$Browser" are read
+        assertThat(lazy.dataBytes()).isEqualTo(columnChunkBytes(file, "v", "typed_value", "$Browser"));
+        assertThat(lazy.metric(HoglakePageSource.VARIANT_RESIDUAL_BATCHES_LOADED)).isZero();
+        assertThat(lazy.metric(HoglakePageSource.VARIANT_RESIDUAL_BATCHES_SKIPPED)).isPositive();
+
+        // Without the lazy residual, the value column is read
+        LazyRead eager = readLazily(file, 8, ParquetReaderOptions.builder().withSmallFileThreshold(DataSize.ofBytes(0)).build(), pruned, Map.of("variant_lazy_residual_enabled", false), Optional.empty());
+        assertThat(eager.values()).isEqualTo(lazy.values());
+        assertThat(eager.dataBytes()).isGreaterThan(columnChunkBytes(file, "v", "value"));
+        assertThat(eager.metrics().getMetrics()).doesNotContainKey(HoglakePageSource.VARIANT_RESIDUAL_BATCHES_LOADED);
+    }
+
+    @Test
+    void mixedBatchLoadsResidualOnlyWhereNeeded()
+            throws IOException
+    {
+        // With pages of at most four rows, the reader returns rows 0, 1 to 2, 3 to 6, 7 to 10, and 11.
+        // Row 9 is not an object, so only its page reads the value column.
+        List<List<Object>> rows = new ArrayList<>();
+        for (long a = 0; a < 12; a++) {
+            rows.add(a == 9 ? row(METADATA, Variant.ofInt(9).data(), null) : row(METADATA, null, typedValue(Variant.ofLong(a), null)));
+        }
+        byte[] file = write(rows, Optional.empty());
+        HoglakeColumnHandle pruned = COLUMN.withVariantPaths(List.of(List.of(HoglakeVariantPathStep.objectKey("a"))));
+        LazyRead read = readLazily(file, 12, ParquetReaderOptions.builder().withMaxReadBlockRowCount(4).build(), pruned, Map.of(), Optional.empty());
+        assertThat(read.values()).containsExactlyElementsOf(LongStream.range(0, 12)
+                .mapToObj(a -> a == 9 ? variantBytes(Variant.ofInt(9)) : variantBytes(objectWithA(a)))
+                .toList());
+        assertThat(read.metric(HoglakePageSource.VARIANT_RESIDUAL_BATCHES_LOADED)).isEqualTo(1);
+        assertThat(read.metric(HoglakePageSource.VARIANT_RESIDUAL_BATCHES_SKIPPED)).isEqualTo(4);
+    }
+
+    @Test
+    void nullGroupDoesNotLoadResidual()
+            throws IOException
+    {
+        // A SQL NULL is a null group, which the typed_value column shows
+        byte[] file = write(
+                Arrays.asList(null, row(METADATA, null, typedValue(Variant.ofLong(1), "Chrome")), null),
+                Optional.empty());
+        HoglakeColumnHandle pruned = COLUMN.withVariantPaths(List.of(List.of(HoglakeVariantPathStep.objectKey("$Browser"))));
+        LazyRead read = readLazily(file, 3, ParquetReaderOptions.defaultOptions(), pruned, Map.of(), Optional.empty());
+        assertThat(read.values()).containsExactly(null, variantBytes(Variant.ofObject(Map.of(utf8Slice("$Browser"), Variant.ofString("Chrome")))), null);
+        assertThat(read.metric(HoglakePageSource.VARIANT_RESIDUAL_BATCHES_LOADED)).isZero();
+    }
+
+    @Test
+    void deletionVectorAppliesToLazyResidual()
+            throws IOException
+    {
+        // Rows 1 and 5 are deleted. Row 4 is not an object, so its page reads the value column
+        // for its remaining rows only.
+        List<List<Object>> rows = Arrays.asList(
+                row(METADATA, null, typedValue(Variant.ofLong(0), null)),
+                row(METADATA, Variant.ofInt(1).data(), null),
+                row(METADATA, null, typedValue(Variant.ofLong(2), null)),
+                null,
+                row(METADATA, Variant.ofInt(4).data(), null),
+                row(METADATA, null, typedValue(Variant.ofLong(5), null)),
+                null,
+                row(METADATA, null, typedValue(Variant.ofLong(7), null)));
+        byte[] file = write(rows, Optional.empty());
+        HoglakeColumnHandle pruned = COLUMN.withVariantPaths(List.of(List.of(HoglakeVariantPathStep.objectKey("a"))));
+        LazyRead read = readLazily(file, 8, ParquetReaderOptions.defaultOptions(), pruned, Map.of(), Optional.of(PuffinDeletionVectorFixtures.deletionVector(PATH, 1, 5)));
+        assertThat(read.values()).containsExactly(
+                variantBytes(objectWithA(0)),
+                variantBytes(objectWithA(2)),
+                null,
+                variantBytes(Variant.ofInt(4)),
+                null,
+                variantBytes(objectWithA(7)));
+        // The pages of rows 0, 1 to 2, and 3 to 6; the one of row 7 has no deleted rows
+        assertThat(read.metric(HoglakePageSource.VARIANT_RESIDUAL_BATCHES_LOADED)).isEqualTo(1);
+    }
+
+    @Test
+    void largePrunedValuesAreSplitIntoPages()
+            throws IOException
+    {
+        // The pruned values hold large "$Browser" values, so pages of assembled values end at the size limit
+        String browser = "x".repeat(16 * 1024);
+        List<List<Object>> rows = new ArrayList<>();
+        for (long a = 0; a < 64; a++) {
+            rows.add(a == 40 ? row(METADATA, Variant.ofInt(40).data(), null) : row(METADATA, null, typedValue(Variant.ofLong(a), browser)));
+        }
+        byte[] file = write(rows, Optional.empty());
+        HoglakeColumnHandle pruned = COLUMN.withVariantPaths(List.of(List.of(HoglakeVariantPathStep.objectKey("$Browser")), List.of(HoglakeVariantPathStep.objectKey("a"))));
+        DataSize maxPageSize = DataSize.of(64, KILOBYTE);
+        ConnectorPageSource pageSource = new HoglakePageSourceProvider(
+                ConnectorTestFixtures.memoryFileSystem(Map.of(PATH, file)),
+                ParquetReaderOptions.builder().withMaxReadBlockSize(maxPageSize).build())
+                .createPageSource(
+                        HoglakeTransactionHandle.INSTANCE,
+                        ConnectorTestFixtures.session(),
+                        new HoglakeSplit(PATH, file.length, 64, Optional.empty(), 0),
+                        new HoglakeTableHandle("analytics", "shredded_variant_test", 1, "uuid-shredded-variant-test", List.of()),
+                        Optional.empty(),
+                        List.of((ColumnHandle) pruned),
+                        DynamicFilter.EMPTY,
+                        MemoryContext.NO_LIMIT);
+        List<Object> values = new ArrayList<>();
+        int pages = 0;
+        try {
+            for (SourcePage page = pageSource.getNextSourcePage(); page != null; page = pageSource.getNextSourcePage()) {
+                Block variants = page.getBlock(0);
+                assertThat(variants.getSizeInBytes()).isLessThan(maxPageSize.toBytes() + 2L * browser.length());
+                for (int position = 0; position < variants.getPositionCount(); position++) {
+                    values.add(variantBytes(VARIANT.getObject(variants, position)));
+                }
+                pages++;
+            }
+        }
+        finally {
+            pageSource.close();
+        }
+        assertThat(pages).isGreaterThanOrEqualTo(16);
+        assertThat(values).containsExactlyElementsOf(LongStream.range(0, 64)
+                .mapToObj(a -> a == 40 ? variantBytes(Variant.ofInt(40)) : variantBytes(Variant.ofObject(Map.of(utf8Slice("a"), Variant.ofLong(a), utf8Slice("$Browser"), Variant.ofString(browser)))))
+                .toList());
+    }
+
+    private record LazyRead(List<Object> values, long dataBytes, Metrics metrics)
+    {
+        long metric(String name)
+        {
+            return ((LongCount) metrics.getMetrics().get(name)).getTotal();
+        }
+    }
+
+    /**
+     * Reads a column, and the bytes that the page source reads after the footer.
+     */
+    private static LazyRead readLazily(byte[] file, long recordCount, ParquetReaderOptions options, HoglakeColumnHandle column, Map<String, Object> sessionProperties, Optional<byte[]> deletionVector)
+            throws IOException
+    {
+        Map<String, byte[]> files = new HashMap<>(Map.of(PATH, file));
+        deletionVector.ifPresent(vector -> files.put(DELETION_VECTOR_PATH, vector));
+        HoglakeSplit split = deletionVector.isPresent()
+                ? new HoglakeSplit(PATH, file.length, recordCount, Optional.of(DELETION_VECTOR_PATH), 2, Optional.of("puffin-dv"))
+                : new HoglakeSplit(PATH, file.length, recordCount, Optional.empty(), 0);
+        ConnectorPageSource pageSource = new HoglakePageSourceProvider(ConnectorTestFixtures.memoryFileSystem(files), options).createPageSource(
+                HoglakeTransactionHandle.INSTANCE,
+                ConnectorTestFixtures.session(sessionProperties),
+                split,
+                new HoglakeTableHandle("analytics", "shredded_variant_test", 1, "uuid-shredded-variant-test", List.of()),
+                Optional.empty(),
+                List.of((ColumnHandle) column),
+                DynamicFilter.EMPTY,
+                MemoryContext.NO_LIMIT);
+        try {
+            long footerBytes = pageSource.getCompletedBytes();
+            List<Object> values = ConnectorTestFixtures.readAll(pageSource, List.of(VARIANT)).stream()
+                    .map(row -> variantBytes((Variant) row.getFirst()))
+                    .toList();
+            return new LazyRead(values, pageSource.getCompletedBytes() - footerBytes, pageSource.getMetrics());
+        }
+        finally {
+            pageSource.close();
+        }
+    }
+
+    /**
+     * The compressed size of the column chunks below a path.
+     */
+    private static long columnChunkBytes(byte[] file, String... path)
+    {
+        return ConnectorTestFixtures.fileMetaData(file).getRow_groups().stream()
+                .flatMap(rowGroup -> rowGroup.getColumns().stream())
+                .filter(chunk -> chunk.getMeta_data().getPath_in_schema().size() >= path.length)
+                .filter(chunk -> chunk.getMeta_data().getPath_in_schema().subList(0, path.length).equals(List.of(path)))
+                .mapToLong(chunk -> chunk.getMeta_data().getTotal_compressed_size())
+                .sum();
     }
 
     @Test
