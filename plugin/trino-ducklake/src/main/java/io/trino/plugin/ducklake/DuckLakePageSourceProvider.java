@@ -32,6 +32,7 @@ import io.trino.plugin.ducklake.metastore.DuckLakeNameMappingEntry;
 import io.trino.plugin.ducklake.metastore.JdbcDuckLakeMetastore;
 import io.trino.plugin.ducklake.util.DuckLakeFieldIds;
 import io.trino.plugin.ducklake.util.DuckLakeTypes;
+import io.trino.plugin.ducklake.util.StatsValueParser;
 import io.trino.plugin.hive.HiveColumnHandle;
 import io.trino.plugin.hive.TransformConnectorPageSource;
 import io.trino.plugin.hive.parquet.ParquetPageSourceFactory;
@@ -41,6 +42,7 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.RowBlock;
+import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
@@ -64,6 +66,8 @@ import io.trino.spi.type.Int128;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeOperators;
+import io.trino.spi.type.TypeUtils;
 import io.trino.spi.type.UuidType;
 import it.unimi.dsi.fastutil.Hash;
 import it.unimi.dsi.fastutil.HashCommon;
@@ -75,7 +79,9 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
@@ -86,6 +92,7 @@ import java.util.function.Supplier;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOfLongArray;
 import static io.trino.memory.context.AggregatedMemoryContext.newAggregatedMemoryContext;
@@ -110,6 +117,8 @@ public class DuckLakePageSourceProvider
         implements ConnectorPageSourceProvider
 {
     private static final int DOMAIN_COMPACTION_THRESHOLD = 100;
+    private static final TypeOperators TYPE_OPERATORS = new TypeOperators();
+
     /**
      * Prefix of the synthetic Parquet column name used for a column that a name mapping does not
      * map to any column of the file. No Parquet column can match it, so the column reads as NULL.
@@ -196,6 +205,17 @@ public class DuckLakePageSourceProvider
             DynamicFilter dynamicFilter,
             MemoryContext memoryContext)
     {
+        return createPageSource(session, split, table, columns, dynamicFilter, memoryContext);
+    }
+
+    ConnectorPageSource createPageSource(
+            ConnectorSession session,
+            ConnectorSplit split,
+            ConnectorTableHandle table,
+            List<ColumnHandle> columns,
+            DynamicFilter dynamicFilter,
+            MemoryContext memoryContext)
+    {
         if (split instanceof DuckLakeRowCountSplit rowCountSplit) {
             return rowCountPageSource(rowCountSplit, columns);
         }
@@ -231,6 +251,24 @@ public class DuckLakePageSourceProvider
             return new DuckLakeCountPageSource(rowCountPages(duckLakeSplit.recordCount()));
         }
         Optional<DuckLakeNameMapping> nameMapping = duckLakeSplit.nameMapping();
+        Map<Long, Block> partitionConstants = new HashMap<>();
+        Supplier<Map<String, String>> hiveValues = Suppliers.memoize(() -> DuckLakeFileImporter.hiveValues(duckLakeSplit.path()));
+        for (DuckLakeColumnHandle column : dataColumns) {
+            nameMapping.flatMap(mapping -> mapping.entry(column.columnId())).filter(DuckLakeNameMappingEntry::hivePartition).ifPresent(entry -> {
+                String value = hiveValues.get().get(entry.sourceName().toLowerCase(Locale.ENGLISH));
+                if (value == null) {
+                    throw new TrinoException(DUCKLAKE_BAD_DATA, "Missing Hive partition key: " + entry.sourceName());
+                }
+                Object nativeValue = null;
+                if (!value.equals("__HIVE_DEFAULT_PARTITION__")) {
+                    nativeValue = StatsValueParser.parse(column.type(), value)
+                            .orElseThrow(() -> new TrinoException(DUCKLAKE_BAD_DATA, "Invalid Hive partition value for " + column.name()));
+                }
+                BlockBuilder builder = column.type().createBlockBuilder(null, 1);
+                TypeUtils.writeNativeValue(column.type(), builder, nativeValue);
+                partitionConstants.put(column.columnId(), builder.build());
+            });
+        }
         TupleDomain<HiveColumnHandle> parquetPredicate = toParquetPredicate(effectivePredicate.simplify(DOMAIN_COMPACTION_THRESHOLD), nameMapping);
 
         Optional<DuckLakeDeleteFileHandle> deleteFile = duckLakeSplit.deleteFile();
@@ -239,9 +277,9 @@ public class DuckLakePageSourceProvider
         OptionalLong rowSnapshotFilter = duckLakeSplit.rowSnapshotFilter();
 
         ImmutableList.Builder<HiveColumnHandle> hiveColumnsBuilder = ImmutableList.builderWithExpectedSize(dataColumns.size() + 2);
-        dataColumns.stream()
-                .map(column -> toHiveColumnHandle(column, nameMapping))
-                .forEach(hiveColumnsBuilder::add);
+        for (DuckLakeColumnHandle column : dataColumns) {
+            hiveColumnsBuilder.add(toHiveColumnHandle(column, nameMapping));
+        }
         // the row index is read to apply positional deletes and to identify rows a merge changes
         boolean hasRowIndexChannel = hasDeletions || rowIdRequested;
         int rowIndexChannel = dataColumns.size();
@@ -303,7 +341,7 @@ public class DuckLakePageSourceProvider
                     pageSource,
                     page -> filterDeletedRows(filterNewerRows(page, rowSnapshotFilter, snapshotChannel), deletedPositions.get(), rowIndexChannel));
             return new MemoryContextClosingPageSource(
-                    projectRequestedColumns(requestedColumns, rowIndexChannel, hasHiddenChannels, duckLakeSplit.dataFileId(), pageSource),
+                    projectRequestedColumns(requestedColumns, rowIndexChannel, hasHiddenChannels, duckLakeSplit.dataFileId(), partitionConstants, pageSource),
                     splitMemoryContext,
                     deleteFileReadStatistics);
         }
@@ -314,7 +352,7 @@ public class DuckLakePageSourceProvider
                     pageSource,
                     page -> filterNewerRows(page, rowSnapshotFilter, snapshotChannel));
         }
-        return projectRequestedColumns(requestedColumns, rowIndexChannel, hasHiddenChannels, duckLakeSplit.dataFileId(), pageSource);
+        return projectRequestedColumns(requestedColumns, rowIndexChannel, hasHiddenChannels, duckLakeSplit.dataFileId(), partitionConstants, pageSource);
     }
 
     /**
@@ -327,6 +365,7 @@ public class DuckLakePageSourceProvider
             int rowIndexChannel,
             boolean hasHiddenChannels,
             long dataFileId,
+            Map<Long, Block> partitionConstants,
             ConnectorPageSource pageSource)
     {
         boolean needsTransform = requestedColumns.stream()
@@ -334,7 +373,7 @@ public class DuckLakePageSourceProvider
         // the row index is read to apply deletes and to build row identifiers, and is projected
         // away again unless the engine asked for the identifier itself; the snapshot of each row
         // is read to filter rows and always projected away
-        if (!hasHiddenChannels && !needsTransform) {
+        if (!hasHiddenChannels && !needsTransform && partitionConstants.isEmpty()) {
             return pageSource;
         }
         TransformConnectorPageSource.Builder transform = TransformConnectorPageSource.builder();
@@ -351,7 +390,11 @@ public class DuckLakePageSourceProvider
             }
             int channel = dataChannel;
             dataChannel++;
-            if (column.isUnsignedInteger()) {
+            if (partitionConstants.containsKey(column.columnId())) {
+                Block value = partitionConstants.get(column.columnId());
+                transform.transform(page -> RunLengthEncodedBlock.create(value, page.getPositionCount()));
+            }
+            else if (column.isUnsignedInteger()) {
                 transform.transform(channel, new UnsignedIntegerToBigint());
             }
             else if (column.isUnsignedBigint()) {
@@ -599,12 +642,85 @@ public class DuckLakePageSourceProvider
             return column.toHiveColumnHandle(MISSING_COLUMN_NAME_PREFIX + column.columnId());
         }
         if (entry.get().hivePartition()) {
-            throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Column '%s' is stored as a Hive partition value in the file path, which is not supported".formatted(column.name()));
+            return column.toHiveColumnHandle(MISSING_COLUMN_NAME_PREFIX + column.columnId());
         }
         if (entry.get().hasNestedFields()) {
-            throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Column '%s' has a name mapping for its nested fields, which is not supported".formatted(column.name()));
+            Type readType = nameMapping.get().nestedReadType(column.columnId())
+                    .orElseThrow(() -> new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Nested name mappings requiring integer widening are not supported: " + column.name()));
+            return new HiveColumnHandle(
+                    entry.get().sourceName(),
+                    0,
+                    DuckLakeTypes.toHiveType(readType),
+                    readType,
+                    Optional.empty(),
+                    HiveColumnHandle.ColumnType.REGULAR,
+                    Optional.empty());
         }
         return column.toHiveColumnHandle(entry.get().sourceName());
+    }
+
+    /**
+     * Resolves the types the columns with nested field entries of each name mapping are read as,
+     * which {@link DuckLakeNameMapping#nestedReadTypes()} describes. Only the coordinator knows the
+     * table schema they depend on, so it resolves them when it creates the splits.
+     */
+    static Map<Long, DuckLakeNameMapping> withNestedReadTypes(Map<Long, DuckLakeNameMapping> mappings, Supplier<List<DuckLakeWriteColumn>> tableColumns)
+    {
+        if (mappings.values().stream().noneMatch(DuckLakeNameMapping::hasNestedFields)) {
+            return mappings;
+        }
+        Map<Long, DuckLakeWriteColumn> columns = tableColumns.get().stream()
+                .collect(toImmutableMap(DuckLakeWriteColumn::columnId, column -> column));
+        ImmutableMap.Builder<Long, DuckLakeNameMapping> resolved = ImmutableMap.builder();
+        for (Map.Entry<Long, DuckLakeNameMapping> mapping : mappings.entrySet()) {
+            ImmutableMap.Builder<Long, Type> readTypes = ImmutableMap.builder();
+            mapping.getValue().columns().forEach((fieldId, entry) -> {
+                // nested entries are keyed by fields that are not columns of the table, and are
+                // part of the read type of the column holding them
+                DuckLakeWriteColumn column = columns.get(fieldId);
+                if (entry.hasNestedFields() && column != null) {
+                    mappedReadType(column, mapping.getValue()).ifPresent(type -> readTypes.put(fieldId, type));
+                }
+            });
+            resolved.put(mapping.getKey(), mapping.getValue().withNestedReadTypes(readTypes.buildOrThrow()));
+        }
+        return resolved.buildOrThrow();
+    }
+
+    /**
+     * The column type with each nested field named as the data file names it, or empty when a
+     * nested field needs an integer widening, which a name mapping cannot express.
+     */
+    private static Optional<Type> mappedReadType(DuckLakeWriteColumn column, DuckLakeNameMapping mapping)
+    {
+        if (column.type() instanceof RowType) {
+            ImmutableList.Builder<RowType.Field> fields = ImmutableList.builder();
+            for (DuckLakeWriteColumn child : column.children()) {
+                Optional<Type> childType = mappedReadType(child, mapping);
+                if (childType.isEmpty()) {
+                    return Optional.empty();
+                }
+                String name = mapping.entry(child.columnId()).map(DuckLakeNameMappingEntry::sourceName)
+                        .orElse(MISSING_COLUMN_NAME_PREFIX + child.columnId());
+                fields.add(RowType.field(name, childType.get()));
+            }
+            return Optional.of(RowType.from(fields.build()));
+        }
+        if (column.type() instanceof ArrayType) {
+            return mappedReadType(column.children().getFirst(), mapping).map(ArrayType::new);
+        }
+        if (column.type() instanceof MapType) {
+            Optional<Type> keyType = mappedReadType(column.children().get(0), mapping);
+            Optional<Type> valueType = mappedReadType(column.children().get(1), mapping);
+            if (keyType.isEmpty() || valueType.isEmpty()) {
+                return Optional.empty();
+            }
+            return Optional.of(new MapType(keyType.get(), valueType.get(), TYPE_OPERATORS));
+        }
+        if (DuckLakeTypes.isUnsignedInteger(column.duckLakeType()) || DuckLakeTypes.isUnsignedBigint(column.duckLakeType()) || DuckLakeTypes.isInt128(column.duckLakeType())) {
+            return Optional.empty();
+        }
+        return Optional.of(column.type());
     }
 
     private static boolean isParquetPushableColumn(DuckLakeColumnHandle column)

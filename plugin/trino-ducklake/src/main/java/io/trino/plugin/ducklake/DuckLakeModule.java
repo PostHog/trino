@@ -63,9 +63,11 @@ public class DuckLakeModule
         newSetBinder(binder, SessionPropertiesProvider.class).addBinding().to(DuckLakeSessionProperties.class).in(Scopes.SINGLETON);
 
         binder.bind(ConnectorSplitManager.class).to(DuckLakeSplitManager.class).in(Scopes.SINGLETON);
-        binder.bind(ConnectorPageSourceProvider.class).to(DuckLakePageSourceProvider.class).in(Scopes.SINGLETON);
+        binder.bind(DuckLakePageSourceProvider.class).in(Scopes.SINGLETON);
+        binder.bind(ConnectorPageSourceProvider.class).to(DuckLakePageSourceProvider.class);
         binder.bind(ConnectorNodePartitioningProvider.class).to(HiveNodePartitioningProvider.class).in(Scopes.SINGLETON);
         binder.bind(ConnectorPageSinkProvider.class).to(DuckLakePageSinkProvider.class).in(Scopes.SINGLETON);
+        binder.bind(DuckLakeRangeReplacement.class).in(Scopes.SINGLETON);
         binder.bind(DuckLakeWriterFactory.class).in(Scopes.SINGLETON);
         binder.bind(DuckLakeTableProperties.class).in(Scopes.SINGLETON);
         jsonCodecBinder(binder).bindJsonCodec(DuckLakeDataFile.class);

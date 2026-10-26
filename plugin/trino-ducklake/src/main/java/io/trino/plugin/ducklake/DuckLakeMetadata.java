@@ -22,6 +22,7 @@ import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.airlift.json.JsonCodec;
 import io.airlift.log.Logger;
 import io.airlift.slice.Slice;
+import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.parquet.ParquetReaderOptions;
@@ -48,6 +49,7 @@ import io.trino.plugin.ducklake.util.DuckLakeTypes;
 import io.trino.plugin.ducklake.util.PartitionTransforms;
 import io.trino.plugin.ducklake.util.PathResolver;
 import io.trino.plugin.ducklake.util.StatsValueParser;
+import io.trino.spi.StandardErrorCode;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.AggregationApplicationResult;
@@ -55,12 +57,14 @@ import io.trino.spi.connector.Assignment;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ColumnPosition;
+import io.trino.spi.connector.ConnectorAccessControl;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorOutputMetadata;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorTableExecuteHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableLayout;
 import io.trino.spi.connector.ConnectorTableMetadata;
@@ -94,8 +98,13 @@ import io.trino.spi.type.VarcharType;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import jakarta.annotation.Nullable;
 
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -150,6 +159,8 @@ public class DuckLakeMetadata
 
     private final JdbcDuckLakeMetastore metastore;
     private final String dataPath;
+    private final boolean addFilesProcedureEnabled;
+    private final DuckLakeRangeReplacement rangeReplacement;
     private final Map<Long, DuckLakeRowCount> rowCounts = new ConcurrentHashMap<>();
     private final Map<TableSnapshot, DuckLakeInlinedSummary> inlinedSummaries = new ConcurrentHashMap<>();
     private final JsonCodec<DuckLakeDataFile> dataFileCodec;
@@ -172,10 +183,14 @@ public class DuckLakeMetadata
             TrinoFileSystemFactory fileSystemFactory,
             DuckLakeWriterFactory writerFactory,
             FileFormatDataSourceStats fileFormatDataSourceStats,
-            ParquetReaderOptions parquetReaderOptions)
+            ParquetReaderOptions parquetReaderOptions,
+            boolean addFilesProcedureEnabled,
+            DuckLakeRangeReplacement rangeReplacement)
     {
         this.metastore = requireNonNull(metastore, "metastore is null");
         this.dataPath = requireNonNull(dataPath, "dataPath is null");
+        this.addFilesProcedureEnabled = addFilesProcedureEnabled;
+        this.rangeReplacement = requireNonNull(rangeReplacement, "rangeReplacement is null");
         this.dataFileCodec = requireNonNull(dataFileCodec, "dataFileCodec is null");
         this.mergeFragmentCodec = requireNonNull(mergeFragmentCodec, "mergeFragmentCodec is null");
         this.viewDefinitionCodec = requireNonNull(viewDefinitionCodec, "viewDefinitionCodec is null");
@@ -755,6 +770,235 @@ public class DuckLakeMetadata
     }
 
     @Override
+    public Optional<ConnectorTableExecuteHandle> getTableHandleForExecute(
+            ConnectorSession session,
+            ConnectorAccessControl accessControl,
+            ConnectorTableHandle tableHandle,
+            String procedureName,
+            Map<String, Object> properties,
+            RetryMode retryMode)
+    {
+        if (!procedureName.equalsIgnoreCase(DuckLakeAddFilesProcedure.NAME)) {
+            return Optional.empty();
+        }
+        if (!addFilesProcedureEnabled) {
+            throw new TrinoException(StandardErrorCode.PERMISSION_DENIED, "add_files procedure is disabled");
+        }
+        if (!metastore.fileRegistrationSupported()) {
+            throw new TrinoException(NOT_SUPPORTED, "File registration requires a DuckLake catalog with name mapping support");
+        }
+        DuckLakeTableHandle table = (DuckLakeTableHandle) tableHandle;
+        accessControl.checkCanInsertIntoTable(null, table.schemaTableName(), Optional.empty());
+        boolean replace = Boolean.TRUE.equals(properties.get("replace"));
+        Optional<DuckLakeReplacementRange> range = replacementRange(table, properties);
+        if (replace && range.isPresent()) {
+            throw new TrinoException(StandardErrorCode.INVALID_PROCEDURE_ARGUMENT, "replace and replace_range_column are mutually exclusive");
+        }
+        if (replace || range.isPresent()) {
+            accessControl.checkCanDeleteFromTable(null, table.schemaTableName(), Optional.empty());
+        }
+        Object rawFiles = properties.get("files");
+        if (!(rawFiles instanceof List<?> values) || values.size() > 10000 || (!replace && range.isEmpty() && values.isEmpty())) {
+            throw new TrinoException(StandardErrorCode.INVALID_PROCEDURE_ARGUMENT, "files must contain 1 to 10000 Parquet locations (an empty replacement is allowed)");
+        }
+        ImmutableList.Builder<String> files = ImmutableList.builder();
+        Set<String> unique = new HashSet<>();
+        for (Object value : values) {
+            if (!(value instanceof String path)) {
+                throw new TrinoException(StandardErrorCode.INVALID_PROCEDURE_ARGUMENT, "files must contain distinct non-null locations");
+            }
+            DuckLakeFileImporter.validateLocation(dataPath, path);
+            if (!unique.add(canonicalFileLocation(path))) {
+                throw new TrinoException(StandardErrorCode.INVALID_PROCEDURE_ARGUMENT, "files must contain distinct non-null locations");
+            }
+            files.add(path);
+        }
+        Object rawImportId = properties.get("import_id");
+        if (!(rawImportId instanceof String importId) || !importId.matches("[A-Za-z0-9_-]{1,128}")) {
+            throw new TrinoException(StandardErrorCode.INVALID_PROCEDURE_ARGUMENT, "import_id must contain 1 to 128 letters, digits, underscores or hyphens");
+        }
+        return Optional.of(new DuckLakeAddFilesHandle(
+                table,
+                files.build().stream().sorted().collect(toImmutableList()),
+                importId,
+                Boolean.TRUE.equals(properties.get("allow_missing")),
+                Boolean.TRUE.equals(properties.get("ignore_extra_columns")),
+                Boolean.TRUE.equals(properties.get("hive_partitioning")),
+                replace,
+                range));
+    }
+
+    private Optional<DuckLakeReplacementRange> replacementRange(DuckLakeTableHandle table, Map<String, Object> properties)
+    {
+        String name = (String) properties.get("replace_range_column");
+        String start = (String) properties.get("replace_range_start");
+        String end = (String) properties.get("replace_range_end");
+        if (name == null && start == null && end == null) {
+            return Optional.empty();
+        }
+        if (name == null || start == null || end == null) {
+            throw new TrinoException(StandardErrorCode.INVALID_PROCEDURE_ARGUMENT, "replace_range_column, replace_range_start and replace_range_end must be specified together");
+        }
+        DuckLakeColumnHandle column = columnHandles(table).stream().filter(value -> value.name().equalsIgnoreCase(name)).findFirst()
+                .orElseThrow(() -> new TrinoException(StandardErrorCode.INVALID_PROCEDURE_ARGUMENT, "Replacement range column does not exist: " + name));
+        return Optional.of(new DuckLakeReplacementRange(column, start, end));
+    }
+
+    @Override
+    public Map<String, Long> executeTableExecute(ConnectorSession session, ConnectorTableExecuteHandle tableExecuteHandle)
+    {
+        DuckLakeAddFilesHandle handle = (DuckLakeAddFilesHandle) tableExecuteHandle;
+        DuckLakeTableHandle table = handle.table();
+        String fingerprint = DuckLakeFileImporter.fingerprint(handle);
+        String receiptKey = "trino_import_" + handle.importId();
+        // A retry of an applied import is recognized before anything is read, so it succeeds even
+        // when the schema, the table contents or the files have changed since.
+        Optional<String> receipt = metastore.tag(table.snapshotId(), table.tableId(), receiptKey);
+        if (receipt.isPresent()) {
+            verifyReceipt(receipt.orElseThrow(), fingerprint);
+            return ImmutableMap.of("added_data_files", 0L);
+        }
+        if (handle.replace() || handle.replacementRange().isPresent()) {
+            verifyNoInlinedData(table, "replacing rows");
+        }
+        List<DuckLakeWriteColumn> columns = DuckLakeColumns.fromCatalog(metastore.columns(table.snapshotId(), table.tableId()));
+        DuckLakeWriteTarget target = new DuckLakeWriteTarget(table.schemaTableName(), table.tableId(), table.tableLocation(), columns, writePartitioningOf(table));
+        List<DuckLakeFileImporter.ImportedFile> imported = DuckLakeFileImporter.readFiles(
+                fileSystemFactory.create(session), dataPath, handle, columns, target.partitioning(), parquetReaderOptions, fileFormatDataSourceStats);
+        handle.replacementRange().ifPresent(range -> range.validateImportedFiles(imported));
+        Optional<DuckLakeRangeReplacement.Plan> rangePlan = handle.replacementRange().map(range -> rangeReplacement.plan(session, table, range));
+        List<RewrittenDeletes> rangeDeletes = rangePlan.map(plan -> rewriteDeleteFiles(session, target, plan.positions())).orElse(ImmutableList.of());
+        Optional<Long> added = commit(commit -> {
+            DuckLakeCommit.TableIdentity current = commit.findTable(table.schemaName(), table.tableName())
+                    .orElseThrow(() -> new TrinoException(StandardErrorCode.TABLE_NOT_FOUND, "Import target no longer exists"));
+            if (current.tableId() != table.tableId()) {
+                throw new DuckLakeCommit.ConcurrentModificationFailure("Import target was replaced while reading files");
+            }
+            Optional<String> concurrentReceipt = commit.tableTag(table.tableId(), receiptKey);
+            if (concurrentReceipt.isPresent()) {
+                verifyReceipt(concurrentReceipt.orElseThrow(), fingerprint);
+                return Optional.empty();
+            }
+            verifyFilesNotRecorded(commit, table, handle.files());
+            if (handle.replace()) {
+                removeAllRows(commit, table.tableId());
+                commit.recordDelete(table.tableId());
+            }
+            rangePlan.ifPresent(plan -> {
+                Set<Long> changed = ImmutableSet.<Long>builder().addAll(plan.wholeFiles()).addAll(plan.positions().keySet()).build();
+                commit.verifyDataFilesUnchanged(table.tableId(), changed);
+                commit.verifyDeleteFilesUnchanged(table.tableId(), plan.positions().keySet(), rangeDeletes.stream()
+                        .flatMap(value -> value.replacedDeleteFileId().stream()).collect(toImmutableSet()));
+                removeDataFiles(commit, table.tableId(), ImmutableList.copyOf(plan.wholeFiles()));
+                applyDeletes(commit, target, rangeDeletes);
+                // A replacement depends on every row in the interval, including the absence of
+                // rows in an empty interval. Record both sides even for a delete-only batch.
+                commit.recordDelete(table.tableId());
+            });
+            Map<String, Long> mappings = new LinkedHashMap<>();
+            Map<List<DuckLakeCommit.NameMappingColumn>, Long> mappingIds = new LinkedHashMap<>();
+            for (DuckLakeFileImporter.ImportedFile file : imported) {
+                long mappingId = mappingIds.computeIfAbsent(file.mapping(), mapping -> {
+                    long id = commit.allocateFileId();
+                    commit.insertNameMapping(id, table.tableId(), mapping);
+                    return id;
+                });
+                mappings.put(file.file().path(), mappingId);
+            }
+            addDataFiles(commit, target, imported.stream().map(DuckLakeFileImporter.ImportedFile::file).collect(toImmutableList()), mappings);
+            commit.setTableTag(table.tableId(), receiptKey, Optional.of(fingerprint));
+            commit.recordInsert(table.tableId());
+            return Optional.of((long) imported.size());
+        });
+        if (added.isEmpty()) {
+            // a concurrent retry applied the import first, so nothing references these files
+            deleteUnreferencedDeleteFiles(session, target, rangeDeletes);
+            return ImmutableMap.of("added_data_files", 0L);
+        }
+        return ImmutableMap.of("added_data_files", added.orElseThrow());
+    }
+
+    private static void verifyReceipt(String receipt, String fingerprint)
+    {
+        if (!receipt.equals(fingerprint)) {
+            throw new TrinoException(StandardErrorCode.INVALID_PROCEDURE_ARGUMENT, "import_id was already used with different files or options");
+        }
+    }
+
+    /**
+     * Fails when a file to register is recorded anywhere in the catalog, in any snapshot and for
+     * any table, or waits to be deleted, or lies in the directory of another table.
+     * <p>
+     * DuckDB deletes a file once the snapshots of a record ending it expire, even while another
+     * record still references it, so a file recorded twice is eventually lost. A file in the
+     * directory of another table holds rows of that table, which the caller may not be allowed to
+     * read.
+     */
+    private void verifyFilesNotRecorded(DuckLakeCommit commit, DuckLakeTableHandle table, List<String> files)
+    {
+        ListMultimap<Long, String> tableLocations = ArrayListMultimap.create();
+        Map<String, Long> visibleTableDirectories = new HashMap<>();
+        for (DuckLakeCommit.TableLocation location : commit.tableLocations()) {
+            String schemaLocation = PathResolver.resolve(dataPath, location.schemaPath(), location.schemaPathIsRelative());
+            String tableLocation = PathResolver.resolve(schemaLocation, location.path(), location.pathIsRelative());
+            tableLocations.put(location.tableId(), tableLocation);
+            if (location.visible()) {
+                visibleTableDirectories.put(canonicalDirectory(tableLocation), location.tableId());
+            }
+        }
+        Map<String, String> filesByLocation = new HashMap<>();
+        for (String file : files) {
+            String location = canonicalFileLocation(file);
+            filesByLocation.put(location, file);
+            // the table whose directory holds the file most closely owns it
+            Optional<Long> owner = visibleTableDirectories.entrySet().stream()
+                    .filter(directory -> location.startsWith(directory.getKey()))
+                    .max(Comparator.comparingInt(directory -> directory.getKey().length()))
+                    .map(Map.Entry::getValue);
+            if (owner.isPresent() && owner.get() != table.tableId()) {
+                throw new TrinoException(StandardErrorCode.INVALID_PROCEDURE_ARGUMENT, "Imported files cannot be in the directory of another table: " + file);
+            }
+        }
+        Set<String> fileNames = files.stream()
+                .map(file -> file.substring(file.lastIndexOf('/') + 1))
+                .collect(toImmutableSet());
+        for (DuckLakeCommit.RecordedFile recorded : commit.recordedFiles(fileNames)) {
+            List<String> bases = recorded.tableId().isPresent() ? tableLocations.get(recorded.tableId().orElseThrow()) : ImmutableList.of(dataPath);
+            for (String base : bases) {
+                String location;
+                try {
+                    location = canonicalFileLocation(PathResolver.resolve(base, recorded.path(), recorded.pathIsRelative()));
+                }
+                catch (IllegalArgumentException _) {
+                    // a location this connector cannot parse is not one of the files to register
+                    continue;
+                }
+                String file = filesByLocation.get(location);
+                if (file != null) {
+                    throw new TrinoException(StandardErrorCode.INVALID_PROCEDURE_ARGUMENT, "File is already registered in the catalog, or was and has not been deleted yet: " + file);
+                }
+            }
+        }
+    }
+
+    private void deleteUnreferencedDeleteFiles(ConnectorSession session, DuckLakeWriteTarget target, List<RewrittenDeletes> rewrittenDeletes)
+    {
+        TrinoFileSystem fileSystem = fileSystemFactory.create(session);
+        for (RewrittenDeletes rewritten : rewrittenDeletes) {
+            if (rewritten.newDeleteFile().isEmpty()) {
+                continue;
+            }
+            String location = PathResolver.resolve(target.tableLocation(), rewritten.newDeleteFile().orElseThrow().path(), true);
+            try {
+                fileSystem.deleteFile(Location.of(location));
+            }
+            catch (IOException e) {
+                log.warn(e, "Could not delete unreferenced delete file %s", location);
+            }
+        }
+    }
+
+    @Override
     public ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, Optional<ConnectorTableLayout> layout, RetryMode retryMode, boolean replace)
     {
         SchemaTableName tableName = tableMetadata.getTable();
@@ -925,6 +1169,11 @@ public class DuckLakeMetadata
      */
     private void addDataFiles(DuckLakeCommit commit, DuckLakeWriteTarget target, List<DuckLakeDataFile> dataFiles)
     {
+        addDataFiles(commit, target, dataFiles, Map.of());
+    }
+
+    private void addDataFiles(DuckLakeCommit commit, DuckLakeWriteTarget target, List<DuckLakeDataFile> dataFiles, Map<String, Long> mappings)
+    {
         DuckLakeCommit.TableStatsRow stats = commit.tableStats(target.tableId())
                 .orElseGet(() -> new DuckLakeCommit.TableStatsRow(0, 0, 0));
         long nextRowId = stats.nextRowId();
@@ -940,15 +1189,17 @@ public class DuckLakeMetadata
         for (DuckLakeDataFile dataFile : dataFiles) {
             long dataFileId = commit.allocateFileId();
             commit.insertDataFile(target.tableId(), dataFileId, new DuckLakeCommit.DataFileRow(
-                    dataFile.path(),
+                    importedFilePath(target.tableLocation(), dataFile.path(), mappings.containsKey(dataFile.path())),
                     dataFile.recordCount(),
                     dataFile.fileSizeBytes(),
                     dataFile.footerSize(),
                     nextRowId,
-                    target.partitioning().map(DuckLakePartitioning::partitionId).map(OptionalLong::of).orElse(OptionalLong.empty())));
-            nextRowId += dataFile.recordCount();
-            recordCount += dataFile.recordCount();
-            fileSizeBytes += dataFile.fileSizeBytes();
+                    target.partitioning().filter(partitioning -> dataFile.partitionValues().size() == partitioning.fields().size()).map(DuckLakePartitioning::partitionId).map(OptionalLong::of).orElse(OptionalLong.empty()),
+                    !mappings.containsKey(dataFile.path()) || Location.of(dataFile.path()).scheme().orElse("").equals("local"),
+                    mappings.containsKey(dataFile.path()) ? OptionalLong.of(mappings.get(dataFile.path())) : OptionalLong.empty()));
+            nextRowId = Math.addExact(nextRowId, dataFile.recordCount());
+            recordCount = Math.addExact(recordCount, dataFile.recordCount());
+            fileSizeBytes = Math.addExact(fileSizeBytes, dataFile.fileSizeBytes());
 
             for (int index = 0; index < dataFile.partitionValues().size(); index++) {
                 commit.insertFilePartitionValue(target.tableId(), dataFileId, index, dataFile.partitionValues().get(index));
@@ -969,6 +1220,30 @@ public class DuckLakeMetadata
         for (DuckLakeTableColumnStats stats2 : mergedStats.values()) {
             commit.writeTableColumnStats(target.tableId(), stats2);
         }
+    }
+
+    private static String importedFilePath(String tableLocation, String file, boolean imported)
+    {
+        // Local locations are relative to the configured filesystem root, which DuckDB does not
+        // know. Store a table-relative path so both engines resolve the same physical file.
+        if (imported && Location.of(file).scheme().orElse("").equals("local")) {
+            return Path.of(Location.of(tableLocation).path()).relativize(Path.of(Location.of(file).path())).toString();
+        }
+        return file;
+    }
+
+    private static String canonicalFileLocation(String file)
+    {
+        if (Location.of(file).scheme().orElse("").equals("local")) {
+            return "local:///" + Path.of(Location.of(file).path()).normalize();
+        }
+        return file;
+    }
+
+    private static String canonicalDirectory(String directory)
+    {
+        String location = canonicalFileLocation(directory);
+        return location.endsWith("/") ? location : location + "/";
     }
 
     private static DuckLakeTableColumnStats toTableColumnStats(DuckLakeWriteColumn column, DuckLakeFileColumnStatsRow fileStats)

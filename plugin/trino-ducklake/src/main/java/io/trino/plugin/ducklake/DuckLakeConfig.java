@@ -45,6 +45,7 @@ public class DuckLakeConfig
     private Duration connectionPoolAcquisitionTimeout = new Duration(30, SECONDS);
     private String metadataSchema = "public";
     private String dataPath;
+    private boolean addFilesProcedureEnabled;
     private boolean fileStatisticsPruningEnabled = true;
     private DataSize maxSplitSize = DataSize.of(64, MEGABYTE);
     private DataSize targetMaxFileSize = DataSize.of(128, MEGABYTE);
@@ -170,6 +171,19 @@ public class DuckLakeConfig
     public DuckLakeConfig setMetadataSchema(String metadataSchema)
     {
         this.metadataSchema = metadataSchema;
+        return this;
+    }
+
+    public boolean isAddFilesProcedureEnabled()
+    {
+        return addFilesProcedureEnabled;
+    }
+
+    @Config("ducklake.add-files-procedure.enabled")
+    @ConfigDescription("Allow registering existing Parquet files under the catalog data path")
+    public DuckLakeConfig setAddFilesProcedureEnabled(boolean enabled)
+    {
+        addFilesProcedureEnabled = enabled;
         return this;
     }
 

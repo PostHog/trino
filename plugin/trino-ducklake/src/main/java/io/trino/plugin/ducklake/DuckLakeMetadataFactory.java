@@ -29,6 +29,7 @@ public class DuckLakeMetadataFactory
 {
     private final JdbcDuckLakeMetastore metastore;
     private final String dataPath;
+    private final boolean addFilesProcedureEnabled;
     private final JsonCodec<DuckLakeDataFile> dataFileCodec;
     private final JsonCodec<DuckLakeMergeFragment> mergeFragmentCodec;
     private final JsonCodec<ConnectorViewDefinition> viewDefinitionCodec;
@@ -36,6 +37,7 @@ public class DuckLakeMetadataFactory
     private final DuckLakeWriterFactory writerFactory;
     private final FileFormatDataSourceStats fileFormatDataSourceStats;
     private final ParquetReaderOptions parquetReaderOptions;
+    private final DuckLakeRangeReplacement rangeReplacement;
 
     @Inject
     public DuckLakeMetadataFactory(
@@ -47,10 +49,12 @@ public class DuckLakeMetadataFactory
             TrinoFileSystemFactory fileSystemFactory,
             DuckLakeWriterFactory writerFactory,
             FileFormatDataSourceStats fileFormatDataSourceStats,
-            ParquetReaderConfig parquetReaderConfig)
+            ParquetReaderConfig parquetReaderConfig,
+            DuckLakeRangeReplacement rangeReplacement)
     {
         this.metastore = requireNonNull(metastore, "metastore is null");
         this.dataPath = config.getDataPath();
+        this.addFilesProcedureEnabled = config.isAddFilesProcedureEnabled();
         this.dataFileCodec = requireNonNull(dataFileCodec, "dataFileCodec is null");
         this.mergeFragmentCodec = requireNonNull(mergeFragmentCodec, "mergeFragmentCodec is null");
         this.viewDefinitionCodec = requireNonNull(viewDefinitionCodec, "viewDefinitionCodec is null");
@@ -58,6 +62,7 @@ public class DuckLakeMetadataFactory
         this.writerFactory = requireNonNull(writerFactory, "writerFactory is null");
         this.fileFormatDataSourceStats = requireNonNull(fileFormatDataSourceStats, "fileFormatDataSourceStats is null");
         this.parquetReaderOptions = parquetReaderConfig.toParquetReaderOptions();
+        this.rangeReplacement = requireNonNull(rangeReplacement, "rangeReplacement is null");
     }
 
     public DuckLakeMetadata create(ConnectorIdentity ignoredIdentity)
@@ -71,6 +76,8 @@ public class DuckLakeMetadataFactory
                 fileSystemFactory,
                 writerFactory,
                 fileFormatDataSourceStats,
-                parquetReaderOptions);
+                parquetReaderOptions,
+                addFilesProcedureEnabled,
+                rangeReplacement);
     }
 }

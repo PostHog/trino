@@ -17,6 +17,8 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.filesystem.local.LocalFileSystem;
 import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
+import io.trino.plugin.ducklake.metastore.DuckLakeNameMapping;
+import io.trino.plugin.ducklake.metastore.DuckLakeNameMappingEntry;
 import io.trino.plugin.hive.HiveTransactionHandle;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
 import io.trino.plugin.hive.parquet.ParquetWriterConfig;
@@ -29,6 +31,7 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
+import io.trino.spi.type.RowType;
 import io.trino.testing.TestingConnectorSession;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -42,11 +45,13 @@ import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 
 import static io.trino.spi.connector.DynamicFilter.EMPTY;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.IntegerType.INTEGER;
 import static java.lang.Math.toIntExact;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -254,6 +259,68 @@ final class TestDuckLakePageSourceProvider
         // read by name, the missing column would read as NULL and leave out every row
         assertThatThrownBy(() -> source(Optional.empty(), "data.parquet", 0, fileSize("data.parquet"), ImmutableList.of(COLUMN), OptionalLong.of(2), TupleDomain.all()))
                 .hasMessage("Data file local:///data.parquet holds rows newer than snapshot 2, but has no _ducklake_internal_snapshot_id column to tell them apart");
+    }
+
+    @Test
+    void testNestedNameMappingsNeedNoCatalog()
+            throws Exception
+    {
+        try (Connection connection = DriverManager.getConnection("jdbc:duckdb:");
+                Statement statement = connection.createStatement()) {
+            statement.execute("COPY (SELECT {'physical_x': 7::INTEGER, 'physical_y': 8::INTEGER} physical_info) TO '%s' (FORMAT PARQUET)"
+                    .formatted(directory.resolve("nested.parquet")));
+        }
+        RowType type = RowType.from(ImmutableList.of(RowType.field("x", INTEGER), RowType.field("missing", INTEGER), RowType.field("y", INTEGER)));
+        DuckLakeWriteColumn tableColumn = new DuckLakeWriteColumn(2, "info", "struct", type, true, ImmutableList.of(
+                new DuckLakeWriteColumn(3, "x", "int32", INTEGER, true, ImmutableList.of()),
+                new DuckLakeWriteColumn(4, "missing", "int32", INTEGER, true, ImmutableList.of()),
+                new DuckLakeWriteColumn(5, "y", "int32", INTEGER, true, ImmutableList.of())));
+        DuckLakeNameMapping mapping = new DuckLakeNameMapping(ImmutableMap.of(
+                2L, new DuckLakeNameMappingEntry("physical_info", false, true),
+                3L, new DuckLakeNameMappingEntry("physical_x", false, false),
+                5L, new DuckLakeNameMappingEntry("physical_y", false, false)));
+        // the coordinator resolves the read type from the table schema, so the provider reading
+        // the file needs no access to the catalog database
+        Map<Long, DuckLakeNameMapping> resolved = DuckLakePageSourceProvider.withNestedReadTypes(ImmutableMap.of(1L, mapping), () -> ImmutableList.of(tableColumn));
+        assertThat(resolved.get(1L).nestedReadType(2)).contains(RowType.from(ImmutableList.of(
+                RowType.field("physical_x", INTEGER),
+                RowType.field("$ducklake_missing_column$4", INTEGER),
+                RowType.field("physical_y", INTEGER))));
+
+        ParquetReaderConfig readerConfig = new ParquetReaderConfig();
+        TestingConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new DuckLakeSessionProperties(new DuckLakeConfig(), readerConfig, new ParquetWriterConfig()).getSessionProperties())
+                .build();
+        DuckLakePageSourceProvider provider = new DuckLakePageSourceProvider(_ -> new LocalFileSystem(directory), readStatistics, readerConfig);
+        long fileSize = fileSize("nested.parquet");
+        DuckLakeSplit split = new DuckLakeSplit(
+                1,
+                "local:///nested.parquet",
+                0,
+                fileSize,
+                fileSize,
+                OptionalLong.empty(),
+                1,
+                OptionalLong.empty(),
+                Optional.empty(),
+                ImmutableMap.of(),
+                Optional.of(resolved.get(1L)),
+                SplitWeight.standard(),
+                Optional.empty(),
+                Optional.empty());
+        DuckLakeTableHandle table = new DuckLakeTableHandle("main", "test", 1, 1, "local:///", TupleDomain.all(), TupleDomain.all(), OptionalLong.empty());
+        DuckLakeColumnHandle column = new DuckLakeColumnHandle(2, "info", "struct", type, true, Optional.empty());
+        try (ConnectorPageSource source = provider.createPageSource(new HiveTransactionHandle(true), session, split, table, Optional.empty(), ImmutableList.of(column), EMPTY, _ -> {})) {
+            SourcePage page = source.getNextSourcePage();
+            while (page == null && !source.isFinished()) {
+                page = source.getNextSourcePage();
+            }
+            assertThat(page).isNotNull();
+            List<Block> fields = RowBlock.getRowFieldsFromBlock(page.getBlock(0));
+            assertThat(INTEGER.getInt(fields.get(0), 0)).isEqualTo(7);
+            assertThat(fields.get(1).isNull(0)).isTrue();
+            assertThat(INTEGER.getInt(fields.get(2), 0)).isEqualTo(8);
+        }
     }
 
     private ConnectorPageSource partialSource(Optional<DuckLakeDeleteFileHandle> deletes, List<DuckLakeColumnHandle> columns, TupleDomain<DuckLakeColumnHandle> predicate)

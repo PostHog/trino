@@ -31,6 +31,7 @@ import io.trino.plugin.ducklake.metastore.DuckLakeNameMapping;
 import io.trino.plugin.ducklake.metastore.DuckLakePartitionColumn;
 import io.trino.plugin.ducklake.metastore.DuckLakePartitionInfo;
 import io.trino.plugin.ducklake.metastore.JdbcDuckLakeMetastore;
+import io.trino.plugin.ducklake.util.DuckLakeColumns;
 import io.trino.plugin.ducklake.util.PartitionTransforms;
 import io.trino.plugin.ducklake.util.PathResolver;
 import io.trino.plugin.ducklake.util.StatsValueParser;
@@ -207,7 +208,9 @@ public class DuckLakeSplitManager
 
         long maxSplitSize = getMaxSplitSize(session).toBytes();
         List<DuckLakeDataFileEntry> dataFiles = metastore.dataFiles(handle.snapshotId(), handle.tableId());
-        Map<Long, DuckLakeNameMapping> nameMappings = nameMappings(dataFiles);
+        Map<Long, DuckLakeNameMapping> nameMappings = DuckLakePageSourceProvider.withNestedReadTypes(
+                nameMappings(dataFiles),
+                () -> DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId())));
         boolean metadataOnly = handle.projectedColumns().map(Set::isEmpty).orElse(false)
                 && handle.unenforcedConstraint().isAll();
         ImmutableList.Builder<DuckLakeSplit> files = ImmutableList.builder();
@@ -393,7 +396,7 @@ public class DuckLakeSplitManager
      * Builds the domain implied by the file column statistics, or {@link Optional#empty()} when
      * the statistics do not constrain the column reliably (so the file must be kept).
      */
-    private static Optional<Domain> statisticsDomain(Type type, DuckLakeFileColumnStats stats, long recordCount)
+    static Optional<Domain> statisticsDomain(Type type, DuckLakeFileColumnStats stats, long recordCount)
     {
         try {
             return buildStatisticsDomain(type, stats, recordCount);

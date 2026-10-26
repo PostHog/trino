@@ -14,6 +14,7 @@
 package io.trino.plugin.ducklake.metastore;
 
 import com.google.common.collect.ImmutableList;
+import io.trino.spi.StandardErrorCode;
 import io.trino.spi.TrinoException;
 import org.jdbi.v3.core.Handle;
 
@@ -51,6 +52,7 @@ public final class DuckLakeCommit
     private final long snapshotId;
     private final long baseSchemaVersion;
     private final boolean sortInfoSupported;
+    private final boolean nameMappingIsPartitionSupported;
 
     private long nextCatalogId;
     private long nextFileId;
@@ -58,7 +60,7 @@ public final class DuckLakeCommit
     private final List<String> changes = new ArrayList<>();
     private final Set<Long> tablesWithSchemaChange = new LinkedHashSet<>();
 
-    DuckLakeCommit(Handle handle, String metadataSchema, SnapshotState state, boolean sortInfoSupported)
+    DuckLakeCommit(Handle handle, String metadataSchema, SnapshotState state, boolean sortInfoSupported, boolean nameMappingIsPartitionSupported)
     {
         this.handle = requireNonNull(handle, "handle is null");
         this.metadataSchema = requireNonNull(metadataSchema, "metadataSchema is null");
@@ -69,6 +71,7 @@ public final class DuckLakeCommit
         this.nextCatalogId = state.nextCatalogId();
         this.nextFileId = state.nextFileId();
         this.sortInfoSupported = sortInfoSupported;
+        this.nameMappingIsPartitionSupported = nameMappingIsPartitionSupported;
     }
 
     /**
@@ -519,18 +522,62 @@ public final class DuckLakeCommit
     // data and delete files
     // ------------------------------------------------------------------
 
+    public Optional<String> tableTag(long tableId, String key)
+    {
+        return handle.createQuery("SELECT value FROM %s WHERE object_id = :tableId AND key = :key AND %s".formatted(table("ducklake_tag"), visibleUnaliased()))
+                .bind("tableId", tableId)
+                .bind("key", key)
+                .bind("snapshot", baseSnapshotId)
+                .mapTo(String.class)
+                .findOne();
+    }
+
+    public void insertNameMapping(long mappingId, long tableId, List<NameMappingColumn> columns)
+    {
+        handle.createUpdate("INSERT INTO %s (mapping_id, table_id, type) VALUES (:mappingId, :tableId, 'map_by_name')".formatted(table("ducklake_column_mapping")))
+                .bind("mappingId", mappingId)
+                .bind("tableId", tableId)
+                .execute();
+        String partitionColumn = nameMappingIsPartitionSupported ? ", is_partition" : "";
+        String partitionValue = nameMappingIsPartitionSupported ? ", :isPartition" : "";
+        var batch = handle.prepareBatch(
+                "INSERT INTO %s (mapping_id, column_id, source_name, target_field_id, parent_column%s) VALUES (:mappingId, :columnId, :sourceName, :targetFieldId, :parentColumn%s)"
+                        .formatted(table("ducklake_name_mapping"), partitionColumn, partitionValue));
+        for (NameMappingColumn column : columns) {
+            if (!nameMappingIsPartitionSupported && column.hivePartition()) {
+                throw new TrinoException(StandardErrorCode.NOT_SUPPORTED, "Hive partition mappings require an upgraded DuckLake catalog");
+            }
+            batch.bind("mappingId", mappingId)
+                    .bind("columnId", column.targetFieldId())
+                    .bind("sourceName", column.sourceName())
+                    .bind("targetFieldId", column.targetFieldId())
+                    .bind("parentColumn", column.parentColumn().isPresent() ? column.parentColumn().orElseThrow() : null);
+            if (nameMappingIsPartitionSupported) {
+                batch.bind("isPartition", column.hivePartition());
+            }
+            batch.add();
+        }
+        if (!columns.isEmpty()) {
+            batch.execute();
+        }
+    }
+
+    public record NameMappingColumn(String sourceName, long targetFieldId, OptionalLong parentColumn, boolean hivePartition) {}
+
     public void insertDataFile(long tableId, long dataFileId, DataFileRow file)
     {
         handle.createUpdate(
                         """
                         INSERT INTO %s (data_file_id, table_id, begin_snapshot, end_snapshot, file_order, path, path_is_relative,
                             file_format, record_count, file_size_bytes, footer_size, row_id_start, partition_id, encryption_key, mapping_id)
-                        VALUES (:dataFileId, :tableId, :snapshot, NULL, NULL, :path, true,
-                            'parquet', :recordCount, :fileSizeBytes, :footerSize, :rowIdStart, :partitionId, NULL, NULL)""".formatted(table("ducklake_data_file")))
+                        VALUES (:dataFileId, :tableId, :snapshot, NULL, NULL, :path, :pathIsRelative,
+                            'parquet', :recordCount, :fileSizeBytes, :footerSize, :rowIdStart, :partitionId, NULL, :mappingId)""".formatted(table("ducklake_data_file")))
                 .bind("dataFileId", dataFileId)
                 .bind("tableId", tableId)
                 .bind("snapshot", snapshotId)
                 .bind("path", file.path())
+                .bind("pathIsRelative", file.pathIsRelative())
+                .bind("mappingId", file.mappingId().isPresent() ? file.mappingId().orElseThrow() : null)
                 .bind("recordCount", file.recordCount())
                 .bind("fileSizeBytes", file.fileSizeBytes())
                 .bind("footerSize", file.footerSize())
@@ -698,6 +745,58 @@ public final class DuckLakeCommit
         if (!Set.copyOf(current).equals(expectedDeleteFileIds)) {
             throw new ConcurrentModificationFailure("deletes of table %s were modified by another transaction".formatted(tableId));
         }
+    }
+
+    /**
+     * Every location a table of the catalog has had, dropped tables included, with whether the
+     * table is visible at the base snapshot.
+     */
+    public List<TableLocation> tableLocations()
+    {
+        return handle.createQuery(
+                        """
+                        SELECT DISTINCT t.table_id, t.path, t.path_is_relative, s.path AS schema_path, s.path_is_relative AS schema_path_is_relative,
+                            %s AS visible
+                        FROM %s t
+                        JOIN %s s ON t.schema_id = s.schema_id""".formatted(visible("t"), table("ducklake_table"), table("ducklake_schema")))
+                .bind("snapshot", baseSnapshotId)
+                .map((rs, _) -> new TableLocation(
+                        rs.getLong("table_id"),
+                        JdbcDuckLakeMetastore.stringOrEmpty(rs, "path"),
+                        rs.getBoolean("path_is_relative"),
+                        JdbcDuckLakeMetastore.stringOrEmpty(rs, "schema_path"),
+                        rs.getBoolean("schema_path_is_relative"),
+                        rs.getBoolean("visible")))
+                .list();
+    }
+
+    /**
+     * The data and delete files of every table and snapshot of the catalog, and the files waiting
+     * to be deleted, whose recorded path ends with one of the given file names. Matching the
+     * name alone keeps the result small without resolving every recorded path.
+     */
+    public List<RecordedFile> recordedFiles(Set<String> fileNames)
+    {
+        if (fileNames.isEmpty()) {
+            return ImmutableList.of();
+        }
+        ImmutableList.Builder<RecordedFile> files = ImmutableList.builder();
+        for (String fileTable : ImmutableList.of("ducklake_data_file", "ducklake_delete_file")) {
+            files.addAll(handle.createQuery("SELECT table_id, path, path_is_relative FROM %s WHERE %s".formatted(table(fileTable), fileNameMatches()))
+                    .bindArray("fileNames", String.class, fileNames)
+                    .map((rs, _) -> new RecordedFile(OptionalLong.of(rs.getLong("table_id")), rs.getString("path"), rs.getBoolean("path_is_relative")))
+                    .list());
+        }
+        files.addAll(handle.createQuery("SELECT path, path_is_relative FROM %s WHERE %s".formatted(table("ducklake_files_scheduled_for_deletion"), fileNameMatches()))
+                .bindArray("fileNames", String.class, fileNames)
+                .map((rs, _) -> new RecordedFile(OptionalLong.empty(), rs.getString("path"), rs.getBoolean("path_is_relative")))
+                .list());
+        return files.build();
+    }
+
+    private static String fileNameMatches()
+    {
+        return "substring(path from '[^/]*$') = ANY(:fileNames)";
     }
 
     public void scheduleFileForDeletion(long dataFileId, String pathFromDataRoot)
@@ -935,12 +1034,40 @@ public final class DuckLakeCommit
 
     public record TableStatsRow(long recordCount, long nextRowId, long fileSizeBytes) {}
 
-    public record DataFileRow(String path, long recordCount, long fileSizeBytes, long footerSize, long rowIdStart, OptionalLong partitionId)
+    public record TableLocation(long tableId, String path, boolean pathIsRelative, String schemaPath, boolean schemaPathIsRelative, boolean visible)
     {
+        public TableLocation
+        {
+            requireNonNull(path, "path is null");
+            requireNonNull(schemaPath, "schemaPath is null");
+        }
+    }
+
+    /**
+     * A file the catalog records, with its path as recorded: relative to the location of its
+     * table, or relative to the data path for a file without a table, waiting to be deleted.
+     */
+    public record RecordedFile(OptionalLong tableId, String path, boolean pathIsRelative)
+    {
+        public RecordedFile
+        {
+            requireNonNull(tableId, "tableId is null");
+            requireNonNull(path, "path is null");
+        }
+    }
+
+    public record DataFileRow(String path, long recordCount, long fileSizeBytes, long footerSize, long rowIdStart, OptionalLong partitionId, boolean pathIsRelative, OptionalLong mappingId)
+    {
+        public DataFileRow(String path, long recordCount, long fileSizeBytes, long footerSize, long rowIdStart, OptionalLong partitionId)
+        {
+            this(path, recordCount, fileSizeBytes, footerSize, rowIdStart, partitionId, true, OptionalLong.empty());
+        }
+
         public DataFileRow
         {
             requireNonNull(path, "path is null");
             requireNonNull(partitionId, "partitionId is null");
+            requireNonNull(mappingId, "mappingId is null");
         }
     }
 

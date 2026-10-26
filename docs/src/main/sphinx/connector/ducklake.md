@@ -91,6 +91,10 @@ The following configuration properties are available:
     catalog resolve against this location. Must match the `DATA_PATH` the
     writer used when attaching the catalog.
   -
+* - `ducklake.add-files-procedure.enabled`
+  - Enable the `add_files` table procedure for registering existing Parquet files
+    under the catalog data path. Grant access only to trusted writers.
+  - `false`
 * - `ducklake.file-statistics-pruning.enabled`
   - Prune data files using the per-file column statistics recorded in the
     catalog.
@@ -312,6 +316,149 @@ it. As in DuckDB, the table that takes the name is a new table. Nothing of the
 old one carries over, so a comment or a `partitioning` property that the new
 definition does not state is gone.
 
+## Registering existing Parquet files
+
+Enable `ducklake.add-files-procedure.enabled=true` in the catalog to register
+immutable Parquet files directly, without reading their rows or rewriting the
+objects. The procedure reads headers and footers on the coordinator, with up to
+eight concurrent file inspections, and publishes all files, column mappings,
+statistics, and the retry receipt in one catalog transaction. A failure before
+commit leaves the table unchanged. Readers in both Trino and DuckDB see the
+same registered files.
+
+Create the target table first, then pass explicit file locations:
+
+```sql
+CREATE TABLE example.default.events (id BIGINT, occurred_at TIMESTAMP(6));
+ALTER TABLE example.default.events EXECUTE add_files(
+    files => ARRAY[
+        's3://example-bucket/imports/batch-001/part-000.parquet',
+        's3://example-bucket/imports/batch-001/part-001.parquet'
+    ],
+    import_id => 'batch-001'
+);
+```
+
+Each invocation accepts at most 10,000 distinct locations under
+`ducklake.data-path`. Directory traversal, globs, directory listing, and sources
+outside that location are not supported. A file in the directory of another
+table cannot be registered. Neither can a file the catalog records for any
+table in any snapshot, or one waiting to be deleted: DuckDB deletes a file once
+the snapshots of a record ending it expire, even while another record still
+references it. This includes a file the same table referenced before a
+replacement removed it. File registration uses the catalog's filesystem
+credentials. The caller must have permission to execute the table procedure and
+insert into the target table. Restrict this capability to writers trusted to
+access files throughout that catalog's data path.
+
+The `import_id` is required and contains 1–128 letters, digits, underscores, or
+hyphens. Retrying the same import into the same table with the same files and
+options succeeds without publishing another snapshot or duplicating rows,
+including when concurrent callers submit the same import. A retry is recognized
+from its receipt before any file is read, so it succeeds even after the table
+schema changed or the files were removed. Reusing the ID with different files or
+options fails. Use a new ID for a new batch. The receipt is stored as a table
+tag named `trino_import_<import_id>`; do not remove or change these tags while
+imports might be retried. Files must be immutable and remain accessible while
+any snapshot references them. Registration does not copy the files or take an
+object storage lock. Do not overwrite registered objects.
+
+Column matching is case insensitive and ignores Parquet field IDs, assigning
+DuckLake name mappings instead. Physical and logical Parquet types must match
+the table's encodings, with two exceptions for files other writers produce: a
+32 or 64 bit integer without an annotation is accepted as a signed integer, and
+a decimal may use any of `INT32`, `INT64`, or `FIXED_LEN_BYTE_ARRAY` of any
+width holding its precision. Standard three-level list and map encodings and
+nested rows are supported. A list element must be named `element`, and map
+entries `key` and `value`; the options below do not relax this, so legacy list
+encodings are rejected. Nested fields using DuckLake `uint32`, `uint64`, or
+`int128` require integer conversions that name mappings do not support and are
+rejected. A file must map at least one table column. A `NOT NULL` column must be
+a `REQUIRED` Parquet field, or a primitive column whose footer statistics count
+no `NULL` values in every row group; an empty file needs neither. By default,
+missing table columns and extra file columns fail the whole batch. These options relax those checks:
+
+- `allow_missing => true` reads absent nullable columns and row fields as `NULL`.
+  A present row must retain at least one physical field so the Parquet reader
+  can distinguish a `NULL` row from a row containing only `NULL` fields.
+- `ignore_extra_columns => true` ignores columns absent from the table.
+- `hive_partitioning => true` supplies absent top-level columns from `key=value`
+  directory components. As in DuckDB, `%XX` escapes in values are decoded and a
+  `%` not followed by two hexadecimal digits is kept as it is. A path naming
+  the same key twice is rejected; for such files registered by DuckDB, the
+  first directory naming the key supplies the value, as DuckDB reads it.
+  Partition values are parsed as the target column type;
+  `__HIVE_DEFAULT_PARTITION__` represents `NULL`. A physical column takes
+  precedence over a path component with the same name.
+
+File statistics are derived conservatively from all row groups. A missing bound
+leaves the file bound unknown, and floating point bounds are not used because
+Parquet does not establish the absence of `NaN`. Partition metadata is recorded
+only when footer bounds or a path constant prove the entire file belongs to one
+partition. Files spanning partitions remain readable without a partition
+constraint. Registration requires a catalog with DuckLake name mapping tables;
+Hive constants require the newer `is_partition` mapping column.
+
+For an atomic replacement of the entire table contents, also pass
+`replace => true`. The caller additionally needs delete permission. An empty
+`files => ARRAY[]` with this option clears the table. Replacement preserves the
+table identity, schema, properties, and prior snapshots. Tables holding inlined
+rows or inlined deletions must be flushed with DuckDB before replacement.
+
+To replace a half-open interval atomically, specify all three range options
+instead of `replace`:
+
+```sql
+ALTER TABLE example.default.events EXECUTE add_files(
+    files => ARRAY['s3://example-bucket/imports/february/part-000.parquet'],
+    import_id => 'replace-february-2024',
+    replace_range_column => 'occurred_at',
+    replace_range_start => '2024-02-01 00:00:00',
+    replace_range_end => '2024-03-01 00:00:00'
+);
+```
+
+The interval is `start <= column < end`; existing `NULL` values and rows outside
+it are preserved. The bounds use the column type's catalog string format. The
+range must name an exactly ordered top-level scalar column, which excludes
+`REAL`, `DOUBLE`, and nested types, and the start must be less than the end. Range replacement requires delete permission and a table
+without inlined rows or inlined deletions. An empty file list clears just the
+interval. `replace` and range options cannot be combined.
+
+Every nonempty replacement file must have footer statistics or path constants
+proving that all of its rows are non-NULL and inside the interval. A missing
+proof, out-of-range row, or NULL fails the whole batch before deleting anything.
+The range column identity and bounds are included in the import receipt;
+reusing the ID with different bounds fails. Bounds are compared by value, so a
+retry spelling a bound differently, or retrying after the column was widened,
+is the same import.
+
+The coordinator uses catalog statistics to skip disjoint files and end wholly
+covered files without reading their rows. It does so only while file statistics
+pruning is enabled, with `ducklake.file-statistics-pruning.enabled` or the
+`file_statistics_pruning_enabled` session property; otherwise it reads every
+file. For boundary files, files whose statistics cannot decide membership, or
+every file with pruning disabled, it reads only the range column and row
+positions using the regular Parquet reader, preserving existing positional
+deletes. It writes new positional delete files for partial removals. Existing
+data files and incoming Parquet objects are not rewritten. Boundary scans run
+on the coordinator, with a 128MB reader budget and a limit of five million newly
+deleted boundary positions per invocation. Use smaller intervals or files
+aligned to intervals if these limits are reached.
+
+All removals, new delete-file references, incoming-file references, and the
+receipt commit in one snapshot. A concurrent insert, delete, schema change, or
+compaction of the target table causes a conflict rather than losing the other
+writer's changes; retry the entire statement with the same import ID. As with
+other writes, an unsuccessful attempt may leave unreferenced delete files that
+require orphan cleanup, but it publishes no partial table change. An attempt
+that finds a concurrent retry already applied the import deletes the delete
+files it wrote.
+
+The procedure does not merge primary keys or apply Delta Lake transaction logs.
+Each statement commits independently; enclosing separate `DELETE` and
+`add_files` statements in `BEGIN` does not make them one atomic publication.
+
 ## Inlined data
 
 A DuckDB writer with `data_inlining_row_limit` set stores the rows of a small
@@ -373,9 +520,6 @@ rows. Flush the inlined data with DuckDB first.
 - A view written in another engine's dialect is listed but cannot be queried
   from Trino, because its query text does not parse here.
 - A column with a non-`NULL` default value is not supported.
-- Queries on a column whose name mapping reads the values from a Hive partition
-  in the file path (`ducklake_name_mapping.is_partition`), or maps the fields
-  nested inside the column, fail. Other columns of such a table can be read.
 - Encrypted data files are not supported.
 - A catalog of specification version 0.3 that DuckDB has not upgraded records
   a file merged with `ducklake_merge_adjacent_files` as a count of leading rows

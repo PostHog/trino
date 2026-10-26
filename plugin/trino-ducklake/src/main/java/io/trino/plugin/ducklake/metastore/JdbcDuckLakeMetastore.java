@@ -133,11 +133,12 @@ public class JdbcDuckLakeMetastore
     {
         // read outside the transaction, so that the commit itself needs one connection only
         boolean sortInfoSupported = sortInfoTableExists();
+        boolean nameMappingIsPartitionSupported = nameMappingHasIsPartition();
         RuntimeException conflict = null;
         for (int attempt = 0; attempt <= maxCommitRetries; attempt++) {
             try {
                 return jdbi.inTransaction(TransactionIsolationLevel.SERIALIZABLE, handle -> {
-                    DuckLakeCommit commit = new DuckLakeCommit(handle, metadataSchema, snapshotState(handle), sortInfoSupported);
+                    DuckLakeCommit commit = new DuckLakeCommit(handle, metadataSchema, snapshotState(handle), sortInfoSupported, nameMappingIsPartitionSupported);
                     T result = action.run(commit);
                     commit.verifyNoConflictSince(readSnapshotId);
                     commit.writeSnapshot();
@@ -204,6 +205,11 @@ public class JdbcDuckLakeMetastore
             Thread.currentThread().interrupt();
             throw new TrinoException(DUCKLAKE_COMMIT_FAILED, "Interrupted while retrying a DuckLake commit", e);
         }
+    }
+
+    public boolean fileRegistrationSupported()
+    {
+        return nameMappingTableExists() && tableExists("ducklake_column_mapping");
     }
 
     public Optional<String> formatVersion()
@@ -743,10 +749,6 @@ public class JdbcDuckLakeMetastore
 
         Map<Long, Map<Long, DuckLakeNameMappingEntry>> entriesByMappingId = new LinkedHashMap<>();
         for (NameMappingRow row : rows) {
-            if (row.parentColumn().isPresent()) {
-                // nested entries are only reachable through their top-level column
-                continue;
-            }
             boolean hasNestedFields = columnIdsWithChildren.getOrDefault(row.mappingId(), Set.of()).contains(row.columnId());
             DuckLakeNameMappingEntry entry = new DuckLakeNameMappingEntry(row.sourceName(), row.isPartition(), hasNestedFields);
             DuckLakeNameMappingEntry existing = entriesByMappingId
@@ -878,19 +880,55 @@ public class JdbcDuckLakeMetastore
                             WHERE table_id = :tableId AND column_id IN (<columnIds>)""".formatted(table("ducklake_file_column_stats")))
                     .bind("tableId", tableId)
                     .bindList("columnIds", ImmutableList.copyOf(columnIds))
-                    .map((rs, _) -> new DuckLakeFileColumnStats(
-                            rs.getLong("data_file_id"),
-                            rs.getLong("column_id"),
-                            optionalLong(rs, "value_count"),
-                            optionalLong(rs, "null_count"),
-                            Optional.ofNullable(rs.getString("min_value")),
-                            Optional.ofNullable(rs.getString("max_value")),
-                            optionalBoolean(rs, "contains_nan")))
+                    .map((rs, _) -> fileColumnStats(rs))
                     .list();
         }
         catch (JdbiException e) {
             throw metastoreError(e);
         }
+    }
+
+    /**
+     * The column statistics of the data files visible in the snapshot only, leaving out those of
+     * the files a table has had over its whole history.
+     */
+    public List<DuckLakeFileColumnStats> fileColumnStats(long snapshotId, long tableId, Set<Long> columnIds)
+    {
+        if (columnIds.isEmpty()) {
+            return ImmutableList.of();
+        }
+        try (Handle handle = jdbi.open()) {
+            return handle.createQuery(
+                            """
+                            SELECT s.data_file_id, s.column_id, s.value_count, s.null_count, s.min_value, s.max_value, s.contains_nan
+                            FROM %s s
+                            JOIN %s f ON s.data_file_id = f.data_file_id AND s.table_id = f.table_id
+                            WHERE s.table_id = :tableId AND s.column_id IN (<columnIds>) AND %s""".formatted(
+                                    table("ducklake_file_column_stats"),
+                                    table("ducklake_data_file"),
+                                    visible("f")))
+                    .bind("snapshot", snapshotId)
+                    .bind("tableId", tableId)
+                    .bindList("columnIds", ImmutableList.copyOf(columnIds))
+                    .map((rs, _) -> fileColumnStats(rs))
+                    .list();
+        }
+        catch (JdbiException e) {
+            throw metastoreError(e);
+        }
+    }
+
+    private static DuckLakeFileColumnStats fileColumnStats(ResultSet rs)
+            throws SQLException
+    {
+        return new DuckLakeFileColumnStats(
+                rs.getLong("data_file_id"),
+                rs.getLong("column_id"),
+                optionalLong(rs, "value_count"),
+                optionalLong(rs, "null_count"),
+                Optional.ofNullable(rs.getString("min_value")),
+                Optional.ofNullable(rs.getString("max_value")),
+                optionalBoolean(rs, "contains_nan"));
     }
 
     /**
@@ -1673,7 +1711,7 @@ public class JdbcDuckLakeMetastore
         return "%s.begin_snapshot <= :snapshot AND (%s.end_snapshot IS NULL OR %s.end_snapshot > :snapshot)".formatted(alias, alias, alias);
     }
 
-    private static String stringOrEmpty(ResultSet resultSet, String columnName)
+    static String stringOrEmpty(ResultSet resultSet, String columnName)
             throws SQLException
     {
         String value = resultSet.getString(columnName);
