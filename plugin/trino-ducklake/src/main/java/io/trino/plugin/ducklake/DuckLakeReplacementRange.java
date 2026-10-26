@@ -15,17 +15,27 @@ package io.trino.plugin.ducklake;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.collect.ImmutableList;
 import io.trino.plugin.ducklake.metastore.DuckLakeFileColumnStats;
+import io.trino.plugin.ducklake.util.DuckLakePartitionValues;
 import io.trino.plugin.ducklake.util.StatsValueParser;
 import io.trino.spi.TrinoException;
+import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.ValueSet;
+import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.MapType;
+import io.trino.spi.type.RowType;
+import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeUtils;
 
 import java.util.List;
 import java.util.Optional;
 
 import static io.trino.spi.StandardErrorCode.INVALID_PROCEDURE_ARGUMENT;
+import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.spi.type.RealType.REAL;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -42,11 +52,50 @@ public record DuckLakeReplacementRange(
         requireNonNull(column, "column is null");
         requireNonNull(start, "start is null");
         requireNonNull(end, "end is null");
-        if (!column.type().isOrderable() || column.isInt128()) {
-            throw new TrinoException(INVALID_PROCEDURE_ARGUMENT, "Replacement range requires an exactly ordered scalar column");
+        if (!isExactlyOrderedScalar(column)) {
+            throw new TrinoException(INVALID_PROCEDURE_ARGUMENT, "Replacement range requires an exactly ordered scalar column, but %s has type %s".formatted(column.name(), column.type()));
         }
         // Validate bounds before any files are inspected or a delete file is written.
         interval(column, start, end);
+    }
+
+    /**
+     * Floating point columns are excluded because NaN has no place in the interval and footers
+     * cannot bound it, so no file could ever be proven to lie inside the range.
+     */
+    private static boolean isExactlyOrderedScalar(DuckLakeColumnHandle column)
+    {
+        Type type = column.type();
+        return type.isOrderable()
+                && !type.equals(REAL)
+                && !type.equals(DOUBLE)
+                && !(type instanceof ArrayType)
+                && !(type instanceof MapType)
+                && !(type instanceof RowType)
+                && !column.isInt128();
+    }
+
+    /**
+     * The bounds in the catalog representation of their values, so that an equivalent spelling
+     * of a bound, or the same bound after the column was widened, has the same representation.
+     */
+    public List<String> canonicalBounds()
+    {
+        return ImmutableList.of(canonical(column, start), canonical(column, end));
+    }
+
+    private static String canonical(DuckLakeColumnHandle column, String value)
+    {
+        Object parsed = StatsValueParser.parse(column.type(), value).orElseThrow();
+        BlockBuilder builder = column.type().createBlockBuilder(null, 1);
+        TypeUtils.writeNativeValue(column.type(), builder, parsed);
+        try {
+            return DuckLakePartitionValues.format(column.type(), builder.build(), 0).orElseThrow();
+        }
+        catch (TrinoException _) {
+            // a type without a catalog representation keeps the bound as it was written
+            return value;
+        }
     }
 
     public Domain domain()

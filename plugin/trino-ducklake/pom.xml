@@ -67,11 +67,6 @@
 
         <dependency>
             <groupId>io.trino</groupId>
-            <artifactId>trino-cache</artifactId>
-        </dependency>
-
-        <dependency>
-            <groupId>io.trino</groupId>
             <artifactId>trino-filesystem</artifactId>
         </dependency>
 

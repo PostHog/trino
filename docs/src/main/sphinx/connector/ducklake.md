@@ -341,29 +341,41 @@ ALTER TABLE example.default.events EXECUTE add_files(
 
 Each invocation accepts at most 10,000 distinct locations under
 `ducklake.data-path`. Directory traversal, globs, directory listing, and sources
-outside that location are not supported. File registration uses the catalog's
-filesystem credentials. The caller must have permission to execute the table
-procedure and insert into the target table. Restrict this capability to writers
-trusted to access files throughout that catalog's data path.
+outside that location are not supported. A file in the directory of another
+table cannot be registered. Neither can a file the catalog records for any
+table in any snapshot, or one waiting to be deleted: DuckDB deletes a file once
+the snapshots of a record ending it expire, even while another record still
+references it. This includes a file the same table referenced before a
+replacement removed it. File registration uses the catalog's filesystem
+credentials. The caller must have permission to execute the table procedure and
+insert into the target table. Restrict this capability to writers trusted to
+access files throughout that catalog's data path.
 
 The `import_id` is required and contains 1–128 letters, digits, underscores, or
 hyphens. Retrying the same import into the same table with the same files and
 options succeeds without publishing another snapshot or duplicating rows,
-including when concurrent callers submit the same import. Reusing the ID with
-different files, footer contents, or options fails. Use a new ID for a new batch.
-The receipt is stored as a table tag named `trino_import_<import_id>`; do not
-remove or change these tags while imports might be retried. Files must be
-immutable and remain accessible while any snapshot references them. Registration
-does not copy the files or take an object storage lock, and the footer digest
-cannot detect changes confined to data pages. Do not overwrite registered
-objects or register the same objects into multiple tables.
+including when concurrent callers submit the same import. A retry is recognized
+from its receipt before any file is read, so it succeeds even after the table
+schema changed or the files were removed. Reusing the ID with different files or
+options fails. Use a new ID for a new batch. The receipt is stored as a table
+tag named `trino_import_<import_id>`; do not remove or change these tags while
+imports might be retried. Files must be immutable and remain accessible while
+any snapshot references them. Registration does not copy the files or take an
+object storage lock. Do not overwrite registered objects.
 
 Column matching is case insensitive and ignores Parquet field IDs, assigning
 DuckLake name mappings instead. Physical and logical Parquet types must match
-the table's encodings. Standard three-level list and map encodings and nested
-rows are supported. Nested fields using DuckLake `uint32`, `uint64`, or
+the table's encodings, with two exceptions for files other writers produce: a
+32 or 64 bit integer without an annotation is accepted as a signed integer, and
+a decimal may use any of `INT32`, `INT64`, or `FIXED_LEN_BYTE_ARRAY` of any
+width holding its precision. Standard three-level list and map encodings and
+nested rows are supported. A list element must be named `element`, and map
+entries `key` and `value`; the options below do not relax this, so legacy list
+encodings are rejected. Nested fields using DuckLake `uint32`, `uint64`, or
 `int128` require integer conversions that name mappings do not support and are
-rejected. A file must map at least one table column. By default,
+rejected. A file must map at least one table column. A `NOT NULL` column must be
+a `REQUIRED` Parquet field, or a primitive column whose footer statistics count
+no `NULL` values in every row group; an empty file needs neither. By default,
 missing table columns and extra file columns fail the whole batch. These options relax those checks:
 
 - `allow_missing => true` reads absent nullable columns and row fields as `NULL`.
@@ -371,7 +383,11 @@ missing table columns and extra file columns fail the whole batch. These options
   can distinguish a `NULL` row from a row containing only `NULL` fields.
 - `ignore_extra_columns => true` ignores columns absent from the table.
 - `hive_partitioning => true` supplies absent top-level columns from `key=value`
-  directory components. Partition values are parsed as the target column type;
+  directory components. As in DuckDB, `%XX` escapes in values are decoded and a
+  `%` not followed by two hexadecimal digits is kept as it is. A path naming
+  the same key twice is rejected; for such files registered by DuckDB, the
+  first directory naming the key supplies the value, as DuckDB reads it.
+  Partition values are parsed as the target column type;
   `__HIVE_DEFAULT_PARTITION__` represents `NULL`. A physical column takes
   precedence over a path component with the same name.
 
@@ -404,20 +420,25 @@ ALTER TABLE example.default.events EXECUTE add_files(
 
 The interval is `start <= column < end`; existing `NULL` values and rows outside
 it are preserved. The bounds use the column type's catalog string format. The
-range must name an exactly ordered top-level scalar column, and the start must
-be less than the end. Range replacement requires delete permission and a table
+range must name an exactly ordered top-level scalar column, which excludes
+`REAL`, `DOUBLE`, and nested types, and the start must be less than the end. Range replacement requires delete permission and a table
 without inlined rows or inlined deletions. An empty file list clears just the
 interval. `replace` and range options cannot be combined.
 
 Every nonempty replacement file must have footer statistics or path constants
 proving that all of its rows are non-NULL and inside the interval. A missing
 proof, out-of-range row, or NULL fails the whole batch before deleting anything.
-The range column identity, type, and bounds are included in the import receipt;
-reusing the ID with different bounds fails.
+The range column identity and bounds are included in the import receipt;
+reusing the ID with different bounds fails. Bounds are compared by value, so a
+retry spelling a bound differently, or retrying after the column was widened,
+is the same import.
 
 The coordinator uses catalog statistics to skip disjoint files and end wholly
-covered files without reading their rows. For boundary files, or files whose
-statistics cannot decide membership, it reads only the range column and row
+covered files without reading their rows. It does so only while file statistics
+pruning is enabled, with `ducklake.file-statistics-pruning.enabled` or the
+`file_statistics_pruning_enabled` session property; otherwise it reads every
+file. For boundary files, files whose statistics cannot decide membership, or
+every file with pruning disabled, it reads only the range column and row
 positions using the regular Parquet reader, preserving existing positional
 deletes. It writes new positional delete files for partial removals. Existing
 data files and incoming Parquet objects are not rewritten. Boundary scans run
@@ -430,7 +451,9 @@ receipt commit in one snapshot. A concurrent insert, delete, schema change, or
 compaction of the target table causes a conflict rather than losing the other
 writer's changes; retry the entire statement with the same import ID. As with
 other writes, an unsuccessful attempt may leave unreferenced delete files that
-require orphan cleanup, but it publishes no partial table change.
+require orphan cleanup, but it publishes no partial table change. An attempt
+that finds a concurrent retry already applied the import deletes the delete
+files it wrote.
 
 The procedure does not merge primary keys or apply Delta Lake transaction logs.
 Each statement commits independently; enclosing separate `DELETE` and

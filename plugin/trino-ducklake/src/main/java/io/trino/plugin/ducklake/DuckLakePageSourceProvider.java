@@ -15,12 +15,10 @@ package io.trino.plugin.ducklake;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Suppliers;
-import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import io.airlift.units.DataSize;
-import io.trino.cache.NonEvictableCache;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
@@ -32,7 +30,6 @@ import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.ducklake.metastore.DuckLakeNameMapping;
 import io.trino.plugin.ducklake.metastore.DuckLakeNameMappingEntry;
 import io.trino.plugin.ducklake.metastore.JdbcDuckLakeMetastore;
-import io.trino.plugin.ducklake.util.DuckLakeColumns;
 import io.trino.plugin.ducklake.util.DuckLakeFieldIds;
 import io.trino.plugin.ducklake.util.DuckLakeTypes;
 import io.trino.plugin.ducklake.util.StatsValueParser;
@@ -98,8 +95,6 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOfLongArray;
-import static io.trino.cache.CacheUtils.uncheckedCacheGet;
-import static io.trino.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.memory.context.AggregatedMemoryContext.newAggregatedMemoryContext;
 import static io.trino.plugin.ducklake.DuckLakeColumnHandle.ROW_COUNT_COLUMN;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_BAD_DATA;
@@ -159,11 +154,6 @@ public class DuckLakePageSourceProvider
             Optional.empty(),
             HiveColumnHandle.ColumnType.REGULAR,
             Optional.empty());
-
-    private final NonEvictableCache<TableSchemaKey, Map<Long, DuckLakeWriteColumn>> mappedColumnSchemas =
-            buildNonEvictableCache(CacheBuilder.newBuilder().maximumSize(100));
-
-    private record TableSchemaKey(long tableId, long snapshotId) {}
 
     private final TrinoFileSystemFactory fileSystemFactory;
     private final FileFormatDataSourceStats fileFormatDataSourceStats;
@@ -261,17 +251,11 @@ public class DuckLakePageSourceProvider
             return new DuckLakeCountPageSource(rowCountPages(duckLakeSplit.recordCount()));
         }
         Optional<DuckLakeNameMapping> nameMapping = duckLakeSplit.nameMapping();
-        Map<Long, DuckLakeWriteColumn> mappedColumns = Map.of();
-        if (nameMapping.stream().flatMap(mapping -> mapping.columns().values().stream()).anyMatch(DuckLakeNameMappingEntry::hasNestedFields)) {
-            mappedColumns = uncheckedCacheGet(mappedColumnSchemas, new TableSchemaKey(tableHandle.tableId(), tableHandle.snapshotId()),
-                    () -> DuckLakeColumns.fromCatalog(metastore.orElseThrow().columns(tableHandle.snapshotId(), tableHandle.tableId())).stream()
-                            .collect(toImmutableMap(DuckLakeWriteColumn::columnId, column -> column)));
-        }
         Map<Long, Block> partitionConstants = new HashMap<>();
+        Supplier<Map<String, String>> hiveValues = Suppliers.memoize(() -> DuckLakeFileImporter.hiveValues(duckLakeSplit.path()));
         for (DuckLakeColumnHandle column : dataColumns) {
             nameMapping.flatMap(mapping -> mapping.entry(column.columnId())).filter(DuckLakeNameMappingEntry::hivePartition).ifPresent(entry -> {
-                Map<String, String> values = DuckLakeFileImporter.hiveValues(duckLakeSplit.path());
-                String value = values.get(entry.sourceName().toLowerCase(Locale.ENGLISH));
+                String value = hiveValues.get().get(entry.sourceName().toLowerCase(Locale.ENGLISH));
                 if (value == null) {
                     throw new TrinoException(DUCKLAKE_BAD_DATA, "Missing Hive partition key: " + entry.sourceName());
                 }
@@ -294,7 +278,7 @@ public class DuckLakePageSourceProvider
 
         ImmutableList.Builder<HiveColumnHandle> hiveColumnsBuilder = ImmutableList.builderWithExpectedSize(dataColumns.size() + 2);
         for (DuckLakeColumnHandle column : dataColumns) {
-            hiveColumnsBuilder.add(toHiveColumnHandle(column, nameMapping, mappedColumns));
+            hiveColumnsBuilder.add(toHiveColumnHandle(column, nameMapping));
         }
         // the row index is read to apply positional deletes and to identify rows a merge changes
         boolean hasRowIndexChannel = hasDeletions || rowIdRequested;
@@ -648,7 +632,7 @@ public class DuckLakePageSourceProvider
      * DuckLake field; columns the mapping does not cover are not stored in the file and are read
      * as NULL, like columns added after the file was written.
      */
-    private static HiveColumnHandle toHiveColumnHandle(DuckLakeColumnHandle column, Optional<DuckLakeNameMapping> nameMapping, Map<Long, DuckLakeWriteColumn> mappedColumns)
+    private static HiveColumnHandle toHiveColumnHandle(DuckLakeColumnHandle column, Optional<DuckLakeNameMapping> nameMapping)
     {
         if (nameMapping.isEmpty()) {
             return column.toHiveColumnHandle();
@@ -661,7 +645,8 @@ public class DuckLakePageSourceProvider
             return column.toHiveColumnHandle(MISSING_COLUMN_NAME_PREFIX + column.columnId());
         }
         if (entry.get().hasNestedFields()) {
-            Type readType = mappedReadType(mappedColumns.get(column.columnId()), nameMapping.orElseThrow());
+            Type readType = nameMapping.get().nestedReadType(column.columnId())
+                    .orElseThrow(() -> new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Nested name mappings requiring integer widening are not supported: " + column.name()));
             return new HiveColumnHandle(
                     entry.get().sourceName(),
                     0,
@@ -674,25 +659,68 @@ public class DuckLakePageSourceProvider
         return column.toHiveColumnHandle(entry.get().sourceName());
     }
 
-    private static Type mappedReadType(DuckLakeWriteColumn column, DuckLakeNameMapping mapping)
+    /**
+     * Resolves the types the columns with nested field entries of each name mapping are read as,
+     * which {@link DuckLakeNameMapping#nestedReadTypes()} describes. Only the coordinator knows the
+     * table schema they depend on, so it resolves them when it creates the splits.
+     */
+    static Map<Long, DuckLakeNameMapping> withNestedReadTypes(Map<Long, DuckLakeNameMapping> mappings, Supplier<List<DuckLakeWriteColumn>> tableColumns)
+    {
+        if (mappings.values().stream().noneMatch(DuckLakeNameMapping::hasNestedFields)) {
+            return mappings;
+        }
+        Map<Long, DuckLakeWriteColumn> columns = tableColumns.get().stream()
+                .collect(toImmutableMap(DuckLakeWriteColumn::columnId, column -> column));
+        ImmutableMap.Builder<Long, DuckLakeNameMapping> resolved = ImmutableMap.builder();
+        for (Map.Entry<Long, DuckLakeNameMapping> mapping : mappings.entrySet()) {
+            ImmutableMap.Builder<Long, Type> readTypes = ImmutableMap.builder();
+            mapping.getValue().columns().forEach((fieldId, entry) -> {
+                // nested entries are keyed by fields that are not columns of the table, and are
+                // part of the read type of the column holding them
+                DuckLakeWriteColumn column = columns.get(fieldId);
+                if (entry.hasNestedFields() && column != null) {
+                    mappedReadType(column, mapping.getValue()).ifPresent(type -> readTypes.put(fieldId, type));
+                }
+            });
+            resolved.put(mapping.getKey(), mapping.getValue().withNestedReadTypes(readTypes.buildOrThrow()));
+        }
+        return resolved.buildOrThrow();
+    }
+
+    /**
+     * The column type with each nested field named as the data file names it, or empty when a
+     * nested field needs an integer widening, which a name mapping cannot express.
+     */
+    private static Optional<Type> mappedReadType(DuckLakeWriteColumn column, DuckLakeNameMapping mapping)
     {
         if (column.type() instanceof RowType) {
-            return RowType.from(column.children().stream()
-                    .map(child -> RowType.field(mapping.entry(child.columnId()).map(DuckLakeNameMappingEntry::sourceName)
-                                    .orElse(MISSING_COLUMN_NAME_PREFIX + child.columnId()),
-                            mappedReadType(child, mapping)))
-                    .collect(toImmutableList()));
+            ImmutableList.Builder<RowType.Field> fields = ImmutableList.builder();
+            for (DuckLakeWriteColumn child : column.children()) {
+                Optional<Type> childType = mappedReadType(child, mapping);
+                if (childType.isEmpty()) {
+                    return Optional.empty();
+                }
+                String name = mapping.entry(child.columnId()).map(DuckLakeNameMappingEntry::sourceName)
+                        .orElse(MISSING_COLUMN_NAME_PREFIX + child.columnId());
+                fields.add(RowType.field(name, childType.get()));
+            }
+            return Optional.of(RowType.from(fields.build()));
         }
         if (column.type() instanceof ArrayType) {
-            return new ArrayType(mappedReadType(column.children().getFirst(), mapping));
+            return mappedReadType(column.children().getFirst(), mapping).map(ArrayType::new);
         }
         if (column.type() instanceof MapType) {
-            return new MapType(mappedReadType(column.children().get(0), mapping), mappedReadType(column.children().get(1), mapping), TYPE_OPERATORS);
+            Optional<Type> keyType = mappedReadType(column.children().get(0), mapping);
+            Optional<Type> valueType = mappedReadType(column.children().get(1), mapping);
+            if (keyType.isEmpty() || valueType.isEmpty()) {
+                return Optional.empty();
+            }
+            return Optional.of(new MapType(keyType.get(), valueType.get(), TYPE_OPERATORS));
         }
         if (DuckLakeTypes.isUnsignedInteger(column.duckLakeType()) || DuckLakeTypes.isUnsignedBigint(column.duckLakeType()) || DuckLakeTypes.isInt128(column.duckLakeType())) {
-            throw new TrinoException(DUCKLAKE_UNSUPPORTED_FEATURE, "Nested name mappings requiring integer widening are not supported: " + column.name());
+            return Optional.empty();
         }
-        return column.type();
+        return Optional.of(column.type());
     }
 
     private static boolean isParquetPushableColumn(DuckLakeColumnHandle column)

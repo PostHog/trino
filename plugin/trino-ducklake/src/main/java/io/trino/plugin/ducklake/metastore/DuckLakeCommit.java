@@ -747,6 +747,58 @@ public final class DuckLakeCommit
         }
     }
 
+    /**
+     * Every location a table of the catalog has had, dropped tables included, with whether the
+     * table is visible at the base snapshot.
+     */
+    public List<TableLocation> tableLocations()
+    {
+        return handle.createQuery(
+                        """
+                        SELECT DISTINCT t.table_id, t.path, t.path_is_relative, s.path AS schema_path, s.path_is_relative AS schema_path_is_relative,
+                            %s AS visible
+                        FROM %s t
+                        JOIN %s s ON t.schema_id = s.schema_id""".formatted(visible("t"), table("ducklake_table"), table("ducklake_schema")))
+                .bind("snapshot", baseSnapshotId)
+                .map((rs, _) -> new TableLocation(
+                        rs.getLong("table_id"),
+                        JdbcDuckLakeMetastore.stringOrEmpty(rs, "path"),
+                        rs.getBoolean("path_is_relative"),
+                        JdbcDuckLakeMetastore.stringOrEmpty(rs, "schema_path"),
+                        rs.getBoolean("schema_path_is_relative"),
+                        rs.getBoolean("visible")))
+                .list();
+    }
+
+    /**
+     * The data and delete files of every table and snapshot of the catalog, and the files waiting
+     * to be deleted, whose recorded path ends with one of the given file names. Matching the
+     * name alone keeps the result small without resolving every recorded path.
+     */
+    public List<RecordedFile> recordedFiles(Set<String> fileNames)
+    {
+        if (fileNames.isEmpty()) {
+            return ImmutableList.of();
+        }
+        ImmutableList.Builder<RecordedFile> files = ImmutableList.builder();
+        for (String fileTable : ImmutableList.of("ducklake_data_file", "ducklake_delete_file")) {
+            files.addAll(handle.createQuery("SELECT table_id, path, path_is_relative FROM %s WHERE %s".formatted(table(fileTable), fileNameMatches()))
+                    .bindArray("fileNames", String.class, fileNames)
+                    .map((rs, _) -> new RecordedFile(OptionalLong.of(rs.getLong("table_id")), rs.getString("path"), rs.getBoolean("path_is_relative")))
+                    .list());
+        }
+        files.addAll(handle.createQuery("SELECT path, path_is_relative FROM %s WHERE %s".formatted(table("ducklake_files_scheduled_for_deletion"), fileNameMatches()))
+                .bindArray("fileNames", String.class, fileNames)
+                .map((rs, _) -> new RecordedFile(OptionalLong.empty(), rs.getString("path"), rs.getBoolean("path_is_relative")))
+                .list());
+        return files.build();
+    }
+
+    private static String fileNameMatches()
+    {
+        return "substring(path from '[^/]*$') = ANY(:fileNames)";
+    }
+
     public void scheduleFileForDeletion(long dataFileId, String pathFromDataRoot)
     {
         handle.createUpdate(
@@ -981,6 +1033,28 @@ public final class DuckLakeCommit
     public record ViewIdentity(long viewId, String dialect) {}
 
     public record TableStatsRow(long recordCount, long nextRowId, long fileSizeBytes) {}
+
+    public record TableLocation(long tableId, String path, boolean pathIsRelative, String schemaPath, boolean schemaPathIsRelative, boolean visible)
+    {
+        public TableLocation
+        {
+            requireNonNull(path, "path is null");
+            requireNonNull(schemaPath, "schemaPath is null");
+        }
+    }
+
+    /**
+     * A file the catalog records, with its path as recorded: relative to the location of its
+     * table, or relative to the data path for a file without a table, waiting to be deleted.
+     */
+    public record RecordedFile(OptionalLong tableId, String path, boolean pathIsRelative)
+    {
+        public RecordedFile
+        {
+            requireNonNull(tableId, "tableId is null");
+            requireNonNull(path, "path is null");
+        }
+    }
 
     public record DataFileRow(String path, long recordCount, long fileSizeBytes, long footerSize, long rowIdStart, OptionalLong partitionId, boolean pathIsRelative, OptionalLong mappingId)
     {

@@ -15,6 +15,7 @@ package io.trino.plugin.ducklake;
 
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
+import com.google.common.hash.Hasher;
 import com.google.common.hash.Hashing;
 import io.airlift.concurrent.Threads;
 import io.airlift.slice.Slice;
@@ -22,6 +23,7 @@ import io.airlift.units.DataSize;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoInputFile;
+import io.trino.parquet.ParquetCorruptionException;
 import io.trino.parquet.ParquetReaderOptions;
 import io.trino.parquet.metadata.ParquetMetadata;
 import io.trino.parquet.reader.MetadataReader;
@@ -42,29 +44,35 @@ import io.trino.spi.type.RowType;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TypeUtils;
 import org.apache.parquet.schema.GroupType;
+import org.apache.parquet.schema.LogicalTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.DecimalLogicalTypeAnnotation;
 import org.apache.parquet.schema.MessageType;
+import org.apache.parquet.schema.PrimitiveType;
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
 import org.apache.parquet.schema.Type;
 import org.apache.parquet.schema.Type.Repetition;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.net.URLDecoder;
 import java.time.DateTimeException;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_BAD_DATA;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_FILESYSTEM_ERROR;
 import static io.trino.spi.StandardErrorCode.INVALID_PROCEDURE_ARGUMENT;
@@ -73,9 +81,13 @@ import static java.util.Locale.ENGLISH;
 
 final class DuckLakeFileImporter
 {
+    // the footer length and the magic number that follow the footer at the end of the file
+    private static final int FOOTER_POSTSCRIPT_SIZE = Integer.BYTES + 4;
+    private static final String PLAINTEXT_FOOTER_MAGIC = "PAR1";
+
     private DuckLakeFileImporter() {}
 
-    public record ImportedFile(DuckLakeDataFile file, List<NameMappingColumn> mapping, String footerHash) {}
+    public record ImportedFile(DuckLakeDataFile file, List<NameMappingColumn> mapping) {}
 
     public static List<ImportedFile> readFiles(
             TrinoFileSystem fileSystem,
@@ -142,32 +154,15 @@ final class DuckLakeFileImporter
         try {
             TrinoInputFile input = fileSystem.newInputFile(Location.of(path));
             long length = input.length();
-            if (length < 12) {
-                throw new TrinoException(DUCKLAKE_BAD_DATA, "Parquet file is too short: " + path);
-            }
             long footerSize;
-            try (var in = input.newInput()) {
-                if (!in.readFully(0, 4).toStringUtf8().equals("PAR1")) {
-                    throw new TrinoException(DUCKLAKE_BAD_DATA, "Invalid Parquet header: " + path);
-                }
-                Slice tail = in.readTail(8);
-                if (!tail.slice(4, 4).toStringUtf8().equals("PAR1")) {
-                    throw new TrinoException(DUCKLAKE_BAD_DATA, "Invalid Parquet magic: " + path);
-                }
-                footerSize = Integer.toUnsignedLong(tail.getInt(0));
-            }
-            if (footerSize > length - 12) {
-                throw new TrinoException(DUCKLAKE_BAD_DATA, "Invalid Parquet footer length: " + path);
-            }
-            if (footerSize + 8 > options.getMaxFooterReadSize().toBytes()) {
-                throw new TrinoException(DUCKLAKE_BAD_DATA, "Parquet footer exceeds the configured maximum: " + path);
-            }
-            String footerHash;
             ParquetMetadata metadata;
+            // a single read of the file tail holds the footer, unless it exceeds the footer read size
             try (var source = new TrinoParquetDataSource(input, options, stats)) {
-                Slice footer = MetadataReader.readFooterBytes(source, ParquetReaderOptions.builder(options)
-                        .withFooterReadSize(DataSize.ofBytes(footerSize + 8)).build());
-                footerHash = Hashing.sha256().hashBytes(footer.getBytes()).toString();
+                Slice footer = MetadataReader.readFooterBytes(source, options);
+                if (!footer.slice(footer.length() - PLAINTEXT_FOOTER_MAGIC.length(), PLAINTEXT_FOOTER_MAGIC.length()).toStringUtf8().equals(PLAINTEXT_FOOTER_MAGIC)) {
+                    throw new TrinoException(DUCKLAKE_BAD_DATA, "Encrypted Parquet files cannot be registered: " + path);
+                }
+                footerSize = (long) footer.length() - FOOTER_POSTSCRIPT_SIZE;
                 metadata = MetadataReader.parseFooter(source.getId(), length, footer, Optional.empty(), Optional.empty());
             }
             MessageType schema = metadata.getFileMetaData().getSchema();
@@ -178,7 +173,11 @@ final class DuckLakeFileImporter
             if (rows < 0 || metadata.getBlocks().stream().mapToLong(block -> block.rowCount()).reduce(0, Math::addExact) != rows) {
                 throw new TrinoException(DUCKLAKE_BAD_DATA, "Inconsistent Parquet row count: " + path);
             }
-            Map<String, String> hiveValues = handle.hivePartitioning() ? hiveValues(path) : Map.of();
+            Map<String, String> hiveValues = Map.of();
+            if (handle.hivePartitioning()) {
+                verifyDistinctHivePartitionKeys(path);
+                hiveValues = hiveValues(path);
+            }
             ImmutableList.Builder<NameMappingColumn> mapping = ImmutableList.builder();
             Map<List<String>, DuckLakeParquetSchema.LeafField> leaves = new LinkedHashMap<>();
             mapColumns(schema, DuckLakeParquetSchema.create(columns).messageType(), columns, OptionalLong.empty(), handle, hiveValues, mapping, ImmutableList.of(), leaves);
@@ -187,41 +186,58 @@ final class DuckLakeFileImporter
                 throw new TrinoException(INVALID_PROCEDURE_ARGUMENT, "A file must map at least one table column");
             }
             List<DuckLakeFileColumnStatsRow> columnStats = DuckLakeImportStatistics.collect(metadata, leaves);
-            List<DuckLakeFileColumnStatsRow> completeStats = completeStatistics(columns, mappings, hiveValues, rows, columnStats);
+            List<DuckLakeFileColumnStatsRow> completeStats = completeStatistics(columns, schema, mappings, hiveValues, rows, columnStats);
             List<Optional<String>> partitions = partitioning.map(value -> partitionValues(value, columns, completeStats)).orElse(ImmutableList.of());
-            return new ImportedFile(new DuckLakeDataFile(path, rows, length, footerSize, partitions, completeStats), mappings, footerHash);
+            return new ImportedFile(new DuckLakeDataFile(path, rows, length, footerSize, partitions, completeStats), mappings);
+        }
+        catch (ParquetCorruptionException e) {
+            throw new TrinoException(DUCKLAKE_BAD_DATA, "Invalid Parquet file: " + path, e);
         }
         catch (IOException e) {
             throw new TrinoException(DUCKLAKE_FILESYSTEM_ERROR, "Could not inspect Parquet file: " + path, e);
         }
     }
 
-    static String fingerprint(DuckLakeAddFilesHandle handle, List<ImportedFile> files)
+    /**
+     * Identifies an import request: the target table, the options, and the files named. A retry of
+     * the request is recognized from this alone, so it neither reads the files again nor
+     * depends on the table schema, which may have changed since the import was applied.
+     */
+    static String fingerprint(DuckLakeAddFilesHandle handle)
     {
-        var hash = Hashing.sha256().newHasher()
-                .putInt(1).putLong(handle.table().tableId())
+        Hasher hash = Hashing.sha256().newHasher()
+                .putInt(2).putLong(handle.table().tableId())
                 .putBoolean(handle.allowMissing()).putBoolean(handle.ignoreExtraColumns())
-                .putBoolean(handle.hivePartitioning()).putBoolean(handle.replace()).putInt(files.size());
+                .putBoolean(handle.hivePartitioning()).putBoolean(handle.replace()).putInt(handle.files().size());
         handle.replacementRange().ifPresent(range -> {
-            hash.putString("replacement_range_v1", UTF_8);
+            hash.putString("replacement_range", UTF_8);
             hash.putLong(range.column().columnId());
-            for (String value : ImmutableList.of(range.column().type().toString(), range.start(), range.end())) {
-                byte[] bytes = value.getBytes(UTF_8);
-                hash.putInt(bytes.length).putBytes(bytes);
+            for (String value : range.canonicalBounds()) {
+                putString(hash, value);
             }
         });
-        for (ImportedFile file : files) {
-            byte[] path = file.file().path().getBytes(UTF_8);
-            hash.putInt(path.length).putBytes(path).putLong(file.file().fileSizeBytes()).putString(file.footerHash(), UTF_8);
+        for (String path : handle.files()) {
+            putString(hash, path);
         }
         return hash.hash().toString();
+    }
+
+    private static void putString(Hasher hash, String value)
+    {
+        byte[] bytes = value.getBytes(UTF_8);
+        hash.putInt(bytes.length).putBytes(bytes);
     }
 
     static void validateLocation(String dataPath, String path)
     {
         String prefix = dataPath.endsWith("/") ? dataPath : dataPath + "/";
-        Location.of(path);
-        String decoded = URLDecoder.decode(path.replace("+", "%2B"), UTF_8);
+        try {
+            Location.of(path);
+        }
+        catch (IllegalArgumentException e) {
+            throw new TrinoException(INVALID_PROCEDURE_ARGUMENT, "Invalid file location: " + path, e);
+        }
+        String decoded = decodePercentEscapes(path);
         if (!path.startsWith(prefix) || path.equals(prefix) || path.contains("?") || path.contains("#") || decoded.indexOf('\\') >= 0 || decoded.indexOf(0) >= 0) {
             throw new TrinoException(INVALID_PROCEDURE_ARGUMENT, "Imported files must be under the catalog data path");
         }
@@ -232,26 +248,76 @@ final class DuckLakeFileImporter
         }
     }
 
+    /**
+     * The Hive partition values in the directories of a file location, keyed by the lowercase key.
+     * They are parsed the way DuckDB parses them, so that both engines read the same values: the
+     * key as written, the value with its %XX escapes decoded, and the first directory naming a key
+     * supplies its value.
+     */
     static Map<String, String> hiveValues(String path)
     {
         Map<String, String> values = new HashMap<>();
-        String directories = Location.of(path).path();
-        directories = directories.substring(0, Math.max(0, directories.lastIndexOf('/')));
-        for (String segment : directories.split("/")) {
-            int separator = segment.indexOf('=');
-            if (separator > 0) {
-                String key = URLDecoder.decode(segment.substring(0, separator).replace("+", "%2B"), UTF_8).toLowerCase(ENGLISH);
-                String value = URLDecoder.decode(segment.substring(separator + 1).replace("+", "%2B"), UTF_8);
-                if (values.putIfAbsent(key, value) != null) {
-                    throw new TrinoException(INVALID_PROCEDURE_ARGUMENT, "Duplicate Hive partition key: " + key);
-                }
-            }
+        for (Map.Entry<String, String> partition : hivePartitions(path)) {
+            values.putIfAbsent(partition.getKey().toLowerCase(ENGLISH), decodePercentEscapes(partition.getValue()));
         }
         return values;
     }
 
+    private static void verifyDistinctHivePartitionKeys(String path)
+    {
+        Set<String> keys = new HashSet<>();
+        for (Map.Entry<String, String> partition : hivePartitions(path)) {
+            if (!keys.add(partition.getKey().toLowerCase(ENGLISH))) {
+                throw new TrinoException(INVALID_PROCEDURE_ARGUMENT, "Duplicate Hive partition key: " + partition.getKey());
+            }
+        }
+    }
+
+    private static List<Map.Entry<String, String>> hivePartitions(String path)
+    {
+        String directories = Location.of(path).path();
+        directories = directories.substring(0, Math.max(0, directories.lastIndexOf('/')));
+        ImmutableList.Builder<Map.Entry<String, String>> partitions = ImmutableList.builder();
+        for (String segment : directories.split("/")) {
+            int separator = segment.indexOf('=');
+            if (separator > 0) {
+                partitions.add(Map.entry(segment.substring(0, separator), segment.substring(separator + 1)));
+            }
+        }
+        return partitions.build();
+    }
+
+    /**
+     * Decodes the %XX escapes of a location like DuckDB does: a '%' not followed by two hexadecimal
+     * digits stays as it is, and so does a '+'. Object store keys may contain either.
+     */
+    static String decodePercentEscapes(String value)
+    {
+        if (value.indexOf('%') < 0) {
+            return value;
+        }
+        byte[] encoded = value.getBytes(UTF_8);
+        ByteArrayOutputStream decoded = new ByteArrayOutputStream(encoded.length);
+        int index = 0;
+        while (index < encoded.length) {
+            if (encoded[index] == '%' && index + 2 < encoded.length) {
+                int high = Character.digit(encoded[index + 1], 16);
+                int low = Character.digit(encoded[index + 2], 16);
+                if (high >= 0 && low >= 0) {
+                    decoded.write((high << 4) | low);
+                    index += 3;
+                    continue;
+                }
+            }
+            decoded.write(encoded[index]);
+            index++;
+        }
+        return decoded.toString(UTF_8);
+    }
+
     private static List<DuckLakeFileColumnStatsRow> completeStatistics(
             List<DuckLakeWriteColumn> columns,
+            MessageType schema,
             List<NameMappingColumn> mapping,
             Map<String, String> hiveValues,
             long rows,
@@ -284,14 +350,24 @@ final class DuckLakeFileImporter
                         value,
                         Optional.of(false)));
             }
-            if (!column.nullsAllowed()) {
-                DuckLakeFileColumnStatsRow value = stats.get(column.columnId());
-                if (value == null || value.nullCount().isEmpty() || value.nullCount().orElseThrow() != 0) {
-                    throw new TrinoException(DUCKLAKE_BAD_DATA, "Cannot prove that required column contains no NULLs: " + column.name());
-                }
+            if (!column.nullsAllowed() && rows > 0 && !provesNoNulls(schema, entry, stats.get(column.columnId()))) {
+                throw new TrinoException(DUCKLAKE_BAD_DATA, "Cannot prove that required column contains no NULLs: " + column.name());
             }
         }
         return ImmutableList.copyOf(stats.values());
+    }
+
+    /**
+     * Whether the file proves that a column holds no NULLs: a REQUIRED field cannot hold one, and
+     * otherwise the footer has to count none. Footer statistics exist for primitive columns only,
+     * so a nested column has to be REQUIRED.
+     */
+    private static boolean provesNoNulls(MessageType schema, NameMappingColumn entry, DuckLakeFileColumnStatsRow stats)
+    {
+        if (entry != null && !entry.hivePartition() && schema.getType(entry.sourceName()).getRepetition() == Repetition.REQUIRED) {
+            return true;
+        }
+        return stats != null && stats.nullCount().isPresent() && stats.nullCount().orElseThrow() == 0;
     }
 
     private static List<Optional<String>> partitionValues(
@@ -422,8 +498,7 @@ final class DuckLakeFileImporter
                 GroupType physicalGroup = physical.asGroupType();
                 GroupType expectedGroup = expectedType.asGroupType();
                 if (column.type() instanceof ArrayType || column.type() instanceof MapType) {
-                    if (physicalGroup.getFieldCount() != 1 || physicalGroup.getType(0).isPrimitive()
-                            || physicalGroup.getType(0).getRepetition() != Repetition.REPEATED) {
+                    if (!isStandardEncoding(physicalGroup, column)) {
                         throw new TrinoException(DUCKLAKE_BAD_DATA, "Expected the standard Parquet list/map encoding for " + column.name());
                     }
                     sourcePath = ImmutableList.<String>builder().addAll(sourcePath).add(physicalGroup.getType(0).getName()).build();
@@ -444,6 +519,28 @@ final class DuckLakeFileImporter
         }
     }
 
+    /**
+     * Whether a list or map uses the standard three-level encoding: a repeated group holding exactly
+     * the element, or the key and the value, under the names the table gives them. They cannot be
+     * missing or extra, whatever the options. A file naming the element differently, as legacy
+     * encodings do, would otherwise register an array whose elements the engines resolve
+     * differently.
+     */
+    private static boolean isStandardEncoding(GroupType group, DuckLakeWriteColumn column)
+    {
+        if (group.getFieldCount() != 1 || group.getType(0).isPrimitive() || group.getType(0).getRepetition() != Repetition.REPEATED) {
+            return false;
+        }
+        GroupType repeated = group.getType(0).asGroupType();
+        Set<String> names = repeated.getFields().stream()
+                .map(field -> field.getName().toLowerCase(ENGLISH))
+                .collect(toImmutableSet());
+        Set<String> expectedNames = column.children().stream()
+                .map(child -> child.name().toLowerCase(ENGLISH))
+                .collect(toImmutableSet());
+        return repeated.getFieldCount() == column.children().size() && names.equals(expectedNames);
+    }
+
     private static void validateType(Type source, Type expected, String name)
     {
         boolean matches = source.isPrimitive() == expected.isPrimitive()
@@ -452,11 +549,7 @@ final class DuckLakeFileImporter
             matches = false;
         }
         if (matches && source.isPrimitive()) {
-            matches = source.asPrimitiveType().getPrimitiveTypeName() == expected.asPrimitiveType().getPrimitiveTypeName()
-                    && Objects.equals(source.getLogicalTypeAnnotation(), expected.getLogicalTypeAnnotation());
-            if (matches && source.asPrimitiveType().getPrimitiveTypeName() == PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY) {
-                matches = source.asPrimitiveType().getTypeLength() == expected.asPrimitiveType().getTypeLength();
-            }
+            matches = primitiveTypeMatches(source.asPrimitiveType(), expected.asPrimitiveType());
         }
         else if (matches) {
             matches = Objects.equals(source.getLogicalTypeAnnotation(), expected.getLogicalTypeAnnotation());
@@ -464,5 +557,46 @@ final class DuckLakeFileImporter
         if (!matches) {
             throw new TrinoException(DUCKLAKE_BAD_DATA, "Parquet type does not match column '%s': %s versus %s".formatted(name, source, expected));
         }
+    }
+
+    /**
+     * Whether the reader decodes the values of the file as those the table column holds. Writers
+     * encode some types differently from DuckDB: a signed 32 or 64 bit integer may carry no
+     * annotation, and a decimal may use any physical type that holds its precision, like the
+     * minimal width fixed length arrays Spark and Arrow write.
+     */
+    private static boolean primitiveTypeMatches(PrimitiveType source, PrimitiveType expected)
+    {
+        if (expected.getLogicalTypeAnnotation() instanceof DecimalLogicalTypeAnnotation decimal) {
+            if (!decimal.equals(source.getLogicalTypeAnnotation())) {
+                return false;
+            }
+            return switch (source.getPrimitiveTypeName()) {
+                case INT32 -> decimal.getPrecision() <= 9;
+                case INT64 -> decimal.getPrecision() <= 18;
+                case FIXED_LEN_BYTE_ARRAY -> true;
+                default -> false;
+            };
+        }
+        if (source.getPrimitiveTypeName() != expected.getPrimitiveTypeName()) {
+            return false;
+        }
+        if (source.getPrimitiveTypeName() == PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY && source.getTypeLength() != expected.getTypeLength()) {
+            return false;
+        }
+        return Objects.equals(effectiveAnnotation(source), effectiveAnnotation(expected));
+    }
+
+    private static LogicalTypeAnnotation effectiveAnnotation(PrimitiveType type)
+    {
+        if (type.getLogicalTypeAnnotation() != null) {
+            return type.getLogicalTypeAnnotation();
+        }
+        // a plain INT32 or INT64 holds signed integers of that width
+        return switch (type.getPrimitiveTypeName()) {
+            case INT32 -> LogicalTypeAnnotation.intType(32, true);
+            case INT64 -> LogicalTypeAnnotation.intType(64, true);
+            default -> null;
+        };
     }
 }

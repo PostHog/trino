@@ -22,6 +22,7 @@ import io.trino.plugin.ducklake.metastore.DuckLakeDeleteFileEntry;
 import io.trino.plugin.ducklake.metastore.DuckLakeFileColumnStats;
 import io.trino.plugin.ducklake.metastore.DuckLakeNameMapping;
 import io.trino.plugin.ducklake.metastore.JdbcDuckLakeMetastore;
+import io.trino.plugin.ducklake.util.DuckLakeColumns;
 import io.trino.plugin.ducklake.util.PathResolver;
 import io.trino.spi.SplitWeight;
 import io.trino.spi.TrinoException;
@@ -47,6 +48,7 @@ import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_COMMIT_CONFLICT;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_FILESYSTEM_ERROR;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
+import static io.trino.plugin.ducklake.DuckLakeSessionProperties.isFileStatisticsPruningEnabled;
 import static io.trino.spi.StandardErrorCode.EXCEEDED_LOCAL_MEMORY_LIMIT;
 import static io.trino.spi.StandardErrorCode.USER_CANCELED;
 import static io.trino.spi.block.RowBlock.getRowFieldsFromBlock;
@@ -55,7 +57,9 @@ import static io.trino.spi.type.TypeUtils.readNativeValue;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Plans metadata removals first, reading only the range column of boundary files.
+ * Plans metadata removals first, reading only the range column of boundary files. Catalog
+ * statistics decide which files lie wholly inside or outside the range only while file
+ * statistics pruning is enabled; otherwise every file is read like a boundary file.
  */
 public final class DuckLakeRangeReplacement
 {
@@ -84,12 +88,19 @@ public final class DuckLakeRangeReplacement
     public Plan plan(ConnectorSession session, DuckLakeTableHandle table, DuckLakeReplacementRange replacement)
     {
         List<DuckLakeDataFileEntry> files = metastore.dataFiles(table.snapshotId(), table.tableId());
-        Map<Long, DuckLakeFileColumnStats> statistics = metastore.fileColumnStats(table.tableId(), Set.of(replacement.column().columnId())).stream()
-                .collect(toImmutableMap(DuckLakeFileColumnStats::dataFileId, value -> value));
+        Map<Long, DuckLakeFileColumnStats> statistics = ImmutableMap.of();
+        if (isFileStatisticsPruningEnabled(session)) {
+            statistics = metastore.fileColumnStats(table.snapshotId(), table.tableId(), Set.of(replacement.column().columnId())).stream()
+                    .collect(toImmutableMap(DuckLakeFileColumnStats::dataFileId, value -> value));
+        }
         Map<Long, DuckLakeDeleteFileEntry> deletions = metastore.deleteFiles(table.snapshotId(), table.tableId()).stream()
-                .collect(toImmutableMap(DuckLakeDeleteFileEntry::dataFileId, value -> value));
-        Map<Long, DuckLakeNameMapping> mappings = metastore.nameMappings(files.stream()
-                .filter(file -> file.mappingId().isPresent()).map(file -> file.mappingId().orElseThrow()).collect(toImmutableSet()));
+                .collect(toImmutableMap(DuckLakeDeleteFileEntry::dataFileId, value -> value, (first, _) -> {
+                    throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Multiple delete files are visible for data file %s of table %s".formatted(first.dataFileId(), table.schemaTableName()));
+                }));
+        Map<Long, DuckLakeNameMapping> mappings = DuckLakePageSourceProvider.withNestedReadTypes(
+                metastore.nameMappings(files.stream()
+                        .filter(file -> file.mappingId().isPresent()).map(file -> file.mappingId().orElseThrow()).collect(toImmutableSet())),
+                () -> DuckLakeColumns.fromCatalog(metastore.columns(table.snapshotId(), table.tableId())));
         Domain range = replacement.domain();
         ImmutableSet.Builder<Long> wholeFiles = ImmutableSet.builder();
         Map<Long, LongOpenHashSet> positions = new LinkedHashMap<>();

@@ -13,14 +13,36 @@
  */
 package io.trino.plugin.ducklake;
 
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import io.trino.Session;
+import io.trino.parquet.writer.ParquetWriter;
+import io.trino.parquet.writer.ParquetWriterOptions;
+import io.trino.spi.Page;
+import io.trino.spi.block.Block;
+import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.RowBlock;
+import io.trino.spi.type.Int128;
+import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeUtils;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
+import org.apache.parquet.format.ColumnChunk;
+import org.apache.parquet.format.CompressionCodec;
+import org.apache.parquet.format.FileMetaData;
+import org.apache.parquet.format.RowGroup;
+import org.apache.parquet.format.SchemaElement;
 import org.apache.parquet.format.Util;
+import org.apache.parquet.schema.LogicalTypeAnnotation;
+import org.apache.parquet.schema.MessageType;
+import org.apache.parquet.schema.Types;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.Execution;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -29,16 +51,27 @@ import java.nio.file.Path;
 import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.DecimalType.createDecimalType;
+import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.DELETE_TABLE;
 import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.INSERT_TABLE;
 import static io.trino.testing.TestingAccessControlManager.privilege;
 import static io.trino.testing.TestingNames.randomNameSuffix;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT32;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
+import static org.apache.parquet.schema.Type.Repetition.OPTIONAL;
+import static org.apache.parquet.schema.Type.Repetition.REQUIRED;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
@@ -286,20 +319,10 @@ final class TestDuckLakeAddFiles
         String table = "statistics_import_" + randomNameSuffix();
         String file = catalog.externalParquetFile(table);
         catalog.executeInDuckDb("COPY (SELECT i::INTEGER id FROM range(4096) t(i)) TO '%s' (FORMAT PARQUET, ROW_GROUP_SIZE 2048)".formatted(file));
-        byte[] bytes = Files.readAllBytes(Path.of(file));
-        int footerLength = ByteBuffer.wrap(bytes, bytes.length - 8, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
-        int footerStart = bytes.length - 8 - footerLength;
-        var metadata = Util.readFileMetaData(new ByteArrayInputStream(bytes, footerStart, footerLength));
-        assertThat(metadata.getRow_groups()).hasSize(2);
-        metadata.getRow_groups().getLast().getColumns().getFirst().getMeta_data().unsetStatistics();
-        var footer = new ByteArrayOutputStream();
-        Util.writeFileMetaData(metadata, footer);
-        var rewritten = new ByteArrayOutputStream();
-        rewritten.write(bytes, 0, footerStart);
-        rewritten.write(footer.toByteArray());
-        rewritten.write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(footer.size()).array());
-        rewritten.write("PAR1".getBytes(StandardCharsets.UTF_8));
-        Files.write(Path.of(file), rewritten.toByteArray());
+        rewriteFooter(file, metadata -> {
+            assertThat(metadata.getRow_groups()).hasSize(2);
+            metadata.getRow_groups().getLast().getColumns().getFirst().getMeta_data().unsetStatistics();
+        });
         assertUpdate("CREATE TABLE " + table + " (id INTEGER) WITH (partitioning = ARRAY['id'])");
         try {
             assertUpdate(addFiles(table, "missing_stats", false, location(file)));
@@ -465,6 +488,362 @@ final class TestDuckLakeAddFiles
         finally {
             assertUpdate("DROP TABLE " + table);
         }
+    }
+
+    @Test
+    void testRecordedFilesCannotBeRegisteredAgain()
+            throws Exception
+    {
+        String table = "reregister_" + randomNameSuffix();
+        String other = "reregister_other_" + randomNameSuffix();
+        String first = catalog.externalParquetFile(table + "/first");
+        String second = catalog.externalParquetFile(table + "/second");
+        String shared = catalog.externalParquetFile("imports_" + randomNameSuffix());
+        catalog.executeInDuckDb(
+                "COPY (SELECT 1::INTEGER id) TO '%s' (FORMAT PARQUET)".formatted(first),
+                "COPY (SELECT 2::INTEGER id) TO '%s' (FORMAT PARQUET)".formatted(second),
+                "COPY (SELECT 3::INTEGER id) TO '%s' (FORMAT PARQUET)".formatted(shared));
+        assertUpdate("CREATE TABLE " + table + " (id INTEGER)");
+        assertUpdate("CREATE TABLE " + other + " (id INTEGER)");
+        try {
+            assertUpdate(addFiles(table, "first", false, location(first), location(shared)));
+            // a file another table references would be deleted once either reference expires
+            assertQueryFails(addFiles(other, "shared", false, location(shared)), ".*already registered.*");
+            assertUpdate(addFiles(table, "replace", true, location(second)));
+            // the replaced file is still referenced by earlier snapshots
+            assertQueryFails(addFiles(table, "again", false, location(first)), ".*already registered.*");
+            // and once they expire, it waits to be deleted
+            catalog.executeInDuckDb("CALL ducklake_expire_snapshots('lake', older_than => now() + INTERVAL 1 DAY)");
+            assertThat(catalog.scalar("SELECT count(*)::VARCHAR FROM __ducklake_metadata_lake.ducklake_files_scheduled_for_deletion WHERE path LIKE '%%%s/first/external.parquet'".formatted(table)))
+                    .isEqualTo("1");
+            assertQueryFails(addFiles(table, "after_expiry", false, location(first)), ".*already registered.*");
+            assertQuery("SELECT * FROM " + table, "VALUES 2");
+            assertQuery("SELECT count(*) FROM " + other, "VALUES CAST(0 AS BIGINT)");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+            assertUpdate("DROP TABLE " + other);
+        }
+    }
+
+    @Test
+    void testFilesInAnotherTableDirectoryCannotBeRegistered()
+            throws Exception
+    {
+        String source = "source_" + randomNameSuffix();
+        String target = "target_" + randomNameSuffix();
+        String unregistered = catalog.externalParquetFile(source + "/unregistered");
+        catalog.executeInDuckDb("COPY (SELECT 8::INTEGER id) TO '%s' (FORMAT PARQUET)".formatted(unregistered));
+        assertUpdate("CREATE TABLE " + source + " (id INTEGER)");
+        assertUpdate("CREATE TABLE " + target + " (id INTEGER)");
+        try {
+            assertUpdate("INSERT INTO " + source + " VALUES 7", 1);
+            String sourceFile = "local:///main/%s/%s".formatted(source, catalog.scalar(
+                    "SELECT f.path FROM __ducklake_metadata_lake.ducklake_data_file f JOIN __ducklake_metadata_lake.ducklake_table t USING (table_id) WHERE t.table_name = '%s' AND t.end_snapshot IS NULL AND f.end_snapshot IS NULL".formatted(source)));
+            assertQueryFails(addFiles(target, "registered", false, sourceFile), ".*directory of another table.*");
+            assertQueryFails(addFiles(target, "unregistered", false, location(unregistered)), ".*directory of another table.*");
+            assertQuery("SELECT count(*) FROM " + target, "VALUES CAST(0 AS BIGINT)");
+            // the table owning the directory can register it
+            assertUpdate(addFiles(source, "own", false, location(unregistered)));
+            assertQuery("SELECT * FROM " + source, "VALUES 7, 8");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + source);
+            assertUpdate("DROP TABLE " + target);
+        }
+    }
+
+    @Test
+    void testRetryOfAppliedImportReadsNothing()
+            throws Exception
+    {
+        String table = "retry_import_" + randomNameSuffix();
+        String file = catalog.externalParquetFile(table + "/batch");
+        String other = catalog.externalParquetFile(table + "/other");
+        catalog.executeInDuckDb(
+                "COPY (SELECT 15::INTEGER id) TO '%s' (FORMAT PARQUET)".formatted(file),
+                "COPY (SELECT 16::INTEGER id) TO '%s' (FORMAT PARQUET)".formatted(other));
+        assertUpdate("CREATE TABLE " + table + " (id INTEGER)");
+        try {
+            String statement = replaceRange(table, "batch", "id", "10", "20", location(file));
+            assertUpdate(statement);
+            assertUpdate("ALTER TABLE " + table + " ADD COLUMN extra VARCHAR");
+            assertUpdate("ALTER TABLE " + table + " ALTER COLUMN id SET DATA TYPE BIGINT");
+            String snapshot = catalog.scalar("SELECT max(snapshot_id)::VARCHAR FROM ducklake_snapshots('lake')");
+            // the file no longer matches the table, which a retry must not notice
+            assertUpdate(statement);
+            // nor does the retry read the file again
+            Files.delete(Path.of(file));
+            assertUpdate(statement);
+            // an equivalent spelling of the bounds is the same import
+            assertUpdate(replaceRange(table, "batch", "id", "+10", "0020", location(file)));
+            assertThat(catalog.scalar("SELECT max(snapshot_id)::VARCHAR FROM ducklake_snapshots('lake')")).isEqualTo(snapshot);
+            assertQueryFails(replaceRange(table, "batch", "id", "10", "20", location(other)), ".*import_id.*different.*");
+            assertQueryFails(replaceRange(table, "batch", "id", "10", "21", location(file)), ".*import_id.*different.*");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testUnannotatedIntegersAndNarrowDecimals()
+            throws Exception
+    {
+        String table = "encodings_" + randomNameSuffix();
+        String file = catalog.externalParquetFile(table + "/file");
+        String replacement = catalog.externalParquetFile(table + "/replacement");
+        // Spark and Arrow write signed integers without an annotation, and decimals in the
+        // narrowest fixed length array that holds their precision
+        MessageType schema = Types.buildMessage()
+                .addField(Types.primitive(INT32, OPTIONAL).named("small"))
+                .addField(Types.primitive(INT64, OPTIONAL).named("big"))
+                .addField(Types.primitive(FIXED_LEN_BYTE_ARRAY, OPTIONAL).length(5).as(LogicalTypeAnnotation.decimalType(2, 10)).named("amount"))
+                .addField(Types.primitive(FIXED_LEN_BYTE_ARRAY, OPTIONAL).length(9).as(LogicalTypeAnnotation.decimalType(2, 20)).named("wide"))
+                .named("spark_schema");
+        Map<List<String>, Type> types = ImmutableMap.of(
+                ImmutableList.of("small"), INTEGER,
+                ImmutableList.of("big"), BIGINT,
+                ImmutableList.of("amount"), createDecimalType(10, 2),
+                ImmutableList.of("wide"), createDecimalType(20, 2));
+        writeParquet(file, schema, types, new Page(
+                block(INTEGER, 7L, -8L),
+                block(BIGINT, 100L, 200L),
+                block(createDecimalType(10, 2), 12345L, -99L),
+                block(createDecimalType(20, 2), Int128.valueOf(123456789012345678L), Int128.valueOf(-1L))));
+        writeParquet(replacement, schema, types, new Page(
+                block(INTEGER, 9L),
+                block(BIGINT, 150L),
+                block(createDecimalType(10, 2), 1L),
+                block(createDecimalType(20, 2), Int128.valueOf(2L))));
+        assertUpdate("CREATE TABLE " + table + " (small INTEGER, big BIGINT, amount DECIMAL(10, 2), wide DECIMAL(20, 2))");
+        try {
+            assertUpdate(addFiles(table, "encodings", false, location(file)));
+            assertQuery("SELECT * FROM " + table,
+                    "VALUES (7, 100, 123.45, 1234567890123456.78), (-8, 200, -0.99, -0.01)");
+            assertThat(catalog.rows("SELECT small::VARCHAR, big::VARCHAR, amount::VARCHAR, wide::VARCHAR FROM " + table + " ORDER BY big"))
+                    .containsExactly("7", "100", "123.45", "1234567890123456.78", "-8", "200", "-0.99", "-0.01");
+            // the footer statistics of the unannotated integers prove the range of a replacement
+            assertUpdate(replaceRange(table, "replace_big", "big", "150", "250", location(replacement)));
+            assertQuery("SELECT small, big FROM " + table, "VALUES (7, 100), (9, 150)");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testRangeReplacementWithoutStatisticsPruningReadsEveryFile()
+            throws SQLException
+    {
+        String table = "range_no_pruning_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + table + " (id INTEGER)");
+        try {
+            assertUpdate("INSERT INTO " + table + " VALUES 5, 15, 25", 3);
+            // statistics an operator distrusts: they claim the file lies inside the range
+            catalog.executeInMetastore(
+                    "UPDATE ducklake_file_column_stats SET min_value = '10', max_value = '19' WHERE table_id = (SELECT table_id FROM ducklake_table WHERE table_name = '%s' AND end_snapshot IS NULL)".formatted(table));
+            Session noPruning = Session.builder(getSession())
+                    .setCatalogSessionProperty("ducklake", "file_statistics_pruning_enabled", "false")
+                    .build();
+            assertUpdate(noPruning, replaceRange(table, "no_pruning", "id", "10", "20"));
+            assertQuery("SELECT id FROM " + table, "VALUES 5, 25");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testListElementsCannotBeMissing()
+            throws Exception
+    {
+        String table = "legacy_list_" + randomNameSuffix();
+        String file = catalog.externalParquetFile(table + "/file");
+        catalog.executeInDuckDb("COPY (SELECT 1::INTEGER id, [1::INTEGER, 2] numbers) TO '%s' (FORMAT PARQUET)".formatted(file));
+        // the element of a list named as the legacy encodings name it
+        rewriteFooter(file, metadata -> {
+            for (SchemaElement element : metadata.getSchema()) {
+                if (element.getName().equals("element")) {
+                    element.setName("item");
+                }
+            }
+            for (RowGroup rowGroup : metadata.getRow_groups()) {
+                for (ColumnChunk chunk : rowGroup.getColumns()) {
+                    chunk.getMeta_data().setPath_in_schema(chunk.getMeta_data().getPath_in_schema().stream()
+                            .map(name -> name.equals("element") ? "item" : name)
+                            .toList());
+                }
+            }
+        });
+        assertUpdate("CREATE TABLE " + table + " (id INTEGER, numbers ARRAY(INTEGER))");
+        try {
+            String statement = addFiles(table, "legacy", false, location(file));
+            assertQueryFails(statement.substring(0, statement.length() - 1) + ", allow_missing => true, ignore_extra_columns => true)", ".*standard Parquet list/map encoding for numbers.*");
+            assertQueryFails(statement, ".*standard Parquet list/map encoding for numbers.*");
+            assertQuery("SELECT count(*) FROM " + table, "VALUES CAST(0 AS BIGINT)");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testHivePartitionValuesAreReadLikeDuckDb()
+            throws Exception
+    {
+        String table = "hive_paths_" + randomNameSuffix();
+        String repeated = catalog.externalParquetFile(table + "/dt=first/x/dt=second");
+        String percent = catalog.externalParquetFile(table + "/dt=50%/escaped");
+        catalog.executeInDuckDb(
+                "COPY (SELECT 1::INTEGER id) TO '%s' (FORMAT PARQUET)".formatted(repeated),
+                "COPY (SELECT 2::INTEGER id) TO '%s' (FORMAT PARQUET)".formatted(percent));
+        assertUpdate("CREATE TABLE " + table + " (id INTEGER, dt VARCHAR)");
+        try {
+            // DuckDB registers a path naming a key twice, and one whose value holds a bare '%'
+            catalog.executeInDuckDb(
+                    "CALL ducklake_add_data_files('lake', '%s', '%s', hive_partitioning => true)".formatted(table, repeated),
+                    "CALL ducklake_add_data_files('lake', '%s', '%s', hive_partitioning => true)".formatted(table, percent));
+            assertThat(catalog.rows("SELECT id::VARCHAR, dt FROM " + table + " ORDER BY id")).containsExactly("1", "first", "2", "50%");
+            assertQuery("SELECT id, dt FROM " + table, "VALUES (1, 'first'), (2, '50%')");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testLocationsWithPercentSigns()
+            throws Exception
+    {
+        String table = "percent_import_" + randomNameSuffix();
+        Path file = Path.of(catalog.externalParquetFile(table + "/region=50%off")).resolveSibling("50%off.parquet");
+        catalog.executeInDuckDb("COPY (SELECT 4::INTEGER id) TO '%s' (FORMAT PARQUET)".formatted(file));
+        assertUpdate("CREATE TABLE " + table + " (id INTEGER, region VARCHAR)");
+        try {
+            String statement = addFiles(table, "percent", false, location(file.toString()));
+            assertUpdate(statement.substring(0, statement.length() - 1) + ", hive_partitioning => true)");
+            assertQuery("SELECT * FROM " + table, "VALUES (4, '50%off')");
+            assertThat(catalog.rows("SELECT id::VARCHAR, region FROM " + table)).containsExactly("4", "50%off");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testRangeColumnMustBeExactlyOrderedScalar()
+    {
+        String table = "range_types_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + table + " (id INTEGER, score DOUBLE, tags ARRAY(INTEGER), info ROW(x INTEGER))");
+        try {
+            assertQueryFails(replaceRange(table, "score", "score", "1.0", "2.0"), ".*exactly ordered scalar column, but score has type double.*");
+            assertQueryFails(replaceRange(table, "tags", "tags", "[1]", "[2]"), ".*exactly ordered scalar column, but tags has type array\\(integer\\).*");
+            assertQueryFails(replaceRange(table, "info", "info", "{1}", "{2}"), ".*exactly ordered scalar column, but info has type row.*");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testRequiredFieldsProveColumnsHoldNoNulls()
+            throws Exception
+    {
+        String table = "not_null_import_" + randomNameSuffix();
+        String required = catalog.externalParquetFile(table + "/required");
+        String optional = catalog.externalParquetFile(table + "/optional");
+        String empty = catalog.externalParquetFile(table + "/empty");
+        Block x = block(INTEGER, 7L);
+        writeParquet(
+                required,
+                Types.buildMessage()
+                        .addField(Types.primitive(INT32, REQUIRED).as(LogicalTypeAnnotation.intType(32, true)).named("id"))
+                        .addField(Types.requiredGroup().addField(Types.primitive(INT32, OPTIONAL).as(LogicalTypeAnnotation.intType(32, true)).named("x")).named("info"))
+                        .named("schema"),
+                ImmutableMap.of(ImmutableList.of("id"), INTEGER, ImmutableList.of("info", "x"), INTEGER),
+                new Page(block(INTEGER, 1L), RowBlock.fromFieldBlocks(1, new Block[] {x})));
+        // REQUIRED fields prove the absence of NULLs without any statistics
+        rewriteFooter(required, metadata -> metadata.getRow_groups().forEach(rowGroup -> rowGroup.getColumns().forEach(chunk -> chunk.getMeta_data().unsetStatistics())));
+        catalog.executeInDuckDb(
+                "COPY (SELECT 2::INTEGER id, {'x': 8::INTEGER} info) TO '%s' (FORMAT PARQUET)".formatted(optional),
+                "COPY (SELECT 3::INTEGER id, {'x': 9::INTEGER} info WHERE false) TO '%s' (FORMAT PARQUET)".formatted(empty),
+                "CREATE TABLE %s (id INTEGER NOT NULL, info STRUCT(x INTEGER) NOT NULL)".formatted(table));
+        try {
+            // a footer cannot count the NULLs of a nested column
+            assertQueryFails(addFiles(table, "optional", false, location(optional)), ".*Cannot prove that required column contains no NULLs: info.*");
+            assertUpdate(addFiles(table, "required", false, location(required), location(empty)));
+            assertQuery("SELECT id, info.x FROM " + table, "VALUES (1, 7)");
+            assertThat(catalog.rows("SELECT id::VARCHAR, info.x::VARCHAR FROM " + table)).containsExactly("1", "7");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testRangeReplacementRejectsDuplicateDeleteFiles()
+            throws Exception
+    {
+        String table = "duplicate_deletes_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + table + " (id INTEGER)");
+        String tableId = "(SELECT table_id FROM ducklake_table WHERE table_name = '%s' AND end_snapshot IS NULL)".formatted(table);
+        try {
+            assertUpdate("INSERT INTO " + table + " VALUES 10, 20, 30", 3);
+            assertUpdate("DELETE FROM " + table + " WHERE id = 30", 1);
+            // a catalog no engine writes: two delete files applying to the same data file
+            catalog.executeInMetastore(
+                    """
+                    INSERT INTO ducklake_delete_file (delete_file_id, table_id, begin_snapshot, end_snapshot, data_file_id, path, path_is_relative,
+                        format, delete_count, file_size_bytes, footer_size, encryption_key)
+                    SELECT delete_file_id + 1000000, table_id, begin_snapshot, end_snapshot, data_file_id, path, path_is_relative,
+                        format, delete_count, file_size_bytes, footer_size, encryption_key
+                    FROM ducklake_delete_file WHERE end_snapshot IS NULL AND table_id = %s""".formatted(tableId));
+            assertQueryFails(replaceRange(table, "duplicate", "id", "10", "15"), ".*Multiple delete files are visible for data file.*");
+        }
+        finally {
+            catalog.executeInMetastore("DELETE FROM ducklake_delete_file WHERE delete_file_id >= 1000000 AND table_id = " + tableId);
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    private static Block block(Type type, Object... values)
+    {
+        BlockBuilder builder = type.createBlockBuilder(null, values.length);
+        for (Object value : values) {
+            TypeUtils.writeNativeValue(type, builder, value);
+        }
+        return builder.build();
+    }
+
+    private static void writeParquet(String file, MessageType schema, Map<List<String>, Type> primitiveTypes, Page page)
+            throws IOException
+    {
+        try (OutputStream output = Files.newOutputStream(Path.of(file));
+                ParquetWriter writer = new ParquetWriter(output, schema, primitiveTypes, ParquetWriterOptions.builder().build(), CompressionCodec.SNAPPY, "test", Optional.empty(), Optional.empty())) {
+            writer.write(page);
+        }
+    }
+
+    /**
+     * Changes the footer of a Parquet file in place, leaving its data pages as they are.
+     */
+    private static void rewriteFooter(String file, Consumer<FileMetaData> change)
+            throws IOException
+    {
+        byte[] bytes = Files.readAllBytes(Path.of(file));
+        int footerLength = ByteBuffer.wrap(bytes, bytes.length - 8, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+        int footerStart = bytes.length - 8 - footerLength;
+        FileMetaData metadata = Util.readFileMetaData(new ByteArrayInputStream(bytes, footerStart, footerLength));
+        change.accept(metadata);
+        var footer = new ByteArrayOutputStream();
+        Util.writeFileMetaData(metadata, footer);
+        var rewritten = new ByteArrayOutputStream();
+        rewritten.write(bytes, 0, footerStart);
+        rewritten.write(footer.toByteArray());
+        rewritten.write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(footer.size()).array());
+        rewritten.write("PAR1".getBytes(StandardCharsets.UTF_8));
+        Files.write(Path.of(file), rewritten.toByteArray());
     }
 
     private static String replaceRange(String table, String importId, String column, String start, String end, String... files)
