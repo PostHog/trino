@@ -20,6 +20,7 @@ import io.trino.parquet.writer.ParquetWriter;
 import io.trino.parquet.writer.ParquetWriterOptions;
 import io.trino.plugin.hoglake.HoglakeConfig;
 import io.trino.plugin.hoglake.HoglakeSessionProperties;
+import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
@@ -70,6 +71,12 @@ import static java.nio.ByteOrder.LITTLE_ENDIAN;
  */
 public final class ConnectorTestFixtures
 {
+    /**
+     * The author and message of the drops, truncations and replacements that tests make
+     * through the client, which the server requires.
+     */
+    public static final HoglakeDtos.OperationMetadata TEST_OPERATION_METADATA = new HoglakeDtos.OperationMetadata("trino-test", "Trino connector test");
+
     private ConnectorTestFixtures() {}
 
     /**

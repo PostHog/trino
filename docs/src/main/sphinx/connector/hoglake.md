@@ -404,6 +404,13 @@ files and deletion vectors while preserving the UUID, schema, partition/sort
 specifications, properties and row-id allocation. DROP and TRUNCATE do not
 physically remove storage objects; normal retention and cleanup still apply.
 
+The server records an author and a message for `DROP TABLE`, `TRUNCATE TABLE`,
+`DROP SCHEMA`, and a `CREATE OR REPLACE TABLE` that replaces an existing table,
+and refuses them without both. The connector sends the session user as the
+author, and a message that names the statement and the query ID, such as
+`Trino DROP TABLE, query 20261026_120000_00001_abcde`. It never sends the query
+text. The server does not authenticate the author.
+
 INSERT and TRUNCATE serialize at catalog publication. Inserts committed before
 truncate are cleared; inserts planned before truncate and committed afterward
 conflict. Fresh inserts can proceed. Truncate does not use drop/recreate.

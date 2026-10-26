@@ -175,7 +175,7 @@ public class HoglakeMetadata
         if (namespace.namespaceId() == null) {
             throw new TrinoException(HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE, "Hoglake namespace identity is missing");
         }
-        client.dropNamespace(schemaName, namespace.namespaceId());
+        client.dropNamespace(schemaName, namespace.namespaceId(), operationMetadata(session, "DROP SCHEMA"));
     }
 
     @Override
@@ -508,6 +508,7 @@ public class HoglakeMetadata
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support atomic-table-creation-v1");
         }
         HoglakeDtos.ReplacementTarget replacement = null;
+        HoglakeDtos.OperationMetadata operationMetadata = null;
         if (replace) {
             if (!catalog.capabilities().contains("atomic-table-replacement-v1")) {
                 throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support atomic-table-replacement-v1");
@@ -515,6 +516,7 @@ public class HoglakeMetadata
             replacement = plannedTargets.computeIfAbsent(metadata.getTable(), name -> new HoglakeDtos.ReplacementTarget(
                     client.getTable(name.getSchemaName(), name.getTableName(), catalog.headSnapshotId()).map(HoglakeDtos.Table::tableUuid).orElse(null),
                     catalog.headSnapshotId()));
+            operationMetadata = operationMetadata(session, "CREATE OR REPLACE TABLE");
         }
         @SuppressWarnings("unchecked")
         List<String> partitioning = (List<String>) metadata.getProperties().getOrDefault("partitioning", List.of());
@@ -536,7 +538,7 @@ public class HoglakeMetadata
         String operation = UUID.randomUUID().toString();
         // Record before sending: a lost preparation response may still have created the operation.
         creationOperation = Optional.of(operation);
-        HoglakeDtos.TableCreation prepared = client.prepareTableCreation(operation, metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), definitions, replacement, partitionFields, sortFields, metadata.getComment().orElse(null), extraProperties);
+        HoglakeDtos.TableCreation prepared = client.prepareTableCreation(operation, metadata.getTable().getSchemaName(), metadata.getTable().getTableName(), definitions, replacement, partitionFields, sortFields, metadata.getComment().orElse(null), extraProperties, operationMetadata);
         if (!"prepared".equals(prepared.state()) || !operation.equals(prepared.operationId()) || prepared.tableUuid() == null || prepared.columns() == null || prepared.writePath() == null) {
             throw new TrinoException(HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE, "Invalid Hoglake preparation response for operation " + operation);
         }
@@ -549,7 +551,7 @@ public class HoglakeMetadata
     {
         checkLifecycleSupport();
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
-        client.dropTable(handle.schemaName(), handle.tableName(), handle.tableUuid());
+        client.dropTable(handle.schemaName(), handle.tableName(), handle.tableUuid(), operationMetadata(session, "DROP TABLE"));
     }
 
     @Override
@@ -568,7 +570,17 @@ public class HoglakeMetadata
     {
         checkLifecycleSupport();
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
-        client.truncateTable(handle.schemaName(), handle.tableName(), handle.tableUuid());
+        client.truncateTable(handle.schemaName(), handle.tableName(), handle.tableUuid(), operationMetadata(session, "TRUNCATE TABLE"));
+    }
+
+    /**
+     * The server records who dropped a schema, or dropped, truncated or replaced a table,
+     * and why, and refuses those operations without both. The author is the session user,
+     * and the message names the statement and the query, but not the query text.
+     */
+    private static HoglakeDtos.OperationMetadata operationMetadata(ConnectorSession session, String statement)
+    {
+        return new HoglakeDtos.OperationMetadata(session.getUser(), "Trino %s, query %s".formatted(statement, session.getQueryId()));
     }
 
     private void checkLifecycleSupport()

@@ -40,6 +40,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static io.trino.plugin.hoglake.testing.ConnectorTestFixtures.TEST_OPERATION_METADATA;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.TransactionBuilder.transaction;
@@ -195,7 +196,7 @@ final class TestHoglakeLiveWriteFailures
 
             proxy.beforeCommit(() -> {
                 client.createTable("test", "contended", List.of(new HoglakeDtos.ColumnDefinition("original", "long", Map.of(), true)));
-                client.dropStagingTable("test", "contended");
+                client.dropStagingTable("test", "contended", TEST_OPERATION_METADATA);
                 client.createTable("test", "contended", List.of(new HoglakeDtos.ColumnDefinition("other", "long", Map.of(), true)));
             });
             assertThatThrownBy(() -> runner.execute("CREATE TABLE contended AS SELECT BIGINT '5' AS id")).hasMessageContaining("already exists");
@@ -229,7 +230,7 @@ final class TestHoglakeLiveWriteFailures
             var fragments = List.of(Slices.wrappedBuffer(new ObjectMapper().writeValueAsBytes(file)));
             proxy.post(base + "/namespaces/test/tables/stale/alter", Map.of("ops", List.of(Map.of("op", "add_column", "column", Map.of("name", "extra", "type", "long", "nullable", true)))));
             assertThatThrownBy(() -> metadata.finishInsert(session, handle, List.of(), fragments, List.of())).hasMessageContaining("conflict");
-            client.dropStagingTable("test", "stale");
+            client.dropStagingTable("test", "stale", TEST_OPERATION_METADATA);
             client.createTable("test", "stale", List.of(new HoglakeDtos.ColumnDefinition("id", "long", Map.of(), true)));
             assertThatThrownBy(() -> metadata.finishInsert(session, handle, List.of(), fragments, List.of())).hasMessageContaining("conflict");
             assertThat(client.getTable("test", "stale").orElseThrow().recordCount()).isZero();
@@ -293,7 +294,7 @@ final class TestHoglakeLiveWriteFailures
                     .hasMessageContaining("Malformed Hoglake write response");
             assertThat(runner.execute("SELECT id FROM replacement").getOnlyValue()).isEqualTo(21L);
 
-            proxy.beforeCommit(() -> client.truncateTable("test", "replacement", client.getTable("test", "replacement").orElseThrow().tableUuid()));
+            proxy.beforeCommit(() -> client.truncateTable("test", "replacement", client.getTable("test", "replacement").orElseThrow().tableUuid(), TEST_OPERATION_METADATA));
             assertThatThrownBy(() -> runner.execute("CREATE OR REPLACE TABLE replacement AS SELECT BIGINT '23' AS id"))
                     .hasMessageContaining("target_changed");
             assertThat(client.getTable("test", "replacement").orElseThrow().recordCount()).isZero();
@@ -340,11 +341,11 @@ final class TestHoglakeLiveWriteFailures
                     Map.of("ops", List.of(Map.of("op", "add_column", "column", Map.of("name", "extra", "type", "long", "nullable", true))))));
             assertThatThrownBy(() -> runner.execute("DELETE FROM delete_fault")).hasMessageContaining("conflict");
             assertThat(runner.execute("SELECT sum(id) FROM delete_fault").getOnlyValue()).isEqualTo(9L);
-            proxy.beforeCommit(() -> client.truncateTable("test", "delete_fault", client.getTable("test", "delete_fault").orElseThrow().tableUuid()));
+            proxy.beforeCommit(() -> client.truncateTable("test", "delete_fault", client.getTable("test", "delete_fault").orElseThrow().tableUuid(), TEST_OPERATION_METADATA));
             assertThatThrownBy(() -> runner.execute("DELETE FROM delete_fault")).hasMessageContaining("conflict");
             runner.execute("INSERT INTO delete_fault (id) VALUES 6");
             proxy.beforeCommit(() -> {
-                client.dropTable("test", "delete_fault", client.getTable("test", "delete_fault").orElseThrow().tableUuid());
+                client.dropTable("test", "delete_fault", client.getTable("test", "delete_fault").orElseThrow().tableUuid(), TEST_OPERATION_METADATA);
                 client.createTable("test", "delete_fault", List.of(new HoglakeDtos.ColumnDefinition("id", "long", Map.of(), true)));
             });
             assertThatThrownBy(() -> runner.execute("DELETE FROM delete_fault")).hasMessageContaining("conflict");
@@ -369,7 +370,12 @@ final class TestHoglakeLiveWriteFailures
                     "test",
                     "append_during_delete",
                     List.of(new HoglakeDtos.ColumnDefinition("id", "long", Map.of(), true)),
-                    new HoglakeDtos.ReplacementTarget(client.getTable("test", "append_during_delete").orElseThrow().tableUuid(), client.getCatalog().headSnapshotId()));
+                    new HoglakeDtos.ReplacementTarget(client.getTable("test", "append_during_delete").orElseThrow().tableUuid(), client.getCatalog().headSnapshotId()),
+                    List.of(),
+                    List.of(),
+                    null,
+                    Map.of(),
+                    TEST_OPERATION_METADATA);
             runner.execute("DELETE FROM append_during_delete WHERE id = 10");
             assertThat(client.publishTableCreation(deleteReplacement, List.of()).reason()).isEqualTo("target_changed");
             proxy.beforeCommit(() -> {
@@ -379,7 +385,12 @@ final class TestHoglakeLiveWriteFailures
                         "test",
                         "append_during_delete",
                         List.of(new HoglakeDtos.ColumnDefinition("id", "long", Map.of(), true)),
-                        new HoglakeDtos.ReplacementTarget(client.getTable("test", "append_during_delete").orElseThrow().tableUuid(), client.getCatalog().headSnapshotId()));
+                        new HoglakeDtos.ReplacementTarget(client.getTable("test", "append_during_delete").orElseThrow().tableUuid(), client.getCatalog().headSnapshotId()),
+                        List.of(),
+                        List.of(),
+                        null,
+                        Map.of(),
+                        TEST_OPERATION_METADATA);
                 assertThat(client.publishTableCreation(operation, List.of()).state()).isEqualTo("committed");
             });
             assertThatThrownBy(() -> runner.execute("DELETE FROM append_during_delete")).hasMessageContaining("conflict");
@@ -389,7 +400,7 @@ final class TestHoglakeLiveWriteFailures
             HoglakeMetadata plannedReplacement = new HoglakeMetadata(client);
             SchemaTableName plannedName = new SchemaTableName("test", "replacement");
             plannedReplacement.getTableHandle(session, plannedName, Optional.empty(), Optional.empty());
-            client.dropStagingTable("test", "replacement");
+            client.dropStagingTable("test", "replacement", TEST_OPERATION_METADATA);
             client.createTable("test", "replacement", List.of(new HoglakeDtos.ColumnDefinition("winner", "long", Map.of(), true)));
             HoglakeWriteHandle plannedOutput = (HoglakeWriteHandle) plannedReplacement.beginCreateTable(
                     session,
