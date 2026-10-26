@@ -132,12 +132,12 @@ import static java.util.Objects.requireNonNull;
 /// - A node that a path reads whole is copied whole.
 ///
 /// The top-level `metadata` and `value` columns are read only for the rows that need them:
-/// a row whose `typed_value` is null, a key that is not shredded, or an object or array
-/// that is copied from a `value` column. Data that breaks the specification in them, such
-/// as a top-level `value` next to a primitive `typed_value`, fails a whole read, but is
-/// not checked in the rows that do not read them. Values without such objects and arrays
-/// share one metadata dictionary of the keys of the paths, and are encoded without new
-/// metadata.
+/// a row whose `typed_value` is null, a key that is not shredded, an object in a `value`
+/// column whose keys a path reads, or an object or array that is copied from a `value`
+/// column. Data that breaks the specification in these columns, such as a top-level
+/// `value` next to a primitive `typed_value`, fails a whole read, but is not checked in
+/// the rows that do not read them. Values without such objects and arrays share one
+/// metadata dictionary of the keys of the paths, and are encoded without new metadata.
 ///
 /// The assembler reads some data that the specification does not allow, in the same way
 /// as the Apache Iceberg reader:
