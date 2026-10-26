@@ -24,9 +24,11 @@ import io.trino.filesystem.cache.CacheFileSystem;
 import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.parquet.Column;
 import io.trino.parquet.Field;
+import io.trino.parquet.GroupField;
 import io.trino.parquet.ParquetCorruptionException;
 import io.trino.parquet.ParquetDataSource;
 import io.trino.parquet.ParquetReaderOptions;
+import io.trino.parquet.PrimitiveField;
 import io.trino.parquet.metadata.FileMetadata;
 import io.trino.parquet.metadata.ParquetMetadata;
 import io.trino.parquet.predicate.TupleDomainParquetPredicate;
@@ -56,8 +58,10 @@ import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.SortedRangeSet;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.LongTimestampWithTimeZone;
+import io.trino.spi.type.RowType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import org.apache.parquet.column.ColumnDescriptor;
+import org.apache.parquet.hadoop.metadata.ColumnPath;
 import org.apache.parquet.io.ColumnIO;
 import org.apache.parquet.io.MessageColumnIO;
 import org.apache.parquet.schema.GroupType;
@@ -72,18 +76,21 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.parquet.ParquetTypeUtils.constructField;
 import static io.trino.parquet.ParquetTypeUtils.getColumnIO;
 import static io.trino.parquet.ParquetTypeUtils.getDescriptors;
 import static io.trino.parquet.ParquetTypeUtils.lookupColumnByName;
 import static io.trino.parquet.predicate.PredicateUtils.buildPredicate;
 import static io.trino.parquet.predicate.PredicateUtils.getFilteredRowGroups;
+import static io.trino.plugin.hoglake.HoglakeSessionProperties.isVariantLazyResidualEnabled;
 import static io.trino.plugin.hoglake.HoglakeSessionProperties.isVariantPathAssemblyEnabled;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -247,7 +254,8 @@ public class HoglakePageSourceProvider
                     predicate.simplify(DOMAIN_COMPACTION_THRESHOLD),
                     resources,
                     options,
-                    isVariantPathAssemblyEnabled(session));
+                    isVariantPathAssemblyEnabled(session),
+                    isVariantLazyResidualEnabled(session));
             // The page source adopts the owner. Its aggregate already reports
             // allocations directly to the engine, including lazy reader loads.
             return pageSource;
@@ -425,7 +433,8 @@ public class HoglakePageSourceProvider
             TupleDomain<HoglakeColumnHandle> predicate,
             HoglakeSplitResources resources,
             ParquetReaderOptions options,
-            boolean variantPathAssembly)
+            boolean variantPathAssembly,
+            boolean variantLazyResidual)
             throws IOException
     {
         FileMetadata fileMetadata = parquetMetadata.getFileMetaData();
@@ -464,6 +473,7 @@ public class HoglakePageSourceProvider
 
         // Reader columns + page adaptations (nulls for unbound columns).
         List<Column> parquetColumns = new ArrayList<>();
+        Set<ColumnPath> separatelyPlannedColumns = new HashSet<>();
         List<HoglakePageSource.ColumnAdaptation> adaptations = new ArrayList<>();
         for (int i = 0; i < columns.size(); i++) {
             HoglakeColumnHandle column = columns.get(i);
@@ -473,7 +483,30 @@ public class HoglakePageSourceProvider
             }
             if (shreddings.get(i).isPresent()) {
                 VariantShreddingSchema shredding = shreddings.get(i).get();
-                Field field = constructField(shredding.physicalType(), lookupColumnByName(messageColumn, bindings.get(i).get().getName())).orElseThrow();
+                ColumnIO groupColumn = lookupColumnByName(messageColumn, bindings.get(i).get().getName());
+                if (variantPathAssembly && variantLazyResidual && column.variantPathTree().isPresent() && readsResidualLazily(shredding, bindings.get(i).get())) {
+                    // The top-level metadata and value columns are separate channels, which the assembler
+                    // loads only for the batches that need them. Their reads are planned separately, so that
+                    // the reads of the other columns do not include them.
+                    List<RowType.Field> physicalFields = shredding.physicalType().getFields();
+                    Field typedValue = constructField(RowType.from(List.of(physicalFields.get(2))), groupColumn).orElseThrow();
+                    Field metadata = constructField(RowType.from(List.of(physicalFields.get(0))), groupColumn).orElseThrow();
+                    Field value = constructField(RowType.from(List.of(physicalFields.get(1))), groupColumn).orElseThrow();
+                    separatelyPlannedColumns.add(leafPath(metadata));
+                    separatelyPlannedColumns.add(leafPath(value));
+                    int typedValueChannel = parquetColumns.size();
+                    parquetColumns.add(new Column(column.name(), typedValue));
+                    parquetColumns.add(new Column(column.name(), metadata));
+                    parquetColumns.add(new Column(column.name(), value));
+                    adaptations.add(new HoglakePageSource.ShreddedVariantColumn(
+                            typedValueChannel,
+                            OptionalInt.of(typedValueChannel + 1),
+                            OptionalInt.of(typedValueChannel + 2),
+                            new ShreddedVariantAssembler(shredding, column.variantPathTree(), variantNullIsSqlNull, dataSource.getId()),
+                            false));
+                    continue;
+                }
+                Field field = constructField(shredding.physicalType(), groupColumn).orElseThrow();
                 if (variantPathAssembly) {
                     // The assembler builds only the paths of the column, and reads SQL NULLs itself
                     adaptations.add(new HoglakePageSource.ShreddedVariantColumn(
@@ -549,7 +582,9 @@ public class HoglakePageSourceProvider
                 exception -> HoglakePageSource.handleException(dataSource.getId(), exception),
                 Optional.empty(),
                 Optional.empty(),
-                Optional.empty());
+                Optional.empty(),
+                false,
+                separatelyPlannedColumns);
         return new HoglakePageSource(
                 parquetReader,
                 adaptations,
@@ -588,6 +623,25 @@ public class HoglakePageSourceProvider
             // Like an unshredded VARIANT group with an unexpected shape
             throw new TrinoException(NOT_SUPPORTED, "Cannot read column %s from data file %s: %s".formatted(column.name(), path, e.getMessage()), e);
         }
+    }
+
+    /**
+     * Whether a shredded group has the columns to read its top-level {@code metadata}
+     * and {@code value} lazily: a {@code typed_value} column, whose definition levels tell
+     * the null rows, and a {@code value} column.
+     */
+    private static boolean readsResidualLazily(VariantShreddingSchema shredding, org.apache.parquet.schema.Type physical)
+    {
+        return shredding.value().typedValue().isPresent() && physical.asGroupType().containsField("value");
+    }
+
+    /**
+     * The path of the leaf of a reader field for a row of one primitive column.
+     */
+    private static ColumnPath leafPath(Field field)
+    {
+        Field leaf = getOnlyElement(((GroupField) field).getChildren()).orElseThrow();
+        return ColumnPath.get(((PrimitiveField) leaf).getDescriptor().getPath());
     }
 
     /**

@@ -41,6 +41,7 @@ public class HoglakeConfig
     private DataSize maxSplitSize = DEFAULT_MAX_SPLIT_SIZE;
     private DataSize parquetFooterCacheMaxSize = DataSize.of(64, MEGABYTE);
     private boolean variantPathAssemblyEnabled = true;
+    private boolean variantLazyResidualEnabled = true;
 
     @NotNull
     public String getUri()
@@ -124,6 +125,19 @@ public class HoglakeConfig
     public HoglakeConfig setVariantPathAssemblyEnabled(boolean variantPathAssemblyEnabled)
     {
         this.variantPathAssemblyEnabled = variantPathAssemblyEnabled;
+        return this;
+    }
+
+    public boolean isVariantLazyResidualEnabled()
+    {
+        return variantLazyResidualEnabled;
+    }
+
+    @Config("hoglake.variant-lazy-residual-enabled")
+    @ConfigDescription("Read the metadata and value columns of a shredded VARIANT with pushed-down subscripts only for the batches of rows that need them")
+    public HoglakeConfig setVariantLazyResidualEnabled(boolean variantLazyResidualEnabled)
+    {
+        this.variantLazyResidualEnabled = variantLazyResidualEnabled;
         return this;
     }
 
