@@ -128,9 +128,11 @@ off this assembly; the scan then builds whole values from the same columns.
 
 The scan also reads the top-level `metadata` and `value` columns of a shredded
 `VARIANT` only for the batches of rows that need them: a row that is not an
-object, a key that is not shredded, or an object or array that a subscript reads
-whole. A query whose subscripts read only shredded keys of objects reads neither
-column. The `hoglake.variant-lazy-residual-enabled` configuration property, `true`
+object, a key that is not shredded, an object or array that a subscript reads
+whole, or a key below a shredded key whose value in the row has another type than
+the shredded one, so that the data file holds it in the `value` column of that key.
+A query whose subscripts read only shredded keys whose values have their shredded
+types reads neither column. The `hoglake.variant-lazy-residual-enabled` configuration property, `true`
 by default, and the `variant_lazy_residual_enabled` session property turn this off.
 
 ## Row-level deletes

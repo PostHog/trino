@@ -99,7 +99,9 @@ public class HoglakePageSource
      * The reader pages of a shredded VARIANT column with pushed-down
      * subscripts that read its top-level {@code metadata} or {@code value}
      * column, because a row has no {@code typed_value} object, a subscript
-     * reads a key that is not shredded, or reads an object or an array whole.
+     * reads a key that is not shredded, reads an object or an array whole, or
+     * reads a key below a shredded key whose value has another type than the
+     * shredded one, which then needs the metadata.
      */
     public static final String VARIANT_RESIDUAL_BATCHES_LOADED = "variantResidualBatchesLoaded";
     /**
