@@ -184,12 +184,15 @@ public class TestShreddedVariantReader
         List<Slice> keys = IntStream.range(0, 70)
                 .mapToObj(key -> utf8Slice("k%02d".formatted(key)))
                 .collect(toImmutableList());
+        // A shredded object is built again in field name order
         Variant shredded = readVariants(DUCKDB.resolve("wide-object.parquet"), "v").getFirst().orElseThrow();
-        Variant unshredded = readVariants(DUCKDB.resolve("wide-object-unshredded.parquet"), "v").get(2).orElseThrow();
         for (Slice key : keys) {
             assertThat(shredded.getObjectField(key)).as("shredded %s", key.toStringUtf8()).isPresent();
-            assertThat(unshredded.getObjectField(key)).as("unshredded %s", key.toStringUtf8()).isPresent();
         }
+        // An object in value is copied as DuckDB wrote it, as in an unshredded column
+        Variant unshredded = readVariants(DUCKDB.resolve("wide-object-unshredded.parquet"), "v").get(2).orElseThrow();
+        assertThat(unshredded.metadata().isSorted()).isTrue();
+        assertThat(unshredded.objectFieldNames().toList()).containsExactlyElementsOf(keys.reversed());
     }
 
     @Test
@@ -374,19 +377,13 @@ public class TestShreddedVariantReader
                 .isInstanceOf(ParquetCorruptionException.class)
                 .hasMessageContaining("VARIANT value is truncated");
 
-        // The same as the element of an array, and as the field of an object, whose offsets leave it one value byte
+        // An array whose offsets leave its element one value byte is copied without decoding
+        // the element, as in an unshredded column
         ParquetDataSource arrayElement = writeUnshreddedVariants(
                 ImmutableList.of(new byte[] {0x01, 0x00, 0x00}),
                 ImmutableList.of(new byte[] {0x03, 0x01, 0x00, 0x02, 0x14, 0x00}));
-        assertThatThrownBy(() -> readPhysicalColumn(arrayElement, "v", ParquetReaderOptions.defaultOptions()))
-                .isInstanceOf(ParquetCorruptionException.class)
-                .hasMessageContaining("VARIANT value is truncated");
-        ParquetDataSource objectField = writeUnshreddedVariants(
-                ImmutableList.of(new byte[] {0x01, 0x01, 0x00, 0x01, 'a'}),
-                ImmutableList.of(new byte[] {0x02, 0x01, 0x00, 0x00, 0x02, 0x14, 0x00}));
-        assertThatThrownBy(() -> readPhysicalColumn(objectField, "v", ParquetReaderOptions.defaultOptions()))
-                .isInstanceOf(ParquetCorruptionException.class)
-                .hasMessageContaining("VARIANT value is truncated");
+        assertThat(readPhysicalColumn(arrayElement, "v", ParquetReaderOptions.defaultOptions()).variants().getFirst().orElseThrow().getArrayLength())
+                .isEqualTo(1);
     }
 
     @Test

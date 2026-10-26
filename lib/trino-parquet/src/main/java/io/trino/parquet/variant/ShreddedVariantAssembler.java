@@ -119,8 +119,9 @@ import static java.util.Objects.requireNonNull;
 /// that read the whole variant.
 ///
 /// With [VariantPaths], it builds only the parts of each value that the paths read, from a
-/// schema [pruned][VariantShreddingSchema#prune(VariantPaths)] to those paths. For every
-/// path, the result reads the same value or fails with the same error as the whole value:
+/// schema [pruned][VariantShreddingSchema#prune(VariantPaths)] to those paths. For data
+/// that follows the specification, the result reads the same value or fails with the same
+/// error as the whole value for every path:
 ///
 /// - An object on a path has only the keys that the paths name, if the value has them. A
 ///   key that a shredded field holds is read from that field, and the other keys are found
@@ -128,12 +129,15 @@ import static java.util.Objects.requireNonNull;
 /// - A value that is not an object keeps its type: a primitive keeps its encoding, and an
 ///   array keeps its length, with the elements that a path reads and variant nulls for the
 ///   others.
-/// - A node that a path reads whole is copied whole, repaired as described below.
+/// - A node that a path reads whole is copied whole.
 ///
 /// The top-level `metadata` and `value` columns are read only for the rows that need them:
 /// a row whose `typed_value` is null, a key that is not shredded, or an object or array
-/// that is copied from a `value` column. Values without such objects and arrays share
-/// one metadata dictionary of the keys of the paths, and are encoded without new metadata.
+/// that is copied from a `value` column. Data that breaks the specification in them, such
+/// as a top-level `value` next to a primitive `typed_value`, fails a whole read, but is
+/// not checked in the rows that do not read them. Values without such objects and arrays
+/// share one metadata dictionary of the keys of the paths, and are encoded without new
+/// metadata.
 ///
 /// The assembler reads some data that the specification does not allow, in the same way
 /// as the Apache Iceberg reader:
@@ -143,10 +147,11 @@ import static java.util.Objects.requireNonNull;
 /// - A missing value at the top level or in an array is a variant null, and so is a
 ///   null `optional` list element group.
 ///
-/// It also repairs two defects of some writers in the values that it copies whole from
-/// `value`: a metadata dictionary that sets `sorted_strings` but is not sorted, and
-/// object fields that are not in field name order. Lookups that trust either one miss
-/// keys. The lookups of keys on paths trust neither.
+/// The values that it copies from `value` keep their encoding, as in an unshredded VARIANT
+/// column. Some writers, such as DuckDB 1.5.5, write object fields that are not in field
+/// name order, and a metadata dictionary that sets `sorted_strings` but is not sorted.
+/// Lookups that trust either one can miss keys in the copied values. The assembler does
+/// not repair them: its own lookups of keys on paths trust neither.
 ///
 /// An assembler reuses its buffers between rows, so it is not thread-safe: each reader
 /// uses its own.
@@ -391,7 +396,9 @@ public final class ShreddedVariantAssembler
             if (getBasicType(data.getByte(0)).isContainer()) {
                 valueMetadata = metadata.metadata();
             }
-            untypedValue = Optional.of(VariantRepairs.withSortedObjectFields(Variant.from(valueMetadata, data)));
+            // A value only reads its header when it is created
+            checkArgument(valueSize(data, 0) <= data.length(), "VARIANT value is truncated");
+            untypedValue = Optional.of(Variant.from(valueMetadata, data));
         }
 
         if (value.typedValue().isEmpty() || value.typedValue().get().block().isNull(position)) {
@@ -762,7 +769,7 @@ public final class ShreddedVariantAssembler
             return Variant.from(EMPTY_METADATA, data.slice(offset, size));
         }
         if (path.whole()) {
-            return VariantRepairs.withSortedObjectFields(Variant.from(row.rowMetadata().metadata(), data.slice(offset, size)));
+            return Variant.from(row.rowMetadata().metadata(), data.slice(offset, size));
         }
         if (getBasicType(header) == OBJECT) {
             int[] starts = path.keyStarts();
@@ -1171,7 +1178,7 @@ public final class ShreddedVariantAssembler
             if (metadata == null) {
                 Metadata decoded = Metadata.from(slice);
                 validateDictionaryOffsets(slice);
-                metadata = VariantRepairs.withVerifiedSortedFlag(decoded);
+                metadata = decoded;
             }
             return metadata;
         }
