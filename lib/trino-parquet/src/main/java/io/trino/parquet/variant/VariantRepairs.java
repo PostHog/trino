@@ -46,8 +46,8 @@ import static java.lang.Math.toIntExact;
 
 /// Repairs two defects of some Variant writers: a metadata dictionary that sets
 /// `sorted_strings` but is not sorted, and object fields that are not in field name
-/// order. Lookups that trust either one miss keys. [ShreddedVariantAssembler] repairs
-/// the values that it reads, and [VariantShredder] the values that it writes.
+/// order. Lookups that trust either one miss keys. [VariantShredder] repairs the values
+/// that it writes. Readers copy values as they are.
 final class VariantRepairs
 {
     private VariantRepairs() {}

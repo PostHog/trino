@@ -105,6 +105,51 @@ COPY (
     ORDER BY id
 ) TO 'wide-object-unshredded.parquet' (FORMAT parquet);
 
+-- Event properties: an object of 77 keys, shredded only on "$browser", as in an
+-- events table. Most keys stay in the partially shredded object in `value`, in
+-- the order in which DuckDB stores them, which is not field name order.
+CREATE MACRO properties_json(id) AS
+    '{' ||
+    CASE WHEN id % 10 <> 0 THEN '"$browser": "' || (['Chrome', 'Firefox', 'Safari', 'Microsoft Edge', 'Opera'])[id % 5 + 1] || '", ' ELSE '' END ||
+    '"$os": "' || (['Mac OS X', 'Windows', 'Linux'])[id % 3 + 1] || '", ' ||
+    '"$current_url": "https://example.com/page/' || (id % 17) || '", ' ||
+    '"$set": {"plan": "' || (['free', 'pro'])[id % 2 + 1] || '", "seats": ' || (id % 7) || '}, ' ||
+    '"tags": ["a", "b", ' || id || '], ' ||
+    '"$screen_width": ' || (1000 + id % 5) || ', ' ||
+    '"$browser_version": ' || (100 + id % 3) || '.5, ' ||
+    (SELECT string_agg('"k' || lpad(i::VARCHAR, 2, '0') || '": ' || (i * 1000 + id), ', ' ORDER BY i DESC) FROM range(70) r(i)) ||
+    '}';
+
+COPY (
+    SELECT id, properties_json(id)::JSON::VARIANT AS v
+    FROM range(2100) t(id)
+    ORDER BY id
+) TO 'properties-shape.parquet' (FORMAT parquet, ROW_GROUP_SIZE 1024, COMPRESSION zstd, SHREDDING {v: 'STRUCT("$browser" VARCHAR)'});
+
+-- The same shape with the values that a pruned read handles specially: SQL
+-- NULL, JSON null, values that are not objects, empty objects, a "$browser"
+-- that is not a string, null, or an object, and a nested object of 70 keys in
+-- field id order.
+COPY (
+    SELECT id, CASE id % 13
+        WHEN 0 THEN NULL::VARIANT
+        WHEN 1 THEN 'null'::JSON::VARIANT
+        WHEN 2 THEN '"a string"'::JSON::VARIANT
+        WHEN 3 THEN '42'::JSON::VARIANT
+        WHEN 4 THEN '[1, {"$browser": "Chrome"}, null]'::JSON::VARIANT
+        WHEN 5 THEN '{}'::JSON::VARIANT
+        WHEN 6 THEN '{"$browser": 7, "$os": "Linux"}'::JSON::VARIANT
+        WHEN 7 THEN '{"$browser": null, "$os": "Linux"}'::JSON::VARIANT
+        WHEN 8 THEN '{"$browser": {"name": "Chrome", "version": 1}, "$os": "Linux"}'::JSON::VARIANT
+        WHEN 9 THEN ('{"$browser": "Firefox", "wide": {' ||
+                (SELECT string_agg('"w' || lpad(i::VARCHAR, 2, '0') || '": ' || (i + id), ', ' ORDER BY i DESC) FROM range(70) r(i)) ||
+                '}}')::JSON::VARIANT
+        ELSE properties_json(id)::JSON::VARIANT
+    END AS v
+    FROM range(2100) t(id)
+    ORDER BY id
+) TO 'properties-shape-mixed.parquet' (FORMAT parquet, ROW_GROUP_SIZE 1024, COMPRESSION zstd, SHREDDING {v: 'STRUCT("$browser" VARCHAR)'});
+
 -- DuckDB's own read-back of each file, for comparison by future readers.
 COPY (SELECT id, v::JSON AS v FROM 'objects.parquet' ORDER BY id) TO 'objects.duckdb.jsonl' (FORMAT json);
 COPY (SELECT id, v::JSON AS v FROM 'nulls.parquet' ORDER BY id) TO 'nulls.duckdb.jsonl' (FORMAT json);

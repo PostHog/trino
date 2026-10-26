@@ -37,14 +37,13 @@ import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 import java.util.stream.IntStream;
 
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
-import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.parquet.ParquetTestUtils.createParquetReader;
 import static io.trino.spi.type.VariantType.VARIANT;
@@ -90,10 +89,16 @@ final class ShreddedVariantTestUtils
     static PhysicalColumn readPhysicalColumn(ParquetDataSource dataSource, String column, ParquetReaderOptions options, Optional<VariantPaths> paths)
             throws IOException
     {
+        return readPhysicalColumn(dataSource, column, options, paths, false);
+    }
+
+    static PhysicalColumn readPhysicalColumn(ParquetDataSource dataSource, String column, ParquetReaderOptions options, Optional<VariantPaths> paths, boolean topLevelVariantNullIsSqlNull)
+            throws IOException
+    {
         ParquetMetadata metadata = MetadataReader.readFooter(dataSource, Optional.empty());
         VariantShreddingSchema whole = parseSchema(metadata, column, dataSource);
         VariantShreddingSchema schema = paths.map(whole::prune).orElse(whole);
-        ShreddedVariantAssembler assembler = new ShreddedVariantAssembler(schema, dataSource.getId());
+        ShreddedVariantAssembler assembler = new ShreddedVariantAssembler(schema, paths, topLevelVariantNullIsSqlNull, dataSource.getId());
 
         ImmutableList.Builder<Block> blocks = ImmutableList.builder();
         ImmutableList.Builder<Optional<Variant>> variants = ImmutableList.builder();
@@ -204,7 +209,8 @@ final class ShreddedVariantTestUtils
         return switch (value) {
             case null -> null;
             case Map<?, ?> map -> {
-                Map<Object, Object> result = new HashMap<>();
+                // Sorted, so that the text of an object does not depend on the order of its fields
+                Map<Object, Object> result = new TreeMap<>();
                 map.forEach((key, entry) -> result.put(key, comparable(entry)));
                 yield result;
             }
@@ -238,7 +244,8 @@ final class ShreddedVariantTestUtils
                 if (variant.basicType() != Header.BasicType.OBJECT) {
                     yield "error: " + variantType(variant) + " is not an object";
                 }
-                yield variant.getObjectField(utf8Slice(name))
+                // Not Variant.getObjectField, which trusts the field order that some writers do not keep
+                yield Optional.ofNullable(objectFields(variant).get(name))
                         .map(field -> evaluate(field, rest))
                         .orElse("missing");
             }

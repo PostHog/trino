@@ -40,6 +40,8 @@ final class ShreddedVariantTestFiles
     static final Path DUCKDB = resourceDirectory("variant/shredded/duckdb");
 
     static final List<String> DUCKDB_FIXTURES = ImmutableList.of("arrays", "case-variant-keys", "nulls", "objects", "wide-object", "wide-object-unshredded");
+    // Larger files in the shape of event properties, without a read-back by DuckDB
+    static final List<String> DUCKDB_PROPERTIES_FIXTURES = ImmutableList.of("properties-shape", "properties-shape-mixed");
 
     private ShreddedVariantTestFiles() {}
 
