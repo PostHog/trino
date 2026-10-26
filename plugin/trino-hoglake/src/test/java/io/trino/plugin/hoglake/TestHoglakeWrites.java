@@ -21,6 +21,7 @@ import com.sun.net.httpserver.HttpServer;
 import io.airlift.bootstrap.Bootstrap;
 import io.airlift.bootstrap.LifeCycleManager;
 import io.airlift.units.DataSize;
+import io.trino.Session;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.filesystem.memory.MemoryFileSystemFactory;
@@ -38,6 +39,7 @@ import io.trino.spi.connector.ConnectorFactory;
 import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.security.ConnectorIdentity;
+import io.trino.spi.security.Identity;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.StandaloneQueryRunner;
@@ -53,7 +55,9 @@ import org.junit.jupiter.api.parallel.Execution;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -63,6 +67,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.MoreCollectors.onlyElement;
 import static io.trino.plugin.hoglake.HoglakeConfig.DEFAULT_MAX_SPLIT_SIZE;
 import static io.trino.spi.StandardErrorCode.INVALID_COLUMN_PROPERTY;
@@ -71,6 +76,7 @@ import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.assertions.Assert.assertEqualsIgnoreOrder;
 import static io.trino.testing.assertions.Assert.assertEventually;
 import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -108,6 +114,7 @@ final class TestHoglakeWrites
     private volatile DataSize maxSplitSize = DEFAULT_MAX_SPLIT_SIZE;
     private volatile boolean corruptLifecycleResponse;
     private int lifecycleRequests;
+    private volatile HoglakeDtos.OperationMetadata lastOperationMetadata;
     private HttpServer server;
     private HoglakeClient client;
     private StandaloneQueryRunner runner;
@@ -226,13 +233,22 @@ final class TestHoglakeWrites
                 }
                 if (!exchange.getRequestMethod().equals("GET")) {
                     lifecycleRequests++;
-                    if (!("expected_table_uuid=" + tables.get(name).tableUuid()).equals(exchange.getRequestURI().getQuery()) &&
-                            !("expected_table_uuid=" + tables.get(name).tableUuid() + "&read_snapshot=" + snapshot).equals(exchange.getRequestURI().getQuery())) {
+                    Map<String, String> query = queryParameters(exchange);
+                    if (!tables.get(name).tableUuid().equals(query.get("expected_table_uuid")) ||
+                            !Long.toString(snapshot).equals(query.getOrDefault("read_snapshot", Long.toString(snapshot))) ||
+                            !Set.of("expected_table_uuid", "read_snapshot", "author", "message").containsAll(query.keySet())) {
                         respond(exchange, 409, Map.of("error", "incarnation_changed"));
+                        return;
+                    }
+                    if (exchange.getRequestMethod().equals("DELETE") && !acceptOperationMetadata(exchange, query.get("author"), query.get("message"))) {
                         return;
                     }
                 }
                 if (path.endsWith("/truncate")) {
+                    JsonNode request = mapper.readTree(exchange.getRequestBody());
+                    if (!acceptOperationMetadata(exchange, request.path("author").textValue(), request.path("message").textValue())) {
+                        return;
+                    }
                     HoglakeDtos.Table table = tables.get(name);
                     tables.put(name, new HoglakeDtos.Table(name, table.namespace(), table.tableUuid(), table.columns(), 0, 0, 0));
                     files.put(name, new ArrayList<>());
@@ -390,6 +406,32 @@ final class TestHoglakeWrites
         return new HoglakeDtos.Column(id, ordinal, definition.name(), definition.type(), definition.typeParams(), definition.nullable(), children);
     }
 
+    private static Map<String, String> queryParameters(HttpExchange exchange)
+    {
+        String query = exchange.getRequestURI().getRawQuery();
+        if (query == null) {
+            return ImmutableMap.of();
+        }
+        return Arrays.stream(query.split("&"))
+                .map(parameter -> parameter.split("=", 2))
+                .collect(toImmutableMap(parameter -> parameter[0], parameter -> URLDecoder.decode(parameter[1], UTF_8)));
+    }
+
+    /**
+     * Like the server, refuses to drop, truncate or replace a table without a nonblank
+     * author and message, and records them otherwise.
+     */
+    private boolean acceptOperationMetadata(HttpExchange exchange, String author, String message)
+            throws IOException
+    {
+        if (author == null || author.isBlank() || message == null || message.isBlank()) {
+            respond(exchange, 422, Map.of("error", "validation", "detail", "author and message are required and must not be blank"));
+            return false;
+        }
+        lastOperationMetadata = new HoglakeDtos.OperationMetadata(author, message);
+        return true;
+    }
+
     private void handleCreation(HttpExchange exchange, String suffix)
             throws IOException
     {
@@ -398,7 +440,15 @@ final class TestHoglakeWrites
         if (exchange.getRequestMethod().equals("PUT")) {
             var request = mapper.readTree(exchange.getRequestBody());
             if (request.has("replacement")) {
-                replacementTargets.put(operation, mapper.treeToValue(request.get("replacement"), HoglakeDtos.ReplacementTarget.class));
+                HoglakeDtos.ReplacementTarget replacement = mapper.treeToValue(request.get("replacement"), HoglakeDtos.ReplacementTarget.class);
+                if (replacement.expectedTableUuid() != null && !acceptOperationMetadata(exchange, request.path("author").textValue(), request.path("message").textValue())) {
+                    return;
+                }
+                replacementTargets.put(operation, replacement);
+            }
+            if (request.has("author") || request.has("message")) {
+                // Recorded even where the server does not require it, so tests see what was sent
+                lastOperationMetadata = new HoglakeDtos.OperationMetadata(request.path("author").asText(), request.path("message").asText());
             }
             List<HoglakeDtos.Column> columns = new ArrayList<>();
             AtomicLong nextFieldId = new AtomicLong(1);
@@ -789,9 +839,13 @@ final class TestHoglakeWrites
     @Test
     void testReplacementSql()
     {
+        // The server requires operation metadata only to replace an existing table
+        assertThat(tables).doesNotContainKey("replacement");
+        lastOperationMetadata = null;
         runner.execute("CREATE OR REPLACE TABLE replacement AS SELECT BIGINT '7' AS id");
+        assertThat(lastOperationMetadata).isNull();
         String original = tables.get("replacement").tableUuid();
-        runner.execute("CREATE OR REPLACE TABLE replacement AS SELECT id + 1 AS id FROM replacement");
+        assertOperationMetadata("CREATE OR REPLACE TABLE replacement AS SELECT id + 1 AS id FROM replacement", "CREATE OR REPLACE TABLE");
         assertQuery("SELECT * FROM replacement", "VALUES BIGINT '8'");
         assertThat(tables.get("replacement").tableUuid()).isNotEqualTo(original);
         corruptCommitResponse = true;
@@ -825,14 +879,29 @@ final class TestHoglakeWrites
         assertThat(tables).doesNotContainKey("lifecycle");
         assertThat(tables.get("renamed_lifecycle").tableUuid()).isEqualTo(original.tableUuid());
         assertQuery("SELECT * FROM renamed_lifecycle", "VALUES BIGINT '7'");
-        runner.execute("TRUNCATE TABLE renamed_lifecycle");
+        assertOperationMetadata("TRUNCATE TABLE renamed_lifecycle", "TRUNCATE TABLE");
         assertThat(runner.execute("SELECT count(*) FROM renamed_lifecycle").getOnlyValue()).isEqualTo(0L);
         assertThat(tables.get("renamed_lifecycle").tableUuid()).isEqualTo(original.tableUuid());
         assertThat(tables.get("renamed_lifecycle").columns()).isEqualTo(original.columns());
         runner.execute("INSERT INTO renamed_lifecycle VALUES 9");
         assertQuery("SELECT * FROM renamed_lifecycle", "VALUES BIGINT '9'");
-        runner.execute("DROP TABLE renamed_lifecycle");
+        Session blankUser = Session.builder(runner.getDefaultSession()).setIdentity(Identity.ofUser(" ")).build();
+        assertThatThrownBy(() -> runner.execute(blankUser, "DROP TABLE renamed_lifecycle")).hasMessage("Hoglake requires a nonblank user for DROP TABLE");
+        assertOperationMetadata("DROP TABLE renamed_lifecycle", "DROP TABLE");
         assertThat(tables).doesNotContainKey("renamed_lifecycle");
+    }
+
+    /**
+     * Runs a statement that the server refuses without operation metadata, and checks the
+     * metadata that it received.
+     */
+    private void assertOperationMetadata(String sql, String statement)
+    {
+        lastOperationMetadata = null;
+        QueryRunner.MaterializedResultWithPlan result = runner.executeWithPlan(runner.getDefaultSession(), sql);
+        assertThat(lastOperationMetadata).isEqualTo(new HoglakeDtos.OperationMetadata(
+                runner.getDefaultSession().getUser(),
+                "Trino %s, query %s".formatted(statement, result.queryId())));
     }
 
     @Test

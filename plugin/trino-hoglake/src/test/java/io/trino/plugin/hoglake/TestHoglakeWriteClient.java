@@ -38,6 +38,7 @@ import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_NOT_FOUND
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_UNAVAILABLE;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_SNAPSHOT_EXPIRED;
+import static io.trino.plugin.hoglake.testing.ConnectorTestFixtures.TEST_OPERATION_METADATA;
 import static io.trino.spi.StandardErrorCode.INVALID_ARGUMENTS;
 import static io.trino.spi.StandardErrorCode.TRANSACTION_CONFLICT;
 import static io.trino.testing.assertions.Assert.assertEventually;
@@ -121,7 +122,7 @@ final class TestHoglakeWriteClient
                         TrinoException.class,
                         exception -> assertThat(exception.getErrorCode()).isEqualTo(failure.code().toErrorCode()));
                 assertThat(requests.get()).isEqualTo(1);
-                assertThatThrownBy(() -> client.truncateTable("test", "values", COMMIT.appends().getFirst().expectedTableUuid())).isInstanceOfSatisfying(
+                assertThatThrownBy(() -> client.truncateTable("test", "values", COMMIT.appends().getFirst().expectedTableUuid(), TEST_OPERATION_METADATA)).isInstanceOfSatisfying(
                         TrinoException.class,
                         exception -> assertThat(exception.getErrorCode()).isEqualTo(failure.code().toErrorCode()));
                 assertThat(requests.get()).isEqualTo(2);
@@ -133,7 +134,7 @@ final class TestHoglakeWriteClient
                         TrinoException.class,
                         exception -> assertThat(exception.getErrorCode()).isEqualTo(failure.code().toErrorCode()));
                 assertThat(requests.get()).isEqualTo(4);
-                assertThatThrownBy(() -> client.dropNamespace("test", 1)).isInstanceOfSatisfying(
+                assertThatThrownBy(() -> client.dropNamespace("test", 1, TEST_OPERATION_METADATA)).isInstanceOfSatisfying(
                         TrinoException.class,
                         exception -> assertThat(exception.getErrorCode()).isEqualTo(failure.code().toErrorCode()));
                 assertThat(requests.get()).isEqualTo(5);
@@ -471,14 +472,65 @@ final class TestHoglakeWriteClient
         });
         server.start();
         try (HoglakeClient client = new HoglakeClient("http://127.0.0.1:" + server.getAddress().getPort(), "lake")) {
-            assertThatThrownBy(() -> client.dropTable("ns", "old_name", "12345678-1234-5678-90ab-1234567890ab"))
+            assertThatThrownBy(() -> client.dropTable("ns", "old_name", "12345678-1234-5678-90ab-1234567890ab", TEST_OPERATION_METADATA))
                     .isInstanceOfSatisfying(TrinoException.class,
                             exception -> assertThat(exception.getErrorCode()).isEqualTo(HOGLAKE_CATALOG_NOT_FOUND.toErrorCode()));
-            client.dropStagingTable("ns", "old_name");
+            client.dropStagingTable("ns", "old_name", TEST_OPERATION_METADATA);
         }
         finally {
             server.stop(0);
         }
+    }
+
+    @Test
+    void testOperationMetadata()
+            throws Exception
+    {
+        HoglakeDtos.OperationMetadata metadata = new HoglakeDtos.OperationMetadata("ana b", "Trino DROP TABLE, query 1&a=b+c%20é");
+        String query = "author=ana%20b&message=Trino%20DROP%20TABLE%2C%20query%201%26a%3Db%2Bc%2520%C3%A9";
+        List<String> requests = new CopyOnWriteArrayList<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            try (exchange) {
+                String body = new String(exchange.getRequestBody().readAllBytes(), UTF_8);
+                requests.add(exchange.getRequestMethod() + " " + exchange.getRequestURI().getRawPath() + "?" + exchange.getRequestURI().getRawQuery() + " " + body);
+                byte[] response = "{\"snapshot_id\": 3, \"operation_id\": \"o\"}".getBytes(UTF_8);
+                exchange.sendResponseHeaders(200, response.length);
+                exchange.getResponseBody().write(response);
+            }
+        });
+        server.start();
+        try (HoglakeClient client = new HoglakeClient("http://127.0.0.1:" + server.getAddress().getPort(), "lake")) {
+            client.dropNamespace("ns", 4, metadata);
+            client.dropTable("ns", "t", "u", metadata);
+            client.truncateTable("ns", "t", "u", metadata);
+            client.dropStagingTable("ns", "t", metadata);
+            client.prepareTableCreation("o", "ns", "t", List.of(), new HoglakeDtos.ReplacementTarget("u", 2), List.of(), List.of(), null, Map.of(), metadata);
+            client.prepareTableCreation("p", "ns", "t", List.of(), null, List.of(), List.of(), null, Map.of(), null);
+            // An absent target needs no metadata, and an existing one is refused before any request
+            client.prepareTableCreation("q", "ns", "t", List.of(), new HoglakeDtos.ReplacementTarget(null, 2), List.of(), List.of(), null, Map.of(), null);
+            assertThatThrownBy(() -> client.prepareTableCreation("r", "ns", "t", List.of(), new HoglakeDtos.ReplacementTarget("u", 2), List.of(), List.of(), null, Map.of(), null))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("Replacing an existing table requires operation metadata");
+        }
+        finally {
+            server.stop(0);
+        }
+        ObjectMapper mapper = new ObjectMapper();
+        assertThat(requests).hasSize(7);
+        assertThat(requests.get(0)).isEqualTo("DELETE /v1/catalogs/lake/namespaces/ns?expected_namespace_id=4&" + query + " {}");
+        assertThat(requests.get(1)).isEqualTo("DELETE /v1/catalogs/lake/namespaces/ns/tables/t?expected_table_uuid=u&" + query + " {}");
+        assertThat(requests.get(3)).isEqualTo("DELETE /v1/catalogs/lake/namespaces/ns/tables/t?" + query + " {}");
+        // The server reads the metadata of a truncation and a table creation from their bodies
+        assertThat(requests.get(2)).startsWith("POST /v1/catalogs/lake/namespaces/ns/tables/t/truncate?expected_table_uuid=u ");
+        assertThat(mapper.readTree(requests.get(2).substring(requests.get(2).indexOf('{'))))
+                .isEqualTo(mapper.valueToTree(Map.of("author", metadata.author(), "message", metadata.message())));
+        var replacement = mapper.readTree(requests.get(4).substring(requests.get(4).indexOf('{')));
+        assertThat(replacement.path("author").textValue()).isEqualTo(metadata.author());
+        assertThat(replacement.path("message").textValue()).isEqualTo(metadata.message());
+        var creation = mapper.readTree(requests.get(5).substring(requests.get(5).indexOf('{')));
+        assertThat(creation.has("author")).isFalse();
+        assertThat(creation.has("message")).isFalse();
     }
 
     private record Failure(int status, String body, ErrorCodeSupplier code) {}

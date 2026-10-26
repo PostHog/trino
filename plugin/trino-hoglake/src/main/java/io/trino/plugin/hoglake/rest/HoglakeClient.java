@@ -53,6 +53,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_NOT_FOUND;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_UNAVAILABLE;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
@@ -193,9 +194,9 @@ public class HoglakeClient
                 .orElseThrow(() -> new SchemaNotFoundException(name));
     }
 
-    public void dropNamespace(String name, long expectedNamespaceId)
+    public void dropNamespace(String name, long expectedNamespaceId, HoglakeDtos.OperationMetadata operationMetadata)
     {
-        validateLifecycleResult(write("DELETE", namespacePath(name, "?expected_namespace_id=" + expectedNamespaceId), Map.of(), new TypeReference<HoglakeDtos.CommitResult>() {}));
+        validateLifecycleResult(write("DELETE", namespacePath(name, "?expected_namespace_id=" + expectedNamespaceId + "&" + operationMetadataQuery(operationMetadata)), Map.of(), new TypeReference<HoglakeDtos.CommitResult>() {}));
     }
 
     public void alterColumns(String namespace, String table, String expectedTableUuid, long readSnapshot, Map<String, Object> operation)
@@ -360,29 +361,19 @@ public class HoglakeClient
                 new TypeReference<HoglakeDtos.Table>() {});
     }
 
-    public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns)
+    /**
+     * @param replacement the table that the creation replaces, or null to create a table
+     * @param operationMetadata who replaces the table and why, which the server requires to
+     *         replace an existing table, or null otherwise
+     */
+    public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns, HoglakeDtos.ReplacementTarget replacement, List<HoglakeDtos.PartitionField> partitionFields, List<HoglakeDtos.SortField> sortFields, String comment, Map<String, String> properties, HoglakeDtos.OperationMetadata operationMetadata)
     {
-        return prepareTableCreation(operationId, namespace, table, columns, null);
-    }
-
-    public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns, HoglakeDtos.ReplacementTarget replacement)
-    {
-        return prepareTableCreation(operationId, namespace, table, columns, replacement, List.of());
-    }
-
-    public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns, HoglakeDtos.ReplacementTarget replacement, List<HoglakeDtos.PartitionField> partitionFields)
-    {
-        return prepareTableCreation(operationId, namespace, table, columns, replacement, partitionFields, List.of());
-    }
-
-    public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns, HoglakeDtos.ReplacementTarget replacement, List<HoglakeDtos.PartitionField> partitionFields, List<HoglakeDtos.SortField> sortFields)
-    {
-        return prepareTableCreation(operationId, namespace, table, columns, replacement, partitionFields, sortFields, null, Map.of());
-    }
-
-    public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns, HoglakeDtos.ReplacementTarget replacement, List<HoglakeDtos.PartitionField> partitionFields, List<HoglakeDtos.SortField> sortFields, String comment, Map<String, String> properties)
-    {
+        checkArgument(operationMetadata != null || replacement == null || replacement.expectedTableUuid() == null, "Replacing an existing table requires operation metadata");
         Map<String, Object> definition = new HashMap<>();
+        if (operationMetadata != null) {
+            definition.put("author", operationMetadata.author());
+            definition.put("message", operationMetadata.message());
+        }
         if (comment != null) {
             definition.put("comment", comment);
         }
@@ -480,14 +471,20 @@ public class HoglakeClient
         }
     }
 
-    public void dropTable(String namespace, String table, String expectedTableUuid)
+    public void dropTable(String namespace, String table, String expectedTableUuid, HoglakeDtos.OperationMetadata operationMetadata)
     {
-        validateLifecycleResult(write("DELETE", tablePath(namespace, table, "?expected_table_uuid=" + encode(expectedTableUuid)), Map.of(), new TypeReference<HoglakeDtos.CommitResult>() {}));
+        validateLifecycleResult(write("DELETE", tablePath(namespace, table, "?expected_table_uuid=" + encode(expectedTableUuid) + "&" + operationMetadataQuery(operationMetadata)), Map.of(), new TypeReference<HoglakeDtos.CommitResult>() {}));
     }
 
-    public void truncateTable(String namespace, String table, String expectedTableUuid)
+    public void truncateTable(String namespace, String table, String expectedTableUuid, HoglakeDtos.OperationMetadata operationMetadata)
     {
-        validateLifecycleResult(post(tablePath(namespace, table, "/truncate?expected_table_uuid=" + encode(expectedTableUuid)), Map.of(), new TypeReference<HoglakeDtos.CommitResult>() {}));
+        validateLifecycleResult(post(tablePath(namespace, table, "/truncate?expected_table_uuid=" + encode(expectedTableUuid)), operationMetadata, new TypeReference<HoglakeDtos.CommitResult>() {}));
+    }
+
+    // The server reads the metadata of a DELETE from its query
+    private static String operationMetadataQuery(HoglakeDtos.OperationMetadata operationMetadata)
+    {
+        return "author=" + encode(operationMetadata.author()) + "&message=" + encode(operationMetadata.message());
     }
 
     private static void validateLifecycleResult(HoglakeDtos.CommitResult result)
@@ -497,9 +494,9 @@ public class HoglakeClient
         }
     }
 
-    public void dropStagingTable(String namespace, String table)
+    public void dropStagingTable(String namespace, String table, HoglakeDtos.OperationMetadata operationMetadata)
     {
-        write("DELETE", tablePath(namespace, table, ""), Map.of(), new TypeReference<Object>() {}, true);
+        write("DELETE", tablePath(namespace, table, "?" + operationMetadataQuery(operationMetadata)), Map.of(), new TypeReference<Object>() {}, true);
     }
 
     public void commit(HoglakeDtos.Commit request)

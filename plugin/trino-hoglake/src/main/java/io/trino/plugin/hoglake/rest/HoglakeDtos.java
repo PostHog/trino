@@ -24,6 +24,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
+import static java.util.Objects.requireNonNull;
+
 /**
  * Wire DTOs for the hoglake REST API (openapi/hoglake.yaml, snake_case
  * wire). Read planning and initial table creation/append operations.
@@ -164,6 +166,23 @@ public final class HoglakeDtos
     public record ReplacementTarget(
             @JsonProperty("expected_table_uuid") String expectedTableUuid,
             @JsonProperty("read_snapshot") long readSnapshot) {}
+
+    /**
+     * Who ran a DDL operation and why, which the server records on the
+     * snapshot and in its audit log. The server requires both, nonblank, to
+     * drop a namespace, and to drop, truncate or replace a table. It does not
+     * authenticate the author.
+     */
+    public record OperationMetadata(
+            @JsonProperty("author") String author,
+            @JsonProperty("message") String message)
+    {
+        public OperationMetadata
+        {
+            requireNonNull(author, "author is null");
+            requireNonNull(message, "message is null");
+        }
+    }
 
     public record TableCreation(
             @JsonProperty("operation_id") String operationId,
