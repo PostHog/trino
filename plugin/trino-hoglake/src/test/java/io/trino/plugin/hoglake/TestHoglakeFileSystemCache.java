@@ -146,7 +146,7 @@ class TestHoglakeFileSystemCache
                     EXTRA_CREDENTIALS_SECRET_KEY_PROPERTY, "test-secret",
                     EXTRA_CREDENTIALS_SESSION_TOKEN_PROPERTY, "test-token"));
         }
-        return TestingConnectorSession.builder().setIdentity(identity.build()).build();
+        return TestingConnectorSession.builder().setPropertyMetadata(new HoglakeSessionProperties(new HoglakeConfig()).getSessionProperties()).setIdentity(identity.build()).build();
     }
 
     @Test
@@ -181,7 +181,7 @@ class TestHoglakeFileSystemCache
                         "s3.max-error-retries", "1",
                         "fs.cache.enabled", Boolean.toString(enabled)), context);
                 try {
-                    ConnectorSession session = TestingConnectorSession.builder().build();
+                    ConnectorSession session = TestingConnectorSession.builder().setPropertyMetadata(new HoglakeSessionProperties(new HoglakeConfig()).getSessionProperties()).build();
                     assertThat(read(connector, session, server.data.length, dataFileId)).containsExactly(List.of(11L), List.of(22L));
                     int coldReads = server.dataReads.get();
                     assertThat(coldReads).isPositive();
@@ -198,7 +198,7 @@ class TestHoglakeFileSystemCache
                     }
 
                     // Another query can reuse the same registered file without validation.
-                    assertThat(read(connector, TestingConnectorSession.builder().build(), server.data.length, dataFileId))
+                    assertThat(read(connector, TestingConnectorSession.builder().setPropertyMetadata(new HoglakeSessionProperties(new HoglakeConfig()).getSessionProperties()).build(), server.data.length, dataFileId))
                             .containsExactly(List.of(11L), List.of(22L));
                     if (enabled) {
                         assertThat(server.dataReads.get()).isEqualTo(coldReads);
@@ -212,7 +212,7 @@ class TestHoglakeFileSystemCache
                         server.lastModified = server.lastModified.plusSeconds(1);
                     }
                     assertThat(server.data.length).isEqualTo(previousLength);
-                    assertThat(read(connector, TestingConnectorSession.builder().build(), server.data.length, dataFileId > 0 ? 2 : dataFileId))
+                    assertThat(read(connector, TestingConnectorSession.builder().setPropertyMetadata(new HoglakeSessionProperties(new HoglakeConfig()).getSessionProperties()).build(), server.data.length, dataFileId > 0 ? 2 : dataFileId))
                             .containsExactly(List.of(33L), List.of(44L));
                     if (enabled) {
                         assertThat(server.metadataReads.get()).isEqualTo(dataFileId > 0 ? 0 : 4);
@@ -248,7 +248,7 @@ class TestHoglakeFileSystemCache
                         "hoglake.s3.path-style", "true",
                         "fs.cache.enabled", "true"), context);
                 try {
-                    assertThat(read(connector, TestingConnectorSession.builder().build(), server.data.length, 1))
+                    assertThat(read(connector, TestingConnectorSession.builder().setPropertyMetadata(new HoglakeSessionProperties(new HoglakeConfig()).getSessionProperties()).build(), server.data.length, 1))
                             .containsExactly(List.of(value), List.of(value + 1));
                     assertThat(server.metadataReads).hasValue(0);
                 }
@@ -319,7 +319,7 @@ class TestHoglakeFileSystemCache
     private static List<List<Object>> read(Connector connector, int fileSize)
             throws IOException
     {
-        return read(connector, TestingConnectorSession.builder().build(), fileSize, 0);
+        return read(connector, TestingConnectorSession.builder().setPropertyMetadata(new HoglakeSessionProperties(new HoglakeConfig()).getSessionProperties()).build(), fileSize, 0);
     }
 
     private static List<List<Object>> read(Connector connector, ConnectorSession session, int fileSize, long dataFileId)

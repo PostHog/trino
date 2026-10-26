@@ -40,6 +40,7 @@ public class HoglakeConfig
     private Duration requestTimeout = Duration.ofMinutes(2);
     private DataSize maxSplitSize = DEFAULT_MAX_SPLIT_SIZE;
     private DataSize parquetFooterCacheMaxSize = DataSize.of(64, MEGABYTE);
+    private boolean variantPathAssemblyEnabled = true;
 
     @NotNull
     public String getUri()
@@ -110,6 +111,19 @@ public class HoglakeConfig
     public HoglakeConfig setParquetFooterCacheMaxSize(DataSize parquetFooterCacheMaxSize)
     {
         this.parquetFooterCacheMaxSize = parquetFooterCacheMaxSize;
+        return this;
+    }
+
+    public boolean isVariantPathAssemblyEnabled()
+    {
+        return variantPathAssemblyEnabled;
+    }
+
+    @Config("hoglake.variant-path-assembly-enabled")
+    @ConfigDescription("Build pushed-down VARIANT subscripts from the parts of each value that they read, instead of from the whole value")
+    public HoglakeConfig setVariantPathAssemblyEnabled(boolean variantPathAssemblyEnabled)
+    {
+        this.variantPathAssemblyEnabled = variantPathAssemblyEnabled;
         return this;
     }
 
