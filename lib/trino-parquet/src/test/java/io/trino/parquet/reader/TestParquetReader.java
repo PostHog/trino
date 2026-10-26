@@ -13,12 +13,14 @@
  */
 package io.trino.parquet.reader;
 
+import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ListMultimap;
 import com.google.common.io.Resources;
 import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 import io.airlift.units.DataSize;
 import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.parquet.Column;
@@ -1120,6 +1122,24 @@ public class TestParquetReader
         }
         assertThat(values).hasSize(100);
         assertThat(values.getLast()).isEqualTo(VARCHAR.getSlice(bValues, 99).toStringUtf8());
+    }
+
+    @Test
+    public void testSeparatelyPlannedOverlappingChunks()
+            throws IOException
+    {
+        // Chunk a has ranges on both sides of the separate chunk b, as in a corrupt file
+        // whose chunks overlap, and is planned in one group
+        TestingParquetDataSource dataSource = new TestingParquetDataSource(Slices.wrappedBuffer(new byte[1000]), ParquetReaderOptions.defaultOptions());
+        ListMultimap<String, DiskRange> ranges = ArrayListMultimap.create();
+        ranges.put("a", new DiskRange(0, 100));
+        ranges.put("a", new DiskRange(400, 100));
+        ranges.put("b", new DiskRange(200, 100));
+        ranges.put("c", new DiskRange(600, 100));
+        Map<String, ChunkedInputStream> readers = ParquetReader.planReadWithSeparateChunks(dataSource, ranges, ImmutableSet.of("b"), newSimpleAggregatedMemoryContext());
+        assertThat(readers.keySet()).isEqualTo(ImmutableSet.of("a", "b", "c"));
+        readers.get("b").getSlice(100);
+        assertThat(dataSource.getReadBytes()).isEqualTo(100);
     }
 
     @Test

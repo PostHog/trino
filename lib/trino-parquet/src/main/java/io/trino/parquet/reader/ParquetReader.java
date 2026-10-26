@@ -358,35 +358,42 @@ public class ParquetReader
             this.chunkReaders = dataSource.planRead(ranges, memoryContext);
         }
         else {
-            this.chunkReaders = planReadWithSeparateChunks(ranges, separateChunks);
+            this.chunkReaders = planReadWithSeparateChunks(dataSource, ranges, separateChunks, memoryContext);
         }
     }
 
     /// Plans the reads of the chunks so that no read covers the bytes of a separate chunk
     /// and of another chunk: each separate chunk is read on its own, and the other chunks
     /// are read in groups that the separate chunks divide, so that a merged read does not
-    /// span a separate chunk either.
-    private Map<ChunkKey, ChunkedInputStream> planReadWithSeparateChunks(ListMultimap<ChunkKey, DiskRange> ranges, Set<ChunkKey> separateChunks)
+    /// span a separate chunk either. All ranges of a chunk are in the group where its
+    /// first range starts, so that the chunks of a corrupt file that overlap are planned
+    /// like any other.
+    @VisibleForTesting
+    static <K> Map<K, ChunkedInputStream> planReadWithSeparateChunks(
+            ParquetDataSource dataSource,
+            ListMultimap<K, DiskRange> ranges,
+            Set<K> separateChunks,
+            AggregatedMemoryContext memoryContext)
     {
-        List<Map.Entry<ChunkKey, DiskRange>> entries = new ArrayList<>(ranges.entries());
-        entries.sort(comparingLong(entry -> entry.getValue().offset()));
-        ImmutableMap.Builder<ChunkKey, ChunkedInputStream> chunkReaders = ImmutableMap.builder();
-        ListMultimap<ChunkKey, DiskRange> group = ArrayListMultimap.create();
-        for (Map.Entry<ChunkKey, DiskRange> entry : entries) {
-            if (separateChunks.contains(entry.getKey())) {
+        Map<K, Long> starts = new HashMap<>();
+        ranges.asMap().forEach((chunk, chunkRanges) -> starts.put(chunk, chunkRanges.stream().mapToLong(DiskRange::offset).min().orElseThrow()));
+        List<K> chunks = new ArrayList<>(starts.keySet());
+        chunks.sort(comparingLong(starts::get));
+        ImmutableMap.Builder<K, ChunkedInputStream> chunkReaders = ImmutableMap.builder();
+        ListMultimap<K, DiskRange> group = ArrayListMultimap.create();
+        for (K chunk : chunks) {
+            if (separateChunks.contains(chunk)) {
                 chunkReaders.putAll(dataSource.planRead(group, memoryContext));
                 group = ArrayListMultimap.create();
+                ListMultimap<K, DiskRange> separate = ArrayListMultimap.create();
+                separate.putAll(chunk, ranges.get(chunk));
+                chunkReaders.putAll(dataSource.planRead(separate, memoryContext));
             }
             else {
-                group.put(entry.getKey(), entry.getValue());
+                group.putAll(chunk, ranges.get(chunk));
             }
         }
         chunkReaders.putAll(dataSource.planRead(group, memoryContext));
-        for (ChunkKey chunk : separateChunks) {
-            ListMultimap<ChunkKey, DiskRange> chunkRanges = ArrayListMultimap.create();
-            chunkRanges.putAll(chunk, ranges.get(chunk));
-            chunkReaders.putAll(dataSource.planRead(chunkRanges, memoryContext));
-        }
         return chunkReaders.buildOrThrow();
     }
 
