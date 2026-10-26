@@ -516,7 +516,10 @@ public class HoglakeMetadata
             replacement = plannedTargets.computeIfAbsent(metadata.getTable(), name -> new HoglakeDtos.ReplacementTarget(
                     client.getTable(name.getSchemaName(), name.getTableName(), catalog.headSnapshotId()).map(HoglakeDtos.Table::tableUuid).orElse(null),
                     catalog.headSnapshotId()));
-            operationMetadata = operationMetadata(session, "CREATE OR REPLACE TABLE");
+            // The server requires it to replace an existing table, and records it only then
+            if (replacement.expectedTableUuid() != null) {
+                operationMetadata = operationMetadata(session, "CREATE OR REPLACE TABLE");
+            }
         }
         @SuppressWarnings("unchecked")
         List<String> partitioning = (List<String>) metadata.getProperties().getOrDefault("partitioning", List.of());
@@ -580,6 +583,9 @@ public class HoglakeMetadata
      */
     private static HoglakeDtos.OperationMetadata operationMetadata(ConnectorSession session, String statement)
     {
+        if (session.getUser().isBlank()) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake requires a nonblank user for " + statement);
+        }
         return new HoglakeDtos.OperationMetadata(session.getUser(), "Trino %s, query %s".formatted(statement, session.getQueryId()));
     }
 

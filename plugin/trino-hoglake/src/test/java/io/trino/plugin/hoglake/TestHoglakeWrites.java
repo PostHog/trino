@@ -21,6 +21,7 @@ import com.sun.net.httpserver.HttpServer;
 import io.airlift.bootstrap.Bootstrap;
 import io.airlift.bootstrap.LifeCycleManager;
 import io.airlift.units.DataSize;
+import io.trino.Session;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.filesystem.memory.MemoryFileSystemFactory;
@@ -38,6 +39,7 @@ import io.trino.spi.connector.ConnectorFactory;
 import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.security.ConnectorIdentity;
+import io.trino.spi.security.Identity;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.StandaloneQueryRunner;
@@ -444,6 +446,10 @@ final class TestHoglakeWrites
                 }
                 replacementTargets.put(operation, replacement);
             }
+            if (request.has("author") || request.has("message")) {
+                // Recorded even where the server does not require it, so tests see what was sent
+                lastOperationMetadata = new HoglakeDtos.OperationMetadata(request.path("author").asText(), request.path("message").asText());
+            }
             List<HoglakeDtos.Column> columns = new ArrayList<>();
             AtomicLong nextFieldId = new AtomicLong(1);
             for (var column : request.path("columns")) {
@@ -833,7 +839,11 @@ final class TestHoglakeWrites
     @Test
     void testReplacementSql()
     {
+        // The server requires operation metadata only to replace an existing table
+        assertThat(tables).doesNotContainKey("replacement");
+        lastOperationMetadata = null;
         runner.execute("CREATE OR REPLACE TABLE replacement AS SELECT BIGINT '7' AS id");
+        assertThat(lastOperationMetadata).isNull();
         String original = tables.get("replacement").tableUuid();
         assertOperationMetadata("CREATE OR REPLACE TABLE replacement AS SELECT id + 1 AS id FROM replacement", "CREATE OR REPLACE TABLE");
         assertQuery("SELECT * FROM replacement", "VALUES BIGINT '8'");
@@ -875,6 +885,8 @@ final class TestHoglakeWrites
         assertThat(tables.get("renamed_lifecycle").columns()).isEqualTo(original.columns());
         runner.execute("INSERT INTO renamed_lifecycle VALUES 9");
         assertQuery("SELECT * FROM renamed_lifecycle", "VALUES BIGINT '9'");
+        Session blankUser = Session.builder(runner.getDefaultSession()).setIdentity(Identity.ofUser(" ")).build();
+        assertThatThrownBy(() -> runner.execute(blankUser, "DROP TABLE renamed_lifecycle")).hasMessage("Hoglake requires a nonblank user for DROP TABLE");
         assertOperationMetadata("DROP TABLE renamed_lifecycle", "DROP TABLE");
         assertThat(tables).doesNotContainKey("renamed_lifecycle");
     }

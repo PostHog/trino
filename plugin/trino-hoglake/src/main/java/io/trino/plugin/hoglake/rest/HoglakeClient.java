@@ -53,6 +53,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_NOT_FOUND;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_UNAVAILABLE;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
@@ -360,32 +361,14 @@ public class HoglakeClient
                 new TypeReference<HoglakeDtos.Table>() {});
     }
 
-    public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns)
-    {
-        return prepareTableCreation(operationId, namespace, table, columns, null);
-    }
-
-    public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns, HoglakeDtos.ReplacementTarget replacement)
-    {
-        return prepareTableCreation(operationId, namespace, table, columns, replacement, List.of());
-    }
-
-    public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns, HoglakeDtos.ReplacementTarget replacement, List<HoglakeDtos.PartitionField> partitionFields)
-    {
-        return prepareTableCreation(operationId, namespace, table, columns, replacement, partitionFields, List.of());
-    }
-
-    public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns, HoglakeDtos.ReplacementTarget replacement, List<HoglakeDtos.PartitionField> partitionFields, List<HoglakeDtos.SortField> sortFields)
-    {
-        return prepareTableCreation(operationId, namespace, table, columns, replacement, partitionFields, sortFields, null, Map.of(), null);
-    }
-
     /**
+     * @param replacement the table that the creation replaces, or null to create a table
      * @param operationMetadata who replaces the table and why, which the server requires to
-     *         replace an existing table; null when {@code replacement} is null
+     *         replace an existing table, or null otherwise
      */
     public HoglakeDtos.TableCreation prepareTableCreation(String operationId, String namespace, String table, List<HoglakeDtos.ColumnDefinition> columns, HoglakeDtos.ReplacementTarget replacement, List<HoglakeDtos.PartitionField> partitionFields, List<HoglakeDtos.SortField> sortFields, String comment, Map<String, String> properties, HoglakeDtos.OperationMetadata operationMetadata)
     {
+        checkArgument(operationMetadata != null || replacement == null || replacement.expectedTableUuid() == null, "Replacing an existing table requires operation metadata");
         Map<String, Object> definition = new HashMap<>();
         if (operationMetadata != null) {
             definition.put("author", operationMetadata.author());

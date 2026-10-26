@@ -507,12 +507,17 @@ final class TestHoglakeWriteClient
             client.dropStagingTable("ns", "t", metadata);
             client.prepareTableCreation("o", "ns", "t", List.of(), new HoglakeDtos.ReplacementTarget("u", 2), List.of(), List.of(), null, Map.of(), metadata);
             client.prepareTableCreation("p", "ns", "t", List.of(), null, List.of(), List.of(), null, Map.of(), null);
+            // An absent target needs no metadata, and an existing one is refused before any request
+            client.prepareTableCreation("q", "ns", "t", List.of(), new HoglakeDtos.ReplacementTarget(null, 2), List.of(), List.of(), null, Map.of(), null);
+            assertThatThrownBy(() -> client.prepareTableCreation("r", "ns", "t", List.of(), new HoglakeDtos.ReplacementTarget("u", 2), List.of(), List.of(), null, Map.of(), null))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("Replacing an existing table requires operation metadata");
         }
         finally {
             server.stop(0);
         }
         ObjectMapper mapper = new ObjectMapper();
-        assertThat(requests).hasSize(6);
+        assertThat(requests).hasSize(7);
         assertThat(requests.get(0)).isEqualTo("DELETE /v1/catalogs/lake/namespaces/ns?expected_namespace_id=4&" + query + " {}");
         assertThat(requests.get(1)).isEqualTo("DELETE /v1/catalogs/lake/namespaces/ns/tables/t?expected_table_uuid=u&" + query + " {}");
         assertThat(requests.get(3)).isEqualTo("DELETE /v1/catalogs/lake/namespaces/ns/tables/t?" + query + " {}");
