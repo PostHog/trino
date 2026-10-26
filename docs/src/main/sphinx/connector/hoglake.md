@@ -116,8 +116,13 @@ columns, the scan reads only those of the paths, besides the top-level `metadata
 and `value` columns. It builds each value from the requested keys only: a shredded
 key is read from its column, and another key is found in the unshredded part of the
 object without decoding the rest. A subscript that reads an object or an array whole
-copies it whole. The results and errors of the subscripts are the same as for the
-whole value. The `hoglake.variant-path-assembly-enabled` configuration property,
+copies it as the data file holds it. For a data file that follows the
+specification, the subscripts return the same results and errors as for the whole
+value. For one that does not, they can differ: the scan does not check the columns
+that the subscripts do not need, such as the top-level `value` of a row whose
+`typed_value` holds the requested keys, and it finds keys in objects whose fields
+are not in name order, as DuckDB 1.5.5 writes them, where a subscript of the whole
+value can miss them. The `hoglake.variant-path-assembly-enabled` configuration property,
 `true` by default, and the `variant_path_assembly_enabled` session property turn
 off this assembly; the scan then builds whole values from the same columns.
 
