@@ -44,7 +44,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.IntStream;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.parquet.ParquetTestUtils.writeParquetFile;
 import static io.trino.parquet.variant.ShreddedVariantTestFiles.DUCKDB;
@@ -175,8 +177,12 @@ public class TestPrunedVariantAssembly
     public void testPrunedWholeObjectOfDuckDb()
             throws IOException
     {
-        // An object of 70 keys that DuckDB wrote out of field name order, read whole
+        // An object of 70 keys that DuckDB wrote out of field name order, read whole, is
+        // copied with all its fields in the order that DuckDB wrote them, as in a whole read
         PhysicalColumn column = readPruned(new FileParquetDataSource(MIXED.toFile(), OPTIONS), ImmutableList.of(ImmutableList.of(key("wide"))), false);
+        List<String> descendingKeys = IntStream.range(0, 70)
+                .mapToObj(key -> "w%02d".formatted(69 - key))
+                .collect(toImmutableList());
         int rowsWithWideObject = 0;
         for (int id = 0; id < column.variants().size(); id++) {
             Optional<Variant> wide = column.variants().get(id)
@@ -185,12 +191,8 @@ public class TestPrunedVariantAssembly
             assertThat(wide.isPresent()).as("row %s", id).isEqualTo(id % 13 == 9);
             if (wide.isPresent()) {
                 rowsWithWideObject++;
-                Variant expected = wideObject(id);
-                for (int key = 0; key < 70; key++) {
-                    assertThat(wide.get().getObjectField(utf8Slice("w%02d".formatted(key)))).hasValue(Variant.ofLong(key + id));
-                }
-                assertThat(wide.get()).isEqualTo(expected);
-                assertThat(wide.get().longHashCode()).isEqualTo(expected.longHashCode());
+                assertSameVariant(wide.get(), wideObject(id), "row " + id);
+                assertThat(wide.get().objectFieldNames().map(Slice::toStringUtf8).toList()).isEqualTo(descendingKeys);
             }
         }
         assertThat(rowsWithWideObject).isEqualTo(161);

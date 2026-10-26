@@ -109,9 +109,9 @@ import static java.util.Objects.requireNonNull;
 ///
 /// The `metadata` column holds the dictionary of each value, which has the names of its
 /// shredded fields too, and all `value` columns of a row use it. Before it splits a
-/// value, the shredder repairs the defects that [ShreddedVariantAssembler] repairs in the
-/// values that it reads, so the files that it writes do not have them. A repaired value
-/// has a new dictionary, and a primitive value has an empty one.
+/// value, the shredder repairs the defects of [VariantRepairs], so the files that it
+/// writes do not have them. A repaired value has a new dictionary, and a primitive value
+/// has an empty one.
 public final class VariantShredder
 {
     private final RowType physicalType;
