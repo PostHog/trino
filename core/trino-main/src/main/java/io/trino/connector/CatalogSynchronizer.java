@@ -14,6 +14,7 @@
 package io.trino.connector;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.errorprone.annotations.ThreadSafe;
 import com.google.inject.Inject;
@@ -24,9 +25,13 @@ import io.trino.spi.catalog.CatalogProperties;
 import io.trino.spi.catalog.RevisionedCatalogStore;
 import io.trino.spi.catalog.RevisionedCatalogStore.CatalogSnapshot;
 import io.trino.spi.catalog.RevisionedCatalogStore.IncompleteSnapshotException;
+import io.trino.spi.connector.CatalogVersion;
+import io.trino.spi.connector.ConnectorName;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
@@ -35,6 +40,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.trino.connector.CatalogSyncFailure.CATALOGS_NOT_APPLIED;
@@ -48,9 +54,11 @@ import static io.trino.connector.CatalogSyncFailure.SYNCHRONIZATION_DISABLED;
 import static io.trino.server.FailureSummary.summarize;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
+import static java.util.Comparator.comparing;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newSingleThreadScheduledExecutor;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.stream.Collectors.joining;
 
 /**
  * Keeps the catalogs of this coordinator in step with the catalogs an external writer publishes in
@@ -62,8 +70,16 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
  *
  * <p>Anything that fails - an unreachable store, an incomplete snapshot, a connector that does not
  * start - leaves the last known good local state in place and is reported through
- * {@link #catalogSyncState()}. Only a snapshot whose catalogs were all applied advances the applied
- * revision, so a coordinator never claims readiness for a revision it did not fully install.
+ * {@link #catalogSyncState()}. A store that cannot be read, or a snapshot that cannot be trusted,
+ * never advances the applied revision.
+ *
+ * <p>A catalog whose connector does not start is isolated instead: when only some catalogs of a
+ * snapshot fail, the rest of the snapshot, including its removals, takes effect and the applied
+ * revision advances. The catalogs that failed are reported by name and keep their last working
+ * version here, if they had one, and the coordinator does not claim readiness until they are
+ * installed. One broken definition therefore cannot hold back every other catalog. When every
+ * catalog of a snapshot fails, the cause is the snapshot or this process rather than one
+ * definition, so the revision is not applied and nothing is removed.
  */
 @ThreadSafe
 public class CatalogSynchronizer
@@ -226,7 +242,7 @@ public class CatalogSynchronizer
         }
 
         if (current.appliedRevision().stream().anyMatch(applied -> applied == revision) && current.failedCatalogs() == 0) {
-            recordSuccess(revision, revision, 0);
+            recordSuccess(revision, revision);
             return true;
         }
 
@@ -245,12 +261,16 @@ public class CatalogSynchronizer
             return false;
         }
 
-        int failedCatalogs = applySnapshot(snapshot);
-        if (failedCatalogs > 0) {
-            recordPartialApplication(snapshot.revision(), failedCatalogs);
+        SnapshotApplication application = applySnapshot(snapshot);
+        if (!application.revisionApplied()) {
+            recordPartialApplication(snapshot.revision(), current.appliedRevision(), application.failedCatalogs());
             return false;
         }
-        recordSuccess(snapshot.revision(), snapshot.revision(), 0);
+        if (!application.failedCatalogs().isEmpty()) {
+            recordPartialApplication(snapshot.revision(), OptionalLong.of(snapshot.revision()), application.failedCatalogs());
+            return false;
+        }
+        recordSuccess(snapshot.revision(), snapshot.revision());
         return true;
     }
 
@@ -284,11 +304,12 @@ public class CatalogSynchronizer
     }
 
     /**
-     * @return the number of catalogs of this snapshot that could not be applied
+     * Installs every catalog of the snapshot that can be installed, and removes the catalogs the
+     * snapshot no longer publishes unless no catalog of it could be installed.
      */
-    private int applySnapshot(CatalogSnapshot snapshot)
+    private SnapshotApplication applySnapshot(CatalogSnapshot snapshot)
     {
-        int failedCatalogs = 0;
+        List<FailedCatalog> failedCatalogs = new ArrayList<>();
         for (CatalogProperties catalog : snapshot.catalogs()) {
             try {
                 if (catalogManager.applyPublishedCatalog(catalog)) {
@@ -296,19 +317,34 @@ public class CatalogSynchronizer
                 }
             }
             catch (Throwable e) {
-                failedCatalogs++;
+                failedCatalogs.add(new FailedCatalog(catalog.name(), catalog.version(), catalog.connectorName()));
                 // A connector reports what it could not reach, which can include a resolved credential
                 log.error("Could not apply catalog %s of revision %s (%s)", catalog.name(), snapshot.revision(), summarize(e));
                 log.debug(e, "Could not apply catalog %s of revision %s", catalog.name(), snapshot.revision());
             }
         }
+        List<FailedCatalog> sortedFailedCatalogs = failedCatalogs.stream()
+                .sorted(comparing(failedCatalog -> failedCatalog.name().toString()))
+                .collect(toImmutableList());
 
-        if (failedCatalogs > 0) {
-            // Removing while part of the revision could not be installed would widen the damage of a
-            // snapshot that turns out to be wrong; the removals happen once the additions succeed
-            return failedCatalogs;
+        if (!snapshot.catalogs().isEmpty() && failedCatalogs.size() == snapshot.catalogs().size()) {
+            // Not one catalog could be installed. That is a snapshot or an environment that is wrong,
+            // not one bad definition, and removing catalogs on its account would widen the damage
+            log.error(
+                    "None of the %s catalogs of revision %s could be applied; keeping the catalogs this coordinator has",
+                    failedCatalogs.size(),
+                    snapshot.revision());
+            return new SnapshotApplication(false, sortedFailedCatalogs);
+        }
+        if (!failedCatalogs.isEmpty()) {
+            log.warn(
+                    "Applying revision %s without %s catalogs that could not be applied: %s",
+                    snapshot.revision(),
+                    failedCatalogs.size(),
+                    sortedFailedCatalogs.stream().map(failedCatalog -> failedCatalog.name().toString()).collect(joining(", ")));
         }
 
+        int failedRemovals = 0;
         Set<CatalogName> publishedNames = snapshot.catalogs().stream()
                 .map(CatalogProperties::name)
                 .collect(toImmutableSet());
@@ -324,32 +360,39 @@ public class CatalogSynchronizer
                 }
             }
             catch (Throwable e) {
-                failedCatalogs++;
+                failedRemovals++;
                 log.error("Could not remove catalog %s of revision %s (%s)", catalogName, snapshot.revision(), summarize(e));
                 log.debug(e, "Could not remove catalog %s of revision %s", catalogName, snapshot.revision());
             }
         }
-        return failedCatalogs;
+        // A catalog that is still reachable although the revision removed it is not isolated the
+        // way a catalog that failed to start is, so the revision is not applied while one remains
+        return new SnapshotApplication(failedRemovals == 0, sortedFailedCatalogs);
     }
 
-    private void recordSuccess(long observedRevision, long appliedRevision, int failedCatalogs)
+    private void recordSuccess(long observedRevision, long appliedRevision)
     {
         consecutiveFailures = 0;
         state.set(new CatalogSyncState(
                 OptionalLong.of(observedRevision),
                 OptionalLong.of(appliedRevision),
-                failedCatalogs,
+                ImmutableList.of(),
                 OptionalLong.of(System.currentTimeMillis()),
                 Optional.empty()));
     }
 
-    private void recordPartialApplication(long observedRevision, int failedCatalogs)
+    /**
+     * Some or all catalogs of the observed revision could not be installed. The coordinator keeps
+     * retrying them, and it is not up to date until they are installed, whether or not the rest of
+     * the revision was applied.
+     */
+    private void recordPartialApplication(long observedRevision, OptionalLong appliedRevision, List<FailedCatalog> failedCatalogs)
     {
         consecutiveFailures++;
         CatalogSyncState current = state.get();
         state.set(new CatalogSyncState(
                 OptionalLong.of(observedRevision),
-                current.appliedRevision(),
+                appliedRevision,
                 failedCatalogs,
                 current.lastSuccessMillis(),
                 Optional.of(CATALOGS_NOT_APPLIED)));
@@ -372,7 +415,7 @@ public class CatalogSynchronizer
         state.set(new CatalogSyncState(
                 current.observedRevision(),
                 current.appliedRevision(),
-                current.failedCatalogs(),
+                current.failedCatalogInstances(),
                 current.lastSuccessMillis(),
                 Optional.of(failure)));
     }
@@ -395,14 +438,38 @@ public class CatalogSynchronizer
         return ThreadLocalRandom.current().nextLong(minRetryDelayMillis, cap + 1);
     }
 
+    private record SnapshotApplication(boolean revisionApplied, List<FailedCatalog> failedCatalogs)
+    {
+        private SnapshotApplication
+        {
+            failedCatalogs = ImmutableList.copyOf(requireNonNull(failedCatalogs, "failedCatalogs is null"));
+        }
+    }
+
+    /**
+     * A published catalog definition that could not be installed here. If an earlier version of the
+     * catalog was installed, that version stays active.
+     */
+    public record FailedCatalog(CatalogName name, CatalogVersion version, ConnectorName connectorName)
+    {
+        public FailedCatalog
+        {
+            requireNonNull(name, "name is null");
+            requireNonNull(version, "version is null");
+            requireNonNull(connectorName, "connectorName is null");
+        }
+    }
+
     /**
      * What this coordinator knows about the published catalogs and how much of it is in effect
-     * here. {@code appliedRevision} is only set once every catalog of that revision was installed.
+     * here. {@code appliedRevision} is set once a revision was installed apart from the catalogs in
+     * {@code failedCatalogInstances}, which are ordered by name. It is not set for a revision none of
+     * whose catalogs could be installed.
      */
     public record CatalogSyncState(
             OptionalLong observedRevision,
             OptionalLong appliedRevision,
-            int failedCatalogs,
+            List<FailedCatalog> failedCatalogInstances,
             OptionalLong lastSuccessMillis,
             Optional<CatalogSyncFailure> lastFailure)
     {
@@ -410,20 +477,26 @@ public class CatalogSynchronizer
         {
             requireNonNull(observedRevision, "observedRevision is null");
             requireNonNull(appliedRevision, "appliedRevision is null");
+            failedCatalogInstances = ImmutableList.copyOf(requireNonNull(failedCatalogInstances, "failedCatalogInstances is null"));
             requireNonNull(lastSuccessMillis, "lastSuccessMillis is null");
             requireNonNull(lastFailure, "lastFailure is null");
         }
 
         public static CatalogSyncState initial()
         {
-            return new CatalogSyncState(OptionalLong.empty(), OptionalLong.empty(), 0, OptionalLong.empty(), Optional.empty());
+            return new CatalogSyncState(OptionalLong.empty(), OptionalLong.empty(), ImmutableList.of(), OptionalLong.empty(), Optional.empty());
+        }
+
+        public int failedCatalogs()
+        {
+            return failedCatalogInstances.size();
         }
 
         public boolean isUpToDate()
         {
             return observedRevision.stream()
                     .anyMatch(observed -> appliedRevision.stream().anyMatch(applied -> applied == observed))
-                    && failedCatalogs == 0
+                    && failedCatalogInstances.isEmpty()
                     && lastFailure.isEmpty();
         }
     }

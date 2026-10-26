@@ -29,9 +29,13 @@ import io.trino.connector.CatalogStoreManager;
 import io.trino.connector.ConnectorServicesProvider;
 import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.server.CatalogSyncResource;
+import io.trino.server.CatalogSyncResource.CatalogInstance;
 import io.trino.server.CatalogSyncResource.CatalogSyncStatus;
+import io.trino.server.CatalogSyncResource.FailedCatalogInstance;
+import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.catalog.CatalogStore;
 import io.trino.spi.catalog.CatalogStoreFactory;
+import io.trino.spi.connector.ConnectorName;
 import io.trino.spi.security.Identity;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner.MaterializedResultWithPlan;
@@ -49,12 +53,14 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
+import static io.trino.plugin.catalogstore.posthog.CatalogVersions.computeCatalogVersion;
 import static io.trino.spi.StandardErrorCode.PERMISSION_DENIED;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.testing.TestingSession.testSessionBuilder;
@@ -64,6 +70,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
 /**
@@ -75,6 +82,8 @@ import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 final class TestCatalogSynchronization
 {
     private static final String PUBLISHER = "publisher-1";
+    // The tpch connector refuses properties it does not know, so a catalog with this one cannot start
+    private static final Map<String, String> BROKEN_PROPERTIES = ImmutableMap.of("unsupported-property", "value");
 
     private TestingCatalogStoreDatabase database;
 
@@ -327,37 +336,190 @@ final class TestCatalogSynchronization
     }
 
     /**
-     * A catalog whose connector cannot start does not make the revision applied, and it does not
-     * cost the coordinator the catalogs that do work.
+     * A catalog whose connector cannot start is isolated. The rest of the revision takes effect,
+     * including its additions and removals, and the revision is applied without it. The broken
+     * catalog is reported by name, and readiness stays false until it is repaired.
      */
     @Test
-    void testCatalogThatCannotStartIsNotAcknowledged()
+    void testCatalogThatCannotStartIsIsolated()
             throws Exception
     {
         String cellId = newCell();
         TestingCatalogPublisher publisher = publisher(cellId);
         publisher.publishCatalog("op-1", "org_17", "tpch", ImmutableMap.of());
+        publisher.publishCatalog("op-2", "org_19", "tpch", ImmutableMap.of());
 
         try (DistributedQueryRunner coordinator = managedCoordinator(cellId)) {
             assertEventually(() -> assertThat(catalogSyncStatus(coordinator).ready()).isTrue());
 
-            long revision = publisher.publishCatalog("op-2", "org_18", "tpch", ImmutableMap.of("unsupported-property", "value"));
+            publisher.publishCatalog("op-3", "org_18", "tpch", BROKEN_PROPERTIES);
+            publisher.publishCatalog("op-4", "org_20", "tpch", ImmutableMap.of());
+            long revision = publisher.removeCatalog("op-5", "org_19");
 
-            assertEventually(() -> assertThat(catalogSyncStatus(coordinator).lastFailure()).isEqualTo("CATALOGS_NOT_APPLIED"));
+            assertEventually(() -> assertThat(catalogSyncStatus(coordinator).appliedRevision()).isEqualTo(revision));
             CatalogSyncStatus status = catalogSyncStatus(coordinator);
             assertThat(status.ready()).isFalse();
             assertThat(status.observedRevision()).isEqualTo(revision);
-            assertThat(status.appliedRevision()).isNotEqualTo(revision);
+            assertThat(status.lastFailure()).isEqualTo("CATALOGS_NOT_APPLIED");
             assertThat(status.failedCatalogs()).isEqualTo(1);
+            assertThat(status.failedCatalogInstances()).containsExactly(failedInstance("org_18", BROKEN_PROPERTIES));
+            assertThat(status.catalogInstances()).noneSatisfy(instance -> assertThat(instance.name()).isEqualTo("org_18"));
 
+            // The catalogs that work are in effect, and so is the removal of the same revision
+            Set<Object> catalogs = coordinator.execute("SHOW CATALOGS").getOnlyColumnAsSet();
+            assertThat(catalogs).contains("org_17", "org_20");
+            assertThat(catalogs).doesNotContain("org_18", "org_19");
             assertThat(coordinator.execute("SELECT count(*) FROM org_17.tiny.nation").getOnlyValue()).isEqualTo(25L);
-            assertThat(coordinator.execute("SHOW CATALOGS").getOnlyColumnAsSet()).doesNotContain("org_18");
+            assertThat(coordinator.execute("SELECT count(*) FROM org_20.tiny.nation").getOnlyValue()).isEqualTo(25L);
 
             // Repairing the definition is enough; nothing has to be restarted
-            long repaired = publisher.publishCatalog("op-3", "org_18", "tpch", ImmutableMap.of());
+            long repaired = publisher.publishCatalog("op-6", "org_18", "tpch", ImmutableMap.of());
             assertEventually(() -> assertThat(catalogSyncStatus(coordinator).ready()).isTrue());
-            assertThat(catalogSyncStatus(coordinator).appliedRevision()).isEqualTo(repaired);
+            CatalogSyncStatus repairedStatus = catalogSyncStatus(coordinator);
+            assertThat(repairedStatus.appliedRevision()).isEqualTo(repaired);
+            assertThat(repairedStatus.lastFailure()).isNull();
+            assertThat(repairedStatus.failedCatalogs()).isZero();
+            assertThat(repairedStatus.failedCatalogInstances()).isEmpty();
             assertThat(coordinator.execute("SELECT count(*) FROM org_18.tiny.nation").getOnlyValue()).isEqualTo(25L);
+        }
+    }
+
+    /**
+     * A coordinator that starts while a broken definition is published cannot load it at startup
+     * and cannot install it later either. It applies the revision without it instead of waiting
+     * for a catalog that no restart can bring back, and it keeps retrying the broken one.
+     */
+    @Test
+    void testStartingCoordinatorIsolatesACatalogThatCannotStart()
+            throws Exception
+    {
+        String cellId = newCell();
+        TestingCatalogPublisher publisher = publisher(cellId);
+        publisher.publishCatalog("op-1", "org_17", "tpch", ImmutableMap.of());
+        publisher.publishCatalog("op-2", "org_18", "tpch", BROKEN_PROPERTIES);
+        long revision = publisher.publishCatalog("op-3", "org_19", "tpch", ImmutableMap.of());
+
+        try (DistributedQueryRunner coordinator = managedCoordinator(cellId)) {
+            assertEventually(() -> assertThat(catalogSyncStatus(coordinator).appliedRevision()).isEqualTo(revision));
+            CatalogSyncStatus status = catalogSyncStatus(coordinator);
+            assertThat(status.ready()).isFalse();
+            assertThat(status.lastFailure()).isEqualTo("CATALOGS_NOT_APPLIED");
+            assertThat(status.failedCatalogInstances()).containsExactly(failedInstance("org_18", BROKEN_PROPERTIES));
+            assertThat(status.failedCatalogs()).isEqualTo(1);
+            // The placeholder of the catalog that failed at startup is not an active instance
+            assertThat(status.catalogInstances()).extracting(CatalogInstance::name).contains("org_17", "org_19").doesNotContain("org_18");
+            assertThat(coordinator.execute("SELECT count(*) FROM org_19.tiny.nation").getOnlyValue()).isEqualTo(25L);
+
+            publisher.publishCatalog("op-4", "org_18", "tpch", ImmutableMap.of());
+            assertEventually(() -> assertThat(catalogSyncStatus(coordinator).ready()).isTrue());
+            assertThat(catalogSyncStatus(coordinator).failedCatalogInstances()).isEmpty();
+            assertThat(coordinator.execute("SELECT count(*) FROM org_18.tiny.nation").getOnlyValue()).isEqualTo(25L);
+        }
+    }
+
+    /**
+     * When not one catalog of a revision can be installed, the cause is the revision or this
+     * process, not one definition. The revision is not applied, and the catalogs it no longer
+     * publishes are not removed. The store is changed directly here, in one transaction, because
+     * the publisher commits one mutation per revision; this is what a publisher that rewrote every
+     * definition wrongly would leave behind.
+     */
+    @Test
+    void testRevisionWithoutAnyCatalogThatStartsIsNotApplied()
+            throws Exception
+    {
+        String cellId = newCell();
+        TestingCatalogPublisher publisher = publisher(cellId);
+        publisher.publishCatalog("op-1", "org_17", "tpch", ImmutableMap.of());
+        publisher.publishCatalog("op-2", "org_18", "tpch", ImmutableMap.of());
+        long revision = publisher.publishCatalog("op-3", "org_19", "tpch", ImmutableMap.of());
+
+        try (DistributedQueryRunner coordinator = managedCoordinator(cellId)) {
+            assertEventually(() -> assertThat(catalogSyncStatus(coordinator).ready()).isTrue());
+            assertThat(catalogSyncStatus(coordinator).appliedRevision()).isEqualTo(revision);
+
+            String brokenProperties = JsonCodec.mapJsonCodec(String.class, String.class).toJson(BROKEN_PROPERTIES);
+            database.execute(
+                    """
+                    BEGIN;
+                    UPDATE trino_catalogs SET properties = '%2$s', catalog_version = '%3$s' WHERE cell_id = '%1$s' AND catalog_name = 'org_17';
+                    UPDATE trino_catalogs SET properties = '%2$s', catalog_version = '%4$s' WHERE cell_id = '%1$s' AND catalog_name = 'org_18';
+                    DELETE FROM trino_catalogs WHERE cell_id = '%1$s' AND catalog_name = 'org_19';
+                    UPDATE trino_catalog_writer_state SET revision = revision + 1, catalog_count = 2 WHERE cell_id = '%1$s';
+                    COMMIT;
+                    """.formatted(
+                            cellId,
+                            brokenProperties,
+                            version("org_17", BROKEN_PROPERTIES),
+                            version("org_18", BROKEN_PROPERTIES)));
+
+            assertEventually(() -> assertThat(catalogSyncStatus(coordinator).failedCatalogs()).isEqualTo(2));
+            Thread.sleep(1_000);
+
+            CatalogSyncStatus status = catalogSyncStatus(coordinator);
+            assertThat(status.ready()).isFalse();
+            assertThat(status.observedRevision()).isEqualTo(revision + 1);
+            assertThat(status.appliedRevision()).isEqualTo(revision);
+            assertThat(status.lastFailure()).isEqualTo("CATALOGS_NOT_APPLIED");
+            assertThat(status.failedCatalogInstances()).containsExactly(
+                    failedInstance("org_17", BROKEN_PROPERTIES),
+                    failedInstance("org_18", BROKEN_PROPERTIES));
+            // Every catalog keeps the version that works, and the one the revision dropped is still here
+            assertThat(status.catalogInstances())
+                    .filteredOn(CatalogInstance::published)
+                    .extracting(CatalogInstance::name, CatalogInstance::version)
+                    .containsExactlyInAnyOrder(
+                            tuple("org_17", version("org_17", ImmutableMap.of())),
+                            tuple("org_18", version("org_18", ImmutableMap.of())),
+                            tuple("org_19", version("org_19", ImmutableMap.of())));
+            assertThat(coordinator.execute("SELECT count(*) FROM org_19.tiny.nation").getOnlyValue()).isEqualTo(25L);
+        }
+    }
+
+    /**
+     * A broken replacement of a catalog that works leaves the working version in place. The
+     * catalog is reported twice: as an active instance at the version that serves, and as a failed
+     * instance at the version that could not be installed.
+     */
+    @Test
+    void testBrokenReplacementKeepsTheWorkingVersion()
+            throws Exception
+    {
+        String cellId = newCell();
+        TestingCatalogPublisher publisher = publisher(cellId);
+        Map<String, String> workingProperties = ImmutableMap.of("tpch.splits-per-node", "2");
+        Map<String, String> brokenReplacementProperties = ImmutableMap.<String, String>builder()
+                .putAll(workingProperties)
+                .putAll(BROKEN_PROPERTIES)
+                .buildOrThrow();
+        publisher.publishCatalog("op-1", "org_17", "tpch", workingProperties);
+        publisher.publishCatalog("op-2", "org_18", "tpch", ImmutableMap.of());
+
+        try (DistributedQueryRunner coordinator = managedCoordinator(cellId)) {
+            assertEventually(() -> assertThat(catalogSyncStatus(coordinator).ready()).isTrue());
+
+            long revision = publisher.publishCatalog("op-3", "org_17", "tpch", brokenReplacementProperties);
+
+            assertEventually(() -> assertThat(catalogSyncStatus(coordinator).appliedRevision()).isEqualTo(revision));
+            CatalogSyncStatus status = catalogSyncStatus(coordinator);
+            assertThat(status.ready()).isFalse();
+            assertThat(status.lastFailure()).isEqualTo("CATALOGS_NOT_APPLIED");
+            assertThat(status.failedCatalogInstances()).containsExactly(failedInstance("org_17", brokenReplacementProperties));
+            assertThat(status.catalogInstances())
+                    .filteredOn(instance -> instance.name().equals("org_17"))
+                    .extracting(CatalogInstance::version)
+                    .containsExactly(version("org_17", workingProperties));
+            assertThat(coordinator.execute("SELECT count(*) FROM org_17.tiny.nation").getOnlyValue()).isEqualTo(25L);
+
+            Map<String, String> repairedProperties = ImmutableMap.of("tpch.splits-per-node", "3");
+            publisher.publishCatalog("op-4", "org_17", "tpch", repairedProperties);
+            assertEventually(() -> assertThat(catalogSyncStatus(coordinator).ready()).isTrue());
+            CatalogSyncStatus repairedStatus = catalogSyncStatus(coordinator);
+            assertThat(repairedStatus.failedCatalogInstances()).isEmpty();
+            assertThat(repairedStatus.catalogInstances())
+                    .filteredOn(instance -> instance.name().equals("org_17"))
+                    .extracting(CatalogInstance::version)
+                    .containsExactly(version("org_17", repairedProperties));
         }
     }
 
@@ -568,6 +730,16 @@ final class TestCatalogSynchronization
             assertEventually(() -> assertThat(catalogSyncStatus(restarted).ready()).isTrue());
             assertThat(catalogSyncStatus(restarted).processId()).isNotEqualTo(processId);
         }
+    }
+
+    private static FailedCatalogInstance failedInstance(String catalogName, Map<String, String> properties)
+    {
+        return new FailedCatalogInstance(catalogName, version(catalogName, properties), "tpch");
+    }
+
+    private static String version(String catalogName, Map<String, String> properties)
+    {
+        return computeCatalogVersion(new CatalogName(catalogName), new ConnectorName("tpch"), properties).toString();
     }
 
     private String newCell()

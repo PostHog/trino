@@ -113,7 +113,8 @@ public class CatalogSyncResource
                 securityRevisions(),
                 1,
                 catalogSynchronizer.storeIdentity().orElse(null),
-                catalogInstances());
+                catalogInstances(),
+                failedCatalogInstances(state));
     }
 
     private List<CatalogInstance> catalogInstances()
@@ -140,6 +141,22 @@ public class CatalogSyncResource
     }
 
     public record CatalogInstance(String name, String version, String connector, String requiredIdentityGroup, boolean published) {}
+
+    /**
+     * The published definitions that could not be installed, ordered by name. A catalog listed here
+     * can also be listed in {@code catalogInstances} with the earlier version that stays active.
+     */
+    private static List<FailedCatalogInstance> failedCatalogInstances(CatalogSyncState state)
+    {
+        return state.failedCatalogInstances().stream()
+                .map(failedCatalog -> new FailedCatalogInstance(
+                        failedCatalog.name().toString(),
+                        failedCatalog.version().toString(),
+                        failedCatalog.connectorName().toString()))
+                .collect(toImmutableList());
+    }
+
+    public record FailedCatalogInstance(String name, String version, String connector) {}
 
     /**
      * What the security components of this process have loaded. This is reported beside the
@@ -182,5 +199,6 @@ public class CatalogSyncResource
             List<ComponentRevision> securityRevisions,
             int catalogIdentityVersion,
             String catalogStoreIdentity,
-            List<CatalogInstance> catalogInstances) {}
+            List<CatalogInstance> catalogInstances,
+            List<FailedCatalogInstance> failedCatalogInstances) {}
 }
