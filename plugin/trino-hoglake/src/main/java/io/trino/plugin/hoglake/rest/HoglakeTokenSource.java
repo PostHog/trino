@@ -28,6 +28,10 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_UNAVAILABLE;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -50,7 +54,7 @@ public interface HoglakeTokenSource
     HoglakeTokenSource NONE = new HoglakeTokenSource()
     {
         @Override
-        public Optional<String> token()
+        public Optional<String> token(Duration timeout)
         {
             return Optional.empty();
         }
@@ -60,9 +64,11 @@ public interface HoglakeTokenSource
     };
 
     /**
-     * The current access token, minting one if none is cached or it is near expiry.
+     * The current access token, minting one if none is cached or it is near
+     * expiry. Waiting for another caller's mint and minting both count against
+     * [timeout], so a caller with a deadline is not held past it.
      */
-    Optional<String> token();
+    Optional<String> token(Duration timeout);
 
     /**
      * Drop [token] if it is still the cached one, so the next {@link #token()}
@@ -91,8 +97,13 @@ public interface HoglakeTokenSource
         private final Ticker ticker;
         private final ObjectMapper mapper = new ObjectMapper();
 
-        private String cached;
-        private long refreshAtNanos;
+        // Held while minting, so concurrent callers that all find the token
+        // stale produce one mint, not one each. A ReentrantLock rather than
+        // synchronized because the wait has to be bounded by the caller's deadline.
+        private final ReentrantLock mintLock = new ReentrantLock();
+        private final AtomicReference<Cached> cached = new AtomicReference<>();
+
+        private record Cached(String token, long refreshAtNanos) {}
 
         public ClientCredentials(URI tokenUri, String clientId, String clientSecret, String audience, HttpClient httpClient)
         {
@@ -112,28 +123,59 @@ public interface HoglakeTokenSource
         }
 
         @Override
-        public synchronized Optional<String> token()
+        public Optional<String> token(Duration timeout)
         {
-            // Synchronized: concurrent splits that all find the token stale must
-            // produce one mint, not one each.
-            if (cached == null || ticker.read() - refreshAtNanos >= 0) {
-                mint();
+            Cached current = cached.get();
+            if (fresh(current)) {
+                return Optional.of(current.token());
             }
-            return Optional.of(cached);
+            long deadline = System.nanoTime() + timeout.toNanos();
+            try {
+                if (!mintLock.tryLock(timeout.toNanos(), NANOSECONDS)) {
+                    throw new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "timed out waiting for a Hoglake access token");
+                }
+            }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "interrupted waiting for a Hoglake access token", e);
+            }
+            try {
+                // Another caller may have minted while this one waited.
+                current = cached.get();
+                if (!fresh(current)) {
+                    current = mint(Duration.ofNanos(deadline - System.nanoTime()));
+                    cached.set(current);
+                }
+                return Optional.of(current.token());
+            }
+            finally {
+                mintLock.unlock();
+            }
         }
 
         @Override
-        public synchronized void invalidate(String token)
+        public void invalidate(String token)
         {
-            if (token.equals(cached)) {
-                cached = null;
+            // Lock-free, so a caller dropping a refused token never waits on a mint.
+            Cached current = cached.get();
+            if (current != null && current.token().equals(token)) {
+                cached.compareAndSet(current, null);
             }
         }
 
-        private void mint()
+        private boolean fresh(Cached current)
         {
+            return current != null && ticker.read() - current.refreshAtNanos() < 0;
+        }
+
+        private Cached mint(Duration remaining)
+        {
+            Duration timeout = remaining.compareTo(MINT_TIMEOUT) < 0 ? remaining : MINT_TIMEOUT;
+            if (timeout.isNegative() || timeout.isZero()) {
+                throw new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "timed out waiting for a Hoglake access token");
+            }
             HttpRequest request = HttpRequest.newBuilder(tokenUri)
-                    .timeout(MINT_TIMEOUT)
+                    .timeout(timeout)
                     .header("Authorization", basicAuth)
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .header("Accept", "application/json")
@@ -141,16 +183,25 @@ public interface HoglakeTokenSource
                     .POST(HttpRequest.BodyPublishers.ofString("grant_type=client_credentials&audience=" + form(audience)))
                     .build();
             HttpResponse<String> response;
+            // HttpRequest.timeout bounds receiving headers, not the body; the
+            // get() bounds both, and the cancel in finally aborts the exchange
+            // so an endpoint that stalls mid-body does not keep it open.
+            CompletableFuture<HttpResponse<String>> future = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
             try {
-                response = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
-                        .get(MINT_TIMEOUT.toNanos(), NANOSECONDS);
+                response = future.get(timeout.toNanos(), NANOSECONDS);
             }
             catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "interrupted minting a Hoglake access token", e);
             }
+            catch (TimeoutException e) {
+                throw new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "timed out minting a Hoglake access token at " + tokenUri, e);
+            }
             catch (Exception e) {
                 throw new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "could not reach the Hoglake token endpoint " + tokenUri, e);
+            }
+            finally {
+                future.cancel(true);
             }
             if (response.statusCode() != 200) {
                 // The body is an RFC 6749 §5.2 error object with no secrets in it;
@@ -168,8 +219,7 @@ public interface HoglakeTokenSource
                 }
                 Duration lifetime = Duration.ofSeconds(expiresIn);
                 Duration margin = REFRESH_MARGIN.compareTo(lifetime.dividedBy(5)) < 0 ? REFRESH_MARGIN : lifetime.dividedBy(5);
-                cached = token;
-                refreshAtNanos = ticker.read() + lifetime.minus(margin).toNanos();
+                return new Cached(token, ticker.read() + lifetime.minus(margin).toNanos());
             }
             catch (IOException e) {
                 throw new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "malformed response from the Hoglake token endpoint", e);

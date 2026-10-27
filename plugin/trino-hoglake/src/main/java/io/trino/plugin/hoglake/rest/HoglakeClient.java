@@ -843,22 +843,40 @@ public class HoglakeClient
      * before any handler runs, so a 401 means the request did nothing. The
      * cases it covers are the ones a fresh token fixes — revocation, a signing
      * key this Hoglake instance has not loaded yet, expiry by clock skew.
+     *
+     * The request's timeout is one deadline for all of it: getting a token
+     * (waiting for another caller's mint included) and both attempts each get
+     * only what is left. Write recovery passes its remaining budget in here,
+     * and a retry must not reach the server after that budget has run out.
      */
     private HttpResponse<String> send(HttpRequest request)
             throws IOException, InterruptedException
     {
-        Optional<String> token = tokenSource.token();
-        HttpResponse<String> response = sendOnce(authorized(request, token));
+        long deadline = System.nanoTime() + request.timeout().orElseThrow().toNanos();
+        Optional<String> token = tokenSource.token(remaining(deadline));
+        HttpResponse<String> response = sendOnce(authorized(request, token, remaining(deadline)));
         if (response.statusCode() != 401 || token.isEmpty()) {
             return response;
         }
         tokenSource.invalidate(token.get());
-        return sendOnce(authorized(request, tokenSource.token()));
+        Optional<String> replacement = tokenSource.token(remaining(deadline));
+        return sendOnce(authorized(request, replacement, remaining(deadline)));
     }
 
-    private static HttpRequest authorized(HttpRequest request, Optional<String> token)
+    private static Duration remaining(long deadline)
+            throws HttpTimeoutException
+    {
+        long remaining = deadline - System.nanoTime();
+        if (remaining <= 0) {
+            throw new HttpTimeoutException("Hoglake request deadline exceeded");
+        }
+        return Duration.ofNanos(remaining);
+    }
+
+    private static HttpRequest authorized(HttpRequest request, Optional<String> token, Duration timeout)
     {
         HttpRequest.Builder builder = HttpRequest.newBuilder(request, (name, _) -> !name.equalsIgnoreCase("Authorization"))
+                .timeout(timeout)
                 .setHeader("User-Agent", USER_AGENT);
         token.ifPresent(value -> builder.setHeader("Authorization", "Bearer " + value));
         return builder.build();
