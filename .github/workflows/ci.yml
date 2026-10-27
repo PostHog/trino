@@ -144,7 +144,7 @@ jobs:
       fail-fast: ${{ github.event_name == 'merge_group' }}
       matrix:
         include:
-          - { java-version: 25.0.4, cache: 'true', cleanup-node: true }
+          - { java-version: 25.0.5, cache: 'true', cleanup-node: true }
           - { java-version: 27, cache: 'restore', cleanup-node: true }
           - { java-version: 28-ea, cache: 'restore', cleanup-node: true }
     timeout-minutes: 45
@@ -405,7 +405,6 @@ jobs:
           fi
       - name: Test current JDBC vs old server
         id: tests-current
-        if: always()
         run: |
           if [ ! -f gib-impacted.log ] || grep -q testing/trino-test-jdbc-compatibility-old-server gib-impacted.log; then
             $MAVEN test ${MAVEN_TEST} -pl :trino-test-jdbc-compatibility-old-server
