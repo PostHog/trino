@@ -1913,13 +1913,4 @@ public class TracingMetadata
         }
         return span;
     }
-
-    private Span startSpan(String methodName, EntityKindAndName entity)
-    {
-        Span span = startSpan(methodName);
-        if (span.isRecording()) {
-            span.setAttribute(TrinoAttributes.ENTITY, String.format("%s-%s", entity.entityKind(), entity.name()));
-        }
-        return span;
-    }
 }

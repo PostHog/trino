@@ -11,14 +11,22 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.trino.plugin.deltalake;
+package io.trino.server.remotetask;
 
-import io.trino.spi.connector.ConnectorSession;
-import io.trino.spi.connector.TableScanRedirectApplicationResult;
+import io.airlift.http.client.HttpStatus;
 
-import java.util.Optional;
+import java.net.URI;
 
-public interface DeltaLakeRedirectionsProvider
+import static java.lang.String.format;
+
+/**
+ * Response status that does not fail the task because the request is retried with backoff.
+ */
+class RetryableResponseException
+        extends RuntimeException
 {
-    Optional<TableScanRedirectApplicationResult> getTableScanRedirection(ConnectorSession session, DeltaLakeTableHandle tableHandle);
+    public RetryableResponseException(HttpStatus status, URI uri)
+    {
+        super(format("Server returned %s: %s", status, uri));
+    }
 }

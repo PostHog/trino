@@ -5,7 +5,7 @@
     <parent>
         <groupId>io.airlift</groupId>
         <artifactId>airbase</artifactId>
-        <version>419</version>
+        <version>421</version>
     </parent>
 
     <groupId>io.trino</groupId>
@@ -164,7 +164,7 @@
         <air.java.version>25.0.1</air.java.version>
         <!-- Temurin JVM release used in the docker image and for product test environments -->
         <!-- https://api.adoptium.net/q/swagger-ui/#/Release%20Info/getReleaseNames -->
-        <temurin.release>jdk-25.0.4+7</temurin.release>
+        <temurin.release>jdk-25.0.5+8</temurin.release>
         <air.javadoc.lint>syntax,reference,html,-missing</air.javadoc.lint>
         <air.modernizer.java-version>${project.build.targetJdk}</air.modernizer.java-version>
         <air.release.preparation-goals>clean verify -DskipTests</air.release.preparation-goals>
@@ -2015,6 +2015,11 @@
                         <groupId>org.apache.parquet</groupId>
                         <artifactId>parquet-hadoop</artifactId>
                     </exclusion>
+                    <exclusion>
+                        <!-- Only needed by VariantJsonParser, which Trino does not use -->
+                        <groupId>org.apache.parquet</groupId>
+                        <artifactId>parquet-jackson</artifactId>
+                    </exclusion>
                 </exclusions>
             </dependency>
 
@@ -2157,6 +2162,12 @@
                 <groupId>org.jetbrains</groupId>
                 <artifactId>annotations</artifactId>
                 <version>26.1.0</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.junit.support</groupId>
+                <artifactId>testng-engine</artifactId>
+                <version>1.1.0</version>
             </dependency>
 
             <dependency>
@@ -2368,34 +2379,6 @@
                                     <include>org.yaml:snakeyaml:2.+</include>
                                 </includes>
                             </bannedDependencies>
-                            <RestrictImports>
-                                <reason>Prefer org.assertj.core.api.Assertions over:</reason>
-                                <bannedImports>
-                                    <bannedImport>org.junit.jupiter.api.Assertions.*</bannedImport>
-                                    <bannedImport>org.testng.Assert.*</bannedImport>
-                                    <bannedImport>org.testng.AssertJUnit.*</bannedImport>
-                                    <bannedImport>org.testng.asserts.**</bannedImport>
-                                </bannedImports>
-                            </RestrictImports>
-                            <RestrictImports>
-                                <reason>Trino assumes non-nullness by default, otherwise it's marked as @Nullable</reason>
-                                <bannedImports>
-                                    <bannedImport>jakarta.annotation.Nonnull</bannedImport>
-                                    <bannedImport>org.jetbrains.annotations.NotNull</bannedImport>
-                                </bannedImports>
-                            </RestrictImports>
-                            <RestrictImports>
-                                <bannedImports>
-                                    <bannedImport>com.google.api.client.util.Preconditions</bannedImport>
-                                    <bannedImport>com.google.api.client.util.Preconditions.*</bannedImport>
-                                </bannedImports>
-                            </RestrictImports>
-                            <RestrictImports>
-                                <reason>Use non-shaded Guava classes</reason>
-                                <bannedImports>
-                                    <bannedImport>org.testcontainers.shaded.com.google.common.**</bannedImport>
-                                </bannedImports>
-                            </RestrictImports>
                             <requireProfileIdsExist />
                             <requirePropertyDiverges>
                                 <property>project.description</property>
@@ -2414,6 +2397,49 @@
                             </requireJavaVendor>
                         </rules>
                     </configuration>
+                    <executions>
+                        <execution>
+                            <!-- Separate execution, so these rules are not merged by position into the RestrictImports rules inherited from airbase -->
+                            <id>trino-restrict-imports</id>
+                            <goals>
+                                <goal>enforce</goal>
+                            </goals>
+                            <phase>validate</phase>
+                            <configuration>
+                                <rules combine.self="override">
+                                    <RestrictImports>
+                                        <reason>Prefer org.assertj.core.api.Assertions over:</reason>
+                                        <bannedImports>
+                                            <bannedImport>org.junit.jupiter.api.Assertions.*</bannedImport>
+                                            <bannedImport>org.testng.Assert.*</bannedImport>
+                                            <bannedImport>org.testng.AssertJUnit.*</bannedImport>
+                                            <bannedImport>org.testng.asserts.**</bannedImport>
+                                        </bannedImports>
+                                    </RestrictImports>
+                                    <RestrictImports>
+                                        <reason>Trino assumes non-nullness by default, otherwise it's marked as @Nullable</reason>
+                                        <bannedImports>
+                                            <bannedImport>jakarta.annotation.Nonnull</bannedImport>
+                                            <bannedImport>org.jetbrains.annotations.NotNull</bannedImport>
+                                        </bannedImports>
+                                    </RestrictImports>
+                                    <RestrictImports>
+                                        <reason>Use com.google.common.base.Preconditions</reason>
+                                        <bannedImports>
+                                            <bannedImport>com.google.api.client.util.Preconditions</bannedImport>
+                                            <bannedImport>com.google.api.client.util.Preconditions.*</bannedImport>
+                                        </bannedImports>
+                                    </RestrictImports>
+                                    <RestrictImports>
+                                        <reason>Use non-shaded Guava classes</reason>
+                                        <bannedImports>
+                                            <bannedImport>org.testcontainers.shaded.com.google.common.**</bannedImport>
+                                        </bannedImports>
+                                    </RestrictImports>
+                                </rules>
+                            </configuration>
+                        </execution>
+                    </executions>
                 </plugin>
 
                 <plugin>
