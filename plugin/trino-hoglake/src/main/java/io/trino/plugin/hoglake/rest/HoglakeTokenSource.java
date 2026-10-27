@@ -66,12 +66,12 @@ public interface HoglakeTokenSource
     /**
      * The current access token, minting one if none is cached or it is near
      * expiry. Waiting for another caller's mint and minting both count against
-     * [timeout], so a caller with a deadline is not held past it.
+     * {@code timeout}, so a caller with a deadline is not held past it.
      */
     Optional<String> token(Duration timeout);
 
     /**
-     * Drop [token] if it is still the cached one, so the next {@link #token()}
+     * Drop {@code token} if it is still the cached one, so the next {@link #token(Duration)}
      * mints. Called after Hoglake answered 401 to it: the token was revoked,
      * signed by a key this Hoglake instance has not loaded yet, or expired
      * early by clock skew, and in every case a fresh one is the fix.
