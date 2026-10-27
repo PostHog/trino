@@ -47,6 +47,29 @@ Keep stored secrets and source credentials.
 Recreate the definitions after deployment.
 Old prefixed catalogs are not automatically renamed or removed.
 
+## Catalogs that cannot start
+
+A published catalog can fail to start on a coordinator.
+For example, its properties can refer to a secret that does not exist.
+The coordinator then applies the other catalogs of the revision, including removals.
+The applied revision advances, and `failedCatalogInstances` names each catalog that failed.
+Each entry has the `name`, `version` and `connector` of the published definition.
+The list is sorted by name, and `failedCatalogs` is its size.
+
+A catalog that failed keeps its last working version on that coordinator, if it had one.
+That version stays in `catalogInstances`.
+The new version that failed is in `failedCatalogInstances`.
+While the list is not empty, `ready` is false and `lastFailure` is `CATALOGS_NOT_APPLIED`.
+The coordinator retries the failed catalogs until they start or are no longer published.
+
+If every catalog of a revision fails, the coordinator does not apply the revision.
+It keeps its catalogs and removes nothing.
+This failure points to the revision or to the coordinator, not to one definition.
+If a removal fails, the coordinator does not apply the revision either.
+
+The applied revision alone does not prove that a specific catalog definition is active.
+A controller must compare `catalogInstances` and `failedCatalogInstances` with the definition it published.
+
 ## Delegated catalog requests
 
 A read-only (`catalog-store.read-only=true`) coordinator rejects `CREATE CATALOG`

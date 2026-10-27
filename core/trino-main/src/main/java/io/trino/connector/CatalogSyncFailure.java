@@ -47,8 +47,10 @@ public enum CatalogSyncFailure
     SNAPSHOT_INCOMPLETE,
 
     /**
-     * Catalogs of the published revision could not be installed locally, so the revision is not
-     * acknowledged. The catalogs that were working here are untouched.
+     * Catalogs of the published revision could not be installed locally. When only some of them
+     * failed, the rest of the revision is applied and the failed ones are reported by name; when all
+     * of them failed, the revision is not acknowledged. A failed catalog that was working here keeps
+     * its last working version.
      */
     CATALOGS_NOT_APPLIED,
 
