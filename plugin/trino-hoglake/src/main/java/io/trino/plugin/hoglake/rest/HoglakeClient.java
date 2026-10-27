@@ -101,7 +101,15 @@ public class HoglakeClient
     private static final String UNKNOWN_INCLUDE_SUFFIX = "; supported:";
     private static final Pattern QUOTED_VALUE = Pattern.compile("'([^']*)'");
 
+    /**
+     * Sent on every request. Hoglake counts auth outcomes per client class read
+     * from this header, and its enforce flip is gated on this class reaching
+     * zero refusals, so it must stay recognisable: the class is the prefix.
+     */
+    public static final String USER_AGENT = "trino-hoglake/1";
+
     private final HttpClient httpClient;
+    private final HoglakeTokenSource tokenSource;
     private final ObjectMapper mapper;
     private final String baseUri;
     private final String catalog;
@@ -123,11 +131,23 @@ public class HoglakeClient
     @VisibleForTesting
     public HoglakeClient(String baseUri, String catalog, Duration requestTimeout, Ticker ticker)
     {
+        this(baseUri, catalog, requestTimeout, ticker, HoglakeTokenSource.NONE);
+    }
+
+    public HoglakeClient(String baseUri, String catalog, Duration requestTimeout, HoglakeTokenSource tokenSource)
+    {
+        this(baseUri, catalog, requestTimeout, Ticker.systemTicker(), tokenSource);
+    }
+
+    @VisibleForTesting
+    public HoglakeClient(String baseUri, String catalog, Duration requestTimeout, Ticker ticker, HoglakeTokenSource tokenSource)
+    {
         // Fail at construction (catalog registration), not per query.
         this.baseUri = validateBaseUri(requireNonNull(baseUri, "baseUri is null")).toString();
         this.catalog = requireNonNull(catalog, "catalog is null");
         this.requestTimeout = requireNonNull(requestTimeout, "requestTimeout is null");
         this.ticker = requireNonNull(ticker, "ticker is null");
+        this.tokenSource = requireNonNull(tokenSource, "tokenSource is null");
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
@@ -814,7 +834,37 @@ public class HoglakeClient
         }
     }
 
+    /**
+     * Every request goes through here, so this is where the credential and the
+     * User-Agent are attached.
+     *
+     * A 401 is retried ONCE with a freshly minted token, and that is safe for
+     * writes too, despite "send once" above: Hoglake decides authentication
+     * before any handler runs, so a 401 means the request did nothing. The
+     * cases it covers are the ones a fresh token fixes — revocation, a signing
+     * key this Hoglake instance has not loaded yet, expiry by clock skew.
+     */
     private HttpResponse<String> send(HttpRequest request)
+            throws IOException, InterruptedException
+    {
+        Optional<String> token = tokenSource.token();
+        HttpResponse<String> response = sendOnce(authorized(request, token));
+        if (response.statusCode() != 401 || token.isEmpty()) {
+            return response;
+        }
+        tokenSource.invalidate(token.get());
+        return sendOnce(authorized(request, tokenSource.token()));
+    }
+
+    private static HttpRequest authorized(HttpRequest request, Optional<String> token)
+    {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(request, (name, _) -> !name.equalsIgnoreCase("Authorization"))
+                .setHeader("User-Agent", USER_AGENT);
+        token.ifPresent(value -> builder.setHeader("Authorization", "Bearer " + value));
+        return builder.build();
+    }
+
+    private HttpResponse<String> sendOnce(HttpRequest request)
             throws IOException, InterruptedException
     {
         // HttpRequest.timeout bounds receiving headers, not consuming the body.
