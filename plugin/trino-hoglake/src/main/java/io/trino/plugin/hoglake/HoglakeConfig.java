@@ -15,12 +15,17 @@ package io.trino.plugin.hoglake;
 
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
+import io.airlift.configuration.ConfigSecuritySensitive;
 import io.airlift.units.DataSize;
 import io.airlift.units.MinDataSize;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.NotNull;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.time.Duration;
+import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -42,6 +47,10 @@ public class HoglakeConfig
     private DataSize parquetFooterCacheMaxSize = DataSize.of(64, MEGABYTE);
     private boolean variantPathAssemblyEnabled = true;
     private boolean variantLazyResidualEnabled = true;
+    private String authTokenUri;
+    private String authClientId;
+    private String authClientSecret;
+    private String authAudience = "hoglake";
 
     @NotNull
     public String getUri()
@@ -144,6 +153,84 @@ public class HoglakeConfig
     /**
      * Airlift-style duration: a positive decimal plus ms/s/m/h/d.
      */
+    public Optional<String> getAuthTokenUri()
+    {
+        return Optional.ofNullable(authTokenUri);
+    }
+
+    @Config("hoglake.auth.token-uri")
+    @ConfigDescription("OAuth2 token endpoint that mints Hoglake access tokens (client credentials grant)")
+    public HoglakeConfig setAuthTokenUri(String authTokenUri)
+    {
+        this.authTokenUri = authTokenUri == null || authTokenUri.isBlank() ? null : validateTokenUri(authTokenUri.trim());
+        return this;
+    }
+
+    public Optional<String> getAuthClientId()
+    {
+        return Optional.ofNullable(authClientId);
+    }
+
+    @Config("hoglake.auth.client-id")
+    @ConfigDescription("Client id for the Hoglake token endpoint")
+    public HoglakeConfig setAuthClientId(String authClientId)
+    {
+        this.authClientId = authClientId == null || authClientId.isBlank() ? null : authClientId;
+        return this;
+    }
+
+    public Optional<String> getAuthClientSecret()
+    {
+        return Optional.ofNullable(authClientSecret);
+    }
+
+    @Config("hoglake.auth.client-secret")
+    @ConfigSecuritySensitive
+    @ConfigDescription("Client secret for the Hoglake token endpoint")
+    public HoglakeConfig setAuthClientSecret(String authClientSecret)
+    {
+        this.authClientSecret = authClientSecret == null || authClientSecret.isEmpty() ? null : authClientSecret;
+        return this;
+    }
+
+    @NotNull
+    public String getAuthAudience()
+    {
+        return authAudience;
+    }
+
+    @Config("hoglake.auth.audience")
+    @ConfigDescription("Audience requested from the token endpoint")
+    public HoglakeConfig setAuthAudience(String authAudience)
+    {
+        this.authAudience = authAudience;
+        return this;
+    }
+
+    // All three or none: a catalog with a token endpoint and no secret would
+    // otherwise register fine and then fail every query.
+    @AssertTrue(message = "hoglake.auth.token-uri, hoglake.auth.client-id and hoglake.auth.client-secret must be set together")
+    public boolean isAuthConfigComplete()
+    {
+        int set = (authTokenUri == null ? 0 : 1) + (authClientId == null ? 0 : 1) + (authClientSecret == null ? 0 : 1);
+        return set == 0 || set == 3;
+    }
+
+    private static String validateTokenUri(String value)
+    {
+        URI parsed;
+        try {
+            parsed = new URI(value);
+        }
+        catch (URISyntaxException e) {
+            throw new IllegalArgumentException("Invalid hoglake.auth.token-uri '" + value + "': " + e.getMessage(), e);
+        }
+        if (!"http".equals(parsed.getScheme()) && !"https".equals(parsed.getScheme()) || parsed.getHost() == null) {
+            throw new IllegalArgumentException("Invalid hoglake.auth.token-uri '" + value + "': must be an http(s) URL with a host");
+        }
+        return parsed.toString();
+    }
+
     private static Duration parseDuration(String value)
     {
         Matcher matcher = DURATION.matcher(value);

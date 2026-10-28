@@ -24,6 +24,7 @@ import io.trino.filesystem.cache.SplitAffinityProvider;
 import io.trino.filesystem.s3.S3SecurityMappingEnabledConfig;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
+import io.trino.plugin.hoglake.rest.HoglakeTokenSource;
 import io.trino.spi.NodeVersion;
 import io.trino.spi.PageSorter;
 import io.trino.spi.cache.CacheKey;
@@ -32,6 +33,9 @@ import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSplitManager;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.time.Duration;
 import java.util.Optional;
 
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
@@ -60,7 +64,15 @@ public class HoglakeModule
     @SuppressWarnings("CloseableProvides") // Registered with ClosingBinder above.
     public static HoglakeClient createClient(HoglakeConfig config)
     {
-        return new HoglakeClient(config.getUri(), config.getCatalog(), config.getRequestTimeout());
+        HoglakeTokenSource tokenSource = config.getAuthTokenUri()
+                .<HoglakeTokenSource>map(tokenUri -> new HoglakeTokenSource.ClientCredentials(
+                        URI.create(tokenUri),
+                        config.getAuthClientId().orElseThrow(),
+                        config.getAuthClientSecret().orElseThrow(),
+                        config.getAuthAudience(),
+                        HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()))
+                .orElse(HoglakeTokenSource.NONE);
+        return new HoglakeClient(config.getUri(), config.getCatalog(), config.getRequestTimeout(), tokenSource);
     }
 
     @Provides
