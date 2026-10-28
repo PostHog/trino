@@ -244,6 +244,33 @@ public final class TestingDuckLakeCatalog
         }
     }
 
+    /**
+     * Everything the query returns when the catalog database itself runs it, one list of values per
+     * row. Reading the rows from the catalog database rather than through DuckDB shows them exactly
+     * as a writer left them. A null reads as {@code <null>}.
+     */
+    public List<List<String>> metastoreRows(@Language("SQL") String sql)
+    {
+        try (Connection connection = DriverManager.getConnection(jdbcUrl(), USER, PASSWORD);
+                Statement statement = connection.createStatement();
+                ResultSet resultSet = statement.executeQuery(sql)) {
+            int columnCount = resultSet.getMetaData().getColumnCount();
+            ImmutableList.Builder<List<String>> rows = ImmutableList.builder();
+            while (resultSet.next()) {
+                ImmutableList.Builder<String> row = ImmutableList.builderWithExpectedSize(columnCount);
+                for (int column = 1; column <= columnCount; column++) {
+                    Object value = resultSet.getObject(column);
+                    row.add(value == null ? "<null>" : value.toString());
+                }
+                rows.add(row.build());
+            }
+            return rows.build();
+        }
+        catch (SQLException e) {
+            throw new RuntimeException("Failed to run in the catalog database: " + sql, e);
+        }
+    }
+
     private static void sleepBeforeRetry(int attempt)
     {
         try {

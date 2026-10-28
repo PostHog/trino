@@ -16,7 +16,9 @@ package io.trino.plugin.ducklake.metastore;
 import com.google.common.collect.ImmutableList;
 import io.trino.spi.StandardErrorCode;
 import io.trino.spi.TrinoException;
+import it.unimi.dsi.fastutil.ints.IntArrayList;
 import org.jdbi.v3.core.Handle;
+import org.jdbi.v3.core.statement.PreparedBatch;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -25,6 +27,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_COMMIT_CONFLICT;
 import static java.lang.String.join;
 import static java.util.Locale.ENGLISH;
@@ -46,6 +49,13 @@ import static java.util.Objects.requireNonNull;
  */
 public final class DuckLakeCommit
 {
+    /**
+     * How many rows of one statement are sent to the catalog database at once. The driver sends
+     * the rows of a batch without waiting for each, and waits for their results every few hundred,
+     * so larger batches would save little time while holding more rows in memory.
+     */
+    private static final int MAX_BATCH_SIZE = 1000;
+
     private final Handle handle;
     private final String metadataSchema;
     private final long baseSnapshotId;
@@ -564,58 +574,70 @@ public final class DuckLakeCommit
 
     public record NameMappingColumn(String sourceName, long targetFieldId, OptionalLong parentColumn, boolean hivePartition) {}
 
-    public void insertDataFile(long tableId, long dataFileId, DataFileRow file)
+    /**
+     * Registers data files with the values of the partition keys they hold and the statistics of
+     * their columns, writing the rows in the order of the files. The rows go to the catalog
+     * database in batches, so that a file costs no round trip of its own: a statement registering
+     * thousands of files with dozens of columns writes a few hundred thousand rows.
+     */
+    public void insertDataFiles(long tableId, List<NewDataFile> files)
     {
-        handle.createUpdate(
-                        """
-                        INSERT INTO %s (data_file_id, table_id, begin_snapshot, end_snapshot, file_order, path, path_is_relative,
-                            file_format, record_count, file_size_bytes, footer_size, row_id_start, partition_id, encryption_key, mapping_id)
-                        VALUES (:dataFileId, :tableId, :snapshot, NULL, NULL, :path, :pathIsRelative,
-                            'parquet', :recordCount, :fileSizeBytes, :footerSize, :rowIdStart, :partitionId, NULL, :mappingId)""".formatted(table("ducklake_data_file")))
-                .bind("dataFileId", dataFileId)
-                .bind("tableId", tableId)
-                .bind("snapshot", snapshotId)
-                .bind("path", file.path())
-                .bind("pathIsRelative", file.pathIsRelative())
-                .bind("mappingId", file.mappingId().isPresent() ? file.mappingId().orElseThrow() : null)
-                .bind("recordCount", file.recordCount())
-                .bind("fileSizeBytes", file.fileSizeBytes())
-                .bind("footerSize", file.footerSize())
-                .bind("rowIdStart", file.rowIdStart())
-                .bind("partitionId", file.partitionId().isPresent() ? file.partitionId().orElseThrow() : null)
-                .execute();
-    }
-
-    public void insertFilePartitionValue(long tableId, long dataFileId, int partitionKeyIndex, Optional<String> value)
-    {
-        handle.createUpdate(
-                        """
-                        INSERT INTO %s (data_file_id, table_id, partition_key_index, partition_value)
-                        VALUES (:dataFileId, :tableId, :keyIndex, :value)""".formatted(table("ducklake_file_partition_value")))
-                .bind("dataFileId", dataFileId)
-                .bind("tableId", tableId)
-                .bind("keyIndex", partitionKeyIndex)
-                .bind("value", value.orElse(null))
-                .execute();
-    }
-
-    public void insertFileColumnStats(long tableId, long dataFileId, DuckLakeFileColumnStatsRow stats)
-    {
-        handle.createUpdate(
-                        """
-                        INSERT INTO %s (data_file_id, table_id, column_id, column_size_bytes, value_count, null_count, min_value, max_value, contains_nan)
-                        VALUES (:dataFileId, :tableId, :columnId, :columnSizeBytes, :valueCount, :nullCount, :minValue, :maxValue, :containsNan)""".formatted(
-                                table("ducklake_file_column_stats")))
-                .bind("dataFileId", dataFileId)
-                .bind("tableId", tableId)
-                .bind("columnId", stats.columnId())
-                .bind("columnSizeBytes", stats.columnSizeBytes().isPresent() ? stats.columnSizeBytes().orElseThrow() : null)
-                .bind("valueCount", stats.valueCount().isPresent() ? stats.valueCount().orElseThrow() : null)
-                .bind("nullCount", stats.nullCount().isPresent() ? stats.nullCount().orElseThrow() : null)
-                .bind("minValue", stats.minValue().orElse(null))
-                .bind("maxValue", stats.maxValue().orElse(null))
-                .bind("containsNan", stats.containsNan().orElse(null))
-                .execute();
+        StatementBatch dataFiles = new StatementBatch(
+                """
+                INSERT INTO %s (data_file_id, table_id, begin_snapshot, end_snapshot, file_order, path, path_is_relative,
+                    file_format, record_count, file_size_bytes, footer_size, row_id_start, partition_id, encryption_key, mapping_id)
+                VALUES (:dataFileId, :tableId, :snapshot, NULL, NULL, :path, :pathIsRelative,
+                    'parquet', :recordCount, :fileSizeBytes, :footerSize, :rowIdStart, :partitionId, NULL, :mappingId)""".formatted(table("ducklake_data_file")));
+        StatementBatch partitionValues = new StatementBatch(
+                """
+                INSERT INTO %s (data_file_id, table_id, partition_key_index, partition_value)
+                VALUES (:dataFileId, :tableId, :keyIndex, :value)""".formatted(table("ducklake_file_partition_value")));
+        StatementBatch columnStatistics = new StatementBatch(
+                """
+                INSERT INTO %s (data_file_id, table_id, column_id, column_size_bytes, value_count, null_count, min_value, max_value, contains_nan)
+                VALUES (:dataFileId, :tableId, :columnId, :columnSizeBytes, :valueCount, :nullCount, :minValue, :maxValue, :containsNan)""".formatted(
+                        table("ducklake_file_column_stats")));
+        for (NewDataFile newFile : files) {
+            long dataFileId = newFile.dataFileId();
+            DataFileRow file = newFile.file();
+            dataFiles.row()
+                    .bind("dataFileId", dataFileId)
+                    .bind("tableId", tableId)
+                    .bind("snapshot", snapshotId)
+                    .bind("path", file.path())
+                    .bind("pathIsRelative", file.pathIsRelative())
+                    .bind("mappingId", file.mappingId().isPresent() ? file.mappingId().orElseThrow() : null)
+                    .bind("recordCount", file.recordCount())
+                    .bind("fileSizeBytes", file.fileSizeBytes())
+                    .bind("footerSize", file.footerSize())
+                    .bind("rowIdStart", file.rowIdStart())
+                    .bind("partitionId", file.partitionId().isPresent() ? file.partitionId().orElseThrow() : null);
+            dataFiles.add();
+            for (int partitionKeyIndex = 0; partitionKeyIndex < newFile.partitionValues().size(); partitionKeyIndex++) {
+                partitionValues.row()
+                        .bind("dataFileId", dataFileId)
+                        .bind("tableId", tableId)
+                        .bind("keyIndex", partitionKeyIndex)
+                        .bind("value", newFile.partitionValues().get(partitionKeyIndex).orElse(null));
+                partitionValues.add();
+            }
+            for (DuckLakeFileColumnStatsRow stats : newFile.columnStatistics()) {
+                columnStatistics.row()
+                        .bind("dataFileId", dataFileId)
+                        .bind("tableId", tableId)
+                        .bind("columnId", stats.columnId())
+                        .bind("columnSizeBytes", stats.columnSizeBytes().isPresent() ? stats.columnSizeBytes().orElseThrow() : null)
+                        .bind("valueCount", stats.valueCount().isPresent() ? stats.valueCount().orElseThrow() : null)
+                        .bind("nullCount", stats.nullCount().isPresent() ? stats.nullCount().orElseThrow() : null)
+                        .bind("minValue", stats.minValue().orElse(null))
+                        .bind("maxValue", stats.maxValue().orElse(null))
+                        .bind("containsNan", stats.containsNan().orElse(null));
+                columnStatistics.add();
+            }
+        }
+        dataFiles.execute();
+        partitionValues.execute();
+        columnStatistics.execute();
     }
 
     public void endDataFiles(long tableId, List<Long> dataFileIds)
@@ -796,7 +818,11 @@ public final class DuckLakeCommit
 
     private static String fileNameMatches()
     {
-        return "substring(path from '[^/]*$') = ANY(:fileNames)";
+        // A semi-join, rather than = ANY of the names, lets the database hash the names whatever
+        // plan it picks. Against a parameter, = ANY hashes them only in a plan made for the values
+        // bound; a generic plan, which a statement prepared on the server comes to use, compares
+        // every row with every name.
+        return "substring(path from '[^/]*$') IN (SELECT unnest(:fileNames))";
     }
 
     public void scheduleFileForDeletion(long dataFileId, String pathFromDataRoot)
@@ -862,32 +888,52 @@ public final class DuckLakeCommit
                 .list();
     }
 
-    public void writeTableColumnStats(long tableId, DuckLakeTableColumnStats stats)
+    /**
+     * Replaces the statistics the table keeps for each of the given columns, creating them for a
+     * column that has none yet. The columns have to be distinct, because every update runs before
+     * the first row is created.
+     */
+    public void writeTableColumnStats(long tableId, List<DuckLakeTableColumnStats> columnStatistics)
     {
-        int updated = handle.createUpdate(
-                        """
-                        UPDATE %s SET contains_null = :containsNull, contains_nan = :containsNan, min_value = :minValue, max_value = :maxValue
-                        WHERE table_id = :tableId AND column_id = :columnId""".formatted(table("ducklake_table_column_stats")))
-                .bind("tableId", tableId)
-                .bind("columnId", stats.columnId())
-                .bind("containsNull", stats.containsNull().orElse(null))
-                .bind("containsNan", stats.containsNan().orElse(null))
-                .bind("minValue", stats.minValue().orElse(null))
-                .bind("maxValue", stats.maxValue().orElse(null))
-                .execute();
-        if (updated == 0) {
-            handle.createUpdate(
-                            """
-                            INSERT INTO %s (table_id, column_id, contains_null, contains_nan, min_value, max_value)
-                            VALUES (:tableId, :columnId, :containsNull, :containsNan, :minValue, :maxValue)""".formatted(table("ducklake_table_column_stats")))
+        checkArgument(
+                columnStatistics.stream().map(DuckLakeTableColumnStats::columnId).distinct().count() == columnStatistics.size(),
+                "Statistics of a column were given more than once: %s",
+                columnStatistics);
+        StatementBatch updates = new StatementBatch(
+                """
+                UPDATE %s SET contains_null = :containsNull, contains_nan = :containsNan, min_value = :minValue, max_value = :maxValue
+                WHERE table_id = :tableId AND column_id = :columnId""".formatted(table("ducklake_table_column_stats")));
+        for (DuckLakeTableColumnStats stats : columnStatistics) {
+            updates.row()
                     .bind("tableId", tableId)
                     .bind("columnId", stats.columnId())
                     .bind("containsNull", stats.containsNull().orElse(null))
                     .bind("containsNan", stats.containsNan().orElse(null))
                     .bind("minValue", stats.minValue().orElse(null))
-                    .bind("maxValue", stats.maxValue().orElse(null))
-                    .execute();
+                    .bind("maxValue", stats.maxValue().orElse(null));
+            updates.add();
         }
+        int[] updated = updates.execute();
+
+        StatementBatch inserts = new StatementBatch(
+                """
+                INSERT INTO %s (table_id, column_id, contains_null, contains_nan, min_value, max_value)
+                VALUES (:tableId, :columnId, :containsNull, :containsNan, :minValue, :maxValue)""".formatted(table("ducklake_table_column_stats")));
+        for (int index = 0; index < columnStatistics.size(); index++) {
+            if (updated[index] != 0) {
+                continue;
+            }
+            DuckLakeTableColumnStats stats = columnStatistics.get(index);
+            inserts.row()
+                    .bind("tableId", tableId)
+                    .bind("columnId", stats.columnId())
+                    .bind("containsNull", stats.containsNull().orElse(null))
+                    .bind("containsNan", stats.containsNan().orElse(null))
+                    .bind("minValue", stats.minValue().orElse(null))
+                    .bind("maxValue", stats.maxValue().orElse(null));
+            inserts.add();
+        }
+        inserts.execute();
     }
 
     public void deleteTableStats(long tableId)
@@ -984,6 +1030,64 @@ public final class DuckLakeCommit
         }
     }
 
+    /**
+     * A statement run once for every row added to it. The rows are sent to the catalog database in
+     * batches, which the driver sends without waiting for the result of each row, so that a batch
+     * costs a few round trips rather than one per row. A batch is bounded in size, so the rows
+     * waiting to be sent hold little memory however many there are.
+     */
+    private final class StatementBatch
+    {
+        private final String sql;
+        private final IntArrayList updateCounts = new IntArrayList();
+        private Optional<PreparedBatch> batch = Optional.empty();
+
+        private StatementBatch(String sql)
+        {
+            this.sql = requireNonNull(sql, "sql is null");
+        }
+
+        /**
+         * The statement to bind the values of the next row to. The row is complete once {@link #add}
+         * is called.
+         */
+        public PreparedBatch row()
+        {
+            if (batch.isEmpty()) {
+                batch = Optional.of(handle.prepareBatch(sql));
+            }
+            return batch.get();
+        }
+
+        public void add()
+        {
+            PreparedBatch current = batch.orElseThrow(() -> new IllegalStateException("No row was bound"));
+            current.add();
+            if (current.size() >= MAX_BATCH_SIZE) {
+                flush();
+            }
+        }
+
+        /**
+         * Runs the statement for every row not sent yet, and returns how many catalog rows it
+         * changed for each row added, in the order they were added.
+         */
+        public int[] execute()
+        {
+            flush();
+            return updateCounts.toIntArray();
+        }
+
+        private void flush()
+        {
+            if (batch.isEmpty()) {
+                return;
+            }
+            updateCounts.addElements(updateCounts.size(), batch.get().execute());
+            batch = Optional.empty();
+        }
+    }
+
     private void endRows(String tableName, String predicate, long objectId)
     {
         handle.createUpdate("UPDATE %s SET end_snapshot = :snapshot WHERE %s AND end_snapshot IS NULL".formatted(table(tableName), predicate))
@@ -1068,6 +1172,20 @@ public final class DuckLakeCommit
             requireNonNull(path, "path is null");
             requireNonNull(partitionId, "partitionId is null");
             requireNonNull(mappingId, "mappingId is null");
+        }
+    }
+
+    /**
+     * A data file to register: its row, the values it holds for the partition keys of the table in
+     * the order of the keys, and the statistics of its columns.
+     */
+    public record NewDataFile(long dataFileId, DataFileRow file, List<Optional<String>> partitionValues, List<DuckLakeFileColumnStatsRow> columnStatistics)
+    {
+        public NewDataFile
+        {
+            requireNonNull(file, "file is null");
+            partitionValues = ImmutableList.copyOf(partitionValues);
+            columnStatistics = ImmutableList.copyOf(columnStatistics);
         }
     }
 

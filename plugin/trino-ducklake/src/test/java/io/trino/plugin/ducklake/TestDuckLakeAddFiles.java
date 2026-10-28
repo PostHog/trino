@@ -527,6 +527,24 @@ final class TestDuckLakeAddFiles
     }
 
     @Test
+    void testDeleteFilesCannotBeRegistered()
+    {
+        String table = "delete_file_import_" + randomNameSuffix();
+        // the columns are those of a delete file, which could otherwise be read as a data file
+        assertUpdate("CREATE TABLE " + table + " AS SELECT CAST(id AS VARCHAR) AS file_path, id AS pos FROM UNNEST(sequence(1, 10)) AS t(id)", 10);
+        try {
+            assertUpdate("DELETE FROM " + table + " WHERE pos = 1", 1);
+            String deleteFile = "local:///main/%s/%s".formatted(table, catalog.scalar(
+                    "SELECT d.path FROM __ducklake_metadata_lake.ducklake_delete_file d JOIN __ducklake_metadata_lake.ducklake_table t USING (table_id) WHERE t.table_name = '%s' AND t.end_snapshot IS NULL AND d.end_snapshot IS NULL".formatted(table)));
+            assertQueryFails(addFiles(table, "delete_file", false, deleteFile), ".*already registered.*");
+            assertQuery("SELECT count(*) FROM " + table, "VALUES CAST(9 AS BIGINT)");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
     void testFilesInAnotherTableDirectoryCannotBeRegistered()
             throws Exception
     {
