@@ -26,6 +26,7 @@ import io.trino.Session;
 import io.trino.connector.MockConnectorFactory;
 import io.trino.connector.MockConnectorPlugin;
 import io.trino.execution.QueryInfo;
+import io.trino.execution.StageInfo;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
@@ -55,6 +56,7 @@ import io.trino.spi.type.Type;
 import io.trino.sql.planner.Plan;
 import io.trino.sql.planner.plan.ExchangeNode;
 import io.trino.sql.planner.plan.TableScanNode;
+import io.trino.sql.planner.plan.TableWriterNode;
 import io.trino.sql.planner.planprinter.IoPlanPrinter;
 import io.trino.sql.planner.planprinter.IoPlanPrinter.ColumnConstraint;
 import io.trino.sql.planner.planprinter.IoPlanPrinter.EstimatedStatsAndCost;
@@ -4275,27 +4277,28 @@ public abstract class BaseHiveConnectorTest
     @Test
     public void testWriterTaskCountLimitUnpartitioned()
     {
-        testLimitWriterTasks(2, 2, true, true, false, DataSize.of(1, MEGABYTE));
-        testLimitWriterTasks(2, 2, false, true, false, DataSize.of(1, MEGABYTE));
-        testLimitWriterTasks(2, 3, false, false, false, DataSize.of(1, MEGABYTE));
+        testLimitWriterTasks(2, true, true, false, DataSize.of(1, MEGABYTE)).isEqualTo(2);
+        testLimitWriterTasks(2, false, true, false, DataSize.of(1, MEGABYTE)).isEqualTo(2);
+        testLimitWriterTasks(2, false, false, false, DataSize.of(1, MEGABYTE)).isEqualTo(3);
     }
 
     @Test
     public void testWriterTaskCountLimitPartitionedScaleWritersDisabled()
     {
-        testLimitWriterTasks(2, 2, false, true, true, DataSize.of(1, MEGABYTE));
+        testLimitWriterTasks(2, false, true, true, DataSize.of(1, MEGABYTE)).isEqualTo(2);
     }
 
     @Test
     public void testWriterTaskCountLimitPartitionedScaleWritersEnabled()
     {
-        testLimitWriterTasks(2, 4, true, true, true, DataSize.of(1, MEGABYTE));
+        // Partition rebalancing need not assign both partitions to every writer task.
+        testLimitWriterTasks(2, true, true, true, DataSize.of(1, MEGABYTE)).isBetween(2L, 4L);
         // Since we track page size for scaling writer instead of actual compressed output file size, we need to have a
         // larger threshold for writerScalingMinDataProcessed. This way we can ensure that the writer scaling is not triggered.
-        testLimitWriterTasks(2, 2, true, true, true, DataSize.of(2, GIGABYTE));
+        testLimitWriterTasks(2, true, true, true, DataSize.of(2, GIGABYTE)).isEqualTo(2);
     }
 
-    private void testLimitWriterTasks(int maxWriterTasks, int expectedFilesCount, boolean scaleWritersEnabled, boolean redistributeWrites, boolean partitioned, DataSize writerScalingMinDataProcessed)
+    private AbstractLongAssert<?> testLimitWriterTasks(int maxWriterTasks, boolean scaleWritersEnabled, boolean redistributeWrites, boolean partitioned, DataSize writerScalingMinDataProcessed)
     {
         Session session = Session.builder(getSession())
                 .setSystemProperty(SCALE_WRITERS, Boolean.toString(scaleWritersEnabled))
@@ -4314,9 +4317,18 @@ public abstract class BaseHiveConnectorTest
                 tableName,
                 partitioned ? ", partitioned_by = ARRAY['part_key']" : "");
         try {
-            assertUpdate(session, createTableSql, (long) computeActual("SELECT count(*) FROM tpch.sf3.orders").getOnlyValue());
-            long files = (long) computeScalar("SELECT count(DISTINCT \"$path\") FROM %s".formatted(tableName));
-            assertThat(files).isEqualTo(expectedFilesCount);
+            QueryRunner queryRunner = getQueryRunner();
+            MaterializedResultWithPlan queryResult = queryRunner.executeWithPlan(session, createTableSql);
+            assertThat(queryResult.result().getUpdateType()).isPresent();
+            assertThat(queryResult.result().getUpdateCount())
+                    .hasValue((long) computeActual("SELECT count(*) FROM tpch.sf3.orders").getOnlyValue());
+            if (scaleWritersEnabled || redistributeWrites) {
+                StageInfo writerStage = getQueryInfo(queryRunner, queryResult).getStages().orElseThrow().getStages().stream()
+                        .filter(stage -> stage.plan() != null && searchFrom(stage.plan().getRoot()).where(TableWriterNode.class::isInstance).matches())
+                        .collect(onlyElement());
+                assertThat(writerStage.tasks()).isNotEmpty().hasSizeLessThanOrEqualTo(maxWriterTasks);
+            }
+            return assertThat((long) computeScalar("SELECT count(DISTINCT \"$path\") FROM %s".formatted(tableName)));
         }
         finally {
             assertUpdate("DROP TABLE IF EXISTS %s".formatted(tableName));

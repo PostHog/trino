@@ -298,6 +298,7 @@ import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_BAD_DATA;
 import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_CATALOG_ERROR;
 import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_COMMIT_ERROR;
 import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_FILESYSTEM_ERROR;
+import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_GC_DISABLED;
 import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_INVALID_METADATA;
 import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_MISSING_METADATA;
 import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_UNSUPPORTED_VIEW_DIALECT;
@@ -374,6 +375,7 @@ import static io.trino.plugin.iceberg.IcebergUtil.getProjectedColumns;
 import static io.trino.plugin.iceberg.IcebergUtil.getSnapshotIdAsOfTime;
 import static io.trino.plugin.iceberg.IcebergUtil.getTableComment;
 import static io.trino.plugin.iceberg.IcebergUtil.getTopLevelColumns;
+import static io.trino.plugin.iceberg.IcebergUtil.isGcEnabled;
 import static io.trino.plugin.iceberg.IcebergUtil.loadDataManifestsFromSnapshot;
 import static io.trino.plugin.iceberg.IcebergUtil.newCreateTableTransaction;
 import static io.trino.plugin.iceberg.IcebergUtil.schemaFromMetadata;
@@ -427,12 +429,14 @@ import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TimeType.TIME_MICROS;
+import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_NANOS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_NANOS;
 import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.TinyintType.TINYINT;
+import static io.trino.spi.type.TypeUtils.containsTimestampWithTimeZone;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VariantType.VARIANT;
 import static java.lang.Boolean.parseBoolean;
@@ -1205,6 +1209,7 @@ public class IcebergMetadata
         return ColumnMetadata.builder()
                 .setName(column.getName())
                 .setType(column.getType())
+                .setTimeZone(containsTimestampWithTimeZone(column.getType()) ? Optional.of(UTC_KEY) : Optional.empty())
                 .setNullable(column.isNullable())
                 .setComment(column.getComment())
                 .setHidden(isMetadataColumnId(column.getId()))
@@ -2460,6 +2465,7 @@ public class IcebergMetadata
             boolean cleanExpiredMetadata)
     {
         BaseTable table = catalog.loadTable(session, schemaTableName);
+        checkGcEnabled(table, "expire snapshots");
         Duration retention = requireNonNull(retentionThreshold, "retention is null");
         validateTableExecuteParameters(
                 table,
@@ -2526,6 +2532,7 @@ public class IcebergMetadata
         IcebergRemoveOrphanFilesHandle removeOrphanFilesHandle = (IcebergRemoveOrphanFilesHandle) executeHandle.procedureHandle();
 
         BaseTable table = catalog.loadTable(session, executeHandle.schemaTableName());
+        checkGcEnabled(table, "remove orphan files");
         Duration retention = requireNonNull(removeOrphanFilesHandle.retentionThreshold(), "retention is null");
         validateTableExecuteParameters(
                 table,
@@ -2550,6 +2557,13 @@ public class IcebergMetadata
                 icebergFileDeleteExecutor,
                 executeHandle.schemaTableName(),
                 expiration);
+    }
+
+    private static void checkGcEnabled(BaseTable table, String operation)
+    {
+        if (!isGcEnabled(table.operations().current())) {
+            throw new TrinoException(ICEBERG_GC_DISABLED, "Cannot %s from a table with '%s' set to false".formatted(operation, GC_ENABLED_PROPERTY));
+        }
     }
 
     public Map<String, Long> executeAddFiles(ConnectorSession session, IcebergTableExecuteHandle executeHandle)
