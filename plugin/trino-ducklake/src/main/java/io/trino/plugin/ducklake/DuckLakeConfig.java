@@ -46,6 +46,7 @@ public class DuckLakeConfig
     private String metadataSchema = "public";
     private String dataPath;
     private boolean addFilesProcedureEnabled;
+    private int addFilesProcedureMaxConcurrentFileReads = 32;
     private boolean fileStatisticsPruningEnabled = true;
     private DataSize maxSplitSize = DataSize.of(64, MEGABYTE);
     private DataSize targetMaxFileSize = DataSize.of(128, MEGABYTE);
@@ -184,6 +185,20 @@ public class DuckLakeConfig
     public DuckLakeConfig setAddFilesProcedureEnabled(boolean enabled)
     {
         addFilesProcedureEnabled = enabled;
+        return this;
+    }
+
+    @Min(1)
+    public int getAddFilesProcedureMaxConcurrentFileReads()
+    {
+        return addFilesProcedureMaxConcurrentFileReads;
+    }
+
+    @Config("ducklake.add-files-procedure.max-concurrent-file-reads")
+    @ConfigDescription("Maximum number of Parquet files an add_files call inspects at the same time on the coordinator")
+    public DuckLakeConfig setAddFilesProcedureMaxConcurrentFileReads(int addFilesProcedureMaxConcurrentFileReads)
+    {
+        this.addFilesProcedureMaxConcurrentFileReads = addFilesProcedureMaxConcurrentFileReads;
         return this;
     }
 

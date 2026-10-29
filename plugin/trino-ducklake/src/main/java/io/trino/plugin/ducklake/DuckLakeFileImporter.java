@@ -96,7 +96,8 @@ final class DuckLakeFileImporter
             List<DuckLakeWriteColumn> columns,
             Optional<DuckLakePartitioning> partitioning,
             ParquetReaderOptions options,
-            FileFormatDataSourceStats stats)
+            FileFormatDataSourceStats stats,
+            int maxConcurrentReads)
     {
         options = ParquetReaderOptions.builder(options).withSmallFileThreshold(DataSize.ofBytes(0)).build();
         ImmutableList.Builder<ImportedFile> files = ImmutableList.builder();
@@ -111,7 +112,9 @@ final class DuckLakeFileImporter
         if (handle.files().isEmpty()) {
             return ImmutableList.of();
         }
-        var executor = Executors.newFixedThreadPool(Math.min(8, handle.files().size()), Threads.daemonThreadsNamed("ducklake-add-files-%s"));
+        // Inspecting a file waits on the file system for its length and the tail holding its
+        // footer, and spends little time computing, so the threads mostly wait.
+        var executor = Executors.newFixedThreadPool(Math.min(maxConcurrentReads, handle.files().size()), Threads.daemonThreadsNamed("ducklake-add-files-%s"));
         List<Future<ImportedFile>> pending = new ArrayList<>();
         try {
             ParquetReaderOptions readerOptions = options;

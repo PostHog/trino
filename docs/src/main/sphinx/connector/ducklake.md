@@ -95,6 +95,13 @@ The following configuration properties are available:
   - Enable the `add_files` table procedure for registering existing Parquet files
     under the catalog data path. Grant access only to trusted writers.
   - `false`
+* - `ducklake.add-files-procedure.max-concurrent-file-reads`
+  - Maximum number of Parquet files one `add_files` call inspects at the same time.
+    Inspecting a file reads its length and its footer, and mostly waits on the
+    object store, so the coordinator spends little CPU or memory per concurrent
+    read. Each concurrent read holds one connection of the file system's pool,
+    which concurrent calls share.
+  - `32`
 * - `ducklake.file-statistics-pruning.enabled`
   - Prune data files using the per-file column statistics recorded in the
     catalog.
@@ -321,10 +328,10 @@ definition does not state is gone.
 Enable `ducklake.add-files-procedure.enabled=true` in the catalog to register
 immutable Parquet files directly, without reading their rows or rewriting the
 objects. The procedure reads headers and footers on the coordinator, with up to
-eight concurrent file inspections, and publishes all files, column mappings,
-statistics, and the retry receipt in one catalog transaction. A failure before
-commit leaves the table unchanged. Readers in both Trino and DuckDB see the
-same registered files.
+`ducklake.add-files-procedure.max-concurrent-file-reads` concurrent file
+inspections, and publishes all files, column mappings, statistics, and the retry
+receipt in one catalog transaction. A failure before commit leaves the table
+unchanged. Readers in both Trino and DuckDB see the same registered files.
 
 Create the target table first, then pass explicit file locations:
 

@@ -162,6 +162,7 @@ public class DuckLakeMetadata
     private final JdbcDuckLakeMetastore metastore;
     private final String dataPath;
     private final boolean addFilesProcedureEnabled;
+    private final int addFilesMaxConcurrentFileReads;
     private final DuckLakeRangeReplacement rangeReplacement;
     private final Map<Long, DuckLakeRowCount> rowCounts = new ConcurrentHashMap<>();
     private final Map<TableSnapshot, DuckLakeInlinedSummary> inlinedSummaries = new ConcurrentHashMap<>();
@@ -187,11 +188,13 @@ public class DuckLakeMetadata
             FileFormatDataSourceStats fileFormatDataSourceStats,
             ParquetReaderOptions parquetReaderOptions,
             boolean addFilesProcedureEnabled,
+            int addFilesMaxConcurrentFileReads,
             DuckLakeRangeReplacement rangeReplacement)
     {
         this.metastore = requireNonNull(metastore, "metastore is null");
         this.dataPath = requireNonNull(dataPath, "dataPath is null");
         this.addFilesProcedureEnabled = addFilesProcedureEnabled;
+        this.addFilesMaxConcurrentFileReads = addFilesMaxConcurrentFileReads;
         this.rangeReplacement = requireNonNull(rangeReplacement, "rangeReplacement is null");
         this.dataFileCodec = requireNonNull(dataFileCodec, "dataFileCodec is null");
         this.mergeFragmentCodec = requireNonNull(mergeFragmentCodec, "mergeFragmentCodec is null");
@@ -929,7 +932,7 @@ public class DuckLakeMetadata
         List<DuckLakeWriteColumn> columns = DuckLakeColumns.fromCatalog(metastore.columns(table.snapshotId(), table.tableId()));
         DuckLakeWriteTarget target = new DuckLakeWriteTarget(table.schemaTableName(), table.tableId(), table.tableLocation(), columns, writePartitioningOf(table));
         List<DuckLakeFileImporter.ImportedFile> imported = DuckLakeFileImporter.readFiles(
-                fileSystemFactory.create(session), dataPath, handle, columns, target.partitioning(), parquetReaderOptions, fileFormatDataSourceStats);
+                fileSystemFactory.create(session), dataPath, handle, columns, target.partitioning(), parquetReaderOptions, fileFormatDataSourceStats, addFilesMaxConcurrentFileReads);
         handle.replacementRange().ifPresent(range -> range.validateImportedFiles(imported));
         Optional<DuckLakeRangeReplacement.Plan> rangePlan = handle.replacementRange().map(range -> rangeReplacement.plan(session, table, range));
         List<RewrittenDeletes> rangeDeletes = rangePlan.map(plan -> rewriteDeleteFiles(session, target, plan.positions())).orElse(ImmutableList.of());
@@ -1288,26 +1291,27 @@ public class DuckLakeMetadata
                 .collect(toImmutableMap(DuckLakeWriteColumn::columnId, column -> column, (first, _) -> first));
         Map<Long, DuckLakeTableColumnStats> mergedStats = new LinkedHashMap<>(columnStats);
 
+        ImmutableList.Builder<DuckLakeCommit.NewDataFile> newFiles = ImmutableList.builderWithExpectedSize(dataFiles.size());
         for (DuckLakeDataFile dataFile : dataFiles) {
             long dataFileId = commit.allocateFileId();
-            commit.insertDataFile(target.tableId(), dataFileId, new DuckLakeCommit.DataFileRow(
-                    importedFilePath(target.tableLocation(), dataFile.path(), mappings.containsKey(dataFile.path())),
-                    dataFile.recordCount(),
-                    dataFile.fileSizeBytes(),
-                    dataFile.footerSize(),
-                    nextRowId,
-                    target.partitioning().filter(partitioning -> dataFile.partitionValues().size() == partitioning.fields().size()).map(DuckLakePartitioning::partitionId).map(OptionalLong::of).orElse(OptionalLong.empty()),
-                    !mappings.containsKey(dataFile.path()) || Location.of(dataFile.path()).scheme().orElse("").equals("local"),
-                    mappings.containsKey(dataFile.path()) ? OptionalLong.of(mappings.get(dataFile.path())) : OptionalLong.empty()));
+            newFiles.add(new DuckLakeCommit.NewDataFile(
+                    dataFileId,
+                    new DuckLakeCommit.DataFileRow(
+                            importedFilePath(target.tableLocation(), dataFile.path(), mappings.containsKey(dataFile.path())),
+                            dataFile.recordCount(),
+                            dataFile.fileSizeBytes(),
+                            dataFile.footerSize(),
+                            nextRowId,
+                            target.partitioning().filter(partitioning -> dataFile.partitionValues().size() == partitioning.fields().size()).map(DuckLakePartitioning::partitionId).map(OptionalLong::of).orElse(OptionalLong.empty()),
+                            !mappings.containsKey(dataFile.path()) || Location.of(dataFile.path()).scheme().orElse("").equals("local"),
+                            mappings.containsKey(dataFile.path()) ? OptionalLong.of(mappings.get(dataFile.path())) : OptionalLong.empty()),
+                    dataFile.partitionValues(),
+                    dataFile.columnStatistics()));
             nextRowId = Math.addExact(nextRowId, dataFile.recordCount());
             recordCount = Math.addExact(recordCount, dataFile.recordCount());
             fileSizeBytes = Math.addExact(fileSizeBytes, dataFile.fileSizeBytes());
 
-            for (int index = 0; index < dataFile.partitionValues().size(); index++) {
-                commit.insertFilePartitionValue(target.tableId(), dataFileId, index, dataFile.partitionValues().get(index));
-            }
             for (DuckLakeFileColumnStatsRow fileStats : dataFile.columnStatistics()) {
-                commit.insertFileColumnStats(target.tableId(), dataFileId, fileStats);
                 DuckLakeWriteColumn column = columnsById.get(fileStats.columnId());
                 if (column != null) {
                     mergedStats.merge(
@@ -1318,10 +1322,9 @@ public class DuckLakeMetadata
             }
         }
 
+        commit.insertDataFiles(target.tableId(), newFiles.build());
         commit.writeTableStats(target.tableId(), new DuckLakeCommit.TableStatsRow(recordCount, nextRowId, fileSizeBytes));
-        for (DuckLakeTableColumnStats stats2 : mergedStats.values()) {
-            commit.writeTableColumnStats(target.tableId(), stats2);
-        }
+        commit.writeTableColumnStats(target.tableId(), ImmutableList.copyOf(mergedStats.values()));
     }
 
     private static String importedFilePath(String tableLocation, String file, boolean imported)

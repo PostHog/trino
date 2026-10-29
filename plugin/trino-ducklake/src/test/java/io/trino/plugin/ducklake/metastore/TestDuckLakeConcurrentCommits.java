@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.ducklake.metastore;
 
+import com.google.common.collect.ImmutableList;
 import io.trino.plugin.ducklake.DuckLakeConfig;
 import io.trino.plugin.ducklake.TestingDuckLakeCatalog;
 import io.trino.spi.TrinoException;
@@ -241,13 +242,17 @@ final class TestDuckLakeConcurrentCommits
             DuckLakeCommit.TableIdentity table = commit.findTable("main", tableName).orElseThrow();
             DuckLakeCommit.TableStatsRow stats = commit.tableStats(table.tableId())
                     .orElseGet(() -> new DuckLakeCommit.TableStatsRow(0, 0, 0));
-            commit.insertDataFile(table.tableId(), commit.allocateFileId(), new DuckLakeCommit.DataFileRow(
-                    dataFile.path(),
-                    dataFile.recordCount(),
-                    dataFile.fileSizeBytes(),
-                    dataFile.footerSize(),
-                    stats.nextRowId(),
-                    OptionalLong.empty()));
+            commit.insertDataFiles(table.tableId(), ImmutableList.of(new DuckLakeCommit.NewDataFile(
+                    commit.allocateFileId(),
+                    new DuckLakeCommit.DataFileRow(
+                            dataFile.path(),
+                            dataFile.recordCount(),
+                            dataFile.fileSizeBytes(),
+                            dataFile.footerSize(),
+                            stats.nextRowId(),
+                            OptionalLong.empty()),
+                    ImmutableList.of(),
+                    ImmutableList.of())));
             commit.writeTableStats(table.tableId(), new DuckLakeCommit.TableStatsRow(
                     stats.recordCount() + dataFile.recordCount(),
                     stats.nextRowId() + dataFile.recordCount(),
