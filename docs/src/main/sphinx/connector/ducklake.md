@@ -459,6 +459,54 @@ The procedure does not merge primary keys or apply Delta Lake transaction logs.
 Each statement commits independently; enclosing separate `DELETE` and
 `add_files` statements in `BEGIN` does not make them one atomic publication.
 
+## Publishing a table under another name
+
+The `publish_as` table procedure gives a table the name of another table in the
+same schema, replacing that table if it exists, in one snapshot. A pipeline can
+build a table under a name readers do not query, for example with `add_files`,
+and then publish it under the name they do. The name resolves to the old table
+or to the new one, never to no table at all, as it would between a `DROP TABLE`
+and an `ALTER TABLE ... RENAME TO`, each of which commits a snapshot of its own.
+
+```sql
+ALTER TABLE example.default.events_staging EXECUTE publish_as(target => 'events');
+```
+
+The required `target` argument is a table name without a schema or catalog, and
+the table is published in its own schema. Like other identifiers, the name is
+matched case insensitively and stored in lowercase. The procedure returns one
+row, `replaced_tables`, which is `1` when a table held the name and `0` when no
+table did.
+
+In the snapshot it commits, the procedure:
+
+- Drops the table holding the target name, as `DROP TABLE` drops it. Readers of
+  earlier snapshots, such as DuckDB queries with `AT (VERSION => ...)`, still
+  read that table, and its data files stay in place until those snapshots
+  expire and DuckDB's `ducklake_cleanup_old_files` deletes them.
+- Renames the table to the target name, as `ALTER TABLE ... RENAME TO` renames
+  it. The table keeps its identifier, UUID, location, columns, properties, and
+  rows.
+
+DuckDB lists the snapshot in `ducklake_snapshots()` as it lists a `DROP TABLE`
+and an `ALTER TABLE ... RENAME TO` committed in one DuckDB transaction, for
+example `{tables_created=[default.events], tables_dropped=[12]}`.
+
+No catalog property enables the procedure. The caller needs permission to
+execute the table procedure and to rename the table to the target name and,
+when a table holds that name, to drop that table.
+
+The procedure fails without changing the catalog when the target is missing,
+empty, qualified with a schema or catalog, the name of the table itself, or the
+name of a view. It also fails when another writer changes either name between
+planning and commit: with `DUCKLAKE_COMMIT_CONFLICT` when the table being
+published was replaced, a table holding the target name was created, dropped,
+or replaced, or a view took the target name, and with `TABLE_NOT_FOUND` when
+the table being published was dropped or renamed. Rows another writer adds to
+either table in the meantime cause no conflict. Rows added to the published
+table are published with it, and rows added to the replaced table are dropped
+with it, as `DROP TABLE` would drop them.
+
 ## Inlined data
 
 A DuckDB writer with `data_inlining_row_limit` set stores the rows of a small

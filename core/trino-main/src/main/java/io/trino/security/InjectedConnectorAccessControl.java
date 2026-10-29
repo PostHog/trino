@@ -135,7 +135,7 @@ public class InjectedConnectorAccessControl
     public void checkCanRenameTable(ConnectorSecurityContext context, SchemaTableName tableName, SchemaTableName newTableName)
     {
         checkArgument(context == null, "context must be null");
-        accessControl.checkCanRenameTable(securityContext, getQualifiedObjectName(tableName), getQualifiedObjectName(tableName));
+        accessControl.checkCanRenameTable(securityContext, getQualifiedObjectName(tableName), getQualifiedObjectName(newTableName));
     }
 
     @Override

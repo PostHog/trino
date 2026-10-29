@@ -111,7 +111,7 @@ public class DuckLakeConnector
     @Override
     public Set<TableProcedureMetadata> getTableProcedures()
     {
-        return Set.of(DuckLakeAddFilesProcedure.metadata());
+        return Set.of(DuckLakeAddFilesProcedure.metadata(), DuckLakePublishAsProcedure.metadata());
     }
 
     @Override

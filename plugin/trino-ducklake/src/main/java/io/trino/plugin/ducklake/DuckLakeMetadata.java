@@ -130,11 +130,13 @@ import static io.trino.plugin.ducklake.util.DuckLakeViewSql.withCatalogPlacehold
 import static io.trino.plugin.ducklake.util.PartitionTransforms.IDENTITY_TRANSFORM;
 import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.COLUMN_ALREADY_EXISTS;
+import static io.trino.spi.StandardErrorCode.INVALID_PROCEDURE_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.SCHEMA_ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_EMPTY;
 import static io.trino.spi.StandardErrorCode.TABLE_ALREADY_EXISTS;
+import static io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND;
 import static io.trino.spi.connector.RowChangeParadigm.DELETE_ROW_AND_INSERT_ROW;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
@@ -543,12 +545,21 @@ public class DuckLakeMetadata
             if (commit.findTable(newTableName.getSchemaName(), newTableName.getTableName()).isPresent()) {
                 throw new TrinoException(TABLE_ALREADY_EXISTS, "Table already exists: " + newTableName);
             }
-            commit.endTable(table.tableId());
-            // the location keeps the original name, so already written data files stay reachable
-            commit.insertTableRow(table.tableId(), targetSchema.schemaId(), newTableName.getTableName(), table.path(), table.tableUuid());
-            commit.recordCreatedTable(newTableName.getSchemaName(), newTableName.getTableName(), table.tableId());
+            renameTable(commit, table, targetSchema.schemaId(), newTableName);
             return null;
         });
+    }
+
+    /**
+     * Gives a table a new name, keeping its identifier, location and UUID: the row naming it ends
+     * and a row with the new name begins in this snapshot, as DuckDB renames a table.
+     */
+    private static void renameTable(DuckLakeCommit commit, DuckLakeCommit.TableIdentity table, long schemaId, SchemaTableName newTableName)
+    {
+        commit.endTable(table.tableId());
+        // the location keeps the original name, so already written data files stay reachable
+        commit.insertTableRow(table.tableId(), schemaId, newTableName.getTableName(), table.path(), table.tableUuid());
+        commit.recordCreatedTable(newTableName.getSchemaName(), newTableName.getTableName(), table.tableId());
     }
 
     @Override
@@ -778,6 +789,9 @@ public class DuckLakeMetadata
             Map<String, Object> properties,
             RetryMode retryMode)
     {
+        if (procedureName.equalsIgnoreCase(DuckLakePublishAsProcedure.NAME)) {
+            return Optional.of(publishAsHandle(accessControl, (DuckLakeTableHandle) tableHandle, properties));
+        }
         if (!procedureName.equalsIgnoreCase(DuckLakeAddFilesProcedure.NAME)) {
             return Optional.empty();
         }
@@ -828,6 +842,49 @@ public class DuckLakeMetadata
                 range));
     }
 
+    /**
+     * Plans {@code publish_as}, which renames the table to the target name and drops the table
+     * holding that name, if there is one, in the same snapshot. The caller needs the permissions
+     * of both statements.
+     */
+    private DuckLakePublishAsHandle publishAsHandle(ConnectorAccessControl accessControl, DuckLakeTableHandle table, Map<String, Object> properties)
+    {
+        SchemaTableName target = publishTarget(table, properties.get("target"));
+        accessControl.checkCanRenameTable(null, table.schemaTableName(), target);
+        if (metastore.findView(table.snapshotId(), target.getSchemaName(), target.getTableName()).isPresent()) {
+            throw new TrinoException(INVALID_PROCEDURE_ARGUMENT, "target is a view, which publish_as cannot replace: " + target);
+        }
+        OptionalLong replacedTableId = metastore.findTable(table.snapshotId(), target.getSchemaName(), target.getTableName())
+                .map(replaced -> OptionalLong.of(replaced.tableId()))
+                .orElseGet(OptionalLong::empty);
+        if (replacedTableId.isPresent()) {
+            accessControl.checkCanDropTable(null, target);
+        }
+        return new DuckLakePublishAsHandle(table, target, replacedTableId);
+    }
+
+    /**
+     * The name {@code publish_as} gives the table: a table name of the schema the table is in,
+     * matched without regard to case, as the engine matches the identifiers of a statement.
+     */
+    private static SchemaTableName publishTarget(DuckLakeTableHandle table, Object value)
+    {
+        if (!(value instanceof String name)) {
+            throw new TrinoException(INVALID_PROCEDURE_ARGUMENT, "target must be specified");
+        }
+        if (name.isBlank()) {
+            throw new TrinoException(INVALID_PROCEDURE_ARGUMENT, "target must be a table name, but is empty");
+        }
+        if (name.contains(".")) {
+            throw new TrinoException(INVALID_PROCEDURE_ARGUMENT, "target must be an unqualified table name, which is published in the schema of the table: " + name);
+        }
+        SchemaTableName target = new SchemaTableName(table.schemaName(), name);
+        if (target.equals(table.schemaTableName())) {
+            throw new TrinoException(INVALID_PROCEDURE_ARGUMENT, "target must name another table than the one published: " + target.getTableName());
+        }
+        return target;
+    }
+
     private Optional<DuckLakeReplacementRange> replacementRange(DuckLakeTableHandle table, Map<String, Object> properties)
     {
         String name = (String) properties.get("replace_range_column");
@@ -847,7 +904,15 @@ public class DuckLakeMetadata
     @Override
     public Map<String, Long> executeTableExecute(ConnectorSession session, ConnectorTableExecuteHandle tableExecuteHandle)
     {
-        DuckLakeAddFilesHandle handle = (DuckLakeAddFilesHandle) tableExecuteHandle;
+        return switch (tableExecuteHandle) {
+            case DuckLakeAddFilesHandle handle -> addFiles(session, handle);
+            case DuckLakePublishAsHandle handle -> publishAs(handle);
+            default -> throw new IllegalArgumentException("Unknown table procedure handle: " + tableExecuteHandle);
+        };
+    }
+
+    private Map<String, Long> addFiles(ConnectorSession session, DuckLakeAddFilesHandle handle)
+    {
         DuckLakeTableHandle table = handle.table();
         String fingerprint = DuckLakeFileImporter.fingerprint(handle);
         String receiptKey = "trino_import_" + handle.importId();
@@ -996,6 +1061,43 @@ public class DuckLakeMetadata
                 log.warn(e, "Could not delete unreferenced delete file %s", location);
             }
         }
+    }
+
+    /**
+     * Renames the table to the target name and retires the table holding that name, if any, in one
+     * snapshot, so that the name resolves to the old table or to the new one and never to nothing.
+     * The replaced table is retired as {@code DROP TABLE} retires it, so a reader of an earlier
+     * snapshot still reads it, from files that stay in place until those snapshots expire.
+     * <p>
+     * Both names are resolved again against the snapshot the commit lands on, and the statement
+     * fails rather than rename or drop a table other than the ones it was planned and authorized
+     * for.
+     */
+    private Map<String, Long> publishAs(DuckLakePublishAsHandle handle)
+    {
+        DuckLakeTableHandle table = handle.table();
+        SchemaTableName target = handle.target();
+        commit(commit -> {
+            DuckLakeCommit.TableIdentity published = commit.findTable(table.schemaName(), table.tableName())
+                    .orElseThrow(() -> new TrinoException(TABLE_NOT_FOUND, "Table %s was dropped or renamed while publishing it".formatted(table.schemaTableName())));
+            if (published.tableId() != table.tableId()) {
+                throw new DuckLakeCommit.ConcurrentModificationFailure("Table %s was replaced while publishing it".formatted(table.schemaTableName()));
+            }
+            if (commit.findView(target.getSchemaName(), target.getTableName()).isPresent()) {
+                throw new DuckLakeCommit.ConcurrentModificationFailure("View %s was created while publishing as it".formatted(target));
+            }
+            OptionalLong replacedTableId = commit.findTable(target.getSchemaName(), target.getTableName())
+                    .map(replaced -> OptionalLong.of(replaced.tableId()))
+                    .orElseGet(OptionalLong::empty);
+            if (!replacedTableId.equals(handle.replacedTableId())) {
+                throw new DuckLakeCommit.ConcurrentModificationFailure("Table %s was created, dropped or replaced while publishing as it".formatted(target));
+            }
+            // dropped first, matching the order DuckDB records a DROP TABLE and a rename committed together
+            replacedTableId.ifPresent(replaced -> endTable(commit, replaced));
+            renameTable(commit, published, published.schemaId(), target);
+            return null;
+        });
+        return ImmutableMap.of("replaced_tables", handle.replacedTableId().isPresent() ? 1L : 0L);
     }
 
     @Override
