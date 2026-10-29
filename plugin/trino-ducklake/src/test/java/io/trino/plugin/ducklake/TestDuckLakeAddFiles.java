@@ -800,6 +800,41 @@ final class TestDuckLakeAddFiles
     }
 
     @Test
+    void testRangeReplacementAcceptsRequiredColumnsWithoutNullCounts()
+            throws Exception
+    {
+        String table = "required_range_" + randomNameSuffix();
+        String required = catalog.externalParquetFile(table + "/required");
+        String optional = catalog.externalParquetFile(table + "/optional");
+        for (String file : List.of(required, optional)) {
+            writeParquet(
+                    file,
+                    Types.buildMessage()
+                            .addField(Types.primitive(INT32, file.equals(required) ? REQUIRED : OPTIONAL).as(LogicalTypeAnnotation.intType(32, true)).named("id"))
+                            .named("schema"),
+                    ImmutableMap.of(ImmutableList.of("id"), INTEGER),
+                    new Page(block(INTEGER, 12L, 18L)));
+            // like ClickHouse, keep the bounds of the column but leave out its null count
+            rewriteFooter(file, metadata -> metadata.getRow_groups().forEach(rowGroup -> rowGroup.getColumns().forEach(chunk -> {
+                assertThat(chunk.getMeta_data().getStatistics().isSetMin_value()).isTrue();
+                chunk.getMeta_data().getStatistics().unsetNull_count();
+            })));
+        }
+        assertUpdate("CREATE TABLE " + table + " (id INTEGER)");
+        assertUpdate("INSERT INTO " + table + " VALUES 5, 10, 15, 20", 4);
+        try {
+            // an OPTIONAL column without a null count can hold NULLs outside of any range
+            assertQueryFails(replaceRange(table, "optional", "id", "10", "20", location(optional)), ".*Replacement file must have non-NULL values entirely inside the replacement range.*");
+            assertUpdate(replaceRange(table, "required", "id", "10", "20", location(required)));
+            assertQuery("SELECT id FROM " + table, "VALUES 5, 12, 18, 20");
+            assertThat(catalog.rows("SELECT id::VARCHAR FROM " + table + " ORDER BY id")).containsExactly("5", "12", "18", "20");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
     void testRangeReplacementRejectsDuplicateDeleteFiles()
             throws Exception
     {
