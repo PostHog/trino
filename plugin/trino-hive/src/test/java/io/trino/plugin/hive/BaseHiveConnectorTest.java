@@ -4277,25 +4277,25 @@ public abstract class BaseHiveConnectorTest
     @Test
     public void testWriterTaskCountLimitUnpartitioned()
     {
-        testLimitWriterTasks(2, true, true, false, DataSize.of(1, MEGABYTE)).isEqualTo(2);
-        testLimitWriterTasks(2, false, true, false, DataSize.of(1, MEGABYTE)).isEqualTo(2);
-        testLimitWriterTasks(2, false, false, false, DataSize.of(1, MEGABYTE)).isEqualTo(3);
+        testLimitWriterTasks(2, true, true, false, DataSize.of(1, MEGABYTE)).isEqualTo(2L);
+        testLimitWriterTasks(2, false, true, false, DataSize.of(1, MEGABYTE)).isEqualTo(2L);
+        testLimitWriterTasks(2, false, false, false, DataSize.of(1, MEGABYTE)).isEqualTo(3L);
     }
 
     @Test
     public void testWriterTaskCountLimitPartitionedScaleWritersDisabled()
     {
-        testLimitWriterTasks(2, false, true, true, DataSize.of(1, MEGABYTE)).isEqualTo(2);
+        testLimitWriterTasks(2, false, true, true, DataSize.of(1, MEGABYTE)).isEqualTo(2L);
     }
 
     @Test
     public void testWriterTaskCountLimitPartitionedScaleWritersEnabled()
     {
-        // Partition rebalancing need not assign both partitions to every writer task.
-        testLimitWriterTasks(2, true, true, true, DataSize.of(1, MEGABYTE)).isBetween(2L, 4L);
+        // Each source task rebalances independently, so one or both partitions scale to the second writer task
+        testLimitWriterTasks(2, true, true, true, DataSize.of(1, MEGABYTE)).isBetween(3L, 4L);
         // Since we track page size for scaling writer instead of actual compressed output file size, we need to have a
         // larger threshold for writerScalingMinDataProcessed. This way we can ensure that the writer scaling is not triggered.
-        testLimitWriterTasks(2, true, true, true, DataSize.of(2, GIGABYTE)).isEqualTo(2);
+        testLimitWriterTasks(2, true, true, true, DataSize.of(2, GIGABYTE)).isEqualTo(2L);
     }
 
     private AbstractLongAssert<?> testLimitWriterTasks(int maxWriterTasks, boolean scaleWritersEnabled, boolean redistributeWrites, boolean partitioned, DataSize writerScalingMinDataProcessed)
