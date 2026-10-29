@@ -21,6 +21,7 @@ import io.trino.plugin.ducklake.util.DuckLakeParquetSchema.LeafField;
 import io.trino.plugin.ducklake.util.StatsValueFormatter;
 import io.trino.spi.TrinoException;
 import org.apache.parquet.column.statistics.Statistics;
+import org.apache.parquet.schema.MessageType;
 
 import java.io.IOException;
 import java.util.Comparator;
@@ -44,12 +45,16 @@ final class DuckLakeImportStatistics
     public static List<DuckLakeFileColumnStatsRow> collect(ParquetMetadata metadata, Map<List<String>, LeafField> fields)
             throws IOException
     {
+        MessageType schema = metadata.getFileMetaData().getSchema();
         Map<Long, Accumulator> accumulators = new HashMap<>();
         for (var block : metadata.getBlocks()) {
             for (ColumnChunkMetadata chunk : block.columns()) {
-                LeafField field = fields.get(ImmutableList.copyOf(chunk.getPath().toArray()));
+                String[] path = chunk.getPath().toArray();
+                LeafField field = fields.get(ImmutableList.copyOf(path));
                 if (field != null) {
-                    accumulators.computeIfAbsent(field.columnId(), _ -> new Accumulator(field)).add(chunk);
+                    // a leaf can hold a NULL only if it, or a field above it, is OPTIONAL or REPEATED
+                    boolean nullable = schema.getMaxDefinitionLevel(path) > 0;
+                    accumulators.computeIfAbsent(field.columnId(), _ -> new Accumulator(field, nullable)).add(chunk);
                 }
             }
         }
@@ -60,6 +65,7 @@ final class DuckLakeImportStatistics
     private static final class Accumulator
     {
         private final LeafField field;
+        private final boolean nullable;
         private long values;
         private long nulls;
         private long size;
@@ -67,9 +73,10 @@ final class DuckLakeImportStatistics
         private boolean boundsKnown = true;
         private Statistics<?> merged;
 
-        public Accumulator(LeafField field)
+        public Accumulator(LeafField field, boolean nullable)
         {
             this.field = field;
+            this.nullable = nullable;
         }
 
         public void add(ColumnChunkMetadata chunk)
@@ -77,14 +84,16 @@ final class DuckLakeImportStatistics
             values = Math.addExact(values, chunk.getValueCount());
             size = Math.addExact(size, chunk.getTotalSize());
             Statistics<?> statistics = chunk.getStatistics();
-            if (statistics == null || !statistics.isNumNullsSet()) {
-                nullsKnown = false;
-            }
-            else {
+            if (statistics != null && statistics.isNumNullsSet()) {
                 if (statistics.getNumNulls() < 0 || statistics.getNumNulls() > chunk.getValueCount()) {
                     throw new TrinoException(DuckLakeErrorCode.DUCKLAKE_BAD_DATA, "Invalid Parquet null count");
                 }
                 nulls = Math.addExact(nulls, statistics.getNumNulls());
+            }
+            else if (nullable) {
+                // without a null count, only a leaf that cannot hold a NULL is known to have none, and
+                // writers like ClickHouse leave the count out for such leaves
+                nullsKnown = false;
             }
             if (statistics == null || (!statistics.hasNonNullValue() && (!statistics.isNumNullsSet() || statistics.getNumNulls() != chunk.getValueCount()))) {
                 boundsKnown = false;
