@@ -11,17 +11,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.trino.plugin.jdbc;
+package io.trino.execution.executor.dedicated;
 
-public enum TimestampTimeZoneDomain
+import io.trino.execution.SplitRunner.BlockedReason;
+
+interface SplitBlockedListener
 {
-    /**
-     * Connector can produce {@link io.trino.spi.type.TimestampWithTimeZoneType} values with varying zones.
-     */
-    ANY,
-
-    /**
-     * Connector can produce {@link io.trino.spi.type.TimestampWithTimeZoneType} values only with UTC zone.
-     */
-    UTC_ONLY,
+    // Accounts for a split that blocks and returns the action that undoes it once the split unblocks.
+    Runnable splitBlocked(TaskEntry task, boolean leaf, BlockedReason reason);
 }
