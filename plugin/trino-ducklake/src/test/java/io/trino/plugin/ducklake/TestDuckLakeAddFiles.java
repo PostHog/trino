@@ -357,6 +357,35 @@ final class TestDuckLakeAddFiles
     }
 
     @Test
+    void testRangeReplacementOnATableDuckDbPartitionedByTemporalTransformsOfTimestampWithTimeZone()
+            throws Exception
+    {
+        String table = "import_tstz_" + randomNameSuffix();
+        String day = catalog.externalParquetFile(table + "/day");
+        String spanning = catalog.externalParquetFile(table + "/spanning");
+        catalog.executeInDuckDb(
+                "CREATE TABLE %s (id INTEGER, ts TIMESTAMPTZ)".formatted(table),
+                "ALTER TABLE %s SET PARTITIONED BY (year(ts), month(ts), day(ts))".formatted(table),
+                "INSERT INTO %s VALUES (1, TIMESTAMPTZ '2026-10-20 23:59:59+00'), (2, TIMESTAMPTZ '2026-10-21 05:00:00+00'), (3, TIMESTAMPTZ '2026-10-22 00:00:00+00')".formatted(table),
+                "COPY (SELECT 12::INTEGER id, TIMESTAMPTZ '2026-10-21 01:00:00+00' ts UNION ALL SELECT 13, TIMESTAMPTZ '2026-10-21 23:00:00+00') TO '%s' (FORMAT PARQUET)".formatted(day),
+                "COPY (SELECT 22::INTEGER id, TIMESTAMPTZ '2026-10-22 22:00:00+00' ts UNION ALL SELECT 23, TIMESTAMPTZ '2026-10-23 02:00:00+00') TO '%s' (FORMAT PARQUET)".formatted(spanning));
+        try {
+            assertUpdate(replaceRange(table, "day", "ts", "2026-10-21 00:00:00+00", "2026-10-22 00:00:00+00", location(day)));
+            assertThat(catalog.rows("SELECT id::VARCHAR FROM " + table + " ORDER BY id")).isEqualTo(List.of("1", "3", "12", "13"));
+            assertQuery("SELECT id FROM " + table + " ORDER BY id", "VALUES 1, 3, 12, 13");
+            assertThat(partitionValues(table)).containsExactly("2026/10/20", "2026/10/21", "2026/10/22");
+
+            // a file crossing a UTC day boundary cannot be filed under one day
+            assertUpdate(addFiles(table, "spanning", false, location(spanning)));
+            assertQuery("SELECT id FROM " + table + " ORDER BY id", "VALUES 1, 3, 12, 13, 22, 23");
+            assertThat(partitionValues(table)).containsExactly("", "2026/10/20", "2026/10/21", "2026/10/22");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
     void testMissingNestedFieldsPreserveNullRows()
             throws Exception
     {
@@ -897,6 +926,23 @@ final class TestDuckLakeAddFiles
         rewritten.write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(footer.size()).array());
         rewritten.write("PAR1".getBytes(StandardCharsets.UTF_8));
         Files.write(Path.of(file), rewritten.toByteArray());
+    }
+
+    /**
+     * One entry per active data file: its partition values in key order, or empty for an
+     * unpartitioned file.
+     */
+    private List<String> partitionValues(String table)
+    {
+        return catalog.rows(
+                """
+                SELECT coalesce(string_agg(v.partition_value, '/' ORDER BY v.partition_key_index), '')
+                FROM __ducklake_metadata_lake.ducklake_data_file f
+                JOIN __ducklake_metadata_lake.ducklake_table t ON t.table_id = f.table_id
+                LEFT JOIN __ducklake_metadata_lake.ducklake_file_partition_value v ON v.data_file_id = f.data_file_id
+                WHERE t.table_name = '%s' AND f.end_snapshot IS NULL
+                GROUP BY f.data_file_id
+                ORDER BY 1""".formatted(table));
     }
 
     private static String replaceRange(String table, String importId, String column, String start, String end, String... files)

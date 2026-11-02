@@ -274,12 +274,6 @@ final class TestDuckLakeReads
                 "VALUES 'ts', 'val'");
         assertThat((String) computeScalar("SHOW CREATE TABLE part_tstz"))
                 .contains("year(ts)");
-        // The rule still holds where it belongs. A write has to file the row under a partition
-        // value, and the value of a temporal transform over a zoned column depends on the zone it
-        // is read in, so it would disagree with the value another engine computes for that row.
-        assertQueryFails(
-                "INSERT INTO part_tstz VALUES (TIMESTAMP '2026-05-04 00:00:00 UTC', 3)",
-                "Partition transform year requires a DATE or TIMESTAMP column; column 'ts' is timestamp\\(6\\) with time zone");
     }
 
     @Test

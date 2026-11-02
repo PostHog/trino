@@ -20,7 +20,9 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.type.LongTimestamp;
+import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.TimestampType;
+import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
 
 import java.time.LocalDate;
@@ -32,6 +34,7 @@ import java.util.Optional;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_TYPE;
+import static io.trino.spi.type.DateTimeEncoding.unpackMillisUtc;
 import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static java.lang.Math.floorDiv;
@@ -45,7 +48,8 @@ import static java.util.Objects.requireNonNull;
  * The temporal transforms follow DuckDB: {@code year} is the calendar year, {@code month} the
  * month of the year, {@code day} the day of the month and {@code hour} the hour of the day, each
  * an independent component rather than a truncation. The read path relies on exactly that reading
- * when it turns a file's partition values back into a range to prune on.
+ * when it turns a file's partition values back into a range to prune on. For zoned timestamps
+ * the components are taken in UTC.
  */
 public final class DuckLakeWritePartitioner
         implements DuckLakePageSink.DuckLakePartitioner
@@ -165,7 +169,19 @@ public final class DuckLakeWritePartitioner
             }
             return fromEpochMicros(((LongTimestamp) timestampType.getObject(block, position)).getEpochMicros());
         }
+        if (sourceType instanceof TimestampWithTimeZoneType zonedType) {
+            if (zonedType.isShort()) {
+                return fromEpochMillisAndPicos(unpackMillisUtc(zonedType.getLong(block, position)), 0);
+            }
+            LongTimestampWithTimeZone timestamp = (LongTimestampWithTimeZone) zonedType.getObject(block, position);
+            return fromEpochMillisAndPicos(timestamp.getEpochMillis(), timestamp.getPicosOfMilli());
+        }
         throw new TrinoException(DUCKLAKE_UNSUPPORTED_TYPE, "A temporal partition transform cannot be applied to a column of type " + sourceType);
+    }
+
+    private static LocalDateTime fromEpochMillisAndPicos(long millis, int picosOfMilli)
+    {
+        return fromEpochMicros(millis * 1_000 + picosOfMilli / 1_000_000);
     }
 
     private static LocalDateTime fromEpochMicros(long micros)
@@ -202,12 +218,12 @@ public final class DuckLakeWritePartitioner
         if (!normalized.equals(YEAR_TRANSFORM) && !normalized.equals(MONTH_TRANSFORM) && !normalized.equals(DAY_TRANSFORM) && !normalized.equals(HOUR_TRANSFORM)) {
             throw new TrinoException(DUCKLAKE_UNSUPPORTED_TYPE, "Unsupported partition transform: " + transform);
         }
-        if (!DATE.equals(type) && !(type instanceof TimestampType)) {
-            // the transform of a value with a time zone depends on the zone it is read in, which
-            // would make the recorded partition value disagree with what another engine computes
+        // Components of a zoned value are always taken in UTC, so the recorded values agree with a
+        // DuckDB writer only when its session TimeZone is UTC, as it is in duckgres.
+        if (!DATE.equals(type) && !(type instanceof TimestampType) && !(type instanceof TimestampWithTimeZoneType)) {
             throw new TrinoException(
                     DUCKLAKE_UNSUPPORTED_TYPE,
-                    "Partition transform %s requires a DATE or TIMESTAMP column; column '%s' is %s".formatted(transform, columnName, type));
+                    "Partition transform %s requires a DATE, TIMESTAMP or TIMESTAMP WITH TIME ZONE column; column '%s' is %s".formatted(transform, columnName, type));
         }
     }
 }

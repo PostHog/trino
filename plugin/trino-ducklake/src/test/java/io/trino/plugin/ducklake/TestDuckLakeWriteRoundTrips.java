@@ -220,6 +220,47 @@ final class TestDuckLakeWriteRoundTrips
     }
 
     /**
+     * DuckDB partitions the PostHog warehouse tables by {@code year/month/day} of a
+     * {@code TIMESTAMPTZ} column. Trino has to file a row under the UTC components of its instant,
+     * whatever zone the literal carried, or the same instant lands in different partitions
+     * depending on the writer. The day delete is the shape that failed in production.
+     */
+    @Test
+    void testWritingToATableDuckDbPartitionedByTemporalTransformsOfTimestampWithTimeZone()
+            throws SQLException
+    {
+        String table = "part_tstz_ymd_" + randomNameSuffix();
+        catalog.executeInDuckDb(
+                "CREATE TABLE %s (id INTEGER, ts TIMESTAMPTZ, v VARCHAR)".formatted(table),
+                "ALTER TABLE %s SET PARTITIONED BY (year(ts), month(ts), day(ts))".formatted(table));
+        try {
+            // 20:30 in Los Angeles is already the next day in UTC
+            assertUpdate(
+                    """
+                    INSERT INTO %s VALUES
+                        (1, TIMESTAMP '2026-10-20 12:00:00 UTC', 'a'),
+                        (2, TIMESTAMP '2026-10-20 20:30:00 America/Los_Angeles', 'b'),
+                        (3, TIMESTAMP '2026-10-22 01:00:00 UTC', 'c')""".formatted(table),
+                    3);
+            assertThat(partitions(table)).isEqualTo(List.of("2026/10/20", "2026/10/21", "2026/10/22"));
+
+            // DuckDB files the same instant under the values Trino recorded
+            catalog.executeInDuckDb("INSERT INTO %s VALUES (4, TIMESTAMPTZ '2026-10-21 03:30:00+00', 'd')".formatted(table));
+            assertThat(partitions(table)).isEqualTo(List.of("2026/10/20", "2026/10/21", "2026/10/21", "2026/10/22"));
+            assertQuery("SELECT id FROM " + table + " ORDER BY id", "VALUES 1, 2, 3, 4");
+            assertThat(catalog.rows("SELECT id::VARCHAR FROM " + table + " ORDER BY id")).isEqualTo(List.of("1", "2", "3", "4"));
+
+            assertUpdate("DELETE FROM %s WHERE ts >= TIMESTAMP '2026-10-21 00:00:00 UTC' AND ts < TIMESTAMP '2026-10-22 00:00:00 UTC'".formatted(table), 2);
+            assertThat(partitions(table)).isEqualTo(List.of("2026/10/20", "2026/10/22"));
+            assertQuery("SELECT id FROM " + table + " ORDER BY id", "VALUES 1, 3");
+            assertThat(catalog.rows("SELECT id::VARCHAR FROM " + table + " ORDER BY id")).isEqualTo(List.of("1", "3"));
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    /**
      * A day partition holding {@code DATE 'infinity'}, which DuckDB records as the string
      * {@code infinity} and no date parser reads back.
      * <p>

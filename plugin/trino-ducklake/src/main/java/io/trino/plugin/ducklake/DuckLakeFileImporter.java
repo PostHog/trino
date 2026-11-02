@@ -42,6 +42,7 @@ import io.trino.spi.type.DateType;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.TimestampType;
+import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.TypeUtils;
 import org.apache.parquet.schema.GroupType;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
@@ -57,6 +58,10 @@ import java.io.IOException;
 import java.time.DateTimeException;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -84,6 +89,13 @@ final class DuckLakeFileImporter
     // the footer length and the magic number that follow the footer at the end of the file
     private static final int FOOTER_POSTSCRIPT_SIZE = Integer.BYTES + 4;
     private static final String PLAINTEXT_FOOTER_MAGIC = "PAR1";
+    // Matches the statistics strings written for TIMESTAMPTZ columns, e.g. "2026-10-21 03:30:00.123+00".
+    private static final DateTimeFormatter TIMESTAMP_TZ_FORMATTER = new DateTimeFormatterBuilder()
+            .append(DateTimeFormatter.ISO_LOCAL_DATE)
+            .appendLiteral(' ')
+            .append(DateTimeFormatter.ISO_LOCAL_TIME)
+            .appendOffset("+HH:mm", "+00")
+            .toFormatter();
 
     private DuckLakeFileImporter() {}
 
@@ -400,12 +412,13 @@ final class DuckLakeFileImporter
             String transform = field.transform().toLowerCase(ENGLISH);
             if (!transform.equals("identity")) {
                 DuckLakeWriteColumn column = columns.stream().filter(item -> item.columnId() == field.columnId()).findFirst().orElseThrow();
-                if (!column.type().equals(DateType.DATE) && !(column.type() instanceof TimestampType)) {
+                boolean zoned = column.type() instanceof TimestampWithTimeZoneType;
+                if (!column.type().equals(DateType.DATE) && !(column.type() instanceof TimestampType) && !zoned) {
                     return ImmutableList.of();
                 }
                 try {
-                    LocalDateTime low = parseTemporal(minimum);
-                    LocalDateTime high = parseTemporal(maximum);
+                    LocalDateTime low = parseTemporal(minimum, zoned);
+                    LocalDateTime high = parseTemporal(maximum, zoned);
                     if (!partitionInterval(low, transform).equals(partitionInterval(high, transform))) {
                         return ImmutableList.of();
                     }
@@ -424,8 +437,12 @@ final class DuckLakeFileImporter
         return values.build();
     }
 
-    private static LocalDateTime parseTemporal(String value)
+    // Partition components of a zoned value are taken in UTC, the zone every PostHog writer uses.
+    private static LocalDateTime parseTemporal(String value, boolean zoned)
     {
+        if (zoned) {
+            return OffsetDateTime.parse(value, TIMESTAMP_TZ_FORMATTER).withOffsetSameInstant(ZoneOffset.UTC).toLocalDateTime();
+        }
         if (!value.contains(" ")) {
             return LocalDate.parse(value).atStartOfDay();
         }

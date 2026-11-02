@@ -564,6 +564,11 @@ rows. Flush the inlined data with DuckDB first.
   first.
 - `partitioning` is the only supported table property, and views take no
   properties.
+- The `year`, `month`, `day`, and `hour` partition transforms of a
+  `TIMESTAMP WITH TIME ZONE` column are computed in UTC. A DuckDB session that
+  writes to the same table must also set `TimeZone` to `UTC`, or it files rows
+  under different partition values. The connector does not prune on these
+  transforms, so query results are correct either way.
 - A view runs as the user who queries it, so `CREATE VIEW` requires
   `SECURITY INVOKER`. `DEFINER` is not implemented, because the connector
   stores the view definition in the catalog database, which the owner of the
