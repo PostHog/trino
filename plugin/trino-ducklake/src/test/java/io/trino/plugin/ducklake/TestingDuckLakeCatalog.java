@@ -113,6 +113,9 @@ public final class TestingDuckLakeCatalog
             statement.execute("INSTALL postgres");
             statement.execute("LOAD ducklake");
             statement.execute("LOAD postgres");
+            // duckgres sessions run in UTC; without this, DuckDB uses the machine's zone for
+            // timestamptz partition values and output
+            statement.execute("SET TimeZone = 'UTC'");
             // DATA_INLINING_ROW_LIMIT 0 forces DuckDB to write Parquet files instead of inlining
             // small inserts into the catalog database
             statement.execute(format(
