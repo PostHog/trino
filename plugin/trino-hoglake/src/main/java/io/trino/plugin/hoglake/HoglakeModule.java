@@ -14,6 +14,7 @@
 package io.trino.plugin.hoglake;
 
 import com.google.inject.Binder;
+import com.google.inject.Key;
 import com.google.inject.Module;
 import com.google.inject.Provider;
 import com.google.inject.Provides;
@@ -25,6 +26,7 @@ import io.trino.filesystem.s3.S3SecurityMappingEnabledConfig;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeTokenSource;
+import io.trino.spi.Node;
 import io.trino.spi.NodeVersion;
 import io.trino.spi.PageSorter;
 import io.trino.spi.cache.CacheKey;
@@ -41,6 +43,7 @@ import java.util.Optional;
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static io.airlift.bootstrap.ClosingBinder.closingBinder;
 import static io.airlift.configuration.ConfigBinder.configBinder;
+import static io.trino.plugin.hoglake.HoglakeConfig.S3CredentialsSource.NONE;
 import static org.weakref.jmx.guice.ExportBinder.newExporter;
 
 public class HoglakeModule
@@ -52,6 +55,7 @@ public class HoglakeModule
         configBinder(binder).bindConfig(HoglakeConfig.class);
         configBinder(binder).bindConfig(S3SecurityMappingEnabledConfig.class);
         closingBinder(binder).registerCloseable(HoglakeClient.class);
+        closingBinder(binder).registerResource(new Key<Optional<HoglakeTeamCredentialSource>>() {}, source -> source.ifPresent(HoglakeTeamCredentialSource::close));
         newSetBinder(binder, SessionPropertiesProvider.class).addBinding().to(HoglakeSessionProperties.class).in(Scopes.SINGLETON);
 
         Provider<CatalogName> catalogName = binder.getProvider(CatalogName.class);
@@ -77,18 +81,37 @@ public class HoglakeModule
 
     @Provides
     @Singleton
-    public static HoglakeMetadata createMetadata(HoglakeClient client, TrinoFileSystemFactory fileSystemFactory)
+    public static HoglakeMetadata createMetadata(HoglakeClient client, TrinoFileSystemFactory fileSystemFactory, HoglakeConfig config)
     {
-        return new HoglakeMetadata(client, fileSystemFactory);
+        return new HoglakeMetadata(client, fileSystemFactory, config.getS3CredentialsSource() != NONE);
     }
 
     @Provides
     @Singleton
-    public static ConnectorSplitManager createSplitManager(HoglakeClient client, SplitAffinityProvider affinityProvider)
+    public static ConnectorSplitManager createSplitManager(HoglakeClient client, SplitAffinityProvider affinityProvider, Optional<HoglakeTeamCredentialSource> credentialSource)
     {
         // The filesystem module binds a key-producing provider only when the
         // catalog caches filesystem data, and a no-op provider otherwise.
-        return new HoglakeSplitManager(client, HoglakeSessionProperties::getMaxSplitSize, affinityProvider);
+        return new HoglakeSplitManager(client, HoglakeSessionProperties::getMaxSplitSize, affinityProvider, credentialSource);
+    }
+
+    /**
+     * Only the split manager holds the source. Every node builds it, and a
+     * worker's copy refuses to vend.
+     */
+    @Provides
+    @Singleton
+    public static Optional<HoglakeTeamCredentialSource> createCredentialSource(HoglakeConfig config, Node currentNode, HoglakeClient client)
+    {
+        return switch (config.getS3CredentialsSource()) {
+            case NONE -> Optional.empty();
+            case DIRECT_STS -> Optional.of(new HoglakeDirectStsCredentialSource(
+                    config.getCatalog(),
+                    config.getDirectStsOrgId().orElseThrow(),
+                    currentNode,
+                    () -> client.getCatalog().dataPath()));
+            case HOGTOWER -> throw new IllegalArgumentException(HoglakeConnectorFactory.HOGTOWER_REFUSAL);
+        };
     }
 
     @Provides
@@ -103,7 +126,12 @@ public class HoglakeModule
     @Singleton
     public static ConnectorPageSourceProvider createPageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache, HoglakeConfig config, S3SecurityMappingEnabledConfig securityMappingConfig)
     {
-        return new HoglakePageSourceProvider(fileSystemFactory, footerCache, Optional.of(CacheKey.of("hoglake-data-v1", config.getUri(), config.getCatalog())), securityMappingConfig.isEnabled());
+        return new HoglakePageSourceProvider(
+                fileSystemFactory,
+                footerCache,
+                Optional.of(CacheKey.of("hoglake-data-v1", config.getUri(), config.getCatalog())),
+                securityMappingConfig.isEnabled(),
+                config.getS3CredentialsSource() != NONE);
     }
 
     @Provides

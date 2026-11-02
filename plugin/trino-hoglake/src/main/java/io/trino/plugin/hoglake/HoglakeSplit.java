@@ -51,6 +51,10 @@ import static java.util.Objects.requireNonNull;
  * data file. It is compared against the decoded bitmap before a single row
  * is dropped, so a catalog that disagrees with its own vector fails the
  * query instead of returning a wrong row set.
+ *
+ * <p>{@code credential} is the S3 credential of the team whose prefix holds
+ * the file, present when the catalog has a credential source. The worker
+ * reads the data file and its deletion vector with it and nothing else.
  */
 public record HoglakeSplit(
         @JsonProperty("dataFileId") long dataFileId,
@@ -64,7 +68,8 @@ public record HoglakeSplit(
         @JsonProperty("length") long length,
         @JsonProperty("splitWeight") SplitWeight splitWeight,
         @JsonProperty("footerSize") OptionalLong footerSize,
-        @JsonProperty("affinityKey") Optional<String> affinityKey)
+        @JsonProperty("affinityKey") Optional<String> affinityKey,
+        @JsonProperty("credential") Optional<HoglakeSplitCredential> credential)
         implements ConnectorSplit
 {
     private static final int INSTANCE_SIZE = instanceSize(HoglakeSplit.class);
@@ -78,6 +83,7 @@ public record HoglakeSplit(
         requireNonNull(splitWeight, "splitWeight is null");
         requireNonNull(footerSize, "footerSize is null");
         requireNonNull(affinityKey, "affinityKey is null");
+        requireNonNull(credential, "credential is null");
         checkArgument(start >= 0, "start is negative: %s", start);
         checkArgument(length >= 0, "length is negative: %s", length);
         checkArgument(start + length <= fileSizeBytes, "range [%s, %s) exceeds file size %s", start, start + length, fileSizeBytes);
@@ -96,7 +102,7 @@ public record HoglakeSplit(
             long deleteCount,
             Optional<String> deleteFileFormat)
     {
-        this(dataFileId, path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat, 0, fileSizeBytes, SplitWeight.standard(), OptionalLong.empty(), Optional.empty());
+        this(dataFileId, path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat, 0, fileSizeBytes, SplitWeight.standard(), OptionalLong.empty(), Optional.empty(), Optional.empty());
     }
 
     /**
@@ -129,7 +135,17 @@ public record HoglakeSplit(
      */
     public HoglakeSplit withRange(long start, long length, SplitWeight splitWeight, Optional<String> affinityKey)
     {
-        return new HoglakeSplit(dataFileId, path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat, start, length, splitWeight, footerSize, affinityKey);
+        return new HoglakeSplit(dataFileId, path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat, start, length, splitWeight, footerSize, affinityKey, credential);
+    }
+
+    /**
+     * The same split carrying its team's credential, after checking that the
+     * data file and its deletion vector are both under the credential's prefix.
+     */
+    public HoglakeSplit withCredential(HoglakeSplitCredential credential)
+    {
+        credential.checkCovers(this);
+        return new HoglakeSplit(dataFileId, path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat, start, length, splitWeight, footerSize, affinityKey, Optional.of(credential));
     }
 
     /**
@@ -184,6 +200,7 @@ public record HoglakeSplit(
                 + sizeOf(deleteFileFormat, SizeOf::estimatedSizeOf)
                 + splitWeight.getRetainedSizeInBytes()
                 + sizeOf(footerSize)
-                + sizeOf(affinityKey, SizeOf::estimatedSizeOf);
+                + sizeOf(affinityKey, SizeOf::estimatedSizeOf)
+                + sizeOf(credential, HoglakeSplitCredential::getRetainedSizeInBytes);
     }
 }

@@ -16,6 +16,7 @@ package io.trino.plugin.hoglake;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.configuration.ConfigurationFactory;
 import io.airlift.units.DataSize;
+import io.trino.plugin.hoglake.HoglakeConfig.S3CredentialsSource;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -45,7 +46,9 @@ class TestHoglakeConfig
                 .setAuthTokenUri(null)
                 .setAuthClientId(null)
                 .setAuthClientSecret(null)
-                .setAuthAudience("hoglake"));
+                .setAuthAudience("hoglake")
+                .setS3CredentialsSource(S3CredentialsSource.NONE)
+                .setDirectStsOrgId(null));
     }
 
     @Test
@@ -63,6 +66,8 @@ class TestHoglakeConfig
                         .put("hoglake.auth.client-id", "hlc_0123")
                         .put("hoglake.auth.client-secret", "s3cret")
                         .put("hoglake.auth.audience", "hoglake-dev")
+                        .put("hoglake.s3-credentials.source", "direct-sts")
+                        .put("hoglake.s3-credentials.direct-sts.org-id", "org-1")
                         .buildOrThrow(),
                 new HoglakeConfig()
                         .setUri("http://localhost:8080")
@@ -75,7 +80,9 @@ class TestHoglakeConfig
                         .setAuthTokenUri("https://hogtower:8443/oauth/token")
                         .setAuthClientId("hlc_0123")
                         .setAuthClientSecret("s3cret")
-                        .setAuthAudience("hoglake-dev"));
+                        .setAuthAudience("hoglake-dev")
+                        .setS3CredentialsSource(S3CredentialsSource.DIRECT_STS)
+                        .setDirectStsOrgId("org-1"));
     }
 
     @Test

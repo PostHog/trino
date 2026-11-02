@@ -57,6 +57,7 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.SortedRangeSet;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.security.ConnectorIdentity;
 import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
@@ -90,6 +91,7 @@ import static io.trino.parquet.ParquetTypeUtils.getDescriptors;
 import static io.trino.parquet.ParquetTypeUtils.lookupColumnByName;
 import static io.trino.parquet.predicate.PredicateUtils.buildPredicate;
 import static io.trino.parquet.predicate.PredicateUtils.getFilteredRowGroups;
+import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_TEAM_CREDENTIAL_UNAVAILABLE;
 import static io.trino.plugin.hoglake.HoglakeSessionProperties.isVariantLazyResidualEnabled;
 import static io.trino.plugin.hoglake.HoglakeSessionProperties.isVariantPathAssemblyEnabled;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
@@ -122,6 +124,11 @@ import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
  * with their original file row positions and the rows the vector marks
  * deleted are dropped, so the vector stays tied to the snapshot the scan
  * pinned.
+ *
+ * <p>A split that carries a team credential is read with that credential
+ * alone, after its data and deletion-vector paths are checked against the
+ * team's prefix, whatever this node's credential source is. When the catalog
+ * has a source, a split without a credential fails before any storage call.
  */
 public class HoglakePageSourceProvider
         implements ConnectorPageSourceProvider
@@ -134,6 +141,7 @@ public class HoglakePageSourceProvider
     private final HoglakeParquetFooterCache footerCache;
     private final Optional<CacheKey> catalogCacheKey;
     private final boolean s3SecurityMappingEnabled;
+    private final boolean credentialRequired;
     private final ParquetReaderOptions readerOptions;
 
     public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory)
@@ -143,18 +151,18 @@ public class HoglakePageSourceProvider
 
     public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache)
     {
-        this(fileSystemFactory, footerCache, Optional.empty(), false);
+        this(fileSystemFactory, footerCache, Optional.empty(), false, false);
     }
 
-    public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache, Optional<CacheKey> catalogCacheKey, boolean s3SecurityMappingEnabled)
+    public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache, Optional<CacheKey> catalogCacheKey, boolean s3SecurityMappingEnabled, boolean credentialRequired)
     {
-        this(fileSystemFactory, footerCache, catalogCacheKey, s3SecurityMappingEnabled, ParquetReaderOptions.defaultOptions());
+        this(fileSystemFactory, footerCache, catalogCacheKey, s3SecurityMappingEnabled, credentialRequired, ParquetReaderOptions.defaultOptions());
     }
 
     @VisibleForTesting
     HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, ParquetReaderOptions readerOptions)
     {
-        this(fileSystemFactory, HoglakeParquetFooterCache.disabled(), Optional.empty(), false, readerOptions);
+        this(fileSystemFactory, HoglakeParquetFooterCache.disabled(), Optional.empty(), false, false, readerOptions);
     }
 
     private HoglakePageSourceProvider(
@@ -162,11 +170,13 @@ public class HoglakePageSourceProvider
             HoglakeParquetFooterCache footerCache,
             Optional<CacheKey> catalogCacheKey,
             boolean s3SecurityMappingEnabled,
+            boolean credentialRequired,
             ParquetReaderOptions readerOptions)
     {
         this.readerOptions = requireNonNull(readerOptions, "readerOptions is null");
         this.catalogCacheKey = requireNonNull(catalogCacheKey, "catalogCacheKey is null");
         this.s3SecurityMappingEnabled = s3SecurityMappingEnabled;
+        this.credentialRequired = credentialRequired;
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.footerCache = requireNonNull(footerCache, "footerCache is null");
     }
@@ -183,6 +193,7 @@ public class HoglakePageSourceProvider
             MemoryContext memoryContext)
     {
         HoglakeSplit hoglakeSplit = (HoglakeSplit) split;
+        ConnectorIdentity identity = storageIdentity(session, hoglakeSplit);
 
         TupleDomain<HoglakeColumnHandle> predicate = ((HoglakeTableHandle) table).constraint();
         if (predicate.isNone()) {
@@ -199,7 +210,7 @@ public class HoglakePageSourceProvider
         // Parquet footer or any data.
         if (columns.isEmpty() && predicate.isAll() && hoglakeSplit.recordCount() >= 0) {
             if (hoglakeSplit.start() == 0) {
-                return createCountPageSource(session, hoglakeSplit, memoryContext);
+                return createCountPageSource(identity, hoglakeSplit, memoryContext);
             }
             return new EmptyPageSource();
         }
@@ -208,9 +219,10 @@ public class HoglakePageSourceProvider
                 .map(HoglakeColumnHandle.class::cast)
                 .toList();
 
-        TrinoFileSystem fileSystem = fileSystemFactory.create(session);
+        TrinoFileSystem fileSystem = fileSystemFactory.create(identity);
         TrinoInputFile inputFile;
-        boolean validateFileAccess = false;
+        // A team credential can be revoked at any time, so every credentialed read checks it.
+        boolean validateFileAccess = hoglakeSplit.credential().isPresent();
         if (fileSystem instanceof CacheFileSystem cacheFileSystem && catalogCacheKey.isPresent() && hoglakeSplit.dataFileId() > 0) {
             // Registered data files are immutable. Re-registration gets a new ID,
             // so the catalog supplies the version without an S3 modification-time lookup.
@@ -218,7 +230,7 @@ public class HoglakePageSourceProvider
                     .append(Long.toString(hoglakeSplit.dataFileId()))
                     .append(Long.toString(hoglakeSplit.fileSizeBytes()));
             inputFile = cacheFileSystem.newInputFile(Location.of(hoglakeSplit.path()), hoglakeSplit.fileSizeBytes(), version);
-            validateFileAccess = s3SecurityMappingEnabled || !session.getIdentity().getExtraCredentials().isEmpty();
+            validateFileAccess |= s3SecurityMappingEnabled || !session.getIdentity().getExtraCredentials().isEmpty();
         }
         else {
             inputFile = fileSystem.newInputFile(Location.of(hoglakeSplit.path()), hoglakeSplit.fileSizeBytes());
@@ -284,6 +296,24 @@ public class HoglakePageSourceProvider
     }
 
     /**
+     * The identity storage is read with: only the split's team credential when
+     * it carries one, checked against its prefix first; else the session's,
+     * unless the catalog requires a credential.
+     */
+    private ConnectorIdentity storageIdentity(ConnectorSession session, HoglakeSplit split)
+    {
+        if (split.credential().isPresent()) {
+            HoglakeSplitCredential credential = split.credential().get();
+            credential.checkCovers(split);
+            return ConnectorIdentity.forUser(session.getUser()).withExtraCredentials(credential.extraCredentials()).build();
+        }
+        if (credentialRequired) {
+            throw new TrinoException(HOGLAKE_TEAM_CREDENTIAL_UNAVAILABLE, "The split for %s carries no team credential".formatted(split.path()));
+        }
+        return session.getIdentity();
+    }
+
+    /**
      * Releases a resource while a failure is propagating, without letting a
      * release failure replace the failure that caused it.
      */
@@ -312,7 +342,7 @@ public class HoglakePageSourceProvider
      * and decodes and releases that memory before returning, so a count
      * leaves no reservation behind.
      */
-    private ConnectorPageSource createCountPageSource(ConnectorSession session, HoglakeSplit split, MemoryContext memoryContext)
+    private ConnectorPageSource createCountPageSource(ConnectorIdentity identity, HoglakeSplit split, MemoryContext memoryContext)
     {
         long visibleRows = split.recordCount();
         if (split.deleteFilePath().isPresent()) {
@@ -322,7 +352,7 @@ public class HoglakePageSourceProvider
             // and a resource that never finished initializing would not.
             try (HoglakeSplitResources resources = new HoglakeSplitResources(memoryContext)) {
                 HoglakeDeletionVector vector = HoglakeDeletionVectorLoader.load(
-                        fileSystemFactory.create(session), split, split.recordCount(), resources);
+                        fileSystemFactory.create(identity), split, split.recordCount(), resources);
                 visibleRows -= vector.cardinality();
             }
         }
