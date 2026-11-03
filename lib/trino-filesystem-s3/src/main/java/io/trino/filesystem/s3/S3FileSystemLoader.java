@@ -71,7 +71,7 @@ final class S3FileSystemLoader
     private final Optional<S3SecurityMappingProvider> mappingProvider;
     private final SdkHttpClient httpClient;
     private final S3ClientFactory clientFactory;
-    private final S3FileSystemConfig config;
+    private final S3PresignerSettings presignerSettings;
     private final S3Context context;
     private final ExecutorService uploadExecutor = newCachedThreadPool(daemonThreadsNamed("s3-upload-%s"));
     private final ExecutorService dnsRefreshExecutor = newCachedThreadPool(daemonThreadsNamed("s3-dns-refresh-%s"));
@@ -98,7 +98,7 @@ final class S3FileSystemLoader
 
         MetricPublisher metricPublisher = stats.newMetricPublisher();
         this.clientFactory = s3ClientFactory(httpClient, openTelemetry, config, metricPublisher);
-        this.config = requireNonNull(config, "config is null");
+        this.presignerSettings = new S3PresignerSettings(config);
         this.context = new S3Context(
                 toIntExact(config.getStreamingPartSize().toBytes()),
                 config.isRequesterPays(),
@@ -119,7 +119,7 @@ final class S3FileSystemLoader
             Optional<S3SecurityMappingResult> mapping = mappingProvider.orElseThrow().getMapping(identity, location);
 
             S3Client client = clients.computeIfAbsent(mapping, _ -> clientFactory.create(mapping));
-            S3Presigner preSigner = preSigners.computeIfAbsent(mapping, _ -> createS3PreSigner(config, client));
+            S3Presigner preSigner = preSigners.computeIfAbsent(mapping, _ -> createS3PreSigner(presignerSettings, client));
             S3Context context = this.context.withCredentials(identity);
 
             if (mapping.isPresent() && mapping.get().kmsKeyId().isPresent()) {
@@ -169,6 +169,7 @@ final class S3FileSystemLoader
         Optional<String> staticRegion = Optional.ofNullable(config.getRegion());
         Optional<String> staticEndpoint = Optional.ofNullable(config.getEndpoint());
         boolean pathStyleAccess = config.isPathStyleAccess();
+        boolean crossRegionAccessEnabled = config.isCrossRegionAccessEnabled();
         S3Configuration serviceConfiguration = S3Configuration.builder()
                 .chunkedEncodingEnabled(config.isChunkedEncodingEnabled())
                 .build();
@@ -176,6 +177,8 @@ final class S3FileSystemLoader
         Optional<String> staticIamRole = Optional.ofNullable(config.getIamRole());
         String staticRoleSessionName = config.getRoleSessionName();
         String externalId = config.getExternalId();
+        Optional<String> stsEndpoint = Optional.ofNullable(config.getStsEndpoint());
+        Optional<String> stsRegion = Optional.ofNullable(config.getStsRegion()).or(() -> staticRegion);
         Optional<S3AuthSchemeProvider> authSchemeProvider = config.getSignerType().map(S3FileSystemLoader::createAuthSchemeProvider);
 
         return mapping -> {
@@ -191,7 +194,7 @@ final class S3FileSystemLoader
 
             S3ClientBuilder s3 = S3Client.builder();
             s3.overrideConfiguration(overrideConfiguration);
-            s3.crossRegionAccessEnabled(config.isCrossRegionAccessEnabled());
+            s3.crossRegionAccessEnabled(crossRegionAccessEnabled);
             s3.httpClient(httpClient);
             s3.responseChecksumValidation(WHEN_REQUIRED);
             s3.requestChecksumCalculation(RequestChecksumCalculation.WHEN_REQUIRED);
@@ -216,7 +219,7 @@ final class S3FileSystemLoader
                                         .roleArn(iamRole.get())
                                         .roleSessionName(roleSessionName)
                                         .externalId(externalId))
-                                .stsClient(createStsClient(config, credentialsProvider))
+                                .stsClient(createStsClient(stsEndpoint, stsRegion, credentialsProvider))
                                 .asyncCredentialUpdateEnabled(true)
                                 .build());
                     }
