@@ -72,6 +72,12 @@
         </artifact>
     </artifactSet>
 
+    <artifactSet to="plugin/posthog-functions">
+        <artifact id="${project.groupId}:trino-posthog-functions:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
     <!--
         PostgreSQL connector. Tenants create their own external PostgreSQL catalogs with
         CREATE CATALOG ... USING postgresql, which the control plane publishes through the
