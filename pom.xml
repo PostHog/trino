@@ -111,6 +111,7 @@
         <module>plugin/trino-pinot</module>
         <module>plugin/trino-postgresql</module>
         <module>plugin/trino-posthog-catalogstore</module>
+        <module>plugin/trino-posthog-external</module>
         <module>plugin/trino-prometheus</module>
         <module>plugin/trino-ranger</module>
         <module>plugin/trino-redis</module>
