@@ -13,6 +13,8 @@
  */
 package io.trino.plugin.posthog.functions;
 
+import java.math.BigDecimal;
+
 /**
  * JSON text as ClickHouse writes it when it extracts a JSON value as a String.
  */
@@ -76,6 +78,15 @@ final class ClickHouseJsonText
         String digits = allDigits.substring(leadingZeros, end);
         // the decimal point sits after this many digits
         int n = point + exponent - leadingZeros;
+        // Double.toString prints at least two significant digits, as 4.9E-324, where the shortest
+        // text that reads back as the value has one, as 5e-324.
+        if (digits.length() == 2) {
+            String single = shortestSingleDigit(Math.abs(value), digits.charAt(0) - '0', n);
+            if (single != null) {
+                digits = single.substring(0, 1);
+                n += single.length() - 1;
+            }
+        }
         int k = digits.length();
         StringBuilder out = new StringBuilder(sign);
         if (k <= n && n <= 21) {
@@ -95,6 +106,27 @@ final class ClickHouseJsonText
             out.append('e').append(n - 1);
         }
         return out.toString();
+    }
+
+    // Returns the digit d, or "10" when it rounds up to ten, such that d × 10^(n - 1) reads back as
+    // value, choosing the closer one when two do; or null when no single digit does.
+    private static String shortestSingleDigit(double value, int firstDigit, int n)
+    {
+        String best = null;
+        BigDecimal bestDistance = null;
+        BigDecimal exact = new BigDecimal(value);
+        for (int digit = firstDigit; digit <= firstDigit + 1; digit++) {
+            BigDecimal candidate = BigDecimal.valueOf(digit).scaleByPowerOfTen(n - 1);
+            if (candidate.signum() == 0 || candidate.doubleValue() != value) {
+                continue;
+            }
+            BigDecimal distance = candidate.subtract(exact).abs();
+            if (bestDistance == null || distance.compareTo(bestDistance) < 0) {
+                best = Integer.toString(digit);
+                bestDistance = distance;
+            }
+        }
+        return best;
     }
 
     static void appendString(StringBuilder out, String value)

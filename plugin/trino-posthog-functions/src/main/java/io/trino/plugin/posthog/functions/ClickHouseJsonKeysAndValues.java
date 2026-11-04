@@ -377,6 +377,7 @@ final class ClickHouseJsonKeysAndValues
                 append(key, 0, Slices.utf8Slice(text), false);
                 return;
             }
+            // A boolean converts as the JSON integer 1 or 0.
             String text = switch (token) {
                 case VALUE_STRING, VALUE_NUMBER_INT, VALUE_NUMBER_FLOAT -> parser.getText();
                 case VALUE_TRUE -> "1";
@@ -387,33 +388,25 @@ final class ClickHouseJsonKeysAndValues
                 reader.skipValue();
                 return;
             }
+            boolean isString = token == JsonToken.VALUE_STRING;
+            boolean isInteger = token != JsonToken.VALUE_NUMBER_FLOAT;
             switch (target) {
                 case FLOAT64 -> {
-                    Double value = floatValue(text, token);
+                    Double value = isString ? ClickHouseNumbers.float64FromString(text) : Double.valueOf(ClickHouseNumbers.float64FromNumber(text, isInteger));
                     if (value != null) {
                         append(key, Double.doubleToRawLongBits(value), null, false);
                     }
                 }
                 case FLOAT32 -> {
-                    Double value = floatValue(text, token);
+                    Float value = isString ? ClickHouseNumbers.float32FromString(text) : Float.valueOf((float) ClickHouseNumbers.float64FromNumber(text, isInteger));
                     if (value != null) {
-                        append(key, floatToRawIntBits(value.floatValue()), null, false);
+                        append(key, floatToRawIntBits(value), null, false);
                     }
                 }
-                case INTEGER -> {
-                    Long value = ClickHouseNumbers.parseInteger(text, low, high);
-                    if (value != null) {
-                        append(key, value, null, false);
-                    }
-                }
-                case UINT64 -> {
-                    Long value = ClickHouseNumbers.parseUInt64(text);
-                    if (value != null) {
-                        append(key, value, null, false);
-                    }
-                }
+                case INTEGER -> appendInteger(key, isString ? ClickHouseNumbers.integerFromString(text, low, high) : ClickHouseNumbers.integerFromNumber(text, isInteger, low, high));
+                case UINT64 -> appendInteger(key, isString ? ClickHouseNumbers.uint64FromString(text) : ClickHouseNumbers.uint64FromNumber(text, isInteger));
                 case BOOL -> {
-                    Long value = ClickHouseNumbers.parseInteger(text, 0, 255);
+                    Long value = isString ? ClickHouseNumbers.integerFromString(text, 0, 255) : ClickHouseNumbers.integerFromNumber(text, isInteger, 0, 255);
                     if (value != null) {
                         append(key, value != 0 ? 1 : 0, null, false);
                     }
@@ -422,16 +415,11 @@ final class ClickHouseJsonKeysAndValues
             }
         }
 
-        // ClickHouse reads a JSON integer that fits 64 bits as an integer first, so -0 becomes +0.
-        private static Double floatValue(String text, JsonToken token)
+        private void appendInteger(Slice key, Long value)
         {
-            if (token == JsonToken.VALUE_NUMBER_INT) {
-                Double exact = ClickHouseNumbers.integerAsDouble(text);
-                if (exact != null) {
-                    return exact;
-                }
+            if (value != null) {
+                append(key, value, null, false);
             }
-            return ClickHouseNumbers.parseFloat(text);
         }
 
         private static String serialize(Reader reader)
