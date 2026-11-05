@@ -137,6 +137,14 @@ public class ExecutingStatementResource
         return queries.containsKey(queryId);
     }
 
+    /**
+     * Whether any query still has results a client may fetch from this coordinator.
+     */
+    public boolean hasQueries()
+    {
+        return !queries.isEmpty();
+    }
+
     @GET
     @Path("{queryId}/{slug}/{token}")
     @Produces(MediaType.APPLICATION_JSON)
