@@ -448,10 +448,15 @@ The coordinator uses catalog statistics to skip disjoint files and end wholly
 covered files without reading their rows. It does so only while file statistics
 pruning is enabled, with `ducklake.file-statistics-pruning.enabled` or the
 `file_statistics_pruning_enabled` session property; otherwise it reads every
-file. For boundary files, files whose statistics cannot decide membership, or
-every file with pruning disabled, it reads only the range column and row
-positions using the regular Parquet reader, preserving existing positional
-deletes. It writes new positional delete files for partial removals. Existing
+file. A file the catalog statistics do not place still ends whole when all of
+its visible rows are non-NULL and inside the interval. The Parquet footer
+settles this when its row group statistics show it, as for a file DuckDB
+registered with `ducklake_add_data_files`, which has no null count in the
+catalog. The footer is not used while the `parquet_ignore_statistics` session
+property is set. Otherwise the coordinator reads the range column until it finds a
+visible row outside the interval. For boundary files, it then reads only the
+range column and row positions using the regular Parquet reader, preserving
+existing positional deletes. It writes new positional delete files for partial removals. Existing
 data files and incoming Parquet objects are not rewritten. Boundary scans run
 on the coordinator, with a 128MB reader budget and a limit of five million newly
 deleted boundary positions per invocation. Use smaller intervals or files

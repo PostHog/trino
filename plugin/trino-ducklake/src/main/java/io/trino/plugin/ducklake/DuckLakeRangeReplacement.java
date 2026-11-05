@@ -30,6 +30,7 @@ import io.trino.plugin.ducklake.util.PathResolver;
 import io.trino.spi.SplitWeight;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
+import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.DynamicFilter;
@@ -62,9 +63,11 @@ import static io.trino.spi.type.TypeUtils.readNativeValue;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Plans metadata removals first, reading only the range column of boundary files. Catalog
- * statistics decide which files lie wholly inside or outside the range only while file
- * statistics pruning is enabled; otherwise every file is read like a boundary file.
+ * Plans metadata removals first, reading only the range column of the files the catalog
+ * statistics do not place. Catalog statistics place a file wholly inside or outside the range only
+ * while file statistics pruning is enabled. A file they do not place still ends whole when its
+ * footer statistics or its rows show that every visible row lies inside the range. Otherwise it is
+ * a boundary file, and its rows inside the range are deleted by position.
  */
 public final class DuckLakeRangeReplacement
 {
@@ -179,15 +182,14 @@ public final class DuckLakeRangeReplacement
             DuckLakeFileColumnStats stats = statistics.get(file.dataFileId());
             Optional<Domain> fileDomain = Optional.ofNullable(stats)
                     .flatMap(value -> DuckLakeSplitManager.statisticsDomain(replacement.column().type(), value, file.recordCount()));
-            if (fileDomain.isPresent()) {
-                if (!range.overlaps(fileDomain.orElseThrow())) {
-                    continue;
-                }
-                if (range.contains(fileDomain.orElseThrow())) {
-                    wholeFiles.add(file.dataFileId());
-                    inlined.ifPresent(value -> plannedInlinedDeletions.put(file.dataFileId(), value));
-                    continue;
-                }
+            if (fileDomain.isPresent() && !range.overlaps(fileDomain.orElseThrow())) {
+                continue;
+            }
+            if ((fileDomain.isPresent() && range.contains(fileDomain.orElseThrow()))
+                    || allVisibleRowsInRange(session, table, replacement, file, Optional.ofNullable(deletion), inlined, mappings)) {
+                wholeFiles.add(file.dataFileId());
+                inlined.ifPresent(value -> plannedInlinedDeletions.put(file.dataFileId(), value));
+                continue;
             }
             LongOpenHashSet removed = readBoundary(session, table, replacement, file, Optional.ofNullable(deletion), inlined, mappings, MAX_BOUNDARY_POSITIONS - totalPositions);
             if (!removed.isEmpty()) {
@@ -199,6 +201,49 @@ public final class DuckLakeRangeReplacement
         return new Plan(wholeFiles.build(), positions, plannedInlinedDeletions.buildOrThrow());
     }
 
+    /**
+     * Whether every visible row of the file has a value of the range column inside the range, so
+     * that the file can end whole. The catalog cannot always tell: DuckDB records no null count for
+     * a file it registers with {@code ducklake_add_data_files}, so such a file may hold a NULL,
+     * which lies outside every range.
+     * <p>
+     * The file is read with the complement of the range as the Parquet predicate. The reader skips
+     * every row group whose footer statistics show only non-NULL values inside the range, so a file
+     * with complete footer statistics is settled from its footer. The read stops at the first
+     * visible row outside the range.
+     */
+    private boolean allVisibleRowsInRange(
+            ConnectorSession session,
+            DuckLakeTableHandle table,
+            DuckLakeReplacementRange replacement,
+            DuckLakeDataFileEntry file,
+            Optional<DuckLakeDeleteFileEntry> deletion,
+            Optional<long[]> inlinedDeletions,
+            Map<Long, DuckLakeNameMapping> mappings)
+    {
+        Domain range = replacement.domain();
+        Type type = replacement.column().type();
+        try (ConnectorPageSource source = openFile(session, table, replacement, file, deletion, inlinedDeletions, mappings, range.complement(), false)) {
+            while (!source.isFinished()) {
+                checkInterrupted();
+                SourcePage page = source.getNextSourcePage();
+                if (page == null) {
+                    continue;
+                }
+                Block values = page.getBlock(0);
+                for (int position = 0; position < page.getPositionCount(); position++) {
+                    if (!range.includesNullableValue(readNativeValue(type, values, position))) {
+                        return false;
+                    }
+                }
+            }
+        }
+        catch (IOException e) {
+            throw new TrinoException(DUCKLAKE_FILESYSTEM_ERROR, "Could not read file for range replacement", e);
+        }
+        return true;
+    }
+
     private LongOpenHashSet readBoundary(
             ConnectorSession session,
             DuckLakeTableHandle table,
@@ -208,6 +253,49 @@ public final class DuckLakeRangeReplacement
             Optional<long[]> inlinedDeletions,
             Map<Long, DuckLakeNameMapping> mappings,
             long remainingPositions)
+    {
+        Domain range = replacement.domain();
+        LongOpenHashSet removed = new LongOpenHashSet();
+        try (ConnectorPageSource source = openFile(session, table, replacement, file, deletion, inlinedDeletions, mappings, range, true)) {
+            while (!source.isFinished()) {
+                checkInterrupted();
+                SourcePage page = source.getNextSourcePage();
+                if (page == null) {
+                    continue;
+                }
+                Block values = page.getBlock(0);
+                Block rowPositions = getRowFieldsFromBlock(page.getBlock(1)).get(DuckLakeMergeRowId.FILE_ROW_POSITION_CHANNEL);
+                for (int position = 0; position < page.getPositionCount(); position++) {
+                    if (range.includesNullableValue(readNativeValue(replacement.column().type(), values, position))) {
+                        removed.add(BIGINT.getLong(rowPositions, position));
+                        if (removed.size() > remainingPositions) {
+                            throw new TrinoException(EXCEEDED_LOCAL_MEMORY_LIMIT, "Range replacement exceeds five million boundary row positions; use smaller ranges or align files to ranges");
+                        }
+                    }
+                }
+            }
+        }
+        catch (IOException e) {
+            throw new TrinoException(DUCKLAKE_FILESYSTEM_ERROR, "Could not read boundary file for range replacement", e);
+        }
+        return removed;
+    }
+
+    /**
+     * Opens the visible rows of the file, with the range column first and, if requested, the row
+     * identifier second. The reader skips row groups whose footer statistics show no value of the
+     * range column in {@code predicate}.
+     */
+    private ConnectorPageSource openFile(
+            ConnectorSession session,
+            DuckLakeTableHandle table,
+            DuckLakeReplacementRange replacement,
+            DuckLakeDataFileEntry file,
+            Optional<DuckLakeDeleteFileEntry> deletion,
+            Optional<long[]> inlinedDeletions,
+            Map<Long, DuckLakeNameMapping> mappings,
+            Domain predicate,
+            boolean rowIds)
     {
         if (!file.fileFormat().equalsIgnoreCase("parquet") || file.encryptionKey().isPresent()) {
             throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Range replacement requires unencrypted Parquet files");
@@ -243,7 +331,6 @@ public final class DuckLakeRangeReplacement
                 // a position already deleted inline must stay out of the new delete file, see
                 // DuckLakeMetadata.rewriteDeleteFiles
                 inlinedDeletions.map(DuckLakeInlinedDeletions::new));
-        Domain range = replacement.domain();
         DuckLakeTableHandle filteredTable = new DuckLakeTableHandle(
                 table.schemaName(),
                 table.tableName(),
@@ -251,42 +338,22 @@ public final class DuckLakeRangeReplacement
                 table.snapshotId(),
                 table.tableLocation(),
                 TupleDomain.all(),
-                TupleDomain.withColumnDomains(Map.of(replacement.column(), range)),
+                TupleDomain.withColumnDomains(Map.of(replacement.column(), predicate)),
                 OptionalLong.empty());
-        LongOpenHashSet removed = new LongOpenHashSet();
-        try (ConnectorPageSource source = pageSources.createPageSource(
+        List<ColumnHandle> columns = rowIds
+                ? ImmutableList.of(replacement.column(), DuckLakeMergeRowId.columnHandle())
+                : ImmutableList.of(replacement.column());
+        return pageSources.createPageSource(
                 session,
                 split,
                 filteredTable,
-                ImmutableList.of(replacement.column(), DuckLakeMergeRowId.columnHandle()),
+                columns,
                 DynamicFilter.EMPTY,
                 bytes -> {
                     if (bytes > MAX_READER_MEMORY) {
                         throw new TrinoException(EXCEEDED_LOCAL_MEMORY_LIMIT, "Range replacement boundary reader exceeded 128MB; use smaller files");
                     }
-                })) {
-            while (!source.isFinished()) {
-                checkInterrupted();
-                SourcePage page = source.getNextSourcePage();
-                if (page == null) {
-                    continue;
-                }
-                Block values = page.getBlock(0);
-                Block rowPositions = getRowFieldsFromBlock(page.getBlock(1)).get(DuckLakeMergeRowId.FILE_ROW_POSITION_CHANNEL);
-                for (int position = 0; position < page.getPositionCount(); position++) {
-                    if (range.includesNullableValue(readNativeValue(replacement.column().type(), values, position))) {
-                        removed.add(BIGINT.getLong(rowPositions, position));
-                        if (removed.size() > remainingPositions) {
-                            throw new TrinoException(EXCEEDED_LOCAL_MEMORY_LIMIT, "Range replacement exceeds five million boundary row positions; use smaller ranges or align files to ranges");
-                        }
-                    }
-                }
-            }
-        }
-        catch (IOException e) {
-            throw new TrinoException(DUCKLAKE_FILESYSTEM_ERROR, "Could not read boundary file for range replacement", e);
-        }
-        return removed;
+                });
     }
 
     private static void checkInterrupted()

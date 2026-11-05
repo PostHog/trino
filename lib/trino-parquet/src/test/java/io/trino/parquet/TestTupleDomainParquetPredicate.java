@@ -85,6 +85,8 @@ import static io.trino.spi.predicate.Domain.create;
 import static io.trino.spi.predicate.Domain.notNull;
 import static io.trino.spi.predicate.Domain.onlyNull;
 import static io.trino.spi.predicate.Domain.singleValue;
+import static io.trino.spi.predicate.Range.greaterThan;
+import static io.trino.spi.predicate.Range.lessThan;
 import static io.trino.spi.predicate.Range.range;
 import static io.trino.spi.predicate.TupleDomain.withColumnDomains;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -766,19 +768,26 @@ public class TestTupleDomainParquetPredicate
                     ImmutableList.of(column),
                     UTC);
             List<ColumnDescriptor> expected = column.getMaxDefinitionLevel() == 0 ? ImmutableList.of() : ImmutableList.of(column);
+            Statistics<?> bounds = Statistics.getBuilderForReading(column.getPrimitiveType())
+                    .withMin(BytesUtils.longToBytes(10))
+                    .withMax(BytesUtils.longToBytes(20))
+                    .build();
             // Cover absent statistics, empty statistics, and bounds without a null count.
             assertThat(predicate.getIndexLookupCandidates(ImmutableMap.of(column, 2L), ImmutableMap.of(), ID))
                     .isEqualTo(Optional.of(expected));
-            for (Statistics<?> stats : ImmutableList.of(
-                    Statistics.getBuilderForReading(column.getPrimitiveType()).build(),
-                    Statistics.getBuilderForReading(column.getPrimitiveType())
-                            .withMin(BytesUtils.longToBytes(10))
-                            .withMax(BytesUtils.longToBytes(20))
-                            .build())) {
+            for (Statistics<?> stats : ImmutableList.of(Statistics.getBuilderForReading(column.getPrimitiveType()).build(), bounds)) {
                 assertThat(stats.isNumNullsSet()).isFalse();
                 assertThat(predicate.getIndexLookupCandidates(ImmutableMap.of(column, 2L), ImmutableMap.of(column, stats), ID))
                         .isEqualTo(Optional.of(expected));
             }
+
+            // For a column without definition levels, bounds without a null count eliminate a row group only a NULL could match.
+            TupleDomainParquetPredicate outsideOrNull = new TupleDomainParquetPredicate(
+                    TupleDomain.withColumnDomains(ImmutableMap.of(column, create(ValueSet.ofRanges(lessThan(BIGINT, 10L), greaterThan(BIGINT, 20L)), true))),
+                    ImmutableList.of(column),
+                    UTC);
+            assertThat(outsideOrNull.getIndexLookupCandidates(ImmutableMap.of(column, 2L), ImmutableMap.of(column, bounds), ID))
+                    .isEqualTo(column.getMaxDefinitionLevel() == 0 ? Optional.empty() : Optional.of(ImmutableList.of(column)));
         }
     }
 
