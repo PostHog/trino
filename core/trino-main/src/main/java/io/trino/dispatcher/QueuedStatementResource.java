@@ -268,6 +268,16 @@ public class QueuedStatementResource
         return queryManager.getQuery(queryId) != null;
     }
 
+    /**
+     * Whether any submission has been accepted but not yet created in the dispatch manager. A created
+     * query stays registered here until the dispatch manager purges it from history, so only an
+     * uncreated submission is pending work.
+     */
+    public boolean hasPendingSubmission()
+    {
+        return queryManager.hasPendingSubmission();
+    }
+
     private Query getQuery(QueryId queryId, String slug, long token)
     {
         Query query = queryManager.getQuery(queryId);
@@ -589,6 +599,11 @@ public class QueuedStatementResource
         public Query getQuery(QueryId queryId)
         {
             return queries.get(queryId);
+        }
+
+        public boolean hasPendingSubmission()
+        {
+            return queries.values().stream().anyMatch(query -> !query.isCreated() && !query.isSubmissionAbandoned());
         }
     }
 }
