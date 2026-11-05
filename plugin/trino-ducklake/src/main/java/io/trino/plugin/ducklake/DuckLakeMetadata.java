@@ -926,16 +926,19 @@ public class DuckLakeMetadata
             verifyReceipt(receipt.orElseThrow(), fingerprint);
             return ImmutableMap.of("added_data_files", 0L);
         }
-        if (handle.replace() || handle.replacementRange().isPresent()) {
-            verifyNoInlinedData(table, "replacing rows");
+        if (handle.replace()) {
+            // ending every data file also ends the rows of them deleted inline, but not inlined rows
+            verifyNoInlinedRows(table, "replacing rows");
         }
+        handle.replacementRange().ifPresent(range -> verifyNoInlinedRowsInRange(table, range));
         List<DuckLakeWriteColumn> columns = DuckLakeColumns.fromCatalog(metastore.columns(table.snapshotId(), table.tableId()));
         DuckLakeWriteTarget target = new DuckLakeWriteTarget(table.schemaTableName(), table.tableId(), table.tableLocation(), columns, writePartitioningOf(table));
         List<DuckLakeFileImporter.ImportedFile> imported = DuckLakeFileImporter.readFiles(
                 fileSystemFactory.create(session), dataPath, handle, columns, target.partitioning(), parquetReaderOptions, fileFormatDataSourceStats, addFilesMaxConcurrentFileReads);
         handle.replacementRange().ifPresent(range -> range.validateImportedFiles(imported));
         Optional<DuckLakeRangeReplacement.Plan> rangePlan = handle.replacementRange().map(range -> rangeReplacement.plan(session, table, range));
-        List<RewrittenDeletes> rangeDeletes = rangePlan.map(plan -> rewriteDeleteFiles(session, target, plan.positions())).orElse(ImmutableList.of());
+        List<RewrittenDeletes> rangeDeletes = rangePlan.map(plan -> rewriteDeleteFiles(session, target, plan.positions(), plan.inlinedDeletions())).orElse(ImmutableList.of());
+        Map<Long, Long> endedInlinedDeletions = rangePlan.map(plan -> inlinedDeletionsOutsideDeleteFiles(session, target, plan.wholeFiles(), plan.inlinedDeletions())).orElse(ImmutableMap.of());
         Optional<Long> added = commit(commit -> {
             DuckLakeCommit.TableIdentity current = commit.findTable(table.schemaName(), table.tableName())
                     .orElseThrow(() -> new TrinoException(StandardErrorCode.TABLE_NOT_FOUND, "Import target no longer exists"));
@@ -957,7 +960,7 @@ public class DuckLakeMetadata
                 commit.verifyDataFilesUnchanged(table.tableId(), changed);
                 commit.verifyDeleteFilesUnchanged(table.tableId(), plan.positions().keySet(), rangeDeletes.stream()
                         .flatMap(value -> value.replacedDeleteFileId().stream()).collect(toImmutableSet()));
-                removeDataFiles(commit, table.tableId(), ImmutableList.copyOf(plan.wholeFiles()));
+                removeDataFiles(commit, table.tableId(), ImmutableList.copyOf(plan.wholeFiles()), endedInlinedDeletions);
                 applyDeletes(commit, target, rangeDeletes);
                 // A replacement depends on every row in the interval, including the absence of
                 // rows in an empty interval. Record both sides even for a delete-only batch.
@@ -1471,7 +1474,8 @@ public class DuckLakeMetadata
             return Optional.empty();
         }
 
-        List<RewrittenDeletes> rewrittenDeletes = rewriteDeleteFiles(session, target, removedPositionsByDataFile);
+        // beginMerge refuses a table with rows deleted inline
+        List<RewrittenDeletes> rewrittenDeletes = rewriteDeleteFiles(session, target, removedPositionsByDataFile, ImmutableMap.of());
         commit(commit -> {
             commit.verifyDataFilesUnchanged(target.tableId(), removedPositionsByDataFile.keySet());
             commit.verifyDeleteFilesUnchanged(
@@ -1499,8 +1503,19 @@ public class DuckLakeMetadata
      * Because a data file has at most one delete file, each one covers both the positions already
      * recorded and the ones the statement removed; a file with nothing left is not given a delete
      * file at all and is dropped instead.
+     * <p>
+     * Positions DuckDB deleted inline stay in the catalog database, where they keep applying to the
+     * data file alongside its delete file, so the new delete file must not repeat them. DuckDB
+     * reads a file wrongly when a position is in both: its filter stalls on the repeated position
+     * and keeps the rows of later deleted positions in the same vector of rows. Both engines would
+     * also subtract the position twice from the row count. So the removed positions leave them
+     * out, like the positions of the delete file being replaced.
      */
-    private List<RewrittenDeletes> rewriteDeleteFiles(ConnectorSession session, DuckLakeWriteTarget target, Map<Long, LongOpenHashSet> removedPositionsByDataFile)
+    private List<RewrittenDeletes> rewriteDeleteFiles(
+            ConnectorSession session,
+            DuckLakeWriteTarget target,
+            Map<Long, LongOpenHashSet> removedPositionsByDataFile,
+            Map<Long, long[]> inlinedDeletionsByDataFile)
     {
         if (removedPositionsByDataFile.isEmpty()) {
             return ImmutableList.of();
@@ -1531,8 +1546,9 @@ public class DuckLakeMetadata
             }
             Optional<Long> replacedDeleteFileId = Optional.ofNullable(existing).map(DuckLakeDeleteFileEntry::deleteFileId);
             long removedNow = positions.size() - (existing == null ? 0 : existing.deleteCount());
+            long deletedOnlyInline = countMissing(inlinedDeletionsByDataFile.get(dataFileId), positions);
 
-            if (positions.size() >= dataFile.recordCount()) {
+            if (positions.size() + deletedOnlyInline >= dataFile.recordCount()) {
                 // nothing of the file is left, so it is dropped rather than fully covered by deletes
                 rewritten.add(new RewrittenDeletes(dataFileId, replacedDeleteFileId, Optional.empty(), removedNow, dataFile.fileSizeBytes()));
                 continue;
@@ -1555,6 +1571,49 @@ public class DuckLakeMetadata
                     0));
         }
         return rewritten.build();
+    }
+
+    /**
+     * For each of the data files to end, the number of its rows DuckDB deleted inline that its
+     * delete file does not also delete. Those rows are already gone, so the table statistics must
+     * not subtract them again when the file ends. A position that both hold counts once.
+     */
+    private Map<Long, Long> inlinedDeletionsOutsideDeleteFiles(ConnectorSession session, DuckLakeWriteTarget target, Set<Long> dataFileIds, Map<Long, long[]> inlinedDeletionsByDataFile)
+    {
+        if (dataFileIds.stream().noneMatch(inlinedDeletionsByDataFile::containsKey)) {
+            return ImmutableMap.of();
+        }
+        Map<Long, DuckLakeDeleteFileEntry> deleteFiles = metastore.deleteFiles(snapshotId(), target.tableId()).stream()
+                .collect(toImmutableMap(DuckLakeDeleteFileEntry::dataFileId, file -> file, (first, _) -> first));
+        TrinoFileSystem fileSystem = fileSystemFactory.create(session);
+        ImmutableMap.Builder<Long, Long> counts = ImmutableMap.builder();
+        for (long dataFileId : dataFileIds) {
+            long[] inlined = inlinedDeletionsByDataFile.get(dataFileId);
+            if (inlined == null) {
+                continue;
+            }
+            DuckLakeDeleteFileEntry existing = deleteFiles.get(dataFileId);
+            LongOpenHashSet deleted = existing == null ? new LongOpenHashSet() : DuckLakeDeleteFiles.readPositions(
+                    fileSystem,
+                    fileFormatDataSourceStats,
+                    parquetReaderOptions,
+                    PathResolver.resolve(target.tableLocation(), existing.path(), existing.pathIsRelative()),
+                    existing.fileSizeBytes(),
+                    existing.deleteCount());
+            counts.put(dataFileId, countMissing(inlined, deleted));
+        }
+        return counts.buildOrThrow();
+    }
+
+    /**
+     * The number of the positions that the set does not hold.
+     */
+    private static long countMissing(@Nullable long[] positions, LongOpenHashSet set)
+    {
+        if (positions == null) {
+            return 0;
+        }
+        return Arrays.stream(positions).filter(position -> !set.contains(position)).count();
     }
 
     private static void applyDeletes(DuckLakeCommit commit, DuckLakeWriteTarget target, List<RewrittenDeletes> rewrittenDeletes)
@@ -1622,7 +1681,7 @@ public class DuckLakeMetadata
                 .orElseThrow(() -> new TrinoException(DUCKLAKE_INVALID_METADATA, "The rows to delete are no longer decidable from the catalog"));
         return OptionalLong.of(commit(commit -> {
             commit.verifyDataFilesUnchanged(tableHandle.tableId(), ImmutableSet.copyOf(dataFileIds));
-            long removed = removeDataFiles(commit, tableHandle.tableId(), dataFileIds);
+            long removed = removeDataFiles(commit, tableHandle.tableId(), dataFileIds, ImmutableMap.of());
             commit.recordDelete(tableHandle.tableId());
             return removed;
         }));
@@ -1690,8 +1749,11 @@ public class DuckLakeMetadata
 
     /**
      * Ends the given data files, removing every row of them.
+     *
+     * @param inlinedDeletions by data file, the number of its rows deleted inline and not by its
+     *         delete file, which are not removed again
      */
-    private static long removeDataFiles(DuckLakeCommit commit, long tableId, List<Long> dataFileIds)
+    private static long removeDataFiles(DuckLakeCommit commit, long tableId, List<Long> dataFileIds, Map<Long, Long> inlinedDeletions)
     {
         if (dataFileIds.isEmpty()) {
             return 0;
@@ -1705,7 +1767,7 @@ public class DuckLakeMetadata
             if (file == null) {
                 throw new DuckLakeCommit.ConcurrentModificationFailure("data file %s of table %s was removed by another transaction".formatted(dataFileId, tableId));
             }
-            removedRecords += file.visibleRecordCount();
+            removedRecords += Math.max(0, file.visibleRecordCount() - inlinedDeletions.getOrDefault(dataFileId, 0L));
             removedBytes += file.fileSizeBytes();
         }
         commit.endDataFiles(tableId, dataFileIds);
@@ -2384,6 +2446,19 @@ public class DuckLakeMetadata
     {
         if (inlinedSummary(handle).hasRows()) {
             throw inlinedDataNotSupported(handle, "inlined data", operation);
+        }
+    }
+
+    /**
+     * Refuses a range replacement of a table holding inlined rows inside the range, which the
+     * replacement would leave in place. Inlined rows outside the range and rows deleted inline do
+     * not stand in its way: the range plan leaves out positions deleted inline, and they keep
+     * applying to a data file for as long as it is visible.
+     */
+    private void verifyNoInlinedRowsInRange(DuckLakeTableHandle handle, DuckLakeReplacementRange range)
+    {
+        if (inlinedSummary(handle).hasRows() && rangeReplacement.hasInlinedRowsInRange(handle, range)) {
+            throw inlinedDataNotSupported(handle, "inlined data in the replacement range", "replacing rows");
         }
     }
 

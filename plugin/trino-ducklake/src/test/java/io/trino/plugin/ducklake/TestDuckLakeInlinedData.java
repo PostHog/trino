@@ -23,16 +23,19 @@ import io.trino.testing.QueryRunner;
 import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.Arrays;
 import java.util.List;
 
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_CONCURRENT_MODIFICATION;
 import static io.trino.plugin.ducklake.TestingDuckLakeCatalog.PASSWORD;
 import static io.trino.plugin.ducklake.TestingDuckLakeCatalog.USER;
+import static java.util.stream.Collectors.joining;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.abort;
@@ -65,7 +68,9 @@ final class TestDuckLakeInlinedData
         catch (SQLException e) {
             abort("Failed to create DuckLake fixtures with DuckDB (extension download requires network access): " + e);
         }
-        return DuckLakeQueryRunner.builder(catalog).build();
+        return DuckLakeQueryRunner.builder(catalog)
+                .addConnectorProperty("ducklake.add-files-procedure.enabled", "true")
+                .build();
     }
 
     private static void createFixtures(TestingDuckLakeCatalog catalog)
@@ -445,6 +450,77 @@ final class TestDuckLakeInlinedData
         assertThat(catalog.rows("SELECT id::VARCHAR, v FROM inlined_insert ORDER BY id")).containsExactly("1", "duckdb", "2", "trino");
     }
 
+    /**
+     * A range replacement changes only the data files holding rows of the range, so rows deleted
+     * inline in other files do not stand in its way. Rows deleted inline stay deleted, are not
+     * subtracted a second time from the table statistics, and are not repeated in a new delete
+     * file, where the catalog would count them twice.
+     */
+    @Test
+    void testReplacementOfTableWithRowsDeletedInline()
+            throws SQLException
+    {
+        String range = catalog.externalParquetFile("replace_inline_deletes/range");
+        String all = catalog.externalParquetFile("replace_inline_deletes/all");
+        catalog.executeInDuckDb(
+                "CREATE TABLE replace_inline_deletes (i INTEGER)",
+                // data files outside the range, wholly inside it, and across its end
+                "INSERT INTO replace_inline_deletes SELECT range FROM range(0, 40)",
+                "INSERT INTO replace_inline_deletes SELECT range FROM range(100, 140)",
+                "INSERT INTO replace_inline_deletes SELECT range FROM range(200, 240)",
+                "DELETE FROM replace_inline_deletes WHERE i IN (5, 7)",
+                "DELETE FROM replace_inline_deletes WHERE i IN (101, 102)",
+                "DELETE FROM replace_inline_deletes WHERE i >= 125 AND i < 140",
+                "DELETE FROM replace_inline_deletes WHERE i = 103",
+                "DELETE FROM replace_inline_deletes WHERE i >= 225",
+                "DELETE FROM replace_inline_deletes WHERE i IN (215, 222)",
+                "COPY (SELECT 150::INTEGER i UNION ALL SELECT 212) TO '%s' (FORMAT PARQUET)".formatted(range),
+                "COPY (SELECT 1000::INTEGER i) TO '%s' (FORMAT PARQUET)".formatted(all));
+        long tableId = tableId("replace_inline_deletes");
+        assertThat(metastoreLong("SELECT count(DISTINCT file_id) FROM ducklake_inlined_delete_" + tableId)).isEqualTo(3);
+        assertThat(metastoreLong("SELECT count(*) FROM ducklake_delete_file WHERE end_snapshot IS NULL AND table_id = " + tableId)).isEqualTo(2);
+        long recordCount = metastoreLong("SELECT record_count FROM ducklake_table_stats WHERE table_id = " + tableId);
+
+        assertUpdate(addFiles("replace_inline_deletes", "range", rangeOptions("100", "220"), range));
+        assertQuery("SELECT i FROM replace_inline_deletes WHERE i >= 40", "VALUES 150, 212, 220, 221, 223, 224");
+        assertQuery("SELECT count(*) FROM replace_inline_deletes", "VALUES 44");
+        assertMatchesDuckDb("SELECT i FROM replace_inline_deletes ORDER BY i");
+        assertThat(computeActual("SHOW STATS FOR replace_inline_deletes").getMaterializedRows().getLast().getField(4)).isEqualTo(44.0);
+        // the 22 rows left in the file ended and the 19 left of the range in the file across its end
+        assertThat(metastoreLong("SELECT record_count FROM ducklake_table_stats WHERE table_id = " + tableId)).isEqualTo(recordCount - 22 - 19 + 2);
+
+        // ending every data file ends the deletions of its rows too
+        assertUpdate(addFiles("replace_inline_deletes", "all", ", replace => true", all));
+        assertQuery("SELECT i FROM replace_inline_deletes", "VALUES 1000");
+        assertMatchesDuckDb("SELECT i FROM replace_inline_deletes ORDER BY i");
+    }
+
+    /**
+     * A replacement cannot remove rows inlined in the catalog database, so it fails when it would
+     * have to. Inlined rows outside the range of a range replacement stay as they are.
+     */
+    @Test
+    void testReplacementOfTableWithInlinedRows()
+            throws SQLException
+    {
+        String range = catalog.externalParquetFile("replace_inlined_rows/range");
+        catalog.executeInDuckDb(
+                "CREATE TABLE replace_inlined_rows (i INTEGER)",
+                "INSERT INTO replace_inlined_rows SELECT range FROM range(0, 40)",
+                "INSERT INTO replace_inlined_rows VALUES (50), (NULL), (300)",
+                "COPY (SELECT 150::INTEGER i) TO '%s' (FORMAT PARQUET)".formatted(range));
+        assertQueryFails(
+                addFiles("replace_inlined_rows", "inside", rangeOptions("40", "60")),
+                MODIFY_REFUSAL.formatted("replace_inlined_rows", "inlined data in the replacement range", "replacing rows"));
+        assertQueryFails(
+                addFiles("replace_inlined_rows", "all", ", replace => true", range),
+                MODIFY_REFUSAL.formatted("replace_inlined_rows", "inlined data", "replacing rows"));
+
+        assertUpdate(addFiles("replace_inlined_rows", "outside", rangeOptions("100", "200"), range));
+        assertQuery("SELECT i FROM replace_inlined_rows WHERE i IS NULL OR i >= 40", "VALUES 50, 150, 300, CAST(NULL AS INTEGER)");
+        assertMatchesDuckDb("SELECT i FROM replace_inlined_rows ORDER BY i");
+    }
+
     @Test
     void testDropTableWithInlinedRows()
             throws SQLException
@@ -631,6 +707,19 @@ final class TestDuckLakeInlinedData
         return new JdbcDuckLakeMetastore(
                 () -> DriverManager.getConnection(catalog.jdbcUrl(), USER, PASSWORD),
                 new DuckLakeConfig());
+    }
+
+    private String addFiles(String table, String importId, String options, String... files)
+    {
+        String locations = Arrays.stream(files)
+                .map(file -> "'local:///" + catalog.dataPath().relativize(Path.of(file)) + "'")
+                .collect(joining(", "));
+        return "ALTER TABLE %s EXECUTE add_files(files => ARRAY[%s], import_id => '%s'%s)".formatted(table, locations, importId, options);
+    }
+
+    private static String rangeOptions(String start, String end)
+    {
+        return ", replace_range_column => 'i', replace_range_start => '%s', replace_range_end => '%s'".formatted(start, end);
     }
 
     private void assertMatchesDuckDb(@Language("SQL") String sql)

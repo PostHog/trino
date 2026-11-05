@@ -19,7 +19,10 @@ import com.google.common.collect.ImmutableSet;
 import com.google.inject.Inject;
 import io.trino.plugin.ducklake.metastore.DuckLakeDataFileEntry;
 import io.trino.plugin.ducklake.metastore.DuckLakeDeleteFileEntry;
+import io.trino.plugin.ducklake.metastore.DuckLakeDeletions;
 import io.trino.plugin.ducklake.metastore.DuckLakeFileColumnStats;
+import io.trino.plugin.ducklake.metastore.DuckLakeInlinedData;
+import io.trino.plugin.ducklake.metastore.DuckLakeInlinedDataTable;
 import io.trino.plugin.ducklake.metastore.DuckLakeNameMapping;
 import io.trino.plugin.ducklake.metastore.JdbcDuckLakeMetastore;
 import io.trino.plugin.ducklake.util.DuckLakeColumns;
@@ -33,6 +36,7 @@ import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.SourcePage;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.type.Type;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 
 import java.io.IOException;
@@ -48,6 +52,7 @@ import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_COMMIT_CONFLICT;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_FILESYSTEM_ERROR;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
+import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_METASTORE_ERROR;
 import static io.trino.plugin.ducklake.DuckLakeSessionProperties.isFileStatisticsPruningEnabled;
 import static io.trino.spi.StandardErrorCode.EXCEEDED_LOCAL_MEMORY_LIMIT;
 import static io.trino.spi.StandardErrorCode.USER_CANCELED;
@@ -76,13 +81,68 @@ public final class DuckLakeRangeReplacement
         this.pageSources = requireNonNull(pageSources, "pageSources is null");
     }
 
-    public record Plan(Set<Long> wholeFiles, Map<Long, LongOpenHashSet> positions)
+    /**
+     * @param wholeFiles the data files to end
+     * @param positions the positions to delete, by data file. They leave out the positions a
+     *         delete file or an inline deletion already deletes.
+     * @param inlinedDeletions the positions DuckDB deleted inline, by data file, for the data files
+     *         to end or to delete positions of. They stay in the catalog database and keep
+     *         applying to a data file for as long as it is visible, so a new delete file does not
+     *         repeat them.
+     */
+    public record Plan(Set<Long> wholeFiles, Map<Long, LongOpenHashSet> positions, Map<Long, long[]> inlinedDeletions)
     {
         public Plan
         {
             wholeFiles = ImmutableSet.copyOf(wholeFiles);
             positions = ImmutableMap.copyOf(positions);
+            inlinedDeletions = ImmutableMap.copyOf(inlinedDeletions);
         }
+    }
+
+    /**
+     * Whether the table holds rows inlined in the catalog database, visible in the snapshot, with
+     * a value of the range column inside the range. A replacement cannot remove such rows. Rows
+     * outside the range stay as they are, so they do not stand in its way.
+     * <p>
+     * Call this before {@link #plan}. DuckDB flushes inlined rows to a data file registered under
+     * the snapshots the rows were written in, so a row this check misses because a flush moved it
+     * is in a data file the plan lists. A flush committed while the rows are read fails the read.
+     */
+    public boolean hasInlinedRowsInRange(DuckLakeTableHandle table, DuckLakeReplacementRange replacement)
+    {
+        DuckLakeInlinedData inlinedData = metastore.inlinedData(table.snapshotId(), table.tableId());
+        Domain range = replacement.domain();
+        Type type = replacement.column().type();
+        for (DuckLakeInlinedDataTable inlinedTable : inlinedData.tables()) {
+            DuckLakeInlinedSplit split = new DuckLakeInlinedSplit(
+                    table.schemaName(),
+                    table.tableName(),
+                    table.tableId(),
+                    table.snapshotId(),
+                    inlinedData.watermarkSnapshotId(),
+                    inlinedTable.tableName(),
+                    inlinedTable.columns());
+            try (ConnectorPageSource source = new DuckLakeInlinedPageSource(metastore, split, ImmutableList.of(replacement.column()))) {
+                while (!source.isFinished()) {
+                    checkInterrupted();
+                    SourcePage page = source.getNextSourcePage();
+                    if (page == null) {
+                        continue;
+                    }
+                    Block values = page.getBlock(0);
+                    for (int position = 0; position < page.getPositionCount(); position++) {
+                        if (range.includesNullableValue(readNativeValue(type, values, position))) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch (IOException e) {
+                throw new TrinoException(DUCKLAKE_METASTORE_ERROR, "Could not read inlined rows for range replacement", e);
+            }
+        }
+        return false;
     }
 
     public Plan plan(ConnectorSession session, DuckLakeTableHandle table, DuckLakeReplacementRange replacement)
@@ -93,10 +153,13 @@ public final class DuckLakeRangeReplacement
             statistics = metastore.fileColumnStats(table.snapshotId(), table.tableId(), Set.of(replacement.column().columnId())).stream()
                     .collect(toImmutableMap(DuckLakeFileColumnStats::dataFileId, value -> value));
         }
-        Map<Long, DuckLakeDeleteFileEntry> deletions = metastore.deleteFiles(table.snapshotId(), table.tableId()).stream()
+        // delete files and inline deletions read from one state of the catalog; see DuckLakeDeletions
+        DuckLakeDeletions allDeletions = metastore.deletions(table.snapshotId(), table.tableId());
+        Map<Long, DuckLakeDeleteFileEntry> deletions = allDeletions.deleteFiles().stream()
                 .collect(toImmutableMap(DuckLakeDeleteFileEntry::dataFileId, value -> value, (first, _) -> {
                     throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Multiple delete files are visible for data file %s of table %s".formatted(first.dataFileId(), table.schemaTableName()));
                 }));
+        Map<Long, long[]> inlinedDeletions = allDeletions.inlinedDeletions();
         Map<Long, DuckLakeNameMapping> mappings = DuckLakePageSourceProvider.withNestedReadTypes(
                 metastore.nameMappings(files.stream()
                         .filter(file -> file.mappingId().isPresent()).map(file -> file.mappingId().orElseThrow()).collect(toImmutableSet())),
@@ -104,6 +167,7 @@ public final class DuckLakeRangeReplacement
         Domain range = replacement.domain();
         ImmutableSet.Builder<Long> wholeFiles = ImmutableSet.builder();
         Map<Long, LongOpenHashSet> positions = new LinkedHashMap<>();
+        ImmutableMap.Builder<Long, long[]> plannedInlinedDeletions = ImmutableMap.builder();
         long totalPositions = 0;
         for (DuckLakeDataFileEntry file : files) {
             checkInterrupted();
@@ -111,6 +175,7 @@ public final class DuckLakeRangeReplacement
             if (file.partialMax().orElse(0) > table.snapshotId() || (deletion != null && deletion.partialMax().orElse(0) > table.snapshotId())) {
                 throw new TrinoException(DUCKLAKE_COMMIT_CONFLICT, "Files changed while planning range replacement; run the statement again");
             }
+            Optional<long[]> inlined = Optional.ofNullable(inlinedDeletions.get(file.dataFileId()));
             DuckLakeFileColumnStats stats = statistics.get(file.dataFileId());
             Optional<Domain> fileDomain = Optional.ofNullable(stats)
                     .flatMap(value -> DuckLakeSplitManager.statisticsDomain(replacement.column().type(), value, file.recordCount()));
@@ -120,16 +185,18 @@ public final class DuckLakeRangeReplacement
                 }
                 if (range.contains(fileDomain.orElseThrow())) {
                     wholeFiles.add(file.dataFileId());
+                    inlined.ifPresent(value -> plannedInlinedDeletions.put(file.dataFileId(), value));
                     continue;
                 }
             }
-            LongOpenHashSet removed = readBoundary(session, table, replacement, file, Optional.ofNullable(deletion), mappings, MAX_BOUNDARY_POSITIONS - totalPositions);
+            LongOpenHashSet removed = readBoundary(session, table, replacement, file, Optional.ofNullable(deletion), inlined, mappings, MAX_BOUNDARY_POSITIONS - totalPositions);
             if (!removed.isEmpty()) {
                 positions.put(file.dataFileId(), removed);
+                inlined.ifPresent(value -> plannedInlinedDeletions.put(file.dataFileId(), value));
                 totalPositions += removed.size();
             }
         }
-        return new Plan(wholeFiles.build(), positions);
+        return new Plan(wholeFiles.build(), positions, plannedInlinedDeletions.buildOrThrow());
     }
 
     private LongOpenHashSet readBoundary(
@@ -138,6 +205,7 @@ public final class DuckLakeRangeReplacement
             DuckLakeReplacementRange replacement,
             DuckLakeDataFileEntry file,
             Optional<DuckLakeDeleteFileEntry> deletion,
+            Optional<long[]> inlinedDeletions,
             Map<Long, DuckLakeNameMapping> mappings,
             long remainingPositions)
     {
@@ -169,7 +237,12 @@ public final class DuckLakeRangeReplacement
                 deleteFile,
                 file.partitionValues(),
                 mapping,
-                SplitWeight.standard());
+                SplitWeight.standard(),
+                Optional.empty(),
+                Optional.empty(),
+                // a position already deleted inline must stay out of the new delete file, see
+                // DuckLakeMetadata.rewriteDeleteFiles
+                inlinedDeletions.map(DuckLakeInlinedDeletions::new));
         Domain range = replacement.domain();
         DuckLakeTableHandle filteredTable = new DuckLakeTableHandle(
                 table.schemaName(),
