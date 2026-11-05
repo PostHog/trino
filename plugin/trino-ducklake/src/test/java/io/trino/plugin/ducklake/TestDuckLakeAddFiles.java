@@ -59,6 +59,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DecimalType.createDecimalType;
@@ -889,6 +890,67 @@ final class TestDuckLakeAddFiles
         }
     }
 
+    @Test
+    void testRangeReplacementEndsFilesWithoutNullCountsThatLieInsideTheRange()
+            throws Exception
+    {
+        String table = "range_unknown_nulls_" + randomNameSuffix();
+        String inside = catalog.externalParquetFile(table + "/inside");
+        String nullCounts = catalog.externalParquetFile(table + "/null_counts");
+        String required = catalog.externalParquetFile(table + "/required");
+        String withNull = catalog.externalParquetFile(table + "/with_null");
+        String partly = catalog.externalParquetFile(table + "/partly");
+        String replacement = catalog.externalParquetFile(table + "/replacement");
+        catalog.executeInDuckDb(
+                // more rows than a replacement deletes by position, and a NULL row deleted below
+                "COPY (SELECT i::INTEGER id FROM range(100, 5000101) t(i) UNION ALL SELECT NULL) TO '%s' (FORMAT PARQUET)".formatted(inside),
+                "COPY (SELECT i::INTEGER id FROM range(100, 200) t(i)) TO '%s' (FORMAT PARQUET)".formatted(nullCounts),
+                "COPY (SELECT 150::INTEGER id UNION ALL SELECT NULL) TO '%s' (FORMAT PARQUET)".formatted(withNull),
+                "COPY (SELECT 50::INTEGER id UNION ALL SELECT 150 UNION ALL SELECT 30000000) TO '%s' (FORMAT PARQUET)".formatted(partly),
+                "COPY (SELECT 160::INTEGER id) TO '%s' (FORMAT PARQUET)".formatted(replacement));
+        writeParquet(
+                required,
+                Types.buildMessage().addField(Types.primitive(INT32, REQUIRED).as(LogicalTypeAnnotation.intType(32, true)).named("id")).named("schema"),
+                ImmutableMap.of(ImmutableList.of("id"), INTEGER),
+                new Page(block(INTEGER, 120L, 180L)));
+        // like ClickHouse, keep the bounds of a column that cannot hold a NULL but leave out its null count
+        rewriteFooter(required, metadata -> metadata.getRow_groups().forEach(rowGroup -> rowGroup.getColumns().forEach(chunk -> chunk.getMeta_data().getStatistics().unsetNull_count())));
+        // without null counts in its footer, only the visible rows of the file show that it holds no NULL
+        rewriteFooter(inside, metadata -> metadata.getRow_groups().forEach(rowGroup -> rowGroup.getColumns().forEach(chunk -> chunk.getMeta_data().getStatistics().unsetNull_count())));
+        // the footers alone must settle these files, because a read of their pages fails
+        corruptDataPages(nullCounts);
+        corruptDataPages(required);
+        assertUpdate("CREATE TABLE " + table + " (id INTEGER)");
+        try {
+            catalog.executeInDuckDb(
+                    "CALL ducklake_add_data_files('lake', '%s', '%s')".formatted(table, inside),
+                    "DELETE FROM %s WHERE id IS NULL".formatted(table));
+            catalog.executeInDuckDb(Stream.of(nullCounts, required, withNull, partly)
+                    .map(file -> "CALL ducklake_add_data_files('lake', '%s', '%s')".formatted(table, file))
+                    .toArray(String[]::new));
+            // DuckDB records no null count for the files it registers
+            catalog.executeInMetastore("UPDATE ducklake_file_column_stats SET null_count = NULL WHERE table_id = (SELECT table_id FROM ducklake_table WHERE table_name = '%s' AND end_snapshot IS NULL)".formatted(table));
+            assertQueryFails("SELECT sum(id) FROM " + table, "Failed to read Parquet file: .*");
+
+            assertUpdate(replaceRange(table, "replace", "id", "100", "20000000", location(replacement)));
+            assertQuery("SELECT id FROM " + table, "VALUES 50, 160, 30000000, CAST(NULL AS INTEGER)");
+            assertThat(catalog.rows("SELECT id::VARCHAR FROM " + table + " ORDER BY id NULLS LAST")).containsExactly("50", "160", "30000000", "<null>");
+            // the files inside the range end whole, and the others keep their rows outside it
+            assertThat(catalog.rows(
+                    """
+                    SELECT regexp_extract(f.path, '([a-z_]+)/[^/]+$', 1) || ':' || coalesce(d.delete_count::VARCHAR, '-')
+                    FROM __ducklake_metadata_lake.ducklake_data_file f
+                    JOIN __ducklake_metadata_lake.ducklake_table t ON t.table_id = f.table_id
+                    LEFT JOIN __ducklake_metadata_lake.ducklake_delete_file d ON d.data_file_id = f.data_file_id AND d.end_snapshot IS NULL
+                    WHERE t.table_name = '%s' AND f.end_snapshot IS NULL
+                    ORDER BY 1""".formatted(table)))
+                    .containsExactly("partly:1", "replacement:-", "with_null:1");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
     private static Block block(Type type, Object... values)
     {
         BlockBuilder builder = type.createBlockBuilder(null, values.length);
@@ -926,6 +988,19 @@ final class TestDuckLakeAddFiles
         rewritten.write(ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(footer.size()).array());
         rewritten.write("PAR1".getBytes(StandardCharsets.UTF_8));
         Files.write(Path.of(file), rewritten.toByteArray());
+    }
+
+    /**
+     * Overwrites everything between the leading magic and the footer of a Parquet file, so that
+     * a read of any page fails while the footer stays readable.
+     */
+    private static void corruptDataPages(String file)
+            throws IOException
+    {
+        byte[] bytes = Files.readAllBytes(Path.of(file));
+        int footerLength = ByteBuffer.wrap(bytes, bytes.length - 8, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+        Arrays.fill(bytes, 4, bytes.length - 8 - footerLength, (byte) 0xFF);
+        Files.write(Path.of(file), bytes);
     }
 
     /**

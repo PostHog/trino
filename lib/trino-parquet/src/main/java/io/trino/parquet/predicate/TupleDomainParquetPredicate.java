@@ -165,6 +165,10 @@ public class TupleDomainParquetPredicate
                     columnStatistics,
                     id,
                     timeZone);
+            if (column.getMaxDefinitionLevel() == 0 && !columnStatistics.isNumNullsSet()) {
+                // writers like ClickHouse leave out the null count of a column that cannot hold a NULL
+                domain = Domain.create(domain.getValues(), false);
+            }
             if (!effectivePredicateDomain.overlaps(domain)) {
                 return Optional.empty();
             }
