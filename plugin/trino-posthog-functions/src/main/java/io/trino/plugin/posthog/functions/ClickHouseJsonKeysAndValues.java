@@ -24,6 +24,7 @@ import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.RowBlockBuilder;
 import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Int128;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
@@ -49,12 +50,14 @@ import static java.lang.Float.floatToRawIntBits;
  */
 final class ClickHouseJsonKeysAndValues
 {
+    private static final DecimalType UINT64_TYPE = createDecimalType(20, 0);
+
     enum Target
     {
         FLOAT64(DOUBLE),
         FLOAT32(REAL),
         INTEGER(BIGINT),
-        UINT64(createDecimalType(20, 0)),
+        UINT64(UINT64_TYPE),
         BOOL(BOOLEAN),
         STRING(VARCHAR);
 
@@ -519,7 +522,7 @@ final class ClickHouseJsonKeysAndValues
                 case FLOAT64 -> DOUBLE.writeDouble(builder, Double.longBitsToDouble(value));
                 case FLOAT32 -> REAL.writeLong(builder, value);
                 case INTEGER -> BIGINT.writeLong(builder, value);
-                case UINT64 -> createDecimalType(20, 0).writeObject(builder, Int128.valueOf(0, value));
+                case UINT64 -> UINT64_TYPE.writeObject(builder, Int128.valueOf(0, value));
                 case BOOL -> BOOLEAN.writeBoolean(builder, value != 0);
                 case STRING -> VARCHAR.writeSlice(builder, strings.get(index));
             }

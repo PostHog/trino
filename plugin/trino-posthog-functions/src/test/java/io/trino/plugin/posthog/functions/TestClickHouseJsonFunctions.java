@@ -27,6 +27,9 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.math.BigDecimal;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
@@ -36,6 +39,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.fail;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
 @TestInstance(PER_CLASS)
@@ -74,9 +78,20 @@ public class TestClickHouseJsonFunctions
         assertThat(lines).hasSizeGreaterThan(900);
 
         List<String> mismatches = new ArrayList<>();
-        for (String line : lines) {
-            String[] fields = line.split("\t", -1);
+        for (int lineNumber = 1; lineNumber <= lines.size(); lineNumber++) {
+            String[] fields = lines.get(lineNumber - 1).split("\t", -1);
             String type = fields[0];
+            // from_utf8 replaces invalid bytes with U+FFFD, so a document that is not valid UTF-8
+            // would be tested against different text than ClickHouse parsed.
+            try {
+                UTF_8.newDecoder()
+                        .onMalformedInput(CodingErrorAction.REPORT)
+                        .onUnmappableCharacter(CodingErrorAction.REPORT)
+                        .decode(ByteBuffer.wrap(HexFormat.of().parseHex(fields[2])));
+            }
+            catch (CharacterCodingException e) {
+                fail("Document on line %s (%s %s) is not valid UTF-8".formatted(lineNumber, type, fields[1]), e);
+            }
             String document = "from_utf8(from_hex('" + fields[2] + "'))";
             List<?> actual = (List<?>) assertions.execute("SELECT " + call(type, document, fields[1])).getOnlyValue();
             List<List<Object>> expected = new ArrayList<>();
