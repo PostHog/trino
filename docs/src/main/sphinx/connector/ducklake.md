@@ -410,7 +410,8 @@ For an atomic replacement of the entire table contents, also pass
 `replace => true`. The caller additionally needs delete permission. An empty
 `files => ARRAY[]` with this option clears the table. Replacement preserves the
 table identity, schema, properties, and prior snapshots. Tables holding inlined
-rows or inlined deletions must be flushed with DuckDB before replacement.
+rows must be flushed with DuckDB before replacement. Inlined deletions do not
+block it, because replacement ends every data file they apply to.
 
 To replace a half-open interval atomically, specify all three range options
 instead of `replace`:
@@ -428,8 +429,11 @@ ALTER TABLE example.default.events EXECUTE add_files(
 The interval is `start <= column < end`; existing `NULL` values and rows outside
 it are preserved. The bounds use the column type's catalog string format. The
 range must name an exactly ordered top-level scalar column, which excludes
-`REAL`, `DOUBLE`, and nested types, and the start must be less than the end. Range replacement requires delete permission and a table
-without inlined rows or inlined deletions. An empty file list clears just the
+`REAL`, `DOUBLE`, and nested types, and the start must be less than the end. Range replacement requires delete permission.
+It fails on a table holding inlined rows inside the interval, which must be
+flushed with DuckDB first. Inlined rows outside the interval stay as they are,
+and so do inlined deletions, which keep applying to the data files the
+replacement keeps. An empty file list clears just the
 interval. `replace` and range options cannot be combined.
 
 Every nonempty replacement file must have footer statistics or path constants
