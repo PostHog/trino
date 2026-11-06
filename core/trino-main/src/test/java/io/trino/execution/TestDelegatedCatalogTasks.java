@@ -60,6 +60,7 @@ import org.junit.jupiter.api.TestInstance;
 
 import java.net.URI;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -71,6 +72,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
+import static com.google.common.util.concurrent.Uninterruptibles.sleepUninterruptibly;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.execution.querystats.PlanOptimizersStatsCollector.createPlanOptimizersStatsCollector;
@@ -258,6 +260,86 @@ public class TestDelegatedCatalogTasks
         assertTrinoExceptionThrownBy(() -> getFutureValue(createTask.execute(createCatalog(true), stateMachine(), emptyList(), WarningCollector.NOOP)))
                 .hasErrorCode(CATALOG_NOT_AVAILABLE);
         assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofMillis(3_000));
+    }
+
+    @Test
+    public void testDeadlinesHoldWhileEveryPollThreadIsBlocked()
+    {
+        // More stalled visibility answers than there are poll threads
+        publish(new CatalogName(CATALOG));
+        store.visibleEverywhere = (_, _) -> {
+            sleepUninterruptibly(Duration.ofSeconds(4));
+            return true;
+        };
+        DelegatedCatalogMutations mutations = new DelegatedCatalogMutations(Optional.empty(), catalogManager, new AllowAllAccessControl(), _ -> ImmutableSet.of(), Duration.ofMillis(20));
+        store.visibilityTimeout = Duration.ofSeconds(1);
+        try {
+            QueryStateMachine stateMachine = stateMachine();
+            long start = System.nanoTime();
+            List<ListenableFuture<Void>> waits = new ArrayList<>();
+            for (int i = 0; i < 6; i++) {
+                waits.add(mutations.awaitCreated(stateMachine, new CatalogName(CATALOG), true, store));
+            }
+            // A wait whose first check never got a thread fails as not yet available here; either
+            // way every wait ends at its own deadline
+            for (ListenableFuture<Void> wait : waits) {
+                assertTrinoExceptionThrownBy(() -> getFutureValue(wait))
+                        .hasErrorCode(CATALOG_NOT_AVAILABLE);
+            }
+            assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofMillis(3_000));
+        }
+        finally {
+            mutations.stop();
+        }
+    }
+
+    @Test
+    public void testTheTimeoutMakesNoAccessCheck()
+    {
+        // Access control that stalls once the deadline nears: the timeout must not wait on it
+        CatalogName catalogName = new CatalogName(CATALOG);
+        publish(catalogName);
+        AtomicInteger checks = new AtomicInteger();
+        AccessControl stalling = new AllowAllAccessControl()
+        {
+            @Override
+            public Set<String> filterCatalogs(SecurityContext context, Set<String> catalogs)
+            {
+                if (checks.incrementAndGet() > 1) {
+                    sleepUninterruptibly(Duration.ofSeconds(4));
+                }
+                return catalogs;
+            }
+        };
+        store.visibleEverywhere = (_, _) -> false;
+        store.visibilityTimeout = Duration.ofSeconds(1);
+        DelegatedCatalogMutations mutations = new DelegatedCatalogMutations(Optional.empty(), catalogManager, stalling, _ -> ImmutableSet.of(), Duration.ofMillis(20));
+        try {
+            long start = System.nanoTime();
+            assertTrinoExceptionThrownBy(() -> getFutureValue(mutations.awaitCreated(stateMachine(), catalogName, true, store)))
+                    .hasErrorCode(CATALOG_NOT_AVAILABLE)
+                    .hasMessage("Catalog '%s' is available on this coordinator but not yet on every coordinator; retry the statement shortly", CATALOG);
+            assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofMillis(3_000));
+        }
+        finally {
+            mutations.stop();
+        }
+    }
+
+    @Test
+    public void testDropObservedJustBeforeTheDeadlineSucceeds()
+    {
+        CatalogName catalogName = new CatalogName(CATALOG);
+        publish(catalogName);
+        // The polls run every 400ms, so the removal at 950ms is first seen by the final check
+        DelegatedCatalogMutations mutations = new DelegatedCatalogMutations(Optional.empty(), catalogManager, new AllowAllAccessControl(), _ -> ImmutableSet.of(), Duration.ofMillis(400));
+        try {
+            publisher.schedule(() -> catalogManager.removePublishedCatalog(catalogName), 950, MILLISECONDS);
+            getFutureValue(mutations.awaitDropped(stateMachine(), catalogName, Duration.ofSeconds(1)));
+        }
+        finally {
+            mutations.stop();
+        }
     }
 
     @Test

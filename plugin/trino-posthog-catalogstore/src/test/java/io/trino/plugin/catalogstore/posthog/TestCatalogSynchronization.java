@@ -614,7 +614,8 @@ final class TestCatalogSynchronization
             assertThat(visibilityRequests.getFirst())
                     .isEqualTo(Map.of("user", coordinator.getDefaultSession().getUser(), "catalog", "ext_tenant__warehouse"));
 
-            // Once it is here, IF NOT EXISTS is answered locally
+            // Once it is here, IF NOT EXISTS sends no create request: it only asks whether the
+            // catalog is visible everywhere
             coordinator.execute("CREATE CATALOG IF NOT EXISTS ext_tenant__warehouse USING tpch WITH (\"tpch.splits-per-node\" = '3')");
             assertThat(requests).hasSize(1);
 

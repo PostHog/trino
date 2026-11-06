@@ -35,15 +35,19 @@ import java.time.Duration;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 import static com.google.common.util.concurrent.Futures.immediateFailedFuture;
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
+import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.trino.spi.StandardErrorCode.CATALOG_NOT_AVAILABLE;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newScheduledThreadPool;
+import static java.util.concurrent.Executors.newSingleThreadScheduledExecutor;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
 /**
@@ -60,6 +64,7 @@ public class DelegatedCatalogMutations
 
     @VisibleForTesting
     static final Duration POLL_INTERVAL = Duration.ofMillis(500);
+    private static final Duration FINAL_CHECK_MARGIN = Duration.ofMillis(20);
 
     private final Optional<CatalogStoreManager> catalogStoreManager;
     private final CatalogManager catalogManager;
@@ -68,6 +73,9 @@ public class DelegatedCatalogMutations
     private final Duration pollInterval;
     // Each poll can call access control, which may be remote, so waits do not share one thread
     private final ScheduledExecutorService executor = newScheduledThreadPool(4, daemonThreadsNamed("delegated-catalog-wait-%s"));
+    // Deadlines run apart from the polls and never call out, so checks that block, even enough of
+    // them to occupy every poll thread, cannot delay a statement's timeout
+    private final ScheduledExecutorService deadlines = newSingleThreadScheduledExecutor(daemonThreadsNamed("delegated-catalog-deadline-%s"));
 
     @Inject
     public DelegatedCatalogMutations(Optional<CatalogStoreManager> catalogStoreManager, CatalogManager catalogManager, AccessControl accessControl, GroupProvider groupProvider)
@@ -89,6 +97,7 @@ public class DelegatedCatalogMutations
     public void stop()
     {
         executor.shutdownNow();
+        deadlines.shutdownNow();
     }
 
     /**
@@ -148,17 +157,26 @@ public class DelegatedCatalogMutations
         if (!changed && catalogManager.getCatalog(catalogName).map(Catalog::isFailed).orElse(false)) {
             return immediateFailedFuture(new TrinoException(CATALOG_NOT_AVAILABLE, "Catalog '%s' exists but failed to load on this coordinator".formatted(catalogName)));
         }
+        // Whether a check has seen the catalog usable here. The timeout reads this rather than
+        // asking access control again, which may be remote
+        AtomicBoolean seenLocally = new AtomicBoolean();
         // The store's answer can be a remote call, so no check runs on the statement's own thread
         return await(
                 stateMachine,
-                () -> isAvailable(session, catalogName) && store.isVisibleEverywhere(session.getIdentity(), catalogName),
+                () -> {
+                    if (!isAvailable(session, catalogName)) {
+                        return false;
+                    }
+                    seenLocally.set(true);
+                    return store.isVisibleEverywhere(session.getIdentity(), catalogName);
+                },
                 false,
                 store.visibilityTimeout(),
                 () -> {
                     if (catalogManager.getCatalog(catalogName).map(Catalog::isFailed).orElse(false)) {
                         return new TrinoException(CATALOG_NOT_AVAILABLE, "Catalog '%s' was accepted but failed to load on this coordinator".formatted(catalogName));
                     }
-                    if (holds(() -> isAvailable(session, catalogName))) {
+                    if (seenLocally.get()) {
                         return new TrinoException(CATALOG_NOT_AVAILABLE, "Catalog '%s' is available on this coordinator but not yet on every coordinator; retry the statement shortly".formatted(catalogName));
                     }
                     return new TrinoException(CATALOG_NOT_AVAILABLE, "Catalog '%s' was accepted but is not yet available on this coordinator; retry the statement shortly".formatted(catalogName));
@@ -196,10 +214,11 @@ public class DelegatedCatalogMutations
 
     /**
      * Polls the condition until it holds, or fails with the timeout failure once the deadline has
-     * passed. The deadline is fixed before the first check and enforced on its own, so a check that
-     * blocks, such as a slow remote call, cannot extend the wait, and an answer that arrives after
-     * the deadline does not count. A check runs on the caller's thread only when {@code checkInline}
-     * is set.
+     * passed. The deadline is fixed before the first check and enforced by its own task, on a
+     * thread no check uses, so a check that blocks, such as a slow remote call, cannot extend the
+     * wait. A check counts only if it started before the deadline. The timeout failure must not
+     * call out: it runs on the deadline thread. A check runs on the caller's thread only when
+     * {@code checkInline} is set.
      */
     private ListenableFuture<Void> await(QueryStateMachine stateMachine, BooleanSupplier condition, boolean checkInline, Duration timeout, Supplier<TrinoException> timeoutFailure)
     {
@@ -216,11 +235,6 @@ public class DelegatedCatalogMutations
             }
         });
 
-        Runnable expire = () -> {
-            if (!result.isDone()) {
-                result.setException(timeoutFailure.get());
-            }
-        };
         Runnable check = new Runnable()
         {
             @Override
@@ -230,17 +244,20 @@ public class DelegatedCatalogMutations
                     return;
                 }
                 try {
-                    boolean satisfied = holds(condition);
-                    long remaining = deadline - System.nanoTime();
-                    if (remaining <= 0) {
-                        expire.run();
+                    if (deadline - System.nanoTime() <= 0) {
+                        // The deadline task completes the statement
                         return;
                     }
-                    if (satisfied) {
+                    if (holds(condition)) {
                         result.set(null);
                         return;
                     }
-                    executor.schedule(this, Math.min(pollInterval.toNanos(), remaining), NANOSECONDS);
+                    // The last check runs just before the deadline, so a change that lands then
+                    // still counts rather than racing the deadline task
+                    long remaining = deadline - System.nanoTime() - FINAL_CHECK_MARGIN.toNanos();
+                    if (remaining > 0) {
+                        executor.schedule(this, Math.min(pollInterval.toNanos(), remaining), NANOSECONDS);
+                    }
                 }
                 catch (Throwable e) {
                     result.setException(e);
@@ -249,8 +266,14 @@ public class DelegatedCatalogMutations
         };
         try {
             long remaining = Math.max(deadline - System.nanoTime(), 0);
-            executor.schedule(expire, remaining, NANOSECONDS);
-            executor.schedule(check, checkInline ? Math.min(pollInterval.toNanos(), remaining) : 0, NANOSECONDS);
+            ScheduledFuture<?> expiry = deadlines.schedule(() -> {
+                if (!result.isDone()) {
+                    result.setException(timeoutFailure.get());
+                }
+            }, remaining, NANOSECONDS);
+            // A wait that ends early releases its deadline, and the session it holds
+            result.addListener(() -> expiry.cancel(false), directExecutor());
+            executor.schedule(check, checkInline ? Math.min(pollInterval.toNanos(), Math.max(remaining - FINAL_CHECK_MARGIN.toNanos(), 0)) : 0, NANOSECONDS);
         }
         catch (RuntimeException e) {
             result.setException(e);
