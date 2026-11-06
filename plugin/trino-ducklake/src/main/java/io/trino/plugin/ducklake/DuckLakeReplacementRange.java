@@ -117,6 +117,24 @@ public record DuckLakeReplacementRange(
         }
     }
 
+    /**
+     * Whether a data file could hold a row inside the range, judged from the catalog statistics of
+     * the range column alone. A NULL lies outside every range, so a file whose bounds lie outside
+     * the range holds no row in it, whatever its null count. A file without usable statistics
+     * could hold any value.
+     */
+    public boolean mayHoldRowInRange(long recordCount, Optional<DuckLakeFileColumnStats> statistics)
+    {
+        if (recordCount == 0) {
+            return false;
+        }
+        Domain range = domain();
+        return statistics
+                .flatMap(value -> DuckLakeSplitManager.statisticsDomain(column.type(), value, recordCount))
+                .map(range::overlaps)
+                .orElse(true);
+    }
+
     public void validateImportedFiles(List<DuckLakeFileImporter.ImportedFile> files)
     {
         Domain range = domain();

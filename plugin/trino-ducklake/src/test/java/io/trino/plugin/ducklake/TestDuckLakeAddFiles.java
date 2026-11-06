@@ -18,15 +18,23 @@ import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
 import io.trino.parquet.writer.ParquetWriter;
 import io.trino.parquet.writer.ParquetWriterOptions;
+import io.trino.plugin.base.security.AllowAllAccessControl;
 import io.trino.spi.Page;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.RowBlock;
+import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorTableExecuteHandle;
+import io.trino.spi.connector.ConnectorTableHandle;
+import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.type.Int128;
+import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeUtils;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
+import io.trino.testing.TestingConnectorSession;
 import org.apache.parquet.format.ColumnChunk;
 import org.apache.parquet.format.CompressionCodec;
 import org.apache.parquet.format.FileMetaData;
@@ -36,6 +44,7 @@ import org.apache.parquet.format.Util;
 import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.Types;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.Execution;
 
@@ -49,6 +58,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.SQLException;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -61,9 +71,13 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
+import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_COMMIT_CONFLICT;
+import static io.trino.spi.connector.RetryMode.NO_RETRIES;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
+import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.DELETE_TABLE;
 import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.INSERT_TABLE;
 import static io.trino.testing.TestingAccessControlManager.privilege;
@@ -74,6 +88,7 @@ import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
 import static org.apache.parquet.schema.Type.Repetition.OPTIONAL;
 import static org.apache.parquet.schema.Type.Repetition.REQUIRED;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
 @Execution(SAME_THREAD)
@@ -949,6 +964,233 @@ final class TestDuckLakeAddFiles
         finally {
             assertUpdate("DROP TABLE " + table);
         }
+    }
+
+    /**
+     * DuckDB registers files with ducklake_add_data_files without a null count in the catalog. The
+     * Parquet reader takes no bounds of a timestamp with time zone from the footer, so only what
+     * the footer says about NULLs can place such a file inside the range without a read of its
+     * pages: a null count, or a column that cannot hold a NULL.
+     */
+    @Test
+    void testRangeReplacementSettlesTimestampWithTimeZoneFilesFromTheirFooters()
+            throws Exception
+    {
+        String table = "range_tstz_footers_" + randomNameSuffix();
+        String nullCounts = catalog.externalParquetFile(table + "/null_counts");
+        String required = catalog.externalParquetFile(table + "/required");
+        String withNull = catalog.externalParquetFile(table + "/with_null");
+        String partly = catalog.externalParquetFile(table + "/partly");
+        String replacement = catalog.externalParquetFile(table + "/replacement");
+        catalog.executeInDuckDb(
+                "COPY (SELECT i::INTEGER id, TIMESTAMPTZ '2026-10-21 00:00:00+00' + i * INTERVAL 1 SECOND ts FROM range(100, 1100) t(i)) TO '%s' (FORMAT PARQUET)".formatted(nullCounts),
+                "COPY (SELECT 21::INTEGER id, TIMESTAMPTZ '2026-10-21 03:00:00+00' ts UNION ALL SELECT 22, NULL) TO '%s' (FORMAT PARQUET)".formatted(withNull),
+                "COPY (SELECT 31::INTEGER id, TIMESTAMPTZ '2026-10-20 23:00:00+00' ts UNION ALL SELECT 32, TIMESTAMPTZ '2026-10-21 05:00:00+00') TO '%s' (FORMAT PARQUET)".formatted(partly),
+                "COPY (SELECT 41::INTEGER id, TIMESTAMPTZ '2026-10-21 06:00:00+00' ts) TO '%s' (FORMAT PARQUET)".formatted(replacement));
+        writeParquet(
+                required,
+                Types.buildMessage()
+                        .addField(Types.primitive(INT32, REQUIRED).as(LogicalTypeAnnotation.intType(32, true)).named("id"))
+                        .addField(Types.primitive(INT64, REQUIRED).as(LogicalTypeAnnotation.timestampType(true, LogicalTypeAnnotation.TimeUnit.MICROS)).named("ts"))
+                        .named("schema"),
+                ImmutableMap.of(ImmutableList.of("id"), INTEGER, ImmutableList.of("ts"), TIMESTAMP_TZ_MICROS),
+                new Page(block(INTEGER, 11L, 12L), block(TIMESTAMP_TZ_MICROS, timestampTz("2026-10-21T01:00:00Z"), timestampTz("2026-10-21T23:59:59.999999Z"))));
+        // like ClickHouse, keep the bounds of columns that cannot hold a NULL but leave out their null counts
+        rewriteFooter(required, metadata -> metadata.getRow_groups().forEach(rowGroup -> rowGroup.getColumns().forEach(chunk -> chunk.getMeta_data().getStatistics().unsetNull_count())));
+        // the footers alone must settle these files, because a read of their pages fails
+        corruptDataPages(nullCounts);
+        corruptDataPages(required);
+        catalog.executeInDuckDb("CREATE TABLE %s (id INTEGER, ts TIMESTAMPTZ)".formatted(table));
+        try {
+            catalog.executeInDuckDb(Stream.of(nullCounts, required, withNull, partly)
+                    .map(file -> "CALL ducklake_add_data_files('lake', '%s', '%s')".formatted(table, file))
+                    .toArray(String[]::new));
+            catalog.executeInMetastore("UPDATE ducklake_file_column_stats SET null_count = NULL WHERE table_id = " + tableId(table));
+            assertQueryFails("SELECT sum(id) FROM " + table, "Failed to read Parquet file: .*");
+
+            assertUpdate(replaceRange(table, "day", "ts", "2026-10-21 00:00:00+00", "2026-10-22 00:00:00+00", location(replacement)));
+            assertQuery("SELECT id FROM " + table, "VALUES 22, 31, 41");
+            assertThat(catalog.rows("SELECT id::VARCHAR FROM %s ORDER BY id".formatted(table))).containsExactly("22", "31", "41");
+            assertThat(activeFilesWithDeleteCounts(table)).containsExactly("partly:1", "replacement:-", "with_null:1");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    /**
+     * An appender keeps adding rows of other days to a table while one day of it is replaced. The
+     * replacement lands on top of the appends, because no file they added can hold a row of the
+     * replaced day.
+     */
+    @Test
+    void testRangeReplacementLandsBesideConcurrentAppendsOutsideTheRange()
+            throws Exception
+    {
+        String table = "range_appends_" + randomNameSuffix();
+        String replacement = catalog.externalParquetFile(table + "/replacement");
+        catalog.executeInDuckDb(
+                "CREATE TABLE %s (id INTEGER, ts TIMESTAMPTZ)".formatted(table),
+                "INSERT INTO %s VALUES (1, TIMESTAMPTZ '2026-10-20 23:00:00+00'), (2, TIMESTAMPTZ '2026-10-21 12:00:00+00')".formatted(table),
+                "COPY (SELECT 12::INTEGER id, TIMESTAMPTZ '2026-10-21 13:00:00+00' ts) TO '%s' (FORMAT PARQUET)".formatted(replacement));
+        try {
+            DuckLakeMetadata metadata = newMetadata();
+            ConnectorTableExecuteHandle replace = planDayReplacement(connectorSession(), metadata, table, replacement);
+            catalog.executeInDuckDb(
+                    // the end of the range is excluded, and a NULL lies outside every range
+                    "INSERT INTO %s VALUES (3, TIMESTAMPTZ '2026-10-22 00:00:00+00'), (4, NULL)".formatted(table),
+                    "INSERT INTO %s VALUES (5, TIMESTAMPTZ '2026-10-20 23:59:59.999999+00')".formatted(table));
+            assertThat(metadata.executeTableExecute(connectorSession(), replace)).isEqualTo(ImmutableMap.of("added_data_files", 1L));
+            assertQuery("SELECT id FROM " + table, "VALUES 1, 3, 4, 5, 12");
+            assertThat(catalog.rows("SELECT id::VARCHAR FROM %s ORDER BY id".formatted(table))).containsExactly("1", "3", "4", "5", "12");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    /**
+     * A concurrent commit that may have added rows to the replaced range, or that changed rows or
+     * files of the table, fails the replacement, which leaves the catalog as it was.
+     */
+    @Test
+    void testRangeReplacementFailsOnConcurrentCommitsThatMayChangeTheRange()
+            throws Throwable
+    {
+        String table = "range_conflicts_" + randomNameSuffix();
+        String replacement = catalog.externalParquetFile(table + "/replacement");
+        catalog.executeInDuckDb(
+                "CREATE TABLE %s (id INTEGER, ts TIMESTAMPTZ)".formatted(table),
+                "ALTER TABLE %s SET PARTITIONED BY (year(ts), month(ts), day(ts))".formatted(table),
+                "INSERT INTO %s VALUES (1, TIMESTAMPTZ '2026-10-19 01:00:00+00')".formatted(table),
+                "INSERT INTO %s VALUES (2, TIMESTAMPTZ '2026-10-19 02:00:00+00')".formatted(table),
+                "INSERT INTO %s VALUES (3, TIMESTAMPTZ '2026-10-21 12:00:00+00')".formatted(table),
+                "COPY (SELECT 12::INTEGER id, TIMESTAMPTZ '2026-10-21 13:00:00+00' ts) TO '%s' (FORMAT PARQUET)".formatted(replacement));
+        try {
+            // merges the two files of another day, which the replacement did not read
+            assertDayReplacementConflicts(
+                    table,
+                    replacement,
+                    ".*this statement deleted from object \\d+, but another transaction compacted it",
+                    () -> catalog.executeInDuckDb("CALL ducklake_merge_adjacent_files('lake', '%s')".formatted(table)));
+            assertDayReplacementConflicts(
+                    table,
+                    replacement,
+                    ".*this statement inserted into object \\d+, but another transaction deleted from it",
+                    () -> catalog.executeInDuckDb("DELETE FROM %s WHERE id = 1".formatted(table)));
+            assertDayReplacementConflicts(
+                    table,
+                    replacement,
+                    ".*another transaction inserted into it data file \\d+, which may hold rows in that range",
+                    () -> catalog.executeInDuckDb("INSERT INTO %s VALUES (6, TIMESTAMPTZ '2026-10-21 18:00:00+00')".formatted(table)));
+            // a file without statistics of the range column could hold any value
+            assertDayReplacementConflicts(table, replacement, ".*another transaction inserted into it data file \\d+, which may hold rows in that range", () -> {
+                catalog.executeInDuckDb("INSERT INTO %s VALUES (7, TIMESTAMPTZ '2026-10-23 08:00:00+00')".formatted(table));
+                catalog.executeInMetastore("DELETE FROM ducklake_file_column_stats WHERE data_file_id = (SELECT max(data_file_id) FROM ducklake_data_file WHERE table_id = %s)".formatted(tableId(table)));
+            });
+            // without file statistics pruning, the replacement trusts no statistics, and every concurrent insert conflicts
+            assertDayReplacementConflicts(
+                    connectorSession(ImmutableMap.<String, Object>of("file_statistics_pruning_enabled", false)),
+                    table,
+                    replacement,
+                    ".*this statement deleted from object \\d+, but another transaction inserted into it",
+                    () -> catalog.executeInDuckDb("INSERT INTO %s VALUES (8, TIMESTAMPTZ '2026-10-24 08:00:00+00')".formatted(table)));
+            assertQuery("SELECT id FROM " + table, "VALUES 2, 3, 6, 7, 8");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    private void assertDayReplacementConflicts(String table, String replacement, String message, ThrowingCallable concurrentCommit)
+            throws Throwable
+    {
+        assertDayReplacementConflicts(connectorSession(), table, replacement, message, concurrentCommit);
+    }
+
+    private void assertDayReplacementConflicts(ConnectorSession session, String table, String replacement, String message, ThrowingCallable concurrentCommit)
+            throws Throwable
+    {
+        DuckLakeMetadata metadata = newMetadata();
+        ConnectorTableExecuteHandle replace = planDayReplacement(session, metadata, table, replacement);
+        concurrentCommit.call();
+        List<List<String>> snapshot = catalog.metastoreRows("SELECT max(snapshot_id) FROM ducklake_snapshot");
+        assertThatThrownBy(() -> metadata.executeTableExecute(session, replace))
+                .isInstanceOfSatisfying(TrinoException.class, e -> assertThat(e.getErrorCode()).isEqualTo(DUCKLAKE_COMMIT_CONFLICT.toErrorCode()))
+                .hasMessageMatching(message);
+        assertThat(catalog.metastoreRows("SELECT max(snapshot_id) FROM ducklake_snapshot")).isEqualTo(snapshot);
+    }
+
+    private DuckLakeMetadata newMetadata()
+    {
+        DuckLakeConnector connector = (DuckLakeConnector) getQueryRunner().getCoordinator().getConnector("ducklake");
+        return connector.getInjector().getInstance(DuckLakeMetadataFactory.class).create(connectorSession().getIdentity());
+    }
+
+    private ConnectorSession connectorSession()
+    {
+        return connectorSession(ImmutableMap.of());
+    }
+
+    private ConnectorSession connectorSession(Map<String, Object> properties)
+    {
+        DuckLakeConnector connector = (DuckLakeConnector) getQueryRunner().getCoordinator().getConnector("ducklake");
+        return TestingConnectorSession.builder()
+                .setPropertyMetadata(connector.getSessionProperties())
+                .setPropertyValues(properties)
+                .build();
+    }
+
+    /**
+     * Plans the replacement of the day 2026-10-21 the way the engine does, which pins the metadata
+     * to the snapshot current now. Running it later commits against whatever other writers
+     * committed in between.
+     */
+    private ConnectorTableExecuteHandle planDayReplacement(ConnectorSession session, DuckLakeMetadata metadata, String table, String replacement)
+    {
+        ConnectorTableHandle tableHandle = metadata.getTableHandle(session, new SchemaTableName("main", table), Optional.empty(), Optional.empty());
+        assertThat(tableHandle).isNotNull();
+        return metadata.getTableHandleForExecute(
+                        session,
+                        new AllowAllAccessControl(),
+                        tableHandle,
+                        DuckLakeAddFilesProcedure.NAME,
+                        ImmutableMap.<String, Object>of(
+                                "files", ImmutableList.of(location(replacement)),
+                                "import_id", "day",
+                                "replace", false,
+                                "replace_range_column", "ts",
+                                "replace_range_start", "2026-10-21 00:00:00+00",
+                                "replace_range_end", "2026-10-22 00:00:00+00"),
+                        NO_RETRIES)
+                .orElseThrow();
+    }
+
+    private static String tableId(String table)
+    {
+        return "(SELECT table_id FROM ducklake_table WHERE table_name = '%s' AND end_snapshot IS NULL)".formatted(table);
+    }
+
+    /**
+     * One entry per active data file: the directory of the file, then the number of rows its
+     * delete file deletes, or a dash when it has none.
+     */
+    private List<String> activeFilesWithDeleteCounts(String table)
+    {
+        return catalog.rows(
+                """
+                SELECT regexp_extract(f.path, '([a-z_]+)/[^/]+$', 1) || ':' || coalesce(d.delete_count::VARCHAR, '-')
+                FROM __ducklake_metadata_lake.ducklake_data_file f
+                JOIN __ducklake_metadata_lake.ducklake_table t ON t.table_id = f.table_id
+                LEFT JOIN __ducklake_metadata_lake.ducklake_delete_file d ON d.data_file_id = f.data_file_id AND d.end_snapshot IS NULL
+                WHERE t.table_name = '%s' AND f.end_snapshot IS NULL
+                ORDER BY 1""".formatted(table));
+    }
+
+    private static LongTimestampWithTimeZone timestampTz(String instant)
+    {
+        Instant value = Instant.parse(instant);
+        return LongTimestampWithTimeZone.fromEpochMillisAndFraction(value.toEpochMilli(), (value.getNano() % 1_000_000) * 1_000, UTC_KEY);
     }
 
     private static Block block(Type type, Object... values)

@@ -150,7 +150,9 @@ the result:
 
 * Inserting into a table another writer altered, dropped, or deleted from.
 * Deleting from a table another writer altered, dropped, inserted into, or
-  compacted.
+  compacted. A range replacement with `add_files` conflicts with an insert only
+  when the insert could have added rows inside its interval, as described in
+  [](ducklake-add-files).
 * Altering a table another writer altered or dropped.
 * Dropping a table another writer dropped.
 * Rewriting a data file or a delete file another writer replaced.
@@ -323,6 +325,7 @@ it. As in DuckDB, the table that takes the name is a new table. Nothing of the
 old one carries over, so a comment or a `partitioning` property that the new
 definition does not state is gone.
 
+(ducklake-add-files)=
 ## Registering existing Parquet files
 
 Enable `ducklake.add-files-procedure.enabled=true` in the catalog to register
@@ -449,12 +452,16 @@ covered files without reading their rows. It does so only while file statistics
 pruning is enabled, with `ducklake.file-statistics-pruning.enabled` or the
 `file_statistics_pruning_enabled` session property; otherwise it reads every
 file. A file the catalog statistics do not place still ends whole when all of
-its visible rows are non-NULL and inside the interval. The Parquet footer
-settles this when its row group statistics show it, as for a file DuckDB
-registered with `ducklake_add_data_files`, which has no null count in the
-catalog. The footer is not used while the `parquet_ignore_statistics` session
-property is set. Otherwise the coordinator reads the range column until it finds a
-visible row outside the interval. For boundary files, it then reads only the
+its visible rows are non-NULL and inside the interval. A file DuckDB registered
+with `ducklake_add_data_files` has no null count in the catalog, so when the
+catalog bounds its values inside the interval, only a NULL can lie outside it.
+The Parquet footer then settles the file, for any column type, when its null
+counts or a column that cannot hold a NULL rule one out. Otherwise the footer
+settles a file when its row group statistics show that every row is inside the
+interval. The footer is not used while the `parquet_ignore_statistics` session
+property is set. When the footer does not settle a file, the coordinator reads
+the range column until it finds a visible row outside the interval, or a
+visible NULL. For boundary files, it then reads only the
 range column and row positions using the regular Parquet reader, preserving
 existing positional deletes. It writes new positional delete files for partial removals. Existing
 data files and incoming Parquet objects are not rewritten. Boundary scans run
@@ -463,9 +470,15 @@ deleted boundary positions per invocation. Use smaller intervals or files
 aligned to intervals if these limits are reached.
 
 All removals, new delete-file references, incoming-file references, and the
-receipt commit in one snapshot. A concurrent insert, delete, schema change, or
+receipt commit in one snapshot. A concurrent delete, drop, schema change, or
 compaction of the target table causes a conflict rather than losing the other
-writer's changes; retry the entire statement with the same import ID. As with
+writer's changes; retry the entire statement with the same import ID. A
+concurrent insert causes a conflict only when a data file it added could hold a
+row inside the interval, judged from the catalog statistics of the range column,
+or when it added inlined rows. A file without such statistics causes a conflict,
+and so does every concurrent insert while file statistics pruning is disabled.
+An appender adding rows outside the interval therefore does not stop a
+replacement. As with
 other writes, an unsuccessful attempt may leave unreferenced delete files that
 require orphan cleanup, but it publishes no partial table change. An attempt
 that finds a concurrent retry already applied the import deletes the delete
