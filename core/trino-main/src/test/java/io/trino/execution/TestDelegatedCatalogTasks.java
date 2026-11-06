@@ -259,7 +259,7 @@ public class TestDelegatedCatalogTasks
         long start = System.nanoTime();
         assertTrinoExceptionThrownBy(() -> getFutureValue(createTask.execute(createCatalog(true), stateMachine(), emptyList(), WarningCollector.NOOP)))
                 .hasErrorCode(CATALOG_NOT_AVAILABLE);
-        assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofMillis(3_000));
+        assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(3));
     }
 
     @Test
@@ -286,7 +286,7 @@ public class TestDelegatedCatalogTasks
                 assertTrinoExceptionThrownBy(() -> getFutureValue(wait))
                         .hasErrorCode(CATALOG_NOT_AVAILABLE);
             }
-            assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofMillis(3_000));
+            assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(3));
         }
         finally {
             mutations.stop();
@@ -319,7 +319,7 @@ public class TestDelegatedCatalogTasks
             assertTrinoExceptionThrownBy(() -> getFutureValue(mutations.awaitCreated(stateMachine(), catalogName, true, store)))
                     .hasErrorCode(CATALOG_NOT_AVAILABLE)
                     .hasMessage("Catalog '%s' is available on this coordinator but not yet on every coordinator; retry the statement shortly", CATALOG);
-            assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofMillis(3_000));
+            assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(3));
         }
         finally {
             mutations.stop();
