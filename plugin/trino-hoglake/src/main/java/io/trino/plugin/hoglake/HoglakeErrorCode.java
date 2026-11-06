@@ -66,7 +66,16 @@ public enum HoglakeErrorCode
      * The {@code type_params.shredding} of a VARIANT column is not a valid
      * declaration of a shredded layout.
      */
-    HOGLAKE_INVALID_VARIANT_SHREDDING(7, USER_ERROR);
+    HOGLAKE_INVALID_VARIANT_SHREDDING(7, USER_ERROR),
+    /**
+     * A team's S3 credential could not be obtained, or a split that needs
+     * one carries none.
+     */
+    HOGLAKE_TEAM_CREDENTIAL_UNAVAILABLE(8, EXTERNAL),
+    /**
+     * A data or deletion-vector path is not under its team's prefix.
+     */
+    HOGLAKE_PATH_OUTSIDE_TEAM_PREFIX(9, EXTERNAL);
 
     // Arbitrary plugin-private range; only uniqueness within this
     // connector matters (external plugins pick their own base).

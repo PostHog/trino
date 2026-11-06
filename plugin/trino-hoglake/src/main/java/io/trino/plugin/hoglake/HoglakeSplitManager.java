@@ -17,6 +17,8 @@ import com.google.common.collect.ImmutableList;
 import io.airlift.units.DataSize;
 import io.trino.filesystem.cache.NoopSplitAffinityProvider;
 import io.trino.filesystem.cache.SplitAffinityProvider;
+import io.trino.plugin.hoglake.HoglakeTeamCredentialSource.TeamCredential;
+import io.trino.plugin.hoglake.HoglakeTeamCredentialSource.TeamCredentials;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.SplitWeight;
@@ -29,7 +31,9 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.FixedSplitSource;
+import io.trino.spi.connector.SchemaTableName;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -43,6 +47,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.hoglake.HoglakeConfig.DEFAULT_MAX_SPLIT_SIZE;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
+import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_TEAM_CREDENTIAL_UNAVAILABLE;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -79,6 +84,12 @@ import static java.util.Objects.requireNonNull;
  * checked here is that the scan's pairing is internally consistent, so an
  * inconsistent scan is rejected before any split reaches the engine rather
  * than being papered over per worker.
+ *
+ * <p>With a credential source, every split carries the S3 credential of the
+ * team whose prefix holds its file: one vend per query for the distinct
+ * teams, one shared credential instance per team, and every data and
+ * deletion-vector path checked against its team's prefix before any split
+ * is emitted.
  */
 public class HoglakeSplitManager
         implements ConnectorSplitManager
@@ -90,6 +101,7 @@ public class HoglakeSplitManager
     private final HoglakeClient client;
     private final Function<ConnectorSession, DataSize> maxSplitSize;
     private final SplitAffinityProvider affinityProvider;
+    private final Optional<HoglakeTeamCredentialSource> credentialSource;
 
     /**
      * A split manager with the default target split size and no scheduling
@@ -103,14 +115,15 @@ public class HoglakeSplitManager
 
     public HoglakeSplitManager(HoglakeClient client, Function<ConnectorSession, DataSize> maxSplitSize)
     {
-        this(client, maxSplitSize, new NoopSplitAffinityProvider());
+        this(client, maxSplitSize, new NoopSplitAffinityProvider(), Optional.empty());
     }
 
-    public HoglakeSplitManager(HoglakeClient client, Function<ConnectorSession, DataSize> maxSplitSize, SplitAffinityProvider affinityProvider)
+    public HoglakeSplitManager(HoglakeClient client, Function<ConnectorSession, DataSize> maxSplitSize, SplitAffinityProvider affinityProvider, Optional<HoglakeTeamCredentialSource> credentialSource)
     {
         this.client = requireNonNull(client, "client is null");
         this.maxSplitSize = requireNonNull(maxSplitSize, "maxSplitSize is null");
         this.affinityProvider = requireNonNull(affinityProvider, "affinityProvider is null");
+        this.credentialSource = requireNonNull(credentialSource, "credentialSource is null");
     }
 
     @Override
@@ -128,10 +141,39 @@ public class HoglakeSplitManager
         List<HoglakeDtos.ScanFile> scan = prunedScan(client, handle);
         // The isAll guard is load-bearing: a count over a pushed predicate
         // reads the files, so it keeps byte ranges and file pruning.
-        if (handle.countOnly() && handle.constraint().isAll()) {
-            return new FixedSplitSource(wholeFileSplits(scan, affinityProvider));
+        List<HoglakeSplit> splits = handle.countOnly() && handle.constraint().isAll()
+                ? wholeFileSplits(scan, affinityProvider)
+                : toSplits(scan, maxSplitSize.apply(session).toBytes(), affinityProvider);
+        return new FixedSplitSource(credentialSource.isEmpty() ? splits : withCredentials(credentialSource.get(), session, handle.schemaTableName(), splits));
+    }
+
+    // Any failure, a file outside its team's prefix included, fails planning before a split is emitted.
+    static List<HoglakeSplit> withCredentials(HoglakeTeamCredentialSource source, ConnectorSession session, SchemaTableName table, List<HoglakeSplit> splits)
+    {
+        Map<String, Long> teams = new HashMap<>();
+        splits.forEach(split -> teams.computeIfAbsent(split.path(), path -> source.teamOf(table, path)));
+        if (teams.isEmpty()) {
+            return splits;
         }
-        return new FixedSplitSource(toSplits(scan, maxSplitSize.apply(session).toBytes(), affinityProvider));
+        Set<Long> teamIds = Set.copyOf(teams.values());
+        TeamCredentials vended = source.vend(session, table, teamIds);
+        Map<Long, HoglakeSplitCredential> credentials = new HashMap<>();
+        for (long team : teamIds) {
+            TeamCredential credential = vended.credentials().get(team);
+            if (credential == null) {
+                throw new TrinoException(HOGLAKE_TEAM_CREDENTIAL_UNAVAILABLE, "No S3 credential was vended for team " + team);
+            }
+            credentials.put(team, new HoglakeSplitCredential(
+                    team,
+                    "s3://%s/%s".formatted(vended.bucket(), credential.prefix()),
+                    credential.accessKeyId(),
+                    credential.secretAccessKey(),
+                    credential.sessionToken(),
+                    credential.expiration().toEpochMilli()));
+        }
+        return splits.stream()
+                .map(split -> split.withCredential(credentials.get(teams.get(split.path()))))
+                .collect(toImmutableList());
     }
 
     /**
@@ -385,6 +427,7 @@ public class HoglakeSplitManager
                 dataFile.fileSizeBytes(),
                 SplitWeight.standard(),
                 footerSize,
+                Optional.empty(),
                 Optional.empty());
     }
 }

@@ -1,0 +1,212 @@
+{
+  "source": "hoglake 6896b2c pyhoglake/tests/vectors/object_prefix_vectors.json: every containment_case, and the prefix_cases with col_type long; the bucket renamed to example-bucket",
+  "prefix_cases": [
+    {
+      "data_path": "s3://example-bucket/lake",
+      "namespace": "ingest",
+      "table": "events",
+      "field": "team_id",
+      "col_type": "long",
+      "value": "4",
+      "expected": "s3://example-bucket/lake/data/ingest/events/team_id=4/"
+    },
+    {
+      "data_path": "s3://example-bucket/lake/",
+      "namespace": "ingest",
+      "table": "events",
+      "field": "team_id",
+      "col_type": "long",
+      "value": "4",
+      "expected": "s3://example-bucket/lake/data/ingest/events/team_id=4/"
+    },
+    {
+      "data_path": "s3://example-bucket/lake",
+      "namespace": "ingest",
+      "table": "events",
+      "field": "team_id",
+      "col_type": "long",
+      "value": "0",
+      "expected": "s3://example-bucket/lake/data/ingest/events/team_id=0/"
+    },
+    {
+      "data_path": "s3://example-bucket/lake",
+      "namespace": "ingest",
+      "table": "events",
+      "field": "team_id",
+      "col_type": "long",
+      "value": "42",
+      "expected": "s3://example-bucket/lake/data/ingest/events/team_id=42/"
+    },
+    {
+      "data_path": "s3://example-bucket/lake",
+      "namespace": "ingest",
+      "table": "events",
+      "field": "team_id",
+      "col_type": "long",
+      "value": "9223372036854775807",
+      "expected": "s3://example-bucket/lake/data/ingest/events/team_id=9223372036854775807/"
+    },
+    {
+      "data_path": "s3://example-bucket/lake",
+      "namespace": "ingest",
+      "table": "events",
+      "field": "team_id",
+      "col_type": "long",
+      "value": "9223372036854775808",
+      "error": "invalid_value"
+    },
+    {
+      "data_path": "s3://example-bucket/lake",
+      "namespace": "ingest",
+      "table": "events",
+      "field": "team_id",
+      "col_type": "long",
+      "value": "042",
+      "error": "invalid_value"
+    },
+    {
+      "data_path": "s3://example-bucket/lake",
+      "namespace": "ingest",
+      "table": "events",
+      "field": "team_id",
+      "col_type": "long",
+      "value": "+4",
+      "error": "invalid_value"
+    },
+    {
+      "data_path": "s3://example-bucket/lake",
+      "namespace": "ingest",
+      "table": "events",
+      "field": "team_id",
+      "col_type": "long",
+      "value": "-4",
+      "error": "invalid_value"
+    },
+    {
+      "data_path": "s3://example-bucket/lake",
+      "namespace": "ingest",
+      "table": "events",
+      "field": "team_id",
+      "col_type": "long",
+      "value": "",
+      "error": "invalid_value"
+    },
+    {
+      "data_path": "s3://example-bucket/lake",
+      "namespace": "ingest",
+      "table": "events",
+      "field": "team_id",
+      "col_type": "long",
+      "value": "4 ",
+      "error": "invalid_value"
+    },
+    {
+      "data_path": "s3://example-bucket/lake",
+      "namespace": "ingest",
+      "table": "events",
+      "field": "team_id",
+      "col_type": "long",
+      "value": "4.0",
+      "error": "invalid_value"
+    },
+    {
+      "data_path": "s3://example-bucket/lake",
+      "namespace": "ingest",
+      "table": "events",
+      "field": "team_id",
+      "col_type": "long",
+      "value": "1e3",
+      "error": "invalid_value"
+    },
+    {
+      "data_path": "s3://example-bucket/lake",
+      "namespace": "ingest",
+      "table": "events",
+      "field": "team_id",
+      "col_type": "long",
+      "value": "\u0664\u0662",
+      "error": "invalid_value"
+    },
+    {
+      "data_path": "s3://example-bucket/lake",
+      "namespace": "ingest",
+      "table": "events",
+      "field": "team_id",
+      "col_type": "long",
+      "value": null,
+      "error": "invalid_value"
+    }
+  ],
+  "containment_cases": [
+    {
+      "prefix": "s3://example-bucket/lake/data/ingest/events/team_id=4/",
+      "path": "s3://example-bucket/lake/data/ingest/events/team_id=4/a.parquet",
+      "under": true
+    },
+    {
+      "prefix": "s3://example-bucket/lake/data/ingest/events/team_id=4/",
+      "path": "s3://example-bucket/lake/data/ingest/events/team_id=4/sub/x.puffin",
+      "under": true
+    },
+    {
+      "prefix": "s3://example-bucket/lake/data/ingest/events/team_id=4/",
+      "path": "s3://example-bucket/lake/data/ingest/events/team_id=42/a.parquet",
+      "under": false
+    },
+    {
+      "prefix": "s3://example-bucket/lake/data/ingest/events/team_id=4/",
+      "path": "s3://example-bucket/lake/data/ingest/events/team_id=4x/a.parquet",
+      "under": false
+    },
+    {
+      "prefix": "s3://example-bucket/lake/data/ingest/events/team_id=4/",
+      "path": "s3://example-bucket/lake/data/ingest/events/team_id=4/../team_id=42/a.parquet",
+      "under": false
+    },
+    {
+      "prefix": "s3://example-bucket/lake/data/ingest/events/team_id=4/",
+      "path": "s3://example-bucket/lake/data/ingest/events/team_id=4//a.parquet",
+      "under": false
+    },
+    {
+      "prefix": "s3://example-bucket/lake/data/ingest/events/team_id=4/",
+      "path": "s3://example-bucket/lake/data/ingest/events/team_id=4/%2E%2E/a.parquet",
+      "under": false
+    },
+    {
+      "prefix": "s3://example-bucket/lake/data/ingest/events/team_id=4/",
+      "path": "s3://example-bucket/lake/data/ingest/events/team_id=4/%2f/a.parquet",
+      "under": false
+    },
+    {
+      "prefix": "s3://example-bucket/lake/data/ingest/events/team_id=4/",
+      "path": "s3://example-bucket/lake/data/ingest/events/hoglake-dv-1.puffin",
+      "under": false
+    },
+    {
+      "prefix": "s3://example-bucket/lake/data/ingest/events/team_id=4/",
+      "path": "s3://example-bucket/lake/data/ingest/events/team_id=4/",
+      "under": false
+    },
+    {
+      "prefix": "s3://example-bucket/lake/data/ingest/events/team_id=4/",
+      "path": "s3://example-bucket/lake/data/ingest/events/team_id=4/a b.parquet",
+      "under": false
+    },
+    {
+      "prefix": "s3://example-bucket/lake/data/ingest/events/team_id=4/",
+      "path": "s3://example-bucket/lake/data/ingest/events/team_id=4/a\\b.parquet",
+      "under": false
+    },
+    {
+      "prefix": "s3://example-bucket/lake/data/ingest/events/team_id=4/",
+      "path": "s3://example-bucket/lake/data/ingest/events/team_id=4/./a.parquet",
+      "under": false
+    },
+    {
+      "prefix": "s3://example-bucket/lake/data/ingest/events/team_id=4/",
+      "path": "s3://example-bucket/lake/data/ingest/events/team_id=4/a\u0000.parquet",
+      "under": false
+    }
+  ]
+}

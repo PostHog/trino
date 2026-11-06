@@ -94,6 +94,7 @@ public class HoglakeMetadata
 {
     private final HoglakeClient client;
     private final TrinoFileSystemFactory fileSystemFactory;
+    private final boolean s3WritesRefused;
     private final Map<SchemaTableName, HoglakeDtos.ReplacementTarget> plannedTargets = new ConcurrentHashMap<>();
     private volatile Optional<String> creationOperation = Optional.empty();
     private HoglakeTransactionState transaction;
@@ -105,13 +106,24 @@ public class HoglakeMetadata
 
     public HoglakeMetadata(HoglakeClient client, TrinoFileSystemFactory fileSystemFactory)
     {
+        this(client, fileSystemFactory, false);
+    }
+
+    /**
+     * {@code s3WritesRefused} is set when the catalog reads with per-team
+     * credentials: writes do not go through splits, so they would upload and
+     * read deletion vectors with the catalog's or the pod's credentials.
+     */
+    public HoglakeMetadata(HoglakeClient client, TrinoFileSystemFactory fileSystemFactory, boolean s3WritesRefused)
+    {
         this.client = requireNonNull(client, "client is null");
         this.fileSystemFactory = fileSystemFactory;
+        this.s3WritesRefused = s3WritesRefused;
     }
 
     public HoglakeMetadata newTransaction()
     {
-        return new HoglakeMetadata(client, fileSystemFactory);
+        return new HoglakeMetadata(client, fileSystemFactory, s3WritesRefused);
     }
 
     public HoglakeMetadata newTransaction(boolean autoCommit)
@@ -127,6 +139,13 @@ public class HoglakeMetadata
     {
         if (transaction != null) {
             transaction.commit();
+        }
+    }
+
+    private void checkS3WritesAllowed()
+    {
+        if (s3WritesRefused) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake writes are not supported when hoglake.s3-credentials.source is set");
         }
     }
 
@@ -496,6 +515,7 @@ public class HoglakeMetadata
     @Override
     public ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata metadata, Optional<ConnectorTableLayout> layout, RetryMode retryMode, boolean replace)
     {
+        checkS3WritesAllowed();
         checkAutocommitDdl();
         if (layout.isPresent()) {
             throw new TrinoException(NOT_SUPPORTED, "Custom layouts are not supported");
@@ -601,6 +621,7 @@ public class HoglakeMetadata
     @Override
     public ConnectorInsertTableHandle beginInsert(ConnectorSession session, ConnectorTableHandle tableHandle, List<ColumnHandle> columns, RetryMode retryMode)
     {
+        checkS3WritesAllowed();
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
         HoglakeDtos.Table table = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId()).orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
         List<HoglakeDtos.PartitionField> partitionFields = HoglakePartitioning.read(table.partitionSpec());
@@ -697,6 +718,7 @@ public class HoglakeMetadata
             Map<Integer, Collection<ColumnHandle>> updateCaseColumns,
             RetryMode retryMode)
     {
+        checkS3WritesAllowed();
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
         HoglakeDtos.Table table = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId()).orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
         Optional<String> insertFailure = Optional.empty();

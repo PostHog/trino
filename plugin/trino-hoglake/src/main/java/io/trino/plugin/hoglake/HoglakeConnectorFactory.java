@@ -33,14 +33,18 @@ import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSplitManager;
 import org.weakref.jmx.guice.MBeanModule;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 import static io.trino.plugin.base.Versions.checkStrictSpiVersionMatch;
+import static java.util.Locale.ENGLISH;
 
 public class HoglakeConnectorFactory
         implements ConnectorFactory
 {
+    static final String HOGTOWER_REFUSAL = "hoglake.s3-credentials.source=hogtower requires plan 2.8, hogtower's credential vend";
+
     @Override
     public String getName()
     {
@@ -51,6 +55,7 @@ public class HoglakeConnectorFactory
     public Connector create(String catalogName, Map<String, String> config, ConnectorContext context)
     {
         checkStrictSpiVersionMatch(context, this);
+        checkCredentialSource(HoglakeFileSystemConfig.normalize(config));
         ClassLoader classLoader = getClass().getClassLoader();
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             Injector injector = new Bootstrap(
@@ -73,6 +78,29 @@ public class HoglakeConnectorFactory
                     new ClassLoaderSafeConnectorPageSinkProvider(injector.getInstance(ConnectorPageSinkProvider.class), classLoader),
                     injector.getInstance(LifeCycleManager.class),
                     injector.getInstance(new Key<Set<SessionPropertiesProvider>>() {}));
+        }
+    }
+
+    /**
+     * With a per-team credential source, no catalog-wide credential may exist
+     * that a read could fall back to if a split's credential were lost.
+     */
+    private static void checkCredentialSource(Map<String, String> config)
+    {
+        String source = config.getOrDefault("hoglake.s3-credentials.source", "none").trim().toLowerCase(ENGLISH);
+        if (source.equals("none")) {
+            return;
+        }
+        if (source.equals("hogtower")) {
+            throw new IllegalArgumentException(HOGTOWER_REFUSAL);
+        }
+        for (String property : List.of("s3.iam-role", "s3.aws-access-key")) {
+            if (config.containsKey(property)) {
+                throw new IllegalArgumentException("%s cannot be set with hoglake.s3-credentials.source".formatted(property));
+            }
+        }
+        if (Boolean.parseBoolean(config.getOrDefault("s3.security-mapping.enabled", "false").trim())) {
+            throw new IllegalArgumentException("s3.security-mapping.enabled cannot be set with hoglake.s3-credentials.source");
         }
     }
 }
