@@ -27,7 +27,9 @@ import io.trino.spi.TrinoException;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.LongStream;
@@ -64,6 +66,52 @@ class TestHoglakeDeletePublisher
             }
             assertThat(vector.referencedDataFile()).contains("memory:///data");
             assertThat(storage.newInputFile(Location.of("memory:///prior")).exists()).isTrue();
+        }
+    }
+
+    @Test
+    void testClaimedDeletionVectorsStayUnderNamespacePrefix()
+            throws IOException
+    {
+        // Hoglake refuses a contained table's files outside <data_path>/data/<namespace>/
+        String writePath = HoglakeMetadata.tableWritePath("memory:///warehouse/", "team_42", "events");
+        HoglakeDeleteHandle handle = new HoglakeDeleteHandle(
+                new HoglakeTableHandle("team_42", "events", 7, "synthetic-table", List.of()), writePath, UUID.randomUUID().toString(), Optional.empty(), List.of(), List.of(), true);
+        List<String> prefixes = new ArrayList<>();
+        MemoryFileSystem storage = new MemoryFileSystem();
+        try (Catalog client = new Catalog()
+        {
+            @Override
+            public String claimUpload(String owner, String prefix, String kind)
+            {
+                assertThat(owner).isEqualTo(handle.operationId());
+                assertThat(kind).isEqualTo("delete");
+                prefixes.add(prefix);
+                return prefix + "trino-upload/" + UUID.randomUUID() + ".puffin";
+            }
+
+            @Override
+            public void renewUploads(String owner) {}
+
+            @Override
+            public void commitClaimed(HoglakeDtos.Commit request, boolean mutation)
+            {
+                assertThat(mutation).isTrue();
+                commitMutation(request);
+            }
+        }) {
+            new HoglakeDeletePublisher(client, storage).publish(handle, List.of(fragment(1, 2)));
+            assertThat(prefixes).containsExactly("memory:///warehouse/data/team_42/events/");
+            var registration = client.committed.deletes().getFirst().files().getFirst();
+            assertThat(registration.path()).startsWith("memory:///warehouse/data/team_42/events/trino-upload/");
+            assertThat(storage.newInputFile(Location.of(registration.path())).exists()).isTrue();
+        }
+        // Without claims the vector is still under the namespace prefix
+        HoglakeDeleteHandle unclaimed = new HoglakeDeleteHandle(
+                new HoglakeTableHandle("team_42", "events", 7, "synthetic-table", List.of()), writePath, UUID.randomUUID().toString());
+        try (Catalog client = new Catalog()) {
+            new HoglakeDeletePublisher(client, new MemoryFileSystem()).publish(unclaimed, List.of(fragment(1, 2)));
+            assertThat(client.committed.deletes().getFirst().files().getFirst().path()).startsWith("memory:///warehouse/data/team_42/events/");
         }
     }
 

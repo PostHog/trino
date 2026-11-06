@@ -625,7 +625,7 @@ public class HoglakeMetadata
         if (catalog.capabilities() != null && catalog.capabilities().contains("idempotent-append-v1")) {
             operation = Optional.of(transaction == null ? UUID.randomUUID().toString() : transaction.operation());
         }
-        return new HoglakeWriteHandle(handle.schemaName(), handle.tableName(), handle.tableUuid(), handle.snapshotId(), catalog.dataPath(), handle.columns(), inputs, Optional.empty(), operation, partitionFields, sortFields, catalog.capabilities() != null && catalog.capabilities().contains("claimed-uploads-v1"));
+        return new HoglakeWriteHandle(handle.schemaName(), handle.tableName(), handle.tableUuid(), handle.snapshotId(), tableWritePath(catalog.dataPath(), handle.schemaName(), handle.tableName()), handle.columns(), inputs, Optional.empty(), operation, partitionFields, sortFields, catalog.capabilities() != null && catalog.capabilities().contains("claimed-uploads-v1"));
     }
 
     @Override
@@ -732,7 +732,7 @@ public class HoglakeMetadata
         if (catalog.capabilities() == null || !catalog.capabilities().contains("idempotent-mutation-v1")) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake server does not support idempotent-mutation-v1 required for DELETE, UPDATE and MERGE");
         }
-        return new HoglakeDeleteHandle(handle, catalog.dataPath(), transaction == null ? UUID.randomUUID().toString() : transaction.operation(), insertFailure, insertFailure.isPresent() ? List.of() : partitionFields, insertFailure.isPresent() ? List.of() : sortFields, catalog.capabilities().contains("claimed-uploads-v1"));
+        return new HoglakeDeleteHandle(handle, tableWritePath(catalog.dataPath(), handle.schemaName(), handle.tableName()), transaction == null ? UUID.randomUUID().toString() : transaction.operation(), insertFailure, insertFailure.isPresent() ? List.of() : partitionFields, insertFailure.isPresent() ? List.of() : sortFields, catalog.capabilities().contains("claimed-uploads-v1"));
     }
 
     @Override
@@ -786,6 +786,22 @@ public class HoglakeMetadata
                 client.commit(request);
             }
         }
+    }
+
+    /**
+     * The directory INSERT, UPDATE, DELETE and MERGE write a table's new data files and
+     * deletion vectors under, and claim uploads under: {@code <data_path>/data/<namespace>/<table>/}.
+     * <p>
+     * A table in a contained namespace may register files only under
+     * {@code <data_path>/data/<namespace>/}, spelled with the namespace name the commit names,
+     * and Hoglake refuses anything else with {@code containment_violation}. The catalog root
+     * itself is outside every namespace's prefix. The same directory is legal for an uncontained
+     * namespace, and it is where Hoglake's compaction writes the table's files.
+     * CREATE TABLE AS keeps the {@code write_path} Hoglake prepares for the new table.
+     */
+    static String tableWritePath(String catalogDataPath, String namespace, String table)
+    {
+        return (catalogDataPath.endsWith("/") ? catalogDataPath : catalogDataPath + "/") + "data/" + namespace + "/" + table + "/";
     }
 
     private static List<HoglakeDtos.FileRegistration> decodeFragments(Collection<Slice> fragments)
