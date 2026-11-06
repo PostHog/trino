@@ -65,6 +65,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
@@ -115,6 +116,7 @@ final class TestHoglakeWrites
     private volatile boolean corruptLifecycleResponse;
     private int lifecycleRequests;
     private volatile HoglakeDtos.OperationMetadata lastOperationMetadata;
+    private final List<String> containmentRefusals = new CopyOnWriteArrayList<>();
     private HttpServer server;
     private HoglakeClient client;
     private StandaloneQueryRunner runner;
@@ -316,6 +318,9 @@ final class TestHoglakeWrites
                     respond(exchange, commitStatus, Map.of("error", "synthetic_failure"));
                     return;
                 }
+                if (refuseUncontained(exchange, request)) {
+                    return;
+                }
                 commits++;
                 for (HoglakeDtos.Append append : request.appends()) {
                     HoglakeDtos.Table table = tables.get(append.table());
@@ -362,6 +367,9 @@ final class TestHoglakeWrites
                     respond(exchange, commitStatus, Map.of("error", "synthetic_failure"));
                     return;
                 }
+                if (refuseUncontained(exchange, request)) {
+                    return;
+                }
                 for (HoglakeDtos.Append append : request.appends()) {
                     HoglakeDtos.Table table = tables.get(append.table());
                     if (!table.tableUuid().equals(append.expectedTableUuid())) {
@@ -386,6 +394,37 @@ final class TestHoglakeWrites
                 respond(exchange, 404, Map.of());
             }
         }
+    }
+
+    /**
+     * Holds every commit to Hoglake's namespace containment: a contained namespace's files must
+     * sit under {@code <data_path>/data/<namespace>/}. This fake treats every namespace as contained.
+     */
+    private boolean refuseUncontained(HttpExchange exchange, HoglakeDtos.Commit request)
+            throws IOException
+    {
+        List<String> refused = new ArrayList<>();
+        for (HoglakeDtos.Append append : request.appends()) {
+            append.files().stream().map(HoglakeDtos.FileRegistration::path)
+                    .filter(path -> !path.startsWith(namespacePrefix(append.namespace())))
+                    .forEach(refused::add);
+        }
+        for (HoglakeDtos.Deletes deletes : request.deletes() == null ? List.<HoglakeDtos.Deletes>of() : request.deletes()) {
+            deletes.files().stream().map(HoglakeDtos.DeleteRegistration::path)
+                    .filter(path -> !path.startsWith(namespacePrefix(deletes.namespace())))
+                    .forEach(refused::add);
+        }
+        containmentRefusals.addAll(refused);
+        if (refused.isEmpty()) {
+            return false;
+        }
+        respond(exchange, 422, Map.of("error", "containment_violation", "message", "refused " + refused));
+        return true;
+    }
+
+    private static String namespacePrefix(String namespace)
+    {
+        return "memory:///warehouse/data/" + namespace + "/";
     }
 
     private static long maxFieldId(List<HoglakeDtos.Column> columns)
@@ -1034,11 +1073,48 @@ final class TestHoglakeWrites
             assertQuery("SELECT count(*) FROM mutations", "VALUES BIGINT '4'");
             assertThat(runner.execute("MERGE INTO mutations t USING (VALUES 30) s(id) ON t.id=s.id WHEN NOT MATCHED THEN INSERT (id) VALUES (s.id)").getUpdateCount()).hasValue(1);
             assertQuery("SELECT count(*) FROM mutations", "VALUES BIGINT '5'");
+            // The fake refuses files outside data/<namespace>/, as Hoglake does for a contained namespace
+            assertThat(containmentRefusals).isEmpty();
+            assertThat(files.get("mutations")).anyMatch(file -> file.deleteFile() != null);
+            assertThat(files.get("mutations")).allSatisfy(file -> {
+                assertThat(file.dataFile().path()).startsWith("memory:///warehouse/data/test/mutations/");
+                if (file.deleteFile() != null) {
+                    assertThat(file.deleteFile().path()).startsWith("memory:///warehouse/data/test/mutations/");
+                }
+            });
         }
         finally {
             idempotentMutation = false;
             corruptCommitResponse = false;
         }
+    }
+
+    @Test
+    void testWriteHandlesTargetNamespacePrefix()
+    {
+        idempotentMutation = true;
+        try {
+            runner.execute("CREATE TABLE namespace_writes (id bigint)");
+            HoglakeMetadata metadata = new HoglakeMetadata(client);
+            var session = ConnectorTestFixtures.session();
+            var table = (HoglakeTableHandle) metadata.getTableHandle(session, new SchemaTableName("test", "namespace_writes"), Optional.empty(), Optional.empty());
+            // INSERT, and the inserts and deletion vectors of UPDATE, DELETE and MERGE, write under
+            // <data_path>/data/<namespace>/, the only prefix a contained namespace may register
+            var insert = (HoglakeWriteHandle) metadata.beginInsert(session, table, List.of(), RetryMode.NO_RETRIES);
+            assertThat(insert.dataPath()).isEqualTo("memory:///warehouse/data/test/namespace_writes/");
+            var merge = (HoglakeDeleteHandle) metadata.beginMerge(session, table, Map.of(), RetryMode.NO_RETRIES);
+            assertThat(merge.dataPath()).isEqualTo("memory:///warehouse/data/test/namespace_writes/");
+        }
+        finally {
+            idempotentMutation = false;
+        }
+    }
+
+    @Test
+    void testTableWritePath()
+    {
+        assertThat(HoglakeMetadata.tableWritePath("s3://lake/org", "team_42", "events")).isEqualTo("s3://lake/org/data/team_42/events/");
+        assertThat(HoglakeMetadata.tableWritePath("s3://lake/org/", "main", "events")).isEqualTo("s3://lake/org/data/main/events/");
     }
 
     @Test
