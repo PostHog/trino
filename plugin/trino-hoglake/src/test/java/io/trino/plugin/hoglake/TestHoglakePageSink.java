@@ -70,6 +70,7 @@ final class TestHoglakePageSink
             {
                 assertThat(claimedOwner).isEqualTo(owner);
                 assertThat(kind).isEqualTo("data");
+                assertThat(prefix).isEqualTo("memory:///warehouse/data/test/table/");
                 return prefix + "trino-upload/" + UUID.randomUUID() + ".parquet";
             }
 
@@ -91,7 +92,7 @@ final class TestHoglakePageSink
                     "table",
                     HANDLE.tableUuid(),
                     3,
-                    "memory:///warehouse/",
+                    HoglakeMetadata.tableWritePath("memory:///warehouse/", "test", "table"),
                     List.of(FIRST),
                     List.of(FIRST),
                     Optional.empty(),
@@ -103,7 +104,7 @@ final class TestHoglakePageSink
             sink.appendPage(new Page(block(1L)));
             var fragment = sink.finish().get().iterator().next();
             var file = new ObjectMapper().readValue(fragment.getBytes(), HoglakeDtos.FileRegistration.class);
-            assertThat(file.path()).contains("/trino-upload/");
+            assertThat(file.path()).startsWith("memory:///warehouse/data/test/table/trino-upload/");
             sink.abort();
             assertThat(abandoned).isEmpty();
             assertThat(storage.newInputFile(Location.of(file.path())).exists()).isTrue();
