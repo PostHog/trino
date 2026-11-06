@@ -60,6 +60,7 @@ import org.junit.jupiter.api.TestInstance;
 
 import java.net.URI;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -71,6 +72,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
+import static com.google.common.util.concurrent.Uninterruptibles.sleepUninterruptibly;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.execution.querystats.PlanOptimizersStatsCollector.createPlanOptimizersStatsCollector;
@@ -178,6 +180,169 @@ public class TestDelegatedCatalogTasks
     }
 
     @Test
+    public void testCreateWaitsUntilTheStoreReportsTheCatalogVisibleEverywhere()
+    {
+        // Usable here at once, but the writer still sees another coordinator without it
+        AtomicInteger askedBeforeLocal = new AtomicInteger();
+        AtomicInteger asked = new AtomicInteger();
+        store.visibleEverywhere = (_, catalogName) -> {
+            if (catalogManager.getCatalog(catalogName).isEmpty()) {
+                askedBeforeLocal.incrementAndGet();
+            }
+            int check = asked.incrementAndGet();
+            if (check == 2) {
+                throw new RuntimeException("writer unavailable");
+            }
+            return check >= 4;
+        };
+        store.onCreate = request -> publisher.schedule(() -> publish(request.catalogName()), 300, MILLISECONDS);
+
+        QueryStateMachine stateMachine = stateMachine();
+        ListenableFuture<Void> future = createTask.execute(createCatalog(false), stateMachine, emptyList(), WarningCollector.NOOP);
+        getFutureValue(future);
+
+        // A failed answer is "not yet", and the store is never asked before the catalog is usable here
+        assertThat(asked.get()).isEqualTo(4);
+        assertThat(askedBeforeLocal.get()).isZero();
+        assertThat(store.visibilityRequests).allSatisfy(identity -> assertThat(identity.getUser()).isEqualTo(stateMachine.getSession().getIdentity().getUser()));
+    }
+
+    @Test
+    public void testCreateTimesOutWhenNotVisibleEverywhere()
+    {
+        store.visibilityTimeout = Duration.ofSeconds(1);
+        store.visibleEverywhere = (_, _) -> false;
+        store.onCreate = request -> publish(request.catalogName());
+
+        assertTrinoExceptionThrownBy(() -> getFutureValue(createTask.execute(createCatalog(false), stateMachine(), emptyList(), WarningCollector.NOOP)))
+                .hasErrorCode(CATALOG_NOT_AVAILABLE)
+                .hasMessage("Catalog '%s' is available on this coordinator but not yet on every coordinator; retry the statement shortly", CATALOG);
+    }
+
+    @Test
+    public void testLocalCreateIfNotExistsStillWaitsForEveryCoordinator()
+    {
+        // Another statement created the catalog and it is usable here, but not yet everywhere
+        publish(new CatalogName(CATALOG));
+        store.visibilityTimeout = Duration.ofSeconds(1);
+        store.visibleEverywhere = (_, _) -> false;
+
+        QueryStateMachine stateMachine = stateMachine();
+        assertTrinoExceptionThrownBy(() -> getFutureValue(createTask.execute(createCatalog(true), stateMachine, emptyList(), WarningCollector.NOOP)))
+                .hasErrorCode(CATALOG_NOT_AVAILABLE)
+                .hasMessage("Catalog '%s' is available on this coordinator but not yet on every coordinator; retry the statement shortly", CATALOG);
+        // It never became a request to the writer
+        assertThat(store.requests).isEmpty();
+        assertThat(store.visibilityRequests).isNotEmpty();
+
+        store.visibleEverywhere = (_, _) -> true;
+        getFutureValue(createTask.execute(createCatalog(true), stateMachine, emptyList(), WarningCollector.NOOP));
+        assertThat(store.requests).isEmpty();
+    }
+
+    @Test
+    public void testASlowVisibilityAnswerDoesNotExtendTheTimeout()
+    {
+        publish(new CatalogName(CATALOG));
+        store.visibilityTimeout = Duration.ofSeconds(1);
+        store.visibleEverywhere = (_, _) -> {
+            try {
+                Thread.sleep(4_000);
+            }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            // Late, and true: it must not count
+            return true;
+        };
+
+        long start = System.nanoTime();
+        assertTrinoExceptionThrownBy(() -> getFutureValue(createTask.execute(createCatalog(true), stateMachine(), emptyList(), WarningCollector.NOOP)))
+                .hasErrorCode(CATALOG_NOT_AVAILABLE);
+        assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(3));
+    }
+
+    @Test
+    public void testDeadlinesHoldWhileEveryPollThreadIsBlocked()
+    {
+        // More stalled visibility answers than there are poll threads
+        publish(new CatalogName(CATALOG));
+        store.visibleEverywhere = (_, _) -> {
+            sleepUninterruptibly(Duration.ofSeconds(4));
+            return true;
+        };
+        DelegatedCatalogMutations mutations = new DelegatedCatalogMutations(Optional.empty(), catalogManager, new AllowAllAccessControl(), _ -> ImmutableSet.of(), Duration.ofMillis(20));
+        store.visibilityTimeout = Duration.ofSeconds(1);
+        try {
+            QueryStateMachine stateMachine = stateMachine();
+            long start = System.nanoTime();
+            List<ListenableFuture<Void>> waits = new ArrayList<>();
+            for (int i = 0; i < 6; i++) {
+                waits.add(mutations.awaitCreated(stateMachine, new CatalogName(CATALOG), true, store));
+            }
+            // A wait whose first check never got a thread fails as not yet available here; either
+            // way every wait ends at its own deadline
+            for (ListenableFuture<Void> wait : waits) {
+                assertTrinoExceptionThrownBy(() -> getFutureValue(wait))
+                        .hasErrorCode(CATALOG_NOT_AVAILABLE);
+            }
+            assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(3));
+        }
+        finally {
+            mutations.stop();
+        }
+    }
+
+    @Test
+    public void testTheTimeoutMakesNoAccessCheck()
+    {
+        // Access control that stalls once the deadline nears: the timeout must not wait on it
+        CatalogName catalogName = new CatalogName(CATALOG);
+        publish(catalogName);
+        AtomicInteger checks = new AtomicInteger();
+        AccessControl stalling = new AllowAllAccessControl()
+        {
+            @Override
+            public Set<String> filterCatalogs(SecurityContext context, Set<String> catalogs)
+            {
+                if (checks.incrementAndGet() > 1) {
+                    sleepUninterruptibly(Duration.ofSeconds(4));
+                }
+                return catalogs;
+            }
+        };
+        store.visibleEverywhere = (_, _) -> false;
+        store.visibilityTimeout = Duration.ofSeconds(1);
+        DelegatedCatalogMutations mutations = new DelegatedCatalogMutations(Optional.empty(), catalogManager, stalling, _ -> ImmutableSet.of(), Duration.ofMillis(20));
+        try {
+            long start = System.nanoTime();
+            assertTrinoExceptionThrownBy(() -> getFutureValue(mutations.awaitCreated(stateMachine(), catalogName, true, store)))
+                    .hasErrorCode(CATALOG_NOT_AVAILABLE)
+                    .hasMessage("Catalog '%s' is available on this coordinator but not yet on every coordinator; retry the statement shortly", CATALOG);
+            assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(3));
+        }
+        finally {
+            mutations.stop();
+        }
+    }
+
+    @Test
+    public void testDropObservedJustBeforeTheDeadlineSucceeds()
+    {
+        CatalogName catalogName = new CatalogName(CATALOG);
+        publish(catalogName);
+        // The polls run every 400ms, so the removal at 950ms is first seen by the final check
+        DelegatedCatalogMutations mutations = new DelegatedCatalogMutations(Optional.empty(), catalogManager, new AllowAllAccessControl(), _ -> ImmutableSet.of(), Duration.ofMillis(400));
+        try {
+            publisher.schedule(() -> catalogManager.removePublishedCatalog(catalogName), 950, MILLISECONDS);
+            getFutureValue(mutations.awaitDropped(stateMachine(), catalogName, Duration.ofSeconds(1)));
+        }
+        finally {
+            mutations.stop();
+        }
+    }
+
+    @Test
     public void testCancelledQueryStopsWaiting()
     {
         store.onCreate = _ -> {};
@@ -270,7 +435,7 @@ public class TestDelegatedCatalogTasks
         };
         DelegatedCatalogMutations mutations = new DelegatedCatalogMutations(Optional.empty(), catalogManager, accessControl, _ -> ImmutableSet.of(), Duration.ofMillis(20));
         try {
-            getFutureValue(mutations.awaitCreated(stateMachine(), catalogName, true, Duration.ofSeconds(30)));
+            getFutureValue(mutations.awaitCreated(stateMachine(), catalogName, true, store));
             assertThat(checks.get()).isGreaterThanOrEqualTo(5);
         }
         finally {
@@ -300,7 +465,7 @@ public class TestDelegatedCatalogTasks
         try {
             QueryStateMachine stateMachine = stateMachine();
             assertThat(stateMachine.getSession().getIdentity().getGroups()).doesNotContain("catalog_grant");
-            getFutureValue(mutations.awaitCreated(stateMachine, catalogName, true, Duration.ofSeconds(30)));
+            getFutureValue(mutations.awaitCreated(stateMachine, catalogName, true, store));
             assertThat(lookups.get()).isGreaterThanOrEqualTo(3);
         }
         finally {
@@ -372,6 +537,11 @@ public class TestDelegatedCatalogTasks
         void handle(Request request);
     }
 
+    private interface VisibilityHandler
+    {
+        boolean visible(Identity identity, CatalogName catalogName);
+    }
+
     private static class FakeDelegatedCatalogStore
             implements CatalogStore, DelegatedCatalogStore
     {
@@ -380,6 +550,8 @@ public class TestDelegatedCatalogTasks
         private volatile RequestHandler onCreate = _ -> {};
         private volatile RequestHandler onDrop = _ -> {};
         private volatile Duration visibilityTimeout = Duration.ofSeconds(30);
+        private volatile VisibilityHandler visibleEverywhere = (_, _) -> true;
+        private final List<Identity> visibilityRequests = new CopyOnWriteArrayList<>();
 
         @Override
         public Collection<StoredCatalog> getCatalogs()
@@ -427,6 +599,13 @@ public class TestDelegatedCatalogTasks
         public Duration visibilityTimeout()
         {
             return visibilityTimeout;
+        }
+
+        @Override
+        public boolean isVisibleEverywhere(Identity identity, CatalogName catalogName)
+        {
+            visibilityRequests.add(identity);
+            return visibleEverywhere.visible(identity, catalogName);
         }
     }
 

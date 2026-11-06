@@ -83,8 +83,10 @@ public class CreateCatalogTask
         Optional<DelegatedCatalogStore> delegatedCatalogStore = delegatedCatalogMutations.delegatedCatalogStore();
         if (delegatedCatalogStore.isPresent() && statement.isNotExists() && delegatedCatalogMutations.isAvailable(session, catalog)) {
             // Already here and usable by this user: an idempotent per-connection CREATE CATALOG IF
-            // NOT EXISTS stays local. A catalog the user cannot use goes to the store, which decides
-            return immediateVoidFuture();
+            // NOT EXISTS sends no request. It still waits until the store reports the catalog visible
+            // everywhere, as the CREATE that made it does. A catalog the user cannot use goes to the
+            // store, which decides
+            return delegatedCatalogMutations.awaitCreated(stateMachine, catalog, false, delegatedCatalogStore.get());
         }
 
         Map<String, String> properties = new HashMap<>();
@@ -121,7 +123,7 @@ public class CreateCatalogTask
         if (delegatedCatalogStore.isPresent()) {
             DelegatedCatalogStore store = delegatedCatalogStore.get();
             DelegatedCatalogStore.CatalogRequestResult result = store.createCatalog(session.getIdentity(), catalog, connectorName, properties, statement.isNotExists());
-            return delegatedCatalogMutations.awaitCreated(stateMachine, catalog, result.changed(), store.visibilityTimeout());
+            return delegatedCatalogMutations.awaitCreated(stateMachine, catalog, result.changed(), store);
         }
         plannerContext.getMetadata().createCatalog(session, catalog, connectorName, properties, statement.isNotExists());
         return immediateVoidFuture();

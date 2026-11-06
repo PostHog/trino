@@ -60,12 +60,18 @@ import static java.util.Objects.requireNonNull;
  * <ul>
  *   <li>{@code POST {endpoint}/create} with {@code {user, catalog, connector, properties, if_not_exists}}
  *   <li>{@code POST {endpoint}/drop} with {@code {user, catalog, if_exists}}
+ *   <li>{@code POST {endpoint}/visibility} with {@code {user, catalog}}
  * </ul>
  *
  * <p>A 200 answers {@code {catalog, created|dropped}}. A rejection answers {@code {error}}, which the
  * control plane guarantees never echoes a property value, and which is shown to the user: 400 is an
  * invalid request, 403 a denied one, 409 an existing catalog on create, 404 a missing catalog on
  * drop. Anything else means catalog requests are unavailable.
+ *
+ * <p>A visibility request asks whether a created catalog is usable by the user on every
+ * coordinator the control plane publishes to, and a 200 answers {@code {catalog, visible}}. A 404
+ * means the control plane cannot tell, so there is nothing more to wait for; a control plane that
+ * predates the request answers the same way.
  */
 public class CatalogRequestClient
 {
@@ -77,12 +83,17 @@ public class CatalogRequestClient
 
     private static final JsonCodec<CreateRequest> CREATE_REQUEST_CODEC = jsonCodec(CreateRequest.class);
     private static final JsonCodec<DropRequest> DROP_REQUEST_CODEC = jsonCodec(DropRequest.class);
+    private static final JsonCodec<VisibilityRequest> VISIBILITY_REQUEST_CODEC = jsonCodec(VisibilityRequest.class);
     private static final JsonCodec<CreateResponse> CREATE_RESPONSE_CODEC = jsonCodec(CreateResponse.class);
     private static final JsonCodec<DropResponse> DROP_RESPONSE_CODEC = jsonCodec(DropResponse.class);
+    private static final JsonCodec<VisibilityResponse> VISIBILITY_RESPONSE_CODEC = jsonCodec(VisibilityResponse.class);
+    // Stands for a 404 to a visibility request; compared by identity, so no decoded body can equal it
+    private static final VisibilityResponse VISIBILITY_UNKNOWN = new VisibilityResponse(null, null);
     private static final JsonCodec<ErrorResponse> ERROR_RESPONSE_CODEC = jsonCodec(ErrorResponse.class);
 
     private final URI createUri;
     private final URI dropUri;
+    private final URI visibilityUri;
     private final Path tokenFile;
     private final HttpClient httpClient;
 
@@ -96,6 +107,7 @@ public class CatalogRequestClient
                 "Catalog request endpoint requires HTTPS unless insecure HTTP is explicitly enabled");
         this.createUri = uriBuilderFrom(endpoint).appendPath("create").build();
         this.dropUri = uriBuilderFrom(endpoint).appendPath("drop").build();
+        this.visibilityUri = uriBuilderFrom(endpoint).appendPath("visibility").build();
         this.tokenFile = config.getDelegateTokenFile()
                 .orElseThrow(() -> new IllegalArgumentException("catalog-store.delegate.token-file is not set"))
                 .toPath();
@@ -120,6 +132,24 @@ public class CatalogRequestClient
             throw unavailable();
         }
         return new CatalogRequestResult(catalogName, response.dropped());
+    }
+
+    /**
+     * Whether the control plane reports the catalog usable by the user on every coordinator. Throws
+     * when the answer is unreadable or the request fails, which the caller treats as "not yet".
+     */
+    public boolean isVisibleEverywhere(Identity identity, CatalogName catalogName)
+    {
+        VisibilityRequest request = new VisibilityRequest(identity.getUser(), catalogName.toString());
+        VisibilityResponse response = execute(visibilityUri, VISIBILITY_REQUEST_CODEC.toJsonBytes(request), VISIBILITY_RESPONSE_CODEC, Operation.VISIBILITY);
+        if (response == VISIBILITY_UNKNOWN) {
+            // The control plane cannot tell
+            return true;
+        }
+        if (response == null || response.visible() == null || !catalogName.toString().equals(response.catalog())) {
+            throw unavailable();
+        }
+        return response.visible();
     }
 
     private <T> T execute(URI uri, byte[] body, JsonCodec<T> responseCodec, Operation operation)
@@ -174,7 +204,7 @@ public class CatalogRequestClient
 
     private enum Operation
     {
-        CREATE, DROP
+        CREATE, DROP, VISIBILITY
     }
 
     private static class CatalogResponseHandler<T>
@@ -218,6 +248,11 @@ public class CatalogRequestClient
                 case 404 -> {
                     if (operation == Operation.DROP) {
                         throw new TrinoException(CATALOG_NOT_FOUND, error.orElse("Catalog does not exist"));
+                    }
+                    if (operation == Operation.VISIBILITY) {
+                        @SuppressWarnings("unchecked")
+                        T unknown = (T) VISIBILITY_UNKNOWN;
+                        return unknown;
                     }
                 }
                 case 409 -> {
@@ -310,9 +345,20 @@ public class CatalogRequestClient
         }
     }
 
+    public record VisibilityRequest(String user, String catalog)
+    {
+        public VisibilityRequest
+        {
+            requireNonNull(user, "user is null");
+            requireNonNull(catalog, "catalog is null");
+        }
+    }
+
     public record CreateResponse(String catalog, Boolean created) {}
 
     public record DropResponse(String catalog, Boolean dropped) {}
+
+    public record VisibilityResponse(String catalog, Boolean visible) {}
 
     public record ErrorResponse(String error) {}
 }

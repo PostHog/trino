@@ -558,21 +558,28 @@ final class TestCatalogSynchronization
         TestingCatalogPublisher publisher = publisher(cellId);
         AtomicInteger operations = new AtomicInteger();
         List<Map<String, Object>> requests = new CopyOnWriteArrayList<>();
+        List<Map<String, Object>> visibilityRequests = new CopyOnWriteArrayList<>();
         JsonCodec<Map<String, Object>> codec = JsonCodec.mapJsonCodec(String.class, Object.class);
 
         HttpServer controlPlane = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         controlPlane.createContext("/catalog-requests/v1/", exchange -> {
             Map<String, Object> request = codec.fromJson(exchange.getRequestBody().readAllBytes());
-            requests.add(request);
             String catalog = (String) request.get("catalog");
             String response;
-            if (exchange.getRequestURI().getPath().endsWith("/create")) {
+            if (exchange.getRequestURI().getPath().endsWith("/visibility")) {
+                // A control plane with one coordinator to observe: visible once published here
+                visibilityRequests.add(request);
+                response = "{\"catalog\":\"%s\",\"visible\":true}".formatted(catalog);
+            }
+            else if (exchange.getRequestURI().getPath().endsWith("/create")) {
+                requests.add(request);
                 @SuppressWarnings("unchecked")
                 Map<String, String> properties = (Map<String, String>) request.get("properties");
                 publisher.publishCatalog("op-" + operations.incrementAndGet(), catalog, (String) request.get("connector"), properties);
                 response = "{\"catalog\":\"%s\",\"created\":true}".formatted(catalog);
             }
             else {
+                requests.add(request);
                 publisher.removeCatalog("op-" + operations.incrementAndGet(), catalog);
                 response = "{\"catalog\":\"%s\",\"dropped\":true}".formatted(catalog);
             }
@@ -602,8 +609,13 @@ final class TestCatalogSynchronization
                     .containsEntry("if_not_exists", false);
             assertThat(coordinator.getCoordinator().getQueryManager().getFullQueryInfo(created.queryId()).getQuery())
                     .contains("\"tpch.splits-per-node\" = '***'");
+            // The statement asked whether the catalog is visible everywhere, as its user
+            assertThat(visibilityRequests).isNotEmpty();
+            assertThat(visibilityRequests.getFirst())
+                    .isEqualTo(Map.of("user", coordinator.getDefaultSession().getUser(), "catalog", "ext_tenant__warehouse"));
 
-            // Once it is here, IF NOT EXISTS is answered locally
+            // Once it is here, IF NOT EXISTS sends no create request: it only asks whether the
+            // catalog is visible everywhere
             coordinator.execute("CREATE CATALOG IF NOT EXISTS ext_tenant__warehouse USING tpch WITH (\"tpch.splits-per-node\" = '3')");
             assertThat(requests).hasSize(1);
 
