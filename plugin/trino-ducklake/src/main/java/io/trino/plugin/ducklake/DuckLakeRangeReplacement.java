@@ -17,6 +17,11 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.inject.Inject;
+import io.airlift.log.Logger;
+import io.trino.filesystem.TrinoFileSystem;
+import io.trino.filesystem.TrinoFileSystemFactory;
+import io.trino.parquet.ParquetReaderOptions;
+import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.ducklake.metastore.DuckLakeDataFileEntry;
 import io.trino.plugin.ducklake.metastore.DuckLakeDeleteFileEntry;
 import io.trino.plugin.ducklake.metastore.DuckLakeDeletions;
@@ -27,6 +32,7 @@ import io.trino.plugin.ducklake.metastore.DuckLakeNameMapping;
 import io.trino.plugin.ducklake.metastore.JdbcDuckLakeMetastore;
 import io.trino.plugin.ducklake.util.DuckLakeColumns;
 import io.trino.plugin.ducklake.util.PathResolver;
+import io.trino.plugin.hive.parquet.ParquetReaderConfig;
 import io.trino.spi.SplitWeight;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
@@ -41,13 +47,16 @@ import io.trino.spi.type.Type;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.concurrent.Callable;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_COMMIT_CONFLICT;
@@ -55,6 +64,7 @@ import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_FILESYSTEM_ERR
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_METASTORE_ERROR;
 import static io.trino.plugin.ducklake.DuckLakeSessionProperties.isFileStatisticsPruningEnabled;
+import static io.trino.plugin.ducklake.DuckLakeSessionProperties.isParquetIgnoreStatistics;
 import static io.trino.spi.StandardErrorCode.EXCEEDED_LOCAL_MEMORY_LIMIT;
 import static io.trino.spi.StandardErrorCode.USER_CANCELED;
 import static io.trino.spi.block.RowBlock.getRowFieldsFromBlock;
@@ -63,25 +73,49 @@ import static io.trino.spi.type.TypeUtils.readNativeValue;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Plans metadata removals first, reading only the range column of the files the catalog
- * statistics do not place. Catalog statistics place a file wholly inside or outside the range only
- * while file statistics pruning is enabled. A file they do not place still ends whole when its
- * footer statistics or its rows show that every visible row lies inside the range. Otherwise it is
- * a boundary file, and its rows inside the range are deleted by position.
+ * Plans metadata removals first, reading only the range column of the files the catalog does not
+ * place outside the range.
+ * <p>
+ * Catalog statistics only skip a file they place wholly outside the range, while file statistics
+ * pruning is enabled. A mistake there leaves a duplicate of a replaced row. They never end a file
+ * whole, because a mistake there loses every row of the file outside the range, and other engines
+ * write those statistics without anything checking them against the file. Every other file has
+ * its Parquet footer read, in parallel, and the footer statistics, derived with the rule that
+ * vets the replacement files, decide: a file ends whole when they prove every row non-NULL and
+ * inside the range, and is skipped when they place it outside. A file they do not settle is read,
+ * for its NULLs alone when they bound the values inside the range, else for its rows. A file with
+ * a visible row outside the range is a boundary file, and its rows inside the range are deleted by
+ * position.
  */
 public final class DuckLakeRangeReplacement
 {
+    private static final Logger log = Logger.get(DuckLakeRangeReplacement.class);
+
     private static final long MAX_BOUNDARY_POSITIONS = 5_000_000;
     private static final long MAX_READER_MEMORY = 128L * 1024 * 1024;
 
     private final JdbcDuckLakeMetastore metastore;
     private final DuckLakePageSourceProvider pageSources;
+    private final TrinoFileSystemFactory fileSystemFactory;
+    private final FileFormatDataSourceStats fileFormatDataSourceStats;
+    private final ParquetReaderOptions parquetReaderOptions;
+    private final int maxConcurrentFooterReads;
 
     @Inject
-    public DuckLakeRangeReplacement(JdbcDuckLakeMetastore metastore, DuckLakePageSourceProvider pageSources)
+    public DuckLakeRangeReplacement(
+            JdbcDuckLakeMetastore metastore,
+            DuckLakePageSourceProvider pageSources,
+            TrinoFileSystemFactory fileSystemFactory,
+            FileFormatDataSourceStats fileFormatDataSourceStats,
+            ParquetReaderConfig parquetReaderConfig,
+            DuckLakeConfig config)
     {
         this.metastore = requireNonNull(metastore, "metastore is null");
         this.pageSources = requireNonNull(pageSources, "pageSources is null");
+        this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
+        this.fileFormatDataSourceStats = requireNonNull(fileFormatDataSourceStats, "fileFormatDataSourceStats is null");
+        this.parquetReaderOptions = parquetReaderConfig.toParquetReaderOptions();
+        this.maxConcurrentFooterReads = config.getAddFilesProcedureMaxConcurrentFileReads();
     }
 
     /**
@@ -168,32 +202,48 @@ public final class DuckLakeRangeReplacement
                         .filter(file -> file.mappingId().isPresent()).map(file -> file.mappingId().orElseThrow()).collect(toImmutableSet())),
                 () -> DuckLakeColumns.fromCatalog(metastore.columns(table.snapshotId(), table.tableId())));
         Domain range = replacement.domain();
-        ImmutableSet.Builder<Long> wholeFiles = ImmutableSet.builder();
-        Map<Long, LongOpenHashSet> positions = new LinkedHashMap<>();
-        ImmutableMap.Builder<Long, long[]> plannedInlinedDeletions = ImmutableMap.builder();
-        long totalPositions = 0;
+        List<Candidate> candidates = new ArrayList<>();
         for (DuckLakeDataFileEntry file : files) {
             checkInterrupted();
             DuckLakeDeleteFileEntry deletion = deletions.get(file.dataFileId());
             if (file.partialMax().orElse(0) > table.snapshotId() || (deletion != null && deletion.partialMax().orElse(0) > table.snapshotId())) {
                 throw new TrinoException(DUCKLAKE_COMMIT_CONFLICT, "Files changed while planning range replacement; run the statement again");
             }
-            Optional<long[]> inlined = Optional.ofNullable(inlinedDeletions.get(file.dataFileId()));
-            DuckLakeFileColumnStats stats = statistics.get(file.dataFileId());
-            Optional<Domain> fileDomain = Optional.ofNullable(stats)
+            Optional<Domain> catalogDomain = Optional.ofNullable(statistics.get(file.dataFileId()))
                     .flatMap(value -> DuckLakeSplitManager.statisticsDomain(replacement.column().type(), value, file.recordCount()));
-            if (fileDomain.isPresent() && !range.overlaps(fileDomain.orElseThrow())) {
+            if (catalogDomain.isPresent() && !range.overlaps(catalogDomain.orElseThrow())) {
                 continue;
             }
-            if (allRowsInRange(session, table, replacement, file, fileDomain, Optional.ofNullable(deletion), inlined, mappings)) {
+            candidates.add(new Candidate(file, Optional.ofNullable(deletion), Optional.ofNullable(inlinedDeletions.get(file.dataFileId())), catalogDomain));
+        }
+        List<Optional<Domain>> footerDomains = readFooterDomains(session, table, replacement, candidates, mappings);
+        // a footer not read proves nothing, which tells nothing about the catalog statistics
+        boolean footersRead = !isParquetIgnoreStatistics(session);
+        ImmutableSet.Builder<Long> wholeFiles = ImmutableSet.builder();
+        Map<Long, LongOpenHashSet> positions = new LinkedHashMap<>();
+        ImmutableMap.Builder<Long, long[]> plannedInlinedDeletions = ImmutableMap.builder();
+        long totalPositions = 0;
+        for (int index = 0; index < candidates.size(); index++) {
+            checkInterrupted();
+            Candidate candidate = candidates.get(index);
+            DuckLakeDataFileEntry file = candidate.file();
+            Optional<Domain> footerDomain = footerDomains.get(index);
+            boolean provenInside = footerDomain.isPresent() && range.contains(footerDomain.orElseThrow());
+            if (footersRead && !provenInside && candidate.catalogDomain().isPresent() && range.contains(candidate.catalogDomain().orElseThrow())) {
+                log.warn("Catalog statistics place data file %s (%s) of table %s inside the replacement range, but its footer statistics do not prove it; the footer and the rows of the file decide instead", file.dataFileId(), file.path(), table.schemaTableName());
+            }
+            if (footerDomain.isPresent() && !range.overlaps(footerDomain.orElseThrow())) {
+                continue;
+            }
+            if (provenInside || allRowsInRange(session, table, replacement, candidate, footerDomain, mappings)) {
                 wholeFiles.add(file.dataFileId());
-                inlined.ifPresent(value -> plannedInlinedDeletions.put(file.dataFileId(), value));
+                candidate.inlinedDeletions().ifPresent(value -> plannedInlinedDeletions.put(file.dataFileId(), value));
                 continue;
             }
-            LongOpenHashSet removed = readBoundary(session, table, replacement, file, Optional.ofNullable(deletion), inlined, mappings, MAX_BOUNDARY_POSITIONS - totalPositions);
+            LongOpenHashSet removed = readBoundary(session, table, replacement, file, candidate.deletion(), candidate.inlinedDeletions(), mappings, MAX_BOUNDARY_POSITIONS - totalPositions);
             if (!removed.isEmpty()) {
                 positions.put(file.dataFileId(), removed);
-                inlined.ifPresent(value -> plannedInlinedDeletions.put(file.dataFileId(), value));
+                candidate.inlinedDeletions().ifPresent(value -> plannedInlinedDeletions.put(file.dataFileId(), value));
                 totalPositions += removed.size();
             }
         }
@@ -201,38 +251,79 @@ public final class DuckLakeRangeReplacement
     }
 
     /**
-     * Whether every visible row of the file has a value of the range column inside the range, so
-     * that the file can end whole.
+     * A data file the catalog statistics do not place outside the range, with what is needed to
+     * read it.
+     */
+    private record Candidate(DuckLakeDataFileEntry file, Optional<DuckLakeDeleteFileEntry> deletion, Optional<long[]> inlinedDeletions, Optional<Domain> catalogDomain) {}
+
+    /**
+     * The values of the range column of each candidate, as its footer proves them, in the order of
+     * the candidates. The footers are read concurrently, and each read keeps only the small domain
+     * it derives, so memory holds no more footers than the reads in flight.
      * <p>
-     * The catalog cannot always tell. DuckDB records no null count for a file it registers with
-     * {@code ducklake_add_data_files}, so such a file may hold a NULL, which lies outside every
-     * range. When the catalog bounds the values of the file inside the range, only a NULL can lie
-     * outside it, so the file is read for its NULLs alone. The Parquet reader skips every row
-     * group whose footer rules out a NULL, from its null count or from a column that cannot hold
-     * one, whatever the type of the column. A file whose footer rules out a NULL in every row
-     * group is so settled without a read of its pages.
+     * With {@code parquet_ignore_statistics} the footers are not used, and every domain is empty.
+     */
+    private List<Optional<Domain>> readFooterDomains(
+            ConnectorSession session,
+            DuckLakeTableHandle table,
+            DuckLakeReplacementRange replacement,
+            List<Candidate> candidates,
+            Map<Long, DuckLakeNameMapping> mappings)
+    {
+        if (candidates.isEmpty()) {
+            return List.of();
+        }
+        if (isParquetIgnoreStatistics(session)) {
+            return candidates.stream().map(_ -> Optional.<Domain>empty()).collect(toImmutableList());
+        }
+        long columnId = replacement.column().columnId();
+        Optional<DuckLakeFooterStatistics.Column> column = DuckLakeColumns.fromCatalog(metastore.columns(table.snapshotId(), table.tableId())).stream()
+                .filter(value -> value.columnId() == columnId)
+                .findFirst()
+                .map(DuckLakeFooterStatistics.Column::of);
+        if (column.isEmpty()) {
+            return candidates.stream().map(_ -> Optional.<Domain>empty()).collect(toImmutableList());
+        }
+        TrinoFileSystem fileSystem = fileSystemFactory.create(session);
+        List<Callable<Optional<Domain>>> reads = candidates.stream()
+                .<Callable<Optional<Domain>>>map(candidate -> () -> {
+                    checkInterrupted();
+                    return DuckLakeFooterStatistics.readDomain(fileSystem, parquetReaderOptions, fileFormatDataSourceStats, table, candidate.file(), mappings, column.orElseThrow());
+                })
+                .collect(toImmutableList());
+        return DuckLakeParallelFileReads.readAll(
+                reads,
+                maxConcurrentFooterReads,
+                "ducklake-range-replacement-%s",
+                "Range replacement was interrupted",
+                DUCKLAKE_FILESYSTEM_ERROR,
+                "Could not read the footers of files for range replacement");
+    }
+
+    /**
+     * Whether every visible row of the file has a value of the range column inside the range, so
+     * that the file can end whole, for a file whose footer does not prove it.
+     * <p>
+     * DuckDB records no null count for a file it registers with {@code ducklake_add_data_files},
+     * so such a file may hold a NULL, which lies outside every range. When the footer bounds the
+     * values of the file inside the range, only a NULL can lie outside it, so the file is read for
+     * its NULLs alone. The Parquet reader skips every row group whose footer rules out a NULL, from
+     * its null count or from a column that cannot hold one, whatever the type of the column. A file
+     * without usable footer bounds is read for the values themselves.
      */
     private boolean allRowsInRange(
             ConnectorSession session,
             DuckLakeTableHandle table,
             DuckLakeReplacementRange replacement,
-            DuckLakeDataFileEntry file,
-            Optional<Domain> fileDomain,
-            Optional<DuckLakeDeleteFileEntry> deletion,
-            Optional<long[]> inlinedDeletions,
+            Candidate candidate,
+            Optional<Domain> footerDomain,
             Map<Long, DuckLakeNameMapping> mappings)
     {
         Domain range = replacement.domain();
-        if (fileDomain.isPresent()) {
-            Domain values = fileDomain.orElseThrow();
-            if (range.contains(values)) {
-                return true;
-            }
-            if (range.contains(Domain.create(values.getValues(), false))) {
-                return !hasVisibleNull(session, table, replacement, file, deletion, inlinedDeletions, mappings);
-            }
+        if (footerDomain.isPresent() && range.contains(Domain.create(footerDomain.orElseThrow().getValues(), false))) {
+            return !hasVisibleNull(session, table, replacement, candidate.file(), candidate.deletion(), candidate.inlinedDeletions(), mappings);
         }
-        return allVisibleRowsInRange(session, table, replacement, file, deletion, inlinedDeletions, mappings);
+        return allVisibleRowsInRange(session, table, replacement, candidate.file(), candidate.deletion(), candidate.inlinedDeletions(), mappings);
     }
 
     private boolean hasVisibleNull(

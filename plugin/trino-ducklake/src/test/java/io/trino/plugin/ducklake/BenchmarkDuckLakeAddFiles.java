@@ -57,8 +57,10 @@ import static java.util.stream.Collectors.joining;
  * Every round registers fresh copies of one Parquet file into a new table. It then registers the
  * same files again under another import, which reads every file and fails at the start of the
  * commit because the files are already registered: that second call measures the reading, and the
- * commit takes the rest of the first. The catalog database is the PostgreSQL container the tests
- * use, and the files are on the local file system.
+ * commit takes the rest of the first. A third call registers one more copy of the file with a range
+ * replacement that ends every file registered by the first call. It measures a whole replacement
+ * call, whose planning reads the footer of each of those files. The catalog database is the
+ * PostgreSQL container the tests use, and the files are on the local file system.
  * <p>
  * Run it with {@code -Dfiles=1000 -Dcolumns=28 -Drows=200 -Drounds=5}. A database next to the
  * benchmark answers much sooner than one across a network, and the commit spends most of its time
@@ -103,6 +105,7 @@ public final class BenchmarkDuckLakeAddFiles
 
                 List<Long> totals = new ArrayList<>();
                 List<Long> reads = new ArrayList<>();
+                List<Long> replacements = new ArrayList<>();
                 // the first round warms up the engine and is not counted
                 for (int round = 0; round <= rounds; round++) {
                     String table = "benchmark_" + round;
@@ -123,15 +126,22 @@ public final class BenchmarkDuckLakeAddFiles
                     }
                     long read = System.nanoTime() - start;
 
-                    out.printf("round %s: total %s ms, reading %s ms, commit %s ms%n", round, millis(total), millis(read), millis(total - read));
+                    // c3 starts at 2024-01-01 and grows with the row number, so the range covers every value
+                    List<String> replacement = copies(catalog, template, table + "_replacement", 1);
+                    start = System.nanoTime();
+                    queryRunner.execute(replaceRange(table, "replace", replacement.get(0)));
+                    long replace = System.nanoTime() - start;
+
+                    out.printf("round %s: total %s ms, reading %s ms, commit %s ms, replace %s ms%n", round, millis(total), millis(read), millis(total - read), millis(replace));
                     if (round > 0) {
                         totals.add(total);
                         reads.add(read);
+                        replacements.add(replace);
                     }
                 }
                 long total = median(totals);
                 long read = median(reads);
-                out.printf("median: total %s ms, reading %s ms, commit %s ms (%.2f ms per file)%n", millis(total), millis(read), millis(total - read), (total - read) / 1e6 / files);
+                out.printf("median: total %s ms, reading %s ms, commit %s ms (%.2f ms per file), replace %s ms%n", millis(total), millis(read), millis(total - read), (total - read) / 1e6 / files, millis(median(replacements)));
             }
         }
     }
@@ -207,6 +217,11 @@ public final class BenchmarkDuckLakeAddFiles
                 table,
                 locations.stream().map(location -> "'" + location + "'").collect(joining(", ")),
                 importId);
+    }
+
+    private static String replaceRange(String table, String importId, String location)
+    {
+        return "ALTER TABLE %s EXECUTE add_files(files => ARRAY['%s'], import_id => '%s', replace_range_column => 'c3', replace_range_start => '2024-01-01 00:00:00', replace_range_end => '2124-01-01 00:00:00')".formatted(table, location, importId);
     }
 
     private static long median(List<Long> values)

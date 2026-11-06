@@ -695,22 +695,62 @@ final class TestDuckLakeAddFiles
         }
     }
 
+    /**
+     * Catalog statistics may skip a file they place outside the range, but never end a file whole:
+     * a file is only ended without a read of its rows when its own footer proves it inside.
+     */
     @Test
-    void testRangeReplacementWithoutStatisticsPruningReadsEveryFile()
+    void testRangeReplacementNeverEndsFileWholeOnCatalogStatistics()
             throws SQLException
     {
-        String table = "range_no_pruning_" + randomNameSuffix();
-        assertUpdate("CREATE TABLE " + table + " (id INTEGER)");
+        Session noPruning = Session.builder(getSession())
+                .setCatalogSessionProperty("ducklake", "file_statistics_pruning_enabled", "false")
+                .build();
+        for (Session session : List.of(noPruning, getSession())) {
+            String table = "range_catalog_stats_" + randomNameSuffix();
+            assertUpdate("CREATE TABLE " + table + " (id INTEGER)");
+            try {
+                assertUpdate("INSERT INTO " + table + " VALUES 5, 15, 25", 3);
+                // statistics an operator distrusts: they claim the file lies inside the range
+                catalog.executeInMetastore(
+                        "UPDATE ducklake_file_column_stats SET min_value = '10', max_value = '19' WHERE table_id = (SELECT table_id FROM ducklake_table WHERE table_name = '%s' AND end_snapshot IS NULL)".formatted(table));
+                assertUpdate(session, replaceRange(table, "catalog_stats", "id", "10", "20"));
+                assertQuery("SELECT id FROM " + table, "VALUES 5, 25");
+                assertThat(catalog.rows("SELECT id::VARCHAR FROM %s ORDER BY id".formatted(table))).containsExactly("5", "25");
+            }
+            finally {
+                assertUpdate("DROP TABLE " + table);
+            }
+        }
+    }
+
+    /**
+     * A file registered without any column statistics in the catalog is settled by its footer
+     * alone: a read of its pages fails.
+     */
+    @Test
+    void testRangeReplacementSettlesFilesWithoutCatalogStatisticsFromTheirFooters()
+            throws Exception
+    {
+        String table = "range_footer_only_" + randomNameSuffix();
+        String inside = catalog.externalParquetFile(table + "/inside");
+        String outside = catalog.externalParquetFile(table + "/outside");
+        String replacement = catalog.externalParquetFile(table + "/replacement");
+        catalog.executeInDuckDb(
+                "COPY (SELECT i::INTEGER id, TIMESTAMPTZ '2026-10-21 00:00:00+00' + i * INTERVAL 1 SECOND ts FROM range(100, 1100) t(i)) TO '%s' (FORMAT PARQUET)".formatted(inside),
+                "COPY (SELECT i::INTEGER id, TIMESTAMPTZ '2026-10-23 00:00:00+00' + i * INTERVAL 1 SECOND ts FROM range(100, 1100) t(i)) TO '%s' (FORMAT PARQUET)".formatted(outside),
+                "COPY (SELECT 41::INTEGER id, TIMESTAMPTZ '2026-10-21 06:00:00+00' ts) TO '%s' (FORMAT PARQUET)".formatted(replacement));
+        corruptDataPages(inside);
+        corruptDataPages(outside);
+        catalog.executeInDuckDb("CREATE TABLE %s (id INTEGER, ts TIMESTAMPTZ)".formatted(table));
         try {
-            assertUpdate("INSERT INTO " + table + " VALUES 5, 15, 25", 3);
-            // statistics an operator distrusts: they claim the file lies inside the range
-            catalog.executeInMetastore(
-                    "UPDATE ducklake_file_column_stats SET min_value = '10', max_value = '19' WHERE table_id = (SELECT table_id FROM ducklake_table WHERE table_name = '%s' AND end_snapshot IS NULL)".formatted(table));
-            Session noPruning = Session.builder(getSession())
-                    .setCatalogSessionProperty("ducklake", "file_statistics_pruning_enabled", "false")
-                    .build();
-            assertUpdate(noPruning, replaceRange(table, "no_pruning", "id", "10", "20"));
-            assertQuery("SELECT id FROM " + table, "VALUES 5, 25");
+            catalog.executeInDuckDb(Stream.of(inside, outside)
+                    .map(file -> "CALL ducklake_add_data_files('lake', '%s', '%s')".formatted(table, file))
+                    .toArray(String[]::new));
+            catalog.executeInMetastore("DELETE FROM ducklake_file_column_stats WHERE table_id = " + tableId(table));
+
+            assertUpdate(replaceRange(table, "day", "ts", "2026-10-21 00:00:00+00", "2026-10-22 00:00:00+00", location(replacement)));
+            assertThat(activeFilesWithDeleteCounts(table)).containsExactly("outside:-", "replacement:-");
         }
         finally {
             assertUpdate("DROP TABLE " + table);

@@ -13,11 +13,9 @@
  */
 package io.trino.plugin.ducklake;
 
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.hash.Hasher;
 import com.google.common.hash.Hashing;
-import io.airlift.concurrent.Threads;
 import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
 import io.trino.filesystem.Location;
@@ -63,7 +61,6 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.temporal.ChronoUnit;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -73,10 +70,9 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
+import java.util.concurrent.Callable;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_BAD_DATA;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_FILESYSTEM_ERROR;
@@ -112,7 +108,6 @@ final class DuckLakeFileImporter
             int maxConcurrentReads)
     {
         options = ParquetReaderOptions.builder(options).withSmallFileThreshold(DataSize.ofBytes(0)).build();
-        ImmutableList.Builder<ImportedFile> files = ImmutableList.builder();
         if (Location.of(handle.table().tableLocation()).scheme().orElse("").equals("local")) {
             try {
                 fileSystem.createDirectory(Location.of(handle.table().tableLocation()));
@@ -126,30 +121,17 @@ final class DuckLakeFileImporter
         }
         // Inspecting a file waits on the file system for its length and the tail holding its
         // footer, and spends little time computing, so the threads mostly wait.
-        var executor = Executors.newFixedThreadPool(Math.min(maxConcurrentReads, handle.files().size()), Threads.daemonThreadsNamed("ducklake-add-files-%s"));
-        List<Future<ImportedFile>> pending = new ArrayList<>();
-        try {
-            ParquetReaderOptions readerOptions = options;
-            for (String path : handle.files()) {
-                pending.add(executor.submit(() -> readFile(fileSystem, dataPath, handle, columns, partitioning, readerOptions, stats, path)));
-            }
-            for (var future : pending) {
-                files.add(future.get());
-            }
-            return files.build();
-        }
-        catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new TrinoException(StandardErrorCode.USER_CANCELED, "File registration was interrupted", e);
-        }
-        catch (ExecutionException e) {
-            Throwables.throwIfUnchecked(e.getCause());
-            throw new TrinoException(DUCKLAKE_BAD_DATA, "Could not inspect imported Parquet files", e.getCause());
-        }
-        finally {
-            pending.forEach(future -> future.cancel(true));
-            executor.shutdownNow();
-        }
+        ParquetReaderOptions readerOptions = options;
+        List<Callable<ImportedFile>> reads = handle.files().stream()
+                .<Callable<ImportedFile>>map(path -> () -> readFile(fileSystem, dataPath, handle, columns, partitioning, readerOptions, stats, path))
+                .collect(toImmutableList());
+        return DuckLakeParallelFileReads.readAll(
+                reads,
+                maxConcurrentReads,
+                "ducklake-add-files-%s",
+                "File registration was interrupted",
+                DUCKLAKE_BAD_DATA,
+                "Could not inspect imported Parquet files");
     }
 
     private static ImportedFile readFile(
@@ -563,6 +545,17 @@ final class DuckLakeFileImporter
 
     private static void validateType(Type source, Type expected, String name)
     {
+        if (!typeMatches(source, expected)) {
+            throw new TrinoException(DUCKLAKE_BAD_DATA, "Parquet type does not match column '%s': %s versus %s".formatted(name, source, expected));
+        }
+    }
+
+    /**
+     * Whether the Parquet field of a file holds the values of a column as the schema DuckLake
+     * writes for the column type expects them.
+     */
+    static boolean typeMatches(Type source, Type expected)
+    {
         boolean matches = source.isPrimitive() == expected.isPrimitive()
                 && source.getRepetition() != Repetition.REPEATED;
         if (expected.getRepetition() == Repetition.REQUIRED && source.getRepetition() != Repetition.REQUIRED) {
@@ -574,9 +567,7 @@ final class DuckLakeFileImporter
         else if (matches) {
             matches = Objects.equals(source.getLogicalTypeAnnotation(), expected.getLogicalTypeAnnotation());
         }
-        if (!matches) {
-            throw new TrinoException(DUCKLAKE_BAD_DATA, "Parquet type does not match column '%s': %s versus %s".formatted(name, source, expected));
-        }
+        return matches;
     }
 
     /**
