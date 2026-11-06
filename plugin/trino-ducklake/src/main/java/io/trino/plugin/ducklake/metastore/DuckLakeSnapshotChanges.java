@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
+import static com.google.common.collect.Sets.difference;
 import static com.google.common.collect.Sets.intersection;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_CHANGE_TYPE;
@@ -44,6 +45,7 @@ public final class DuckLakeSnapshotChanges
     private final Set<Long> droppedRelations;
     private final Set<Long> alteredRelations;
     private final Set<Long> insertedIntoTables;
+    private final Set<Long> inlinedInsertTables;
     private final Set<Long> deletedFromTables;
     private final Set<Long> compactedTables;
 
@@ -120,12 +122,14 @@ public final class DuckLakeSnapshotChanges
             Set<Long> droppedRelations,
             Set<Long> alteredRelations,
             Set<Long> insertedIntoTables,
+            Set<Long> inlinedInsertTables,
             Set<Long> deletedFromTables,
             Set<Long> compactedTables)
     {
         this.droppedRelations = requireNonNull(droppedRelations, "droppedRelations is null");
         this.alteredRelations = requireNonNull(alteredRelations, "alteredRelations is null");
         this.insertedIntoTables = requireNonNull(insertedIntoTables, "insertedIntoTables is null");
+        this.inlinedInsertTables = requireNonNull(inlinedInsertTables, "inlinedInsertTables is null");
         this.deletedFromTables = requireNonNull(deletedFromTables, "deletedFromTables is null");
         this.compactedTables = requireNonNull(compactedTables, "compactedTables is null");
     }
@@ -151,13 +155,28 @@ public final class DuckLakeSnapshotChanges
      */
     public Optional<String> conflictWith(DuckLakeSnapshotChanges other)
     {
+        return conflictWith(other, ImmutableSet.of());
+    }
+
+    /**
+     * Like {@link #conflictWith(DuckLakeSnapshotChanges)}, except for a delete from a table in
+     * {@code rangeDeletedTables}, which removed only the rows inside a range of one column. Data
+     * files that {@code other} inserted into such a table are left to the caller, who decides from
+     * their statistics whether they could hold a row in the range. Rows {@code other} inlined
+     * into such a table still conflict, because the snapshot changes cannot say where they lie.
+     */
+    public Optional<String> conflictWith(DuckLakeSnapshotChanges other, Set<Long> rangeDeletedTables)
+    {
+        Set<Long> deletedWithoutRange = difference(deletedFromTables, rangeDeletedTables);
+        Set<Long> deletedInRange = intersection(deletedFromTables, rangeDeletedTables);
         return firstConflict(droppedRelations, other.droppedRelations, "dropped", "dropped it")
                 .or(() -> firstConflict(insertedIntoTables, other.droppedRelations, "inserted into", "dropped it"))
                 .or(() -> firstConflict(insertedIntoTables, other.alteredRelations, "inserted into", "altered it"))
                 .or(() -> firstConflict(insertedIntoTables, other.deletedFromTables, "inserted into", "deleted from it"))
                 .or(() -> firstConflict(deletedFromTables, other.droppedRelations, "deleted from", "dropped it"))
                 .or(() -> firstConflict(deletedFromTables, other.alteredRelations, "deleted from", "altered it"))
-                .or(() -> firstConflict(deletedFromTables, other.insertedIntoTables, "deleted from", "inserted into it"))
+                .or(() -> firstConflict(deletedWithoutRange, other.insertedIntoTables, "deleted from", "inserted into it"))
+                .or(() -> firstConflict(deletedInRange, other.inlinedInsertTables, "deleted from", "inserted inlined rows into it"))
                 .or(() -> firstConflict(deletedFromTables, other.compactedTables, "deleted from", "compacted it"))
                 .or(() -> firstConflict(alteredRelations, other.droppedRelations, "altered", "dropped it"))
                 .or(() -> firstConflict(alteredRelations, other.alteredRelations, "altered", "altered it"));
@@ -175,6 +194,7 @@ public final class DuckLakeSnapshotChanges
         private final ImmutableSet.Builder<Long> droppedRelations = ImmutableSet.builder();
         private final ImmutableSet.Builder<Long> alteredRelations = ImmutableSet.builder();
         private final ImmutableSet.Builder<Long> insertedIntoTables = ImmutableSet.builder();
+        private final ImmutableSet.Builder<Long> inlinedInsertTables = ImmutableSet.builder();
         private final ImmutableSet.Builder<Long> deletedFromTables = ImmutableSet.builder();
         private final ImmutableSet.Builder<Long> compactedTables = ImmutableSet.builder();
 
@@ -188,7 +208,12 @@ public final class DuckLakeSnapshotChanges
                 case "altered_table", "altered_view" -> alteredRelations.add(objectId(value));
                 // Inlined rows live in the catalog database rather than a data file, but they are
                 // rows of the table either way and conflict with the same statements.
-                case "inserted_into_table", "inlined_insert" -> insertedIntoTables.add(objectId(value));
+                case "inserted_into_table" -> insertedIntoTables.add(objectId(value));
+                case "inlined_insert" -> {
+                    long tableId = objectId(value);
+                    insertedIntoTables.add(tableId);
+                    inlinedInsertTables.add(tableId);
+                }
                 case "deleted_from_table", "inlined_delete" -> deletedFromTables.add(objectId(value));
                 case "compacted_table", "merge_adjacent", "rewrite_delete" -> compactedTables.add(objectId(value));
                 // Creating something by name, dropping a schema, and flushing inlined rows into a
@@ -221,6 +246,7 @@ public final class DuckLakeSnapshotChanges
                     droppedRelations.build(),
                     alteredRelations.build(),
                     insertedIntoTables.build(),
+                    inlinedInsertTables.build(),
                     deletedFromTables.build(),
                     compactedTables.build());
         }

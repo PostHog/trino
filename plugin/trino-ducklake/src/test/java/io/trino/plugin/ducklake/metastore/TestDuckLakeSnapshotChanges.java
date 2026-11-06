@@ -16,6 +16,8 @@ package io.trino.plugin.ducklake.metastore;
 import io.trino.spi.TrinoException;
 import org.junit.jupiter.api.Test;
 
+import java.util.Set;
+
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_CHANGE_TYPE;
 import static io.trino.plugin.ducklake.metastore.DuckLakeSnapshotChanges.parse;
@@ -84,6 +86,29 @@ final class TestDuckLakeSnapshotChanges
                 .contains("this statement deleted from object 1, but another transaction compacted it");
         assertThat(parse("deleted_from_table:1").conflictWith(parse("rewrite_delete:1"))).isPresent();
         assertThat(parse("deleted_from_table:1").conflictWith(parse("compacted_table:1"))).isPresent();
+    }
+
+    /**
+     * A delete of the rows in a range leaves the data files another writer inserted to the caller,
+     * which decides from their statistics. Every other rule still holds.
+     */
+    @Test
+    void testRangeDeleteLeavesInsertedDataFilesToTheCaller()
+    {
+        DuckLakeSnapshotChanges replacement = parse("deleted_from_table:1,inserted_into_table:1");
+        assertThat(replacement.conflictWith(parse("inserted_into_table:1"), Set.of(1L))).isEmpty();
+        // the snapshot changes cannot say where inlined rows lie
+        assertThat(replacement.conflictWith(parse("inlined_insert:1"), Set.of(1L)))
+                .contains("this statement deleted from object 1, but another transaction inserted inlined rows into it");
+        assertThat(replacement.conflictWith(parse("deleted_from_table:1"), Set.of(1L)))
+                .contains("this statement inserted into object 1, but another transaction deleted from it");
+        assertThat(replacement.conflictWith(parse("merge_adjacent:1"), Set.of(1L)))
+                .contains("this statement deleted from object 1, but another transaction compacted it");
+        assertThat(replacement.conflictWith(parse("altered_table:1"), Set.of(1L))).isPresent();
+        assertThat(replacement.conflictWith(parse("dropped_table:1"), Set.of(1L))).isPresent();
+        // only the tables named are left to the caller
+        assertThat(parse("deleted_from_table:1,deleted_from_table:2").conflictWith(parse("inserted_into_table:2"), Set.of(1L)))
+                .contains("this statement deleted from object 2, but another transaction inserted into it");
     }
 
     @Test

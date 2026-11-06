@@ -185,8 +185,7 @@ public final class DuckLakeRangeReplacement
             if (fileDomain.isPresent() && !range.overlaps(fileDomain.orElseThrow())) {
                 continue;
             }
-            if ((fileDomain.isPresent() && range.contains(fileDomain.orElseThrow()))
-                    || allVisibleRowsInRange(session, table, replacement, file, Optional.ofNullable(deletion), inlined, mappings)) {
+            if (allRowsInRange(session, table, replacement, file, fileDomain, Optional.ofNullable(deletion), inlined, mappings)) {
                 wholeFiles.add(file.dataFileId());
                 inlined.ifPresent(value -> plannedInlinedDeletions.put(file.dataFileId(), value));
                 continue;
@@ -203,14 +202,77 @@ public final class DuckLakeRangeReplacement
 
     /**
      * Whether every visible row of the file has a value of the range column inside the range, so
-     * that the file can end whole. The catalog cannot always tell: DuckDB records no null count for
-     * a file it registers with {@code ducklake_add_data_files}, so such a file may hold a NULL,
-     * which lies outside every range.
+     * that the file can end whole.
+     * <p>
+     * The catalog cannot always tell. DuckDB records no null count for a file it registers with
+     * {@code ducklake_add_data_files}, so such a file may hold a NULL, which lies outside every
+     * range. When the catalog bounds the values of the file inside the range, only a NULL can lie
+     * outside it, so the file is read for its NULLs alone. The Parquet reader skips every row
+     * group whose footer rules out a NULL, from its null count or from a column that cannot hold
+     * one, whatever the type of the column. A file whose footer rules out a NULL in every row
+     * group is so settled without a read of its pages.
+     */
+    private boolean allRowsInRange(
+            ConnectorSession session,
+            DuckLakeTableHandle table,
+            DuckLakeReplacementRange replacement,
+            DuckLakeDataFileEntry file,
+            Optional<Domain> fileDomain,
+            Optional<DuckLakeDeleteFileEntry> deletion,
+            Optional<long[]> inlinedDeletions,
+            Map<Long, DuckLakeNameMapping> mappings)
+    {
+        Domain range = replacement.domain();
+        if (fileDomain.isPresent()) {
+            Domain values = fileDomain.orElseThrow();
+            if (range.contains(values)) {
+                return true;
+            }
+            if (range.contains(Domain.create(values.getValues(), false))) {
+                return !hasVisibleNull(session, table, replacement, file, deletion, inlinedDeletions, mappings);
+            }
+        }
+        return allVisibleRowsInRange(session, table, replacement, file, deletion, inlinedDeletions, mappings);
+    }
+
+    private boolean hasVisibleNull(
+            ConnectorSession session,
+            DuckLakeTableHandle table,
+            DuckLakeReplacementRange replacement,
+            DuckLakeDataFileEntry file,
+            Optional<DuckLakeDeleteFileEntry> deletion,
+            Optional<long[]> inlinedDeletions,
+            Map<Long, DuckLakeNameMapping> mappings)
+    {
+        try (ConnectorPageSource source = openFile(session, table, replacement, file, deletion, inlinedDeletions, mappings, Domain.onlyNull(replacement.column().type()), false)) {
+            while (!source.isFinished()) {
+                checkInterrupted();
+                SourcePage page = source.getNextSourcePage();
+                if (page == null) {
+                    continue;
+                }
+                Block values = page.getBlock(0);
+                for (int position = 0; position < page.getPositionCount(); position++) {
+                    if (values.isNull(position)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        catch (IOException e) {
+            throw new TrinoException(DUCKLAKE_FILESYSTEM_ERROR, "Could not read file for range replacement", e);
+        }
+        return false;
+    }
+
+    /**
+     * Whether every visible row of the file has a value of the range column inside the range,
+     * read from the file itself.
      * <p>
      * The file is read with the complement of the range as the Parquet predicate. The reader skips
-     * every row group whose footer statistics show only non-NULL values inside the range, so a file
-     * with complete footer statistics is settled from its footer. The read stops at the first
-     * visible row outside the range.
+     * every row group whose footer statistics show only non-NULL values inside the range. It takes
+     * no bounds from the footer for some types, such as timestamp with time zone, and reads their
+     * pages instead. The read stops at the first visible row outside the range.
      */
     private boolean allVisibleRowsInRange(
             ConnectorSession session,

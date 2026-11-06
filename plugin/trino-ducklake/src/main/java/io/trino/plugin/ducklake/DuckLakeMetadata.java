@@ -126,6 +126,7 @@ import static io.trino.plugin.ducklake.DuckLakeColumnHandle.ROW_COUNT_COLUMN;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_INVALID_METADATA;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_FEATURE;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_FORMAT_VERSION;
+import static io.trino.plugin.ducklake.DuckLakeSessionProperties.isFileStatisticsPruningEnabled;
 import static io.trino.plugin.ducklake.util.DuckLakeViewSql.withCatalogPlaceholder;
 import static io.trino.plugin.ducklake.util.PartitionTransforms.IDENTITY_TRANSFORM;
 import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
@@ -964,7 +965,14 @@ public class DuckLakeMetadata
                 applyDeletes(commit, target, rangeDeletes);
                 // A replacement depends on every row in the interval, including the absence of
                 // rows in an empty interval. Record both sides even for a delete-only batch.
-                commit.recordDelete(table.tableId());
+                if (isFileStatisticsPruningEnabled(session)) {
+                    // a concurrent append conflicts only if a file it added could hold a row in the range
+                    DuckLakeReplacementRange range = handle.replacementRange().orElseThrow();
+                    commit.recordRangeDelete(table.tableId(), range.column().columnId(), range::mayHoldRowInRange);
+                }
+                else {
+                    commit.recordDelete(table.tableId());
+                }
             });
             Map<String, Long> mappings = new LinkedHashMap<>();
             Map<List<DuckLakeCommit.NameMappingColumn>, Long> mappingIds = new LinkedHashMap<>();

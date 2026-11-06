@@ -21,13 +21,16 @@ import org.jdbi.v3.core.Handle;
 import org.jdbi.v3.core.statement.PreparedBatch;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.collect.Sets.difference;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_COMMIT_CONFLICT;
 import static java.lang.String.join;
 import static java.util.Locale.ENGLISH;
@@ -69,6 +72,8 @@ public final class DuckLakeCommit
     private long schemaVersion;
     private final List<String> changes = new ArrayList<>();
     private final Set<Long> tablesWithSchemaChange = new LinkedHashSet<>();
+    private final Set<Long> deletesWithoutRange = new LinkedHashSet<>();
+    private final Map<Long, RangeDelete> rangeDeletes = new LinkedHashMap<>();
 
     DuckLakeCommit(Handle handle, String metadataSchema, SnapshotState state, boolean sortInfoSupported, boolean nameMappingIsPartitionSupported)
     {
@@ -172,6 +177,20 @@ public final class DuckLakeCommit
     public void recordDelete(long tableId)
     {
         recordChange("deleted_from_table:" + tableId);
+        deletesWithoutRange.add(tableId);
+    }
+
+    /**
+     * Records a delete of the rows of the table whose value of a column lies inside a range. The
+     * catalog records it like any other delete. When this commit lands on top of others, a data
+     * file that another transaction added to the table conflicts with the delete only if
+     * {@code check} says that the file could hold a row inside the range. Rows another
+     * transaction inlined into the table still conflict.
+     */
+    public void recordRangeDelete(long tableId, long columnId, RangeCheck check)
+    {
+        recordChange("deleted_from_table:" + tableId);
+        rangeDeletes.put(tableId, new RangeDelete(columnId, requireNonNull(check, "check is null")));
     }
 
     /**
@@ -992,9 +1011,57 @@ public final class DuckLakeCommit
                 .mapTo(String.class)
                 .list();
         DuckLakeSnapshotChanges otherChanges = DuckLakeSnapshotChanges.parse(join(",", otherChangesMade));
-        ourChanges.conflictWith(otherChanges).ifPresent(conflict -> {
+        Set<Long> rangeDeletedTables = difference(rangeDeletes.keySet(), deletesWithoutRange).immutableCopy();
+        ourChanges.conflictWith(otherChanges, rangeDeletedTables).ifPresent(conflict -> {
             throw new ConcurrentModificationFailure("Conflicting concurrent commit to the DuckLake catalog: " + conflict);
         });
+        // every file added since is checked, whichever change recorded it
+        for (long tableId : rangeDeletedTables) {
+            verifyFilesAddedSinceAreOutsideRange(tableId, rangeDeletes.get(tableId), readSnapshotId);
+        }
+    }
+
+    /**
+     * Fails unless no data file added to the table after {@code readSnapshotId} could hold a row
+     * inside the range of the delete. The files of every snapshot since are checked, also those
+     * that a later snapshot already ended: the snapshot that ended them conflicts by itself. A
+     * file without statistics of the column could hold any value, so it conflicts.
+     */
+    private void verifyFilesAddedSinceAreOutsideRange(long tableId, RangeDelete delete, long readSnapshotId)
+    {
+        List<AddedDataFile> files = handle.createQuery(
+                        """
+                        SELECT f.data_file_id, f.record_count, s.column_id, s.value_count, s.null_count, s.min_value, s.max_value, s.contains_nan
+                        FROM %s f
+                        LEFT JOIN %s s ON s.data_file_id = f.data_file_id AND s.table_id = f.table_id AND s.column_id = :columnId
+                        WHERE f.table_id = :tableId AND f.begin_snapshot > :readSnapshot AND f.begin_snapshot <= :baseSnapshot
+                        ORDER BY f.data_file_id""".formatted(table("ducklake_data_file"), table("ducklake_file_column_stats")))
+                .bind("tableId", tableId)
+                .bind("columnId", delete.columnId())
+                .bind("readSnapshot", readSnapshotId)
+                .bind("baseSnapshot", baseSnapshotId)
+                .map((rs, _) -> {
+                    long dataFileId = rs.getLong("data_file_id");
+                    Optional<DuckLakeFileColumnStats> statistics = JdbcDuckLakeMetastore.optionalLong(rs, "column_id").isEmpty()
+                            ? Optional.empty()
+                            : Optional.of(new DuckLakeFileColumnStats(
+                            dataFileId,
+                            delete.columnId(),
+                            JdbcDuckLakeMetastore.optionalLong(rs, "value_count"),
+                            JdbcDuckLakeMetastore.optionalLong(rs, "null_count"),
+                            Optional.ofNullable(rs.getString("min_value")),
+                            Optional.ofNullable(rs.getString("max_value")),
+                            JdbcDuckLakeMetastore.optionalBoolean(rs, "contains_nan")));
+                    return new AddedDataFile(dataFileId, rs.getLong("record_count"), statistics);
+                })
+                .list();
+        for (AddedDataFile file : files) {
+            if (delete.check().mayHoldRowInRange(file.recordCount(), file.statistics())) {
+                throw new ConcurrentModificationFailure(
+                        "Conflicting concurrent commit to the DuckLake catalog: this statement deleted a range of rows from object %s, but another transaction inserted into it data file %s, which may hold rows in that range"
+                                .formatted(tableId, file.dataFileId()));
+            }
+        }
     }
 
     void writeSnapshot()
@@ -1129,6 +1196,21 @@ public final class DuckLakeCommit
     {
         return "\"" + name.replace("\"", "\"\"") + "\"";
     }
+
+    /**
+     * Decides whether a data file could hold a row whose value of a column lies inside a range,
+     * from the number of rows of the file and the statistics of the column the catalog records for
+     * it, if any.
+     */
+    @FunctionalInterface
+    public interface RangeCheck
+    {
+        boolean mayHoldRowInRange(long recordCount, Optional<DuckLakeFileColumnStats> statistics);
+    }
+
+    private record RangeDelete(long columnId, RangeCheck check) {}
+
+    private record AddedDataFile(long dataFileId, long recordCount, Optional<DuckLakeFileColumnStats> statistics) {}
 
     public record TableIdentity(long tableId, long schemaId, String tableName, String path, Optional<String> tableUuid) {}
 
