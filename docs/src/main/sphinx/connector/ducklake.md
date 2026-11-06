@@ -99,8 +99,9 @@ The following configuration properties are available:
   - Maximum number of Parquet files one `add_files` call inspects at the same time.
     Inspecting a file reads its length and its footer, and mostly waits on the
     object store, so the coordinator spends little CPU or memory per concurrent
-    read. Each concurrent read holds one connection of the file system's pool,
-    which concurrent calls share.
+    read. It also bounds the footer reads of a range replacement. Each concurrent
+    read holds one connection of the file system's pool, which concurrent calls
+    share.
   - `32`
 * - `ducklake.file-statistics-pruning.enabled`
   - Prune data files using the per-file column statistics recorded in the
@@ -447,21 +448,26 @@ reusing the ID with different bounds fails. Bounds are compared by value, so a
 retry spelling a bound differently, or retrying after the column was widened,
 is the same import.
 
-The coordinator uses catalog statistics to skip disjoint files and end wholly
-covered files without reading their rows. It does so only while file statistics
-pruning is enabled, with `ducklake.file-statistics-pruning.enabled` or the
-`file_statistics_pruning_enabled` session property; otherwise it reads every
-file. A file the catalog statistics do not place still ends whole when all of
-its visible rows are non-NULL and inside the interval. A file DuckDB registered
-with `ducklake_add_data_files` has no null count in the catalog, so when the
-catalog bounds its values inside the interval, only a NULL can lie outside it.
-The Parquet footer then settles the file, for any column type, when its null
-counts or a column that cannot hold a NULL rule one out. Otherwise the footer
-settles a file when its row group statistics show that every row is inside the
-interval. The footer is not used while the `parquet_ignore_statistics` session
-property is set. When the footer does not settle a file, the coordinator reads
-the range column until it finds a visible row outside the interval, or a
-visible NULL. For boundary files, it then reads only the
+The coordinator uses catalog statistics only to skip files they place outside
+the interval, and only while file statistics pruning is enabled, with
+`ducklake.file-statistics-pruning.enabled` or the
+`file_statistics_pruning_enabled` session property. It never ends a file whole
+on catalog statistics, because other engines write them and nothing checks them
+against the file. It reads the Parquet footer of every other file, up to
+`ducklake.add-files-procedure.max-concurrent-file-reads` at a time. It ends a
+file whole, without reading its rows, only when the footer statistics prove
+that every row is non-NULL and inside the interval, by the same rule it applies
+to the replacement files. A footer that places a file outside the interval
+leaves the file untouched. When a footer bounds the values of a file inside the
+interval but may allow a NULL, the coordinator reads the range column for a
+NULL: the Parquet reader skips every row group whose null count, or a column
+that cannot hold a NULL, rules one out, for any column type. A file whose
+footer does not settle it, because it lacks usable statistics, does not match
+the column type of the table, or straddles the interval, is read until the
+coordinator finds a visible row outside the interval. The footer is not used
+while the `parquet_ignore_statistics` session property is set, so every file
+that catalog statistics do not skip is read. For boundary files, the
+coordinator then reads only the
 range column and row positions using the regular Parquet reader, preserving
 existing positional deletes. It writes new positional delete files for partial removals. Existing
 data files and incoming Parquet objects are not rewritten. Boundary scans run
