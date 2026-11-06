@@ -79,13 +79,22 @@ behalf of the user who ran them, to the control plane that publishes the
 catalogs. The statement returns once the published change has arrived through
 catalog synchronization and the user can see the new catalog.
 
+A cluster with several coordinators routes the next statement to any of them,
+and each receives the catalog and its authorization on its own schedule. So
+after `CREATE CATALOG` is usable here, the coordinator also polls
+`{endpoint}/visibility` with `{user, catalog}` until the control plane answers
+`{catalog, visible: true}`, meaning every coordinator it publishes to can serve
+the user. A 404 means the control plane cannot tell, and ends the wait. A failed
+or unreadable answer counts as not yet. The visibility timeout bounds the whole
+wait, and a statement that times out after the catalog arrived here says so.
+
 | Property | Default | Description |
 | --- | --- | --- |
-| `catalog-store.delegate.endpoint` | (unset) | Base URL; requests go to `{endpoint}/create` and `{endpoint}/drop`. Unset keeps mutations rejected. |
+| `catalog-store.delegate.endpoint` | (unset) | Base URL; requests go to `{endpoint}/create`, `{endpoint}/drop` and `{endpoint}/visibility`. Unset keeps mutations rejected. |
 | `catalog-store.delegate.token-file` | (required with an endpoint) | File holding the bearer token, re-read on every request. |
 | `catalog-store.delegate.allow-insecure-http` | `false` | Allow `http` on a trusted private route; otherwise `https` is required. |
 | `catalog-store.delegate.request-timeout` | `15s` | Budget for one request to the control plane. |
-| `catalog-store.delegate.visibility-timeout` | `3m` | How long an accepted request waits for the change to arrive on this coordinator. |
+| `catalog-store.delegate.visibility-timeout` | `3m` | How long an accepted request waits for the change to arrive on this coordinator and, for a created catalog, to be reported visible everywhere. |
 
 The writable store refuses delegation at startup. Redirects are not followed,
 responses are bounded to 64 KiB, and request bodies never appear in errors or

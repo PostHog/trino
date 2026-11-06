@@ -58,6 +58,12 @@ public class DelegatingManagedCatalogStore
     }
 
     @Override
+    public boolean isVisibleEverywhere(Identity identity, CatalogName catalogName)
+    {
+        return client.isVisibleEverywhere(identity, catalogName);
+    }
+
+    @Override
     public Duration visibilityTimeout()
     {
         return visibilityTimeout;
