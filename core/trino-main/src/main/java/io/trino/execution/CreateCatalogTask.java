@@ -121,7 +121,7 @@ public class CreateCatalogTask
         if (delegatedCatalogStore.isPresent()) {
             DelegatedCatalogStore store = delegatedCatalogStore.get();
             DelegatedCatalogStore.CatalogRequestResult result = store.createCatalog(session.getIdentity(), catalog, connectorName, properties, statement.isNotExists());
-            return delegatedCatalogMutations.awaitCreated(stateMachine, catalog, result.changed(), store.visibilityTimeout());
+            return delegatedCatalogMutations.awaitCreated(stateMachine, catalog, result.changed(), store);
         }
         plannerContext.getMetadata().createCatalog(session, catalog, connectorName, properties, statement.isNotExists());
         return immediateVoidFuture();

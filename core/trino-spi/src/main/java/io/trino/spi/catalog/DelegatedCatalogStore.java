@@ -32,7 +32,8 @@ import static java.util.Objects.requireNonNull;
  * <p>When the configured store implements this interface, the engine calls it instead of the
  * store's mutation methods, after its own access control checks and after the catalog properties
  * have been evaluated. A successful call only means that the writer accepted the request; the
- * engine then waits until the change is visible on this coordinator, for at most
+ * engine then waits until the change is visible on this coordinator, and for a created catalog
+ * until the store reports it {@linkplain #isVisibleEverywhere visible everywhere}, for at most
  * {@link #visibilityTimeout()}.
  *
  * <p>A store implementing this interface promises that:
@@ -74,6 +75,24 @@ public interface DelegatedCatalogStore
     default Duration visibilityTimeout()
     {
         return Duration.ofMinutes(3);
+    }
+
+    /**
+     * Whether a created catalog is usable by this user on every coordinator the writer publishes
+     * to, not only on this one. A statement after {@code CREATE CATALOG} can run on another
+     * coordinator of the same cluster, which receives the catalog and its authorization on its own
+     * schedule; a writer that can see every coordinator answers whether all of them are ready.
+     *
+     * <p>The engine calls this repeatedly, and only once the catalog is already usable on this
+     * coordinator, until it returns true or the {@linkplain #visibilityTimeout() visibility
+     * timeout} passes. An exception counts as "not yet". The default returns true: a store that
+     * cannot tell has nothing further to wait for.
+     *
+     * @param identity the user who ran the statement
+     */
+    default boolean isVisibleEverywhere(Identity identity, CatalogName catalogName)
+    {
+        return true;
     }
 
     /**

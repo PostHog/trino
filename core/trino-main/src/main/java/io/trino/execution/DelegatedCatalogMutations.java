@@ -49,7 +49,8 @@ import static java.util.concurrent.TimeUnit.NANOSECONDS;
 /**
  * Shared by {@link CreateCatalogTask} and {@link DropCatalogTask} for a catalog store that hands
  * catalog mutations to an external writer. The writer accepting a request does not make the change
- * visible here: it arrives later through catalog synchronization. This waits for that, polling the
+ * visible here: it arrives later through catalog synchronization, and a created catalog reaches the
+ * cluster's other coordinators on their own schedules. This waits for that, polling the
  * local catalog state without blocking a query thread and without holding any catalog lock, and
  * gives up with a retryable error once the store's visibility timeout has passed.
  */
@@ -134,12 +135,14 @@ public class DelegatedCatalogMutations
     }
 
     /**
-     * Completes once the catalog is active on this coordinator and the user of the statement is
-     * allowed to see it, or fails with {@code CATALOG_NOT_AVAILABLE} after the timeout. When the
-     * store changed nothing (IF NOT EXISTS matched an existing catalog) and that catalog is present
-     * here but failed to load, waiting cannot help, so that fails at once.
+     * Completes once the catalog is active on this coordinator, the user of the statement is
+     * allowed to see it, and the store reports it {@linkplain DelegatedCatalogStore#isVisibleEverywhere
+     * visible everywhere}, or fails with {@code CATALOG_NOT_AVAILABLE} after the store's visibility
+     * timeout. The store is asked only once the catalog is usable here. When the store changed
+     * nothing (IF NOT EXISTS matched an existing catalog) and that catalog is present here but
+     * failed to load, waiting cannot help, so that fails at once.
      */
-    public ListenableFuture<Void> awaitCreated(QueryStateMachine stateMachine, CatalogName catalogName, boolean changed, Duration timeout)
+    public ListenableFuture<Void> awaitCreated(QueryStateMachine stateMachine, CatalogName catalogName, boolean changed, DelegatedCatalogStore store)
     {
         Session session = stateMachine.getSession();
         if (!changed && catalogManager.getCatalog(catalogName).map(Catalog::isFailed).orElse(false)) {
@@ -147,11 +150,14 @@ public class DelegatedCatalogMutations
         }
         return await(
                 stateMachine,
-                () -> isAvailable(session, catalogName),
-                timeout,
+                () -> isAvailable(session, catalogName) && store.isVisibleEverywhere(session.getIdentity(), catalogName),
+                store.visibilityTimeout(),
                 () -> {
                     if (catalogManager.getCatalog(catalogName).map(Catalog::isFailed).orElse(false)) {
                         return new TrinoException(CATALOG_NOT_AVAILABLE, "Catalog '%s' was accepted but failed to load on this coordinator".formatted(catalogName));
+                    }
+                    if (holds(() -> isAvailable(session, catalogName))) {
+                        return new TrinoException(CATALOG_NOT_AVAILABLE, "Catalog '%s' is available on this coordinator but not yet on every coordinator; retry the statement shortly".formatted(catalogName));
                     }
                     return new TrinoException(CATALOG_NOT_AVAILABLE, "Catalog '%s' was accepted but is not yet available on this coordinator; retry the statement shortly".formatted(catalogName));
                 });

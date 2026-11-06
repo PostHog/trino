@@ -38,6 +38,7 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -136,6 +137,42 @@ final class TestCatalogRequestClient
 
         response = "{\"catalog\":\"ext_example_db__warehouse\",\"dropped\":false}";
         assertThat(client().dropCatalog(USER, CATALOG, true).changed()).isFalse();
+    }
+
+    @Test
+    void testVisibility()
+    {
+        CatalogRequestClient client = client();
+        response = "{\"catalog\":\"ext_example_db__warehouse\",\"visible\":false,\"members\":3,\"ready\":2}";
+        assertThat(client.isVisibleEverywhere(USER, CATALOG)).isFalse();
+        assertThat(path.get()).isEqualTo("/trino/catalog-requests/v1/visibility");
+        assertThat(authorization.get()).isEqualTo("Bearer synthetic-cell-token");
+        assertThat(body.get()).isEqualTo(Map.of(
+                "user", "example_db.analyst",
+                "catalog", "ext_example_db__warehouse"));
+
+        response = "{\"catalog\":\"ext_example_db__warehouse\",\"visible\":true}";
+        assertThat(client.isVisibleEverywhere(USER, CATALOG)).isTrue();
+
+        // A control plane that cannot tell, or predates the request, leaves nothing to wait for
+        status = 404;
+        response = "404 page not found";
+        assertThat(client.isVisibleEverywhere(USER, CATALOG)).isTrue();
+    }
+
+    @Test
+    void testVisibilityFailuresAreUnavailable()
+    {
+        CatalogRequestClient client = client();
+        for (String malformed : List.of("{}", "{\"catalog\":\"ext_example_db__warehouse\"}", "{\"catalog\":\"other\",\"visible\":true}", "not json")) {
+            response = malformed;
+            assertUnavailable(() -> client.isVisibleEverywhere(USER, CATALOG));
+        }
+        response = "{\"error\":\"unavailable\"}";
+        for (int failure : List.of(400, 403, 409, 500, 503)) {
+            status = failure;
+            assertThatThrownBy(() -> client.isVisibleEverywhere(USER, CATALOG)).isInstanceOf(RuntimeException.class);
+        }
     }
 
     @Test
