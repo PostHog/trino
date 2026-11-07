@@ -51,6 +51,8 @@ import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.TypeUtils.readNativeValue;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
+import static io.trino.spi.type.UuidType.UUID;
+import static io.trino.spi.type.UuidType.javaUuidToTrinoUuid;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.lang.Float.floatToRawIntBits;
@@ -60,7 +62,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Checks that building a {@link SortedRangeSet} from unordered values gives the same
  * result as the original list based sorting algorithm, which is kept here as a reference.
  */
-class TestSortedRangeSetFromUnorderedValues
+public class TestSortedRangeSetFromUnorderedValues
 {
     private static final long SEED = 20260503;
     private static final List<Integer> SIZES = List.of(1, 2, 3, 10, 17, 33, 100, 1000, 20000);
@@ -93,6 +95,12 @@ class TestSortedRangeSetFromUnorderedValues
                 new TypeCase(VARCHAR, random -> randomSlice(random, 12)),
                 new TypeCase(VARCHAR, random -> randomSlice(random, 2)),
                 new TypeCase(VARBINARY, random -> randomSlice(random, 12)),
+                // bytes above 0x7F order after the ASCII ones, as they are compared unsigned
+                new TypeCase(VARBINARY, random -> randomBinary(random, 5)),
+                new TypeCase(VARCHAR, TestSortedRangeSetFromUnorderedValues::randomUnicodeSlice),
+                new TypeCase(UUID, random -> javaUuidToTrinoUuid(new java.util.UUID(random.nextLong(), random.nextLong()))),
+                // a few distinct bytes, some above 0x7F, to get equal values that differ in a single byte
+                new TypeCase(UUID, TestSortedRangeSetFromUnorderedValues::randomUuidWithFewDistinctBytes),
                 new TypeCase(DOUBLE, TestSortedRangeSetFromUnorderedValues::randomDouble),
                 new TypeCase(REAL, random -> (long) floatToRawIntBits((float) randomDouble(random))),
                 new TypeCase(TIME_MILLIS, random -> random.nextLong(0, 86_400_000) * 1_000_000_000L),
@@ -105,7 +113,7 @@ class TestSortedRangeSetFromUnorderedValues
     }
 
     @Test
-    void testCollection()
+    public void testCollection()
     {
         Random random = new Random(SEED);
         for (TypeCase typeCase : typeCases()) {
@@ -122,7 +130,7 @@ class TestSortedRangeSetFromUnorderedValues
     }
 
     @Test
-    void testVarargs()
+    public void testVarargs()
     {
         Random random = new Random(SEED);
         for (TypeCase typeCase : typeCases()) {
@@ -140,7 +148,7 @@ class TestSortedRangeSetFromUnorderedValues
     }
 
     @Test
-    void testNegativeZero()
+    public void testNegativeZero()
     {
         // zeros of different sign are distinct values
         List<Object> values = List.of(0.0, -0.0, 1.0, -0.0, 0.0, Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY);
@@ -150,7 +158,7 @@ class TestSortedRangeSetFromUnorderedValues
     }
 
     @Test
-    void testKeepsFirstOfEqualValues()
+    public void testKeepsFirstOfEqualValues()
     {
         long warsaw = packDateTimeWithZone(1000, "Europe/Warsaw");
         long utc = packDateTimeWithZone(1000, "UTC");
@@ -241,6 +249,47 @@ class TestSortedRangeSetFromUnorderedValues
             bytes[i] = (byte) ('a' + random.nextInt(26));
         }
         return Slices.wrappedBuffer(bytes);
+    }
+
+    private static Slice randomUuidWithFewDistinctBytes(Random random)
+    {
+        byte[] bytes = new byte[16];
+        for (int position : new int[] {0, 7, 8, 15}) {
+            bytes[position] = (byte) switch (random.nextInt(4)) {
+                case 0 -> 0x00;
+                case 1 -> 0x01;
+                case 2 -> 0x80;
+                default -> 0xFF;
+            };
+        }
+        return Slices.wrappedBuffer(bytes);
+    }
+
+    private static Slice randomBinary(Random random, int maxLength)
+    {
+        byte[] bytes = new byte[random.nextInt(maxLength + 1)];
+        for (int i = 0; i < bytes.length; i++) {
+            // a small set of bytes, to get equal values and values that are a prefix of another
+            bytes[i] = (byte) switch (random.nextInt(5)) {
+                case 0 -> 0x00;
+                case 1 -> 0x01;
+                case 2 -> 0x7F;
+                case 3 -> 0x80;
+                default -> 0xFF;
+            };
+        }
+        return Slices.wrappedBuffer(bytes);
+    }
+
+    private static Slice randomUnicodeSlice(Random random)
+    {
+        String[] characters = {"a", "b", "z", "é", "ÿ", "€", "中", "😀"};
+        StringBuilder builder = new StringBuilder();
+        int length = random.nextInt(5);
+        for (int i = 0; i < length; i++) {
+            builder.append(characters[random.nextInt(characters.length)]);
+        }
+        return Slices.utf8Slice(builder.toString());
     }
 
     private static double randomDouble(Random random)
