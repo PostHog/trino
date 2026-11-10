@@ -21,6 +21,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Ticker;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.log.Logger;
+import io.trino.plugin.hoglake.HoglakePosthogSchema;
 import io.trino.spi.StandardErrorCode;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.SchemaNotFoundException;
@@ -58,7 +59,9 @@ import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_NOT_FOUND
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_UNAVAILABLE;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_SNAPSHOT_EXPIRED;
+import static io.trino.spi.StandardErrorCode.EXCEEDED_SCAN_LIMIT;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME;
 import static java.util.Objects.requireNonNull;
@@ -100,6 +103,7 @@ public class HoglakeClient
     private static final String UNKNOWN_INCLUDE_PREFIX = "include: unknown value(s) ";
     private static final String UNKNOWN_INCLUDE_SUFFIX = "; supported:";
     private static final Pattern QUOTED_VALUE = Pattern.compile("'([^']*)'");
+    private static final Pattern ERROR_CODE = Pattern.compile("[a-z_]{1,64}");
 
     /**
      * Sent on every request. Hoglake counts auth outcomes per client class read
@@ -117,6 +121,9 @@ public class HoglakeClient
     private final Ticker ticker;
     private final ScanIncludeSupport columnStatsSupport = new ScanIncludeSupport(COLUMN_STATS);
     private final ScanIncludeSupport splitOffsetsSupport = new ScanIncludeSupport(SPLIT_OFFSETS);
+    // The client of the posthog schema's mount catalog: its messages name the schema,
+    // never a URL or a response body.
+    private final boolean mount;
 
     public HoglakeClient(String baseUri, String catalog)
     {
@@ -142,6 +149,28 @@ public class HoglakeClient
     @VisibleForTesting
     public HoglakeClient(String baseUri, String catalog, Duration requestTimeout, Ticker ticker, HoglakeTokenSource tokenSource)
     {
+        this(baseUri, catalog, requestTimeout, ticker, tokenSource, false);
+    }
+
+    /**
+     * The client of the posthog schema: the mount catalog {@code mountCatalog} on the
+     * same server, with the org catalog's own token source. Its 404 for the catalog
+     * means the schema does not exist, and its errors carry no URL or response body.
+     */
+    public static HoglakeClient forMount(String baseUri, String mountCatalog, Duration requestTimeout, HoglakeTokenSource tokenSource)
+    {
+        return new HoglakeClient(baseUri, mountCatalog, requestTimeout, Ticker.systemTicker(), tokenSource, true);
+    }
+
+    @VisibleForTesting
+    public static HoglakeClient forMount(String baseUri, String mountCatalog)
+    {
+        return forMount(baseUri, mountCatalog, DEFAULT_REQUEST_TIMEOUT, HoglakeTokenSource.NONE);
+    }
+
+    private HoglakeClient(String baseUri, String catalog, Duration requestTimeout, Ticker ticker, HoglakeTokenSource tokenSource, boolean mount)
+    {
+        this.mount = mount;
         // Fail at construction (catalog registration), not per query.
         this.baseUri = validateBaseUri(requireNonNull(baseUri, "baseUri is null")).toString();
         this.catalog = requireNonNull(catalog, "catalog is null");
@@ -192,6 +221,19 @@ public class HoglakeClient
     {
         return get(catalogPath(""), new TypeReference<HoglakeDtos.Catalog>() {})
                 .orElseThrow(this::catalogNotFound);
+    }
+
+    /**
+     * The catalog, or empty when the server has none of this name for this caller.
+     */
+    public Optional<HoglakeDtos.Catalog> findCatalog()
+    {
+        return get(catalogPath(""), new TypeReference<HoglakeDtos.Catalog>() {});
+    }
+
+    public String catalogName()
+    {
+        return catalog;
     }
 
     public List<HoglakeDtos.Namespace> listNamespaces()
@@ -727,6 +769,85 @@ public class HoglakeClient
         }
     }
 
+    /**
+     * The request as user-visible text: the method and URL for the org catalog, as
+     * before, and only the schema for the posthog schema's mount.
+     */
+    private String describe(URI uri)
+    {
+        if (mount) {
+            return "a request for the posthog schema";
+        }
+        return "GET " + uri;
+    }
+
+    /**
+     * A failed answer as user-visible text: with the body for the org catalog, as
+     * before, and with only the status and the server's error word for the mount.
+     */
+    private String describe(URI uri, HttpResponse<String> response)
+    {
+        if (mount) {
+            return describe(uri) + " -> HTTP " + response.statusCode() + errorCode(response.body()).map(code -> " (" + code + ")").orElse("");
+        }
+        return describe(uri) + " -> HTTP " + response.statusCode() + ": " + response.body();
+    }
+
+    /**
+     * The typed refusals of a mount and of the mount Client that proxies it, for the
+     * posthog schema's client only
+     * (hoglake auth-tenancy.md 6.5a and 6.5b), as Trino errors with fixed messages:
+     * never the response body or a URL. Empty for every other answer.
+     */
+    private Optional<TrinoException> typedRefusal(HttpResponse<String> response)
+    {
+        Optional<String> code = errorCode(response.body());
+        if (code.isEmpty()) {
+            return Optional.empty();
+        }
+        String subject = "the posthog schema";
+        TrinoException refusal = switch (code.get()) {
+            case "read_only_catalog" -> new TrinoException(NOT_SUPPORTED, "Writes are not supported: " + subject + " is read-only");
+            case "mount_operation_unavailable" -> new TrinoException(NOT_SUPPORTED, "This operation is not supported on " + subject);
+            case "mount_scan_too_many_files" -> new TrinoException(EXCEEDED_SCAN_LIMIT, "The scan of " + subject + " plans too many files; add a filter that selects fewer");
+            case "mount_scan_timeout" -> new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "Planning the scan of " + subject + " timed out on the Hoglake server; retry later");
+            case "mount_scan_busy" -> new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "The Hoglake server is busy planning scans of " + subject + "; retry later");
+            case "mount_host_unavailable" -> new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "The events host serving " + subject + " is unavailable; retry later");
+            case "mount_proxy_busy" -> new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "The Hoglake server is busy forwarding requests for " + subject + "; retry later");
+            case "mount_host_invalid_response" -> new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "The events host serving " + subject + " answered outside its contract");
+            case "mount_exchange_unavailable" -> new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "The token exchange for " + subject + " is unavailable; retry later");
+            case "mount_exchange_misconfigured" -> new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "The Hoglake server's token exchange for " + subject + " is misconfigured; contact the operator");
+            case "mount_exchange_invalid_response" -> new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "The token exchange for " + subject + " answered outside its contract");
+            default -> null;
+        };
+        return Optional.ofNullable(refusal);
+    }
+
+    /**
+     * The {@code error} word of a Hoglake error body, if it is one: a short
+     * lowercase token, so nothing else of the body can reach a message.
+     */
+    private Optional<String> errorCode(String body)
+    {
+        if (body == null || body.isEmpty()) {
+            return Optional.empty();
+        }
+        try {
+            JsonNode error = mapper.readTree(body);
+            if (error == null || !error.path("error").isTextual()) {
+                return Optional.empty();
+            }
+            String code = error.path("error").asText();
+            if (!ERROR_CODE.matcher(code).matches()) {
+                return Optional.empty();
+            }
+            return Optional.of(code);
+        }
+        catch (IOException ignored) {
+            return Optional.empty();
+        }
+    }
+
     private boolean isAlreadyExists(String body)
     {
         try {
@@ -783,12 +904,12 @@ public class HoglakeClient
             // network to it) failed — an EXTERNAL fault, not an engine bug.
             throw new TrinoException(
                     HOGLAKE_CATALOG_UNAVAILABLE,
-                    "hoglake request failed: GET " + uri,
-                    e);
+                    "hoglake request failed: " + describe(uri),
+                    cause(e));
         }
         catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new TrinoException(GENERIC_INTERNAL_ERROR, "hoglake request interrupted: GET " + uri, e);
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "hoglake request interrupted: " + describe(uri), e);
         }
     }
 
@@ -802,35 +923,41 @@ public class HoglakeClient
         if (status == 404) {
             return Optional.empty();
         }
+        if (status != 200 && mount) {
+            Optional<TrinoException> refusal = typedRefusal(response);
+            if (refusal.isPresent()) {
+                throw refusal.get();
+            }
+        }
         if (status == 410) {
             // The catalog's typed expiry signal: the requested snapshot fell
             // below the expiry floor. With pinned-snapshot planning this
             // means "your read snapshot expired during the query".
             throw new TrinoException(HOGLAKE_SNAPSHOT_EXPIRED,
-                    "hoglake snapshot expired during query (history below the expiry floor): GET "
-                            + uri + " -> HTTP 410: " + response.body());
+                    "hoglake snapshot expired during query (history below the expiry floor): "
+                            + describe(uri, response));
         }
         if (status == 429 || status >= 500) {
             throw new RetryAfterException(
-                    "hoglake catalog service error: GET " + uri + " -> HTTP " + status + ": " + response.body(), response);
+                    "hoglake catalog service error: " + describe(uri, response), response);
         }
         if (status != 200) {
             throw new TrinoException(
                     HOGLAKE_INVALID_RESPONSE,
-                    "hoglake request failed: GET " + uri + " -> HTTP " + status + ": " + response.body());
+                    "hoglake request failed: " + describe(uri, response));
         }
         try {
             T result = mapper.readValue(response.body(), type);
             if (result == null) {
-                throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Null Hoglake response from GET " + uri);
+                throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Null Hoglake response from " + describe(uri));
             }
             return Optional.of(result);
         }
         catch (IOException e) {
             throw new TrinoException(
                     HOGLAKE_INVALID_RESPONSE,
-                    "Malformed hoglake response from GET " + uri,
-                    e);
+                    "Malformed hoglake response from " + describe(uri),
+                    cause(e));
         }
     }
 
@@ -853,14 +980,45 @@ public class HoglakeClient
             throws IOException, InterruptedException
     {
         long deadline = System.nanoTime() + request.timeout().orElseThrow().toNanos();
-        Optional<String> token = tokenSource.token(remaining(deadline));
+        Optional<String> token = token(remaining(deadline));
         HttpResponse<String> response = sendOnce(authorized(request, token, remaining(deadline)));
-        if (response.statusCode() != 401 || token.isEmpty()) {
+        // The mount shares the org catalog's token source: a 401 from the mount
+        // alone must not discard the token the org catalog is using. A revoked
+        // token is replaced by the org client's own 401 retry or at its expiry.
+        if (response.statusCode() != 401 || token.isEmpty() || mount) {
             return response;
         }
         tokenSource.invalidate(token.get());
         Optional<String> replacement = tokenSource.token(remaining(deadline));
         return sendOnce(authorized(request, replacement, remaining(deadline)));
+    }
+
+    private Optional<String> token(Duration timeout)
+    {
+        if (!mount) {
+            return tokenSource.token(timeout);
+        }
+        try {
+            return tokenSource.token(timeout);
+        }
+        catch (TrinoException e) {
+            // The token source's messages name its endpoint and may carry its answer
+            log.debug(e, "No access token for the posthog schema of catalog '%s'", catalog);
+            throw new TrinoException(e::getErrorCode, "No access token is available for the posthog schema");
+        }
+    }
+
+    /**
+     * The cause attached to a user-visible failure: none for the mount, whose
+     * transport and parser errors can name the server or quote its answer.
+     */
+    private Throwable cause(Exception e)
+    {
+        if (!mount) {
+            return e;
+        }
+        log.debug(e, "Hoglake request for the posthog schema of catalog '%s' failed", catalog);
+        return null;
     }
 
     private static Duration remaining(long deadline)
@@ -983,6 +1141,10 @@ public class HoglakeClient
 
     private TrinoException catalogNotFound()
     {
+        if (mount) {
+            // The org has no events mount, or the server does not show it to this token.
+            return new SchemaNotFoundException(HoglakePosthogSchema.SCHEMA_NAME);
+        }
         return new TrinoException(
                 HOGLAKE_CATALOG_NOT_FOUND,
                 "hoglake catalog '" + catalog + "' not found (check the hoglake.catalog property)");

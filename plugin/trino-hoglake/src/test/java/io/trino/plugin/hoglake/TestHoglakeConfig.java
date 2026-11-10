@@ -45,7 +45,8 @@ class TestHoglakeConfig
                 .setAuthTokenUri(null)
                 .setAuthClientId(null)
                 .setAuthClientSecret(null)
-                .setAuthAudience("hoglake"));
+                .setAuthAudience("hoglake")
+                .setPosthogSchemaEnabled(false));
     }
 
     @Test
@@ -53,7 +54,7 @@ class TestHoglakeConfig
     {
         assertFullMapping(ImmutableMap.<String, String>builder()
                         .put("hoglake.uri", "http://localhost:8080")
-                        .put("hoglake.catalog", "lake")
+                        .put("hoglake.catalog", "0b5f0c2e-1111-4222-8333-444455556666")
                         .put("hoglake.client.request-timeout", "45s")
                         .put("hoglake.max-split-size", "1GB")
                         .put("hoglake.parquet-footer-cache.max-size", "16MB")
@@ -63,10 +64,11 @@ class TestHoglakeConfig
                         .put("hoglake.auth.client-id", "hlc_0123")
                         .put("hoglake.auth.client-secret", "s3cret")
                         .put("hoglake.auth.audience", "hoglake-dev")
+                        .put("hoglake.posthog-schema.enabled", "true")
                         .buildOrThrow(),
                 new HoglakeConfig()
                         .setUri("http://localhost:8080")
-                        .setCatalog("lake")
+                        .setCatalog("0b5f0c2e-1111-4222-8333-444455556666")
                         .setRequestTimeout("45s")
                         .setMaxSplitSize(DataSize.of(1, GIGABYTE))
                         .setParquetFooterCacheMaxSize(DataSize.of(16, MEGABYTE))
@@ -75,7 +77,31 @@ class TestHoglakeConfig
                         .setAuthTokenUri("https://hogtower:8443/oauth/token")
                         .setAuthClientId("hlc_0123")
                         .setAuthClientSecret("s3cret")
-                        .setAuthAudience("hoglake-dev"));
+                        .setAuthAudience("hoglake-dev")
+                        .setPosthogSchemaEnabled(true));
+    }
+
+    @Test
+    void posthogSchemaRequiresAnOrgCatalog()
+    {
+        assertThatThrownBy(() -> parse(Map.of(
+                "hoglake.uri", "http://h:1",
+                "hoglake.catalog", "lake",
+                "hoglake.posthog-schema.enabled", "true")))
+                .isInstanceOf(RuntimeException.class)
+                .hasStackTraceContaining("requires hoglake.catalog to be an org id");
+        assertThatThrownBy(() -> parse(Map.of(
+                "hoglake.uri", "http://h:1",
+                "hoglake.catalog", "0B5F0C2E-1111-4222-8333-444455556666",
+                "hoglake.posthog-schema.enabled", "true")))
+                .isInstanceOf(RuntimeException.class)
+                .hasStackTraceContaining("requires hoglake.catalog to be an org id");
+        assertThat(parse(Map.of(
+                "hoglake.uri", "http://h:1",
+                "hoglake.catalog", "0b5f0c2e-1111-4222-8333-444455556666",
+                "hoglake.posthog-schema.enabled", "true")).isPosthogSchemaEnabled()).isTrue();
+        // Off, any catalog name is fine, as before
+        assertThat(parse(Map.of("hoglake.uri", "http://h:1", "hoglake.catalog", "lake")).isPosthogSchemaEnabled()).isFalse();
     }
 
     @Test

@@ -14,6 +14,7 @@
 package io.trino.plugin.hoglake;
 
 import com.google.inject.Binder;
+import com.google.inject.Key;
 import com.google.inject.Module;
 import com.google.inject.Provider;
 import com.google.inject.Provides;
@@ -52,6 +53,7 @@ public class HoglakeModule
         configBinder(binder).bindConfig(HoglakeConfig.class);
         configBinder(binder).bindConfig(S3SecurityMappingEnabledConfig.class);
         closingBinder(binder).registerCloseable(HoglakeClient.class);
+        closingBinder(binder).registerResource(new Key<Optional<HoglakePosthogSchema>>() {}, schema -> schema.ifPresent(HoglakePosthogSchema::close));
         newSetBinder(binder, SessionPropertiesProvider.class).addBinding().to(HoglakeSessionProperties.class).in(Scopes.SINGLETON);
 
         Provider<CatalogName> catalogName = binder.getProvider(CatalogName.class);
@@ -61,10 +63,9 @@ public class HoglakeModule
 
     @Provides
     @Singleton
-    @SuppressWarnings("CloseableProvides") // Registered with ClosingBinder above.
-    public static HoglakeClient createClient(HoglakeConfig config)
+    public static HoglakeTokenSource createTokenSource(HoglakeConfig config)
     {
-        HoglakeTokenSource tokenSource = config.getAuthTokenUri()
+        return config.getAuthTokenUri()
                 .<HoglakeTokenSource>map(tokenUri -> new HoglakeTokenSource.ClientCredentials(
                         URI.create(tokenUri),
                         config.getAuthClientId().orElseThrow(),
@@ -72,23 +73,47 @@ public class HoglakeModule
                         config.getAuthAudience(),
                         HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()))
                 .orElse(HoglakeTokenSource.NONE);
+    }
+
+    @Provides
+    @Singleton
+    @SuppressWarnings("CloseableProvides") // Registered with ClosingBinder above.
+    public static HoglakeClient createClient(HoglakeConfig config, HoglakeTokenSource tokenSource)
+    {
         return new HoglakeClient(config.getUri(), config.getCatalog(), config.getRequestTimeout(), tokenSource);
     }
 
+    /**
+     * The posthog schema's mount, on the same server and with the same token source
+     * as the org catalog: one token, which the server exchanges for the mount's.
+     */
     @Provides
     @Singleton
-    public static HoglakeMetadata createMetadata(HoglakeClient client, TrinoFileSystemFactory fileSystemFactory)
+    public static Optional<HoglakePosthogSchema> createPosthogSchema(HoglakeConfig config, HoglakeTokenSource tokenSource)
     {
-        return new HoglakeMetadata(client, fileSystemFactory);
+        if (!config.isPosthogSchemaEnabled()) {
+            return Optional.empty();
+        }
+        String mountCatalog = HoglakePosthogSchema.mountCatalog(config.getCatalog());
+        return Optional.of(new HoglakePosthogSchema(
+                config.getCatalog(),
+                HoglakeClient.forMount(config.getUri(), mountCatalog, config.getRequestTimeout(), tokenSource)));
     }
 
     @Provides
     @Singleton
-    public static ConnectorSplitManager createSplitManager(HoglakeClient client, SplitAffinityProvider affinityProvider)
+    public static HoglakeMetadata createMetadata(HoglakeClient client, TrinoFileSystemFactory fileSystemFactory, Optional<HoglakePosthogSchema> posthogSchema)
+    {
+        return new HoglakeMetadata(client, fileSystemFactory, posthogSchema);
+    }
+
+    @Provides
+    @Singleton
+    public static ConnectorSplitManager createSplitManager(HoglakeClient client, Optional<HoglakePosthogSchema> posthogSchema, SplitAffinityProvider affinityProvider)
     {
         // The filesystem module binds a key-producing provider only when the
         // catalog caches filesystem data, and a no-op provider otherwise.
-        return new HoglakeSplitManager(client, HoglakeSessionProperties::getMaxSplitSize, affinityProvider);
+        return new HoglakeSplitManager(client, posthogSchema, HoglakeSessionProperties::getMaxSplitSize, affinityProvider);
     }
 
     @Provides

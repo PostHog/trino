@@ -32,6 +32,7 @@ the catalog's files.
 | `hoglake.parquet-footer-cache.max-size` | Serialized size of the parsed Parquet footers each worker keeps for the catalog; `0B` disables the cache. See [](hoglake-split-planning). | `64MB` |
 | `hoglake.variant-path-assembly-enabled` | Build pushed-down `VARIANT` subscripts from the requested keys of each value, instead of from the whole value. See [](hoglake-variant). Use the `variant_path_assembly_enabled` catalog session property to change it for a session. | `true` |
 | `hoglake.variant-lazy-residual-enabled` | With `hoglake.variant-path-assembly-enabled`, read the top-level `metadata` and `value` columns of a shredded `VARIANT` only for the batches of rows that need them. See [](hoglake-variant). Use the `variant_lazy_residual_enabled` catalog session property to change it for a session. | `true` |
+| `hoglake.posthog-schema.enabled` | Show the org's events mount, the Hoglake catalog `<hoglake.catalog>-events` on the same server, as the read-only schema `posthog`. Requires `hoglake.catalog` to be an org id (a lowercase UUID). See [](hoglake-posthog-schema). | `false` |
 | `fs.s3.enabled` | Enable the native S3 filesystem. | `true` |
 | `s3.endpoint` | Optional S3-compatible endpoint. | AWS endpoint resolution |
 | `s3.region` | S3 region. | `us-east-1` |
@@ -306,6 +307,39 @@ The connector does not support time-travel SQL.
 Only Hoglake's `puffin-dv` deletion-vector format is read; any other format
 fails the query. Equality deletes and any other row-level delete representation
 are not read. SQL `DELETE`, `UPDATE` and `MERGE` write compatible vectors.
+
+(hoglake-posthog-schema)=
+## The `posthog` schema
+
+With `hoglake.posthog-schema.enabled=true`, the catalog shows one more schema,
+`posthog`, whose tables are those of the org's events mount: the Hoglake catalog
+`<hoglake.catalog>-events` on the same server. Requests for it use the catalog's own
+token; the Hoglake server exchanges it for the mount's. No other property is needed.
+
+- The schema is read-only. `INSERT`, `DELETE`, `UPDATE`, `MERGE`, `CREATE TABLE`,
+  `CREATE TABLE AS`, `DROP TABLE`, `TRUNCATE`, renames, column changes, comments,
+  `SET PROPERTIES`, and `CREATE SCHEMA` or `DROP SCHEMA posthog` fail with
+  `NOT_SUPPORTED` before any request is sent or any file is written.
+- The name `posthog` always means the mount. A namespace named `posthog` (in any
+  case) in the org's own Hoglake catalog is not listed and cannot be read or
+  written through this catalog, even when the mount is missing or unavailable.
+- The tables of every namespace the mount serves are shown in `posthog`. If two of
+  its namespaces hold a table of the same name, queries on that table fail.
+- The schema is listed when the mount exists, and also when the server cannot say
+  (for example, when the mount's host is unavailable); it is not listed when the
+  server has no mount for the catalog. Queries on `posthog` then fail with
+  `SCHEMA_NOT_FOUND`, or with `HOGLAKE_CATALOG_UNAVAILABLE` while the mount cannot be
+  reached. Other schemas and catalog-wide `information_schema` queries are not
+  affected.
+- Mount refusals map to Trino errors: `read_only_catalog` and
+  `mount_operation_unavailable` to `NOT_SUPPORTED`; `mount_scan_too_many_files` to
+  `EXCEEDED_SCAN_LIMIT`; `mount_scan_timeout`, `mount_scan_busy`,
+  `mount_host_unavailable`, `mount_proxy_busy`, `mount_host_invalid_response`,
+  `mount_exchange_unavailable`, `mount_exchange_misconfigured` and
+  `mount_exchange_invalid_response` to `HOGLAKE_CATALOG_UNAVAILABLE`. Error messages
+  for the schema do not include server URLs or response bodies.
+- Workers read the mount's files with the catalog's storage credentials. An
+  unfiltered `count(*)` is answered from catalog counts without reading files.
 
 ## Writing tables
 

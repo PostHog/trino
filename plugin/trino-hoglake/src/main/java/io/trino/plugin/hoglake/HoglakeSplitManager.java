@@ -29,6 +29,7 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.FixedSplitSource;
+import io.trino.spi.connector.TableNotFoundException;
 
 import java.util.List;
 import java.util.Map;
@@ -88,6 +89,7 @@ public class HoglakeSplitManager
     private static final double MINIMUM_SPLIT_WEIGHT = 0.05;
 
     private final HoglakeClient client;
+    private final Optional<HoglakePosthogSchema> posthogSchema;
     private final Function<ConnectorSession, DataSize> maxSplitSize;
     private final SplitAffinityProvider affinityProvider;
 
@@ -108,7 +110,17 @@ public class HoglakeSplitManager
 
     public HoglakeSplitManager(HoglakeClient client, Function<ConnectorSession, DataSize> maxSplitSize, SplitAffinityProvider affinityProvider)
     {
+        this(client, Optional.empty(), maxSplitSize, affinityProvider);
+    }
+
+    /**
+     * A split manager that also plans the posthog schema's tables, through the
+     * mount's scan route.
+     */
+    public HoglakeSplitManager(HoglakeClient client, Optional<HoglakePosthogSchema> posthogSchema, Function<ConnectorSession, DataSize> maxSplitSize, SplitAffinityProvider affinityProvider)
+    {
         this.client = requireNonNull(client, "client is null");
+        this.posthogSchema = requireNonNull(posthogSchema, "posthogSchema is null");
         this.maxSplitSize = requireNonNull(maxSplitSize, "maxSplitSize is null");
         this.affinityProvider = requireNonNull(affinityProvider, "affinityProvider is null");
     }
@@ -125,7 +137,7 @@ public class HoglakeSplitManager
         if (handle.constraint().isNone() || constraint.getSummary().isNone()) {
             return new FixedSplitSource(List.of());
         }
-        List<HoglakeDtos.ScanFile> scan = prunedScan(client, handle);
+        List<HoglakeDtos.ScanFile> scan = prunedScan(HoglakeMetadata.clientFor(client, posthogSchema, handle), handle);
         // The isAll guard is load-bearing: a count over a pushed predicate
         // reads the files, so it keeps byte ranges and file pruning.
         if (handle.countOnly() && handle.constraint().isAll()) {
@@ -154,7 +166,7 @@ public class HoglakeSplitManager
      */
     static List<HoglakeDtos.ScanFile> scan(HoglakeClient client, HoglakeTableHandle handle)
     {
-        return withStaged(handle, client.scan(handle.schemaName(), handle.tableName(), handle.snapshotId()));
+        return withStaged(handle, client.scan(handle.namespace(), handle.tableName(), handle.snapshotId()));
     }
 
     /**
@@ -166,7 +178,17 @@ public class HoglakeSplitManager
     static List<HoglakeDtos.ScanFile> prunedScan(HoglakeClient client, HoglakeTableHandle handle)
     {
         Set<Long> statsFields = HoglakeFilePruner.prunableFieldIds(handle.constraint());
-        List<HoglakeDtos.ScanFile> catalogFiles = client.planningScan(handle.schemaName(), handle.tableName(), handle.snapshotId(), statsFields);
+        List<HoglakeDtos.ScanFile> catalogFiles;
+        try {
+            catalogFiles = client.planningScan(handle.namespace(), handle.tableName(), handle.snapshotId(), statsFields);
+        }
+        catch (TableNotFoundException e) {
+            if (handle.mount().isEmpty()) {
+                throw e;
+            }
+            // Name the table as the user did, not by the mount's namespace.
+            throw new TableNotFoundException(handle.schemaTableName());
+        }
         if (!statsFields.isEmpty()) {
             catalogFiles = catalogFiles.stream()
                     .filter(file -> file.dataFile() == null || HoglakeFilePruner.mayContain(handle.constraint(), file.dataFile()))

@@ -51,6 +51,7 @@ public class HoglakeConfig
     private String authClientId;
     private String authClientSecret;
     private String authAudience = "hoglake";
+    private boolean posthogSchemaEnabled;
 
     @NotNull
     public String getUri()
@@ -205,6 +206,27 @@ public class HoglakeConfig
     {
         this.authAudience = authAudience;
         return this;
+    }
+
+    public boolean isPosthogSchemaEnabled()
+    {
+        return posthogSchemaEnabled;
+    }
+
+    @Config("hoglake.posthog-schema.enabled")
+    @ConfigDescription("Show the org's events mount, the Hoglake catalog <hoglake.catalog>-events on the same server, as the read-only schema posthog")
+    public HoglakeConfig setPosthogSchemaEnabled(boolean posthogSchemaEnabled)
+    {
+        this.posthogSchemaEnabled = posthogSchemaEnabled;
+        return this;
+    }
+
+    // A mount is named <orgID>-events, with the org id a canonical lowercase
+    // UUID, so a catalog with any other name can never have one.
+    @AssertTrue(message = "hoglake.posthog-schema.enabled requires hoglake.catalog to be an org id (a lowercase UUID)")
+    public boolean isPosthogSchemaCatalogValid()
+    {
+        return !posthogSchemaEnabled || HoglakePosthogSchema.isOrgCatalog(catalog);
     }
 
     // All three or none: a catalog with a token endpoint and no secret would
