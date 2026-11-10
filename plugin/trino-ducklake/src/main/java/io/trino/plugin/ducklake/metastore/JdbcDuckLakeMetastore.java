@@ -39,6 +39,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
@@ -116,18 +117,28 @@ public class JdbcDuckLakeMetastore
      * another writer committed in the meantime.
      * <p>
      * DuckLake orders all changes to a catalog on a single snapshot chain, so every commit has to
-     * claim the snapshot following the newest one. Losing that race is ordinary rather than
-     * exceptional here, because a DuckDB writer commits to the same catalog: the database reports
-     * it — as a serialization failure, or as a unique violation on the snapshot table's primary
-     * key — and the action is discarded and replayed against the newer state. A replay is safe
-     * because the action only reads catalog rows and writes them through this commit; the data
+     * claim the snapshot following the newest one, and every writer, DuckDB included, does so by
+     * inserting that row on the primary key of the snapshot table. This commit inserts it first,
+     * before it runs the action. The claim is what serializes commits: a writer that claims the same
+     * identifier waits until this transaction ends and then fails on the primary key, so a commit
+     * that loses the race does so at once, before it spends time on the action. Which is why the
+     * transaction runs at {@code REPEATABLE READ}: the action sees one consistent state, and
+     * {@code SERIALIZABLE} would only add aborts for writes that the claim already ordered.
+     * <p>
+     * The database reports a lost claim as a unique violation, or as a serialization failure. The
+     * transaction is then discarded and the action replayed against the newer state. A replay is
+     * safe because the action only reads catalog rows and writes them through this commit; the data
      * files it registers were written to object storage before the commit began, and the discarded
-     * attempt left no rows behind.
+     * attempt left no rows behind. The wait between attempts is random, so that writers that lost
+     * together do not retry together.
      * <p>
      * Re-basing is only allowed where DuckLake allows it. {@code readSnapshotId} is the snapshot the
      * statement was planned and read against, and the commit refuses to land if anything committed
      * after it changed an object the statement's own result depends on. The refusal carries
      * {@code DUCKLAKE_COMMIT_CONFLICT} and is not retried: only replanning the statement can help.
+     * <p>
+     * Because the claim is held while the action runs, the action should be short, and should read
+     * and write the catalog only.
      */
     public <T> T commit(long readSnapshotId, DuckLakeCommitAction<T> action)
     {
@@ -137,8 +148,9 @@ public class JdbcDuckLakeMetastore
         RuntimeException conflict = null;
         for (int attempt = 0; attempt <= maxCommitRetries; attempt++) {
             try {
-                return jdbi.inTransaction(TransactionIsolationLevel.SERIALIZABLE, handle -> {
+                return jdbi.inTransaction(TransactionIsolationLevel.REPEATABLE_READ, handle -> {
                     DuckLakeCommit commit = new DuckLakeCommit(handle, metadataSchema, snapshotState(handle), sortInfoSupported, nameMappingIsPartitionSupported);
+                    commit.claimSnapshot();
                     T result = action.run(commit);
                     commit.verifyNoConflictSince(readSnapshotId);
                     commit.writeSnapshot();
@@ -162,6 +174,25 @@ public class JdbcDuckLakeMetastore
                 DUCKLAKE_COMMIT_FAILED,
                 "Failed to commit to the DuckLake catalog after %s retries because of concurrent updates; raise ducklake.commit.max-retries if this is common".formatted(maxCommitRetries),
                 conflict);
+    }
+
+    /**
+     * Reads, in one transaction, every file the catalog records under the given names and the
+     * identifier the next recorded file gets. The scan is too slow to hold the snapshot claim of a
+     * commit, so it runs before one. The commit then only has to read the files recorded after the
+     * returned identifier, see {@link DuckLakeCommit#recordedFilesSince}.
+     */
+    public DuckLakeCommit.FileRegistrationState fileRegistrationState(Set<String> fileNames)
+    {
+        try {
+            return jdbi.inTransaction(TransactionIsolationLevel.REPEATABLE_READ, handle -> {
+                long nextFileId = snapshotState(handle).nextFileId();
+                return new DuckLakeCommit.FileRegistrationState(fileNames, DuckLakeCommit.recordedFiles(handle, metadataSchema, fileNames), nextFileId);
+            });
+        }
+        catch (JdbiException e) {
+            throw metastoreError(e);
+        }
     }
 
     private DuckLakeCommit.SnapshotState snapshotState(Handle handle)
@@ -199,7 +230,8 @@ public class JdbcDuckLakeMetastore
     private void sleepBeforeRetry(int attempt)
     {
         try {
-            Thread.sleep(commitRetryBackoffMillis << Math.min(attempt, MAX_COMMIT_RETRY_DOUBLINGS));
+            long backoffMillis = commitRetryBackoffMillis << Math.min(attempt, MAX_COMMIT_RETRY_DOUBLINGS);
+            Thread.sleep((long) (backoffMillis * ThreadLocalRandom.current().nextDouble(0.5, 1.0)));
         }
         catch (InterruptedException e) {
             Thread.currentThread().interrupt();

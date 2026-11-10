@@ -14,6 +14,7 @@
 package io.trino.plugin.ducklake.metastore;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import io.trino.spi.StandardErrorCode;
 import io.trino.spi.TrinoException;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
@@ -818,21 +819,75 @@ public final class DuckLakeCommit
      */
     public List<RecordedFile> recordedFiles(Set<String> fileNames)
     {
+        return recordedFiles(handle, metadataSchema, fileNames);
+    }
+
+    /**
+     * Reads the files of {@link #recordedFiles} without a commit, for a check that runs before one.
+     */
+    static List<RecordedFile> recordedFiles(Handle handle, String metadataSchema, Set<String> fileNames)
+    {
         if (fileNames.isEmpty()) {
             return ImmutableList.of();
         }
         ImmutableList.Builder<RecordedFile> files = ImmutableList.builder();
         for (String fileTable : ImmutableList.of("ducklake_data_file", "ducklake_delete_file")) {
-            files.addAll(handle.createQuery("SELECT table_id, path, path_is_relative FROM %s WHERE %s".formatted(table(fileTable), fileNameMatches()))
+            files.addAll(handle.createQuery("SELECT table_id, path, path_is_relative FROM %s WHERE %s".formatted(qualified(metadataSchema, fileTable), fileNameMatches()))
                     .bindArray("fileNames", String.class, fileNames)
                     .map((rs, _) -> new RecordedFile(OptionalLong.of(rs.getLong("table_id")), rs.getString("path"), rs.getBoolean("path_is_relative")))
                     .list());
         }
-        files.addAll(handle.createQuery("SELECT path, path_is_relative FROM %s WHERE %s".formatted(table("ducklake_files_scheduled_for_deletion"), fileNameMatches()))
+        files.addAll(recordedFilesScheduledForDeletion(handle, metadataSchema, fileNames));
+        return files.build();
+    }
+
+    /**
+     * Every file recorded under the names of the state: the ones read before the commit, and the
+     * ones recorded since, which the state's identifier tells apart from the ones it already holds.
+     */
+    public List<RecordedFile> recordedFiles(FileRegistrationState state)
+    {
+        return ImmutableList.<RecordedFile>builder()
+                .addAll(state.recordedFiles())
+                .addAll(recordedFilesSince(state.fileNames(), state.nextFileId()))
+                .build();
+    }
+
+    /**
+     * The files {@link #recordedFiles} would find that were recorded at or after the given file
+     * identifier, and the files waiting to be deleted. Data and delete files draw their identifiers
+     * from the same counter, which only grows, so a file recorded after a reader saw the counter at
+     * {@code firstFileId} has an identifier of at least that value. Both file tables are read by
+     * primary key range. Files waiting to be deleted have no such range, because a file moves there
+     * without a snapshot of its own, so that table is read whole.
+     */
+    public List<RecordedFile> recordedFilesSince(Set<String> fileNames, long firstFileId)
+    {
+        if (fileNames.isEmpty()) {
+            return ImmutableList.of();
+        }
+        ImmutableList.Builder<RecordedFile> files = ImmutableList.builder();
+        files.addAll(recordedFilesSince("ducklake_data_file", "data_file_id", fileNames, firstFileId));
+        files.addAll(recordedFilesSince("ducklake_delete_file", "delete_file_id", fileNames, firstFileId));
+        files.addAll(recordedFilesScheduledForDeletion(handle, metadataSchema, fileNames));
+        return files.build();
+    }
+
+    private List<RecordedFile> recordedFilesSince(String fileTable, String idColumn, Set<String> fileNames, long firstFileId)
+    {
+        return handle.createQuery("SELECT table_id, path, path_is_relative FROM %s WHERE %s >= :firstFileId AND %s".formatted(table(fileTable), idColumn, fileNameMatches()))
+                .bind("firstFileId", firstFileId)
+                .bindArray("fileNames", String.class, fileNames)
+                .map((rs, _) -> new RecordedFile(OptionalLong.of(rs.getLong("table_id")), rs.getString("path"), rs.getBoolean("path_is_relative")))
+                .list();
+    }
+
+    private static List<RecordedFile> recordedFilesScheduledForDeletion(Handle handle, String metadataSchema, Set<String> fileNames)
+    {
+        return handle.createQuery("SELECT path, path_is_relative FROM %s WHERE %s".formatted(qualified(metadataSchema, "ducklake_files_scheduled_for_deletion"), fileNameMatches()))
                 .bindArray("fileNames", String.class, fileNames)
                 .map((rs, _) -> new RecordedFile(OptionalLong.empty(), rs.getString("path"), rs.getBoolean("path_is_relative")))
-                .list());
-        return files.build();
+                .list();
     }
 
     private static String fileNameMatches()
@@ -1064,15 +1119,42 @@ public final class DuckLakeCommit
         }
     }
 
-    void writeSnapshot()
+    /**
+     * Inserts the snapshot row this commit will fill in, which claims its identifier. Another
+     * writer claiming the same identifier makes the database fail this insert, or wait until this
+     * transaction ends and then fail it, so the commit loses the race before it does any work.
+     * The row carries the base values until {@link #writeSnapshot} sets the final ones.
+     */
+    void claimSnapshot()
     {
-        if (changes.isEmpty()) {
-            return;
-        }
         handle.createUpdate(
                         """
                         INSERT INTO %s (snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id)
                         VALUES (:snapshotId, CURRENT_TIMESTAMP, :schemaVersion, :nextCatalogId, :nextFileId)""".formatted(table("ducklake_snapshot")))
+                .bind("snapshotId", snapshotId)
+                .bind("schemaVersion", baseSchemaVersion)
+                .bind("nextCatalogId", nextCatalogId)
+                .bind("nextFileId", nextFileId)
+                .execute();
+    }
+
+    /**
+     * Completes the snapshot claimed by {@link #claimSnapshot}, or releases the claim when the
+     * commit changed nothing, because a commit that changes nothing leaves no snapshot.
+     */
+    void writeSnapshot()
+    {
+        if (changes.isEmpty()) {
+            handle.createUpdate("DELETE FROM %s WHERE snapshot_id = :snapshotId".formatted(table("ducklake_snapshot")))
+                    .bind("snapshotId", snapshotId)
+                    .execute();
+            return;
+        }
+        handle.createUpdate(
+                        """
+                        UPDATE %s
+                        SET schema_version = :schemaVersion, next_catalog_id = :nextCatalogId, next_file_id = :nextFileId
+                        WHERE snapshot_id = :snapshotId""".formatted(table("ducklake_snapshot")))
                 .bind("snapshotId", snapshotId)
                 .bind("schemaVersion", schemaVersion)
                 .bind("nextCatalogId", nextCatalogId)
@@ -1165,6 +1247,11 @@ public final class DuckLakeCommit
 
     private String table(String tableName)
     {
+        return qualified(metadataSchema, tableName);
+    }
+
+    private static String qualified(String metadataSchema, String tableName)
+    {
         return "\"%s\".\"%s\"".formatted(metadataSchema.replace("\"", "\"\""), tableName.replace("\"", "\"\""));
     }
 
@@ -1219,6 +1306,19 @@ public final class DuckLakeCommit
     public record ViewIdentity(long viewId, String dialect) {}
 
     public record TableStatsRow(long recordCount, long nextRowId, long fileSizeBytes) {}
+
+    /**
+     * What the check of the files to register reads before a commit: the names to register, the
+     * files recorded under them, and the identifier the next recorded file gets.
+     */
+    public record FileRegistrationState(Set<String> fileNames, List<RecordedFile> recordedFiles, long nextFileId)
+    {
+        public FileRegistrationState
+        {
+            fileNames = ImmutableSet.copyOf(fileNames);
+            recordedFiles = ImmutableList.copyOf(recordedFiles);
+        }
+    }
 
     public record TableLocation(long tableId, String path, boolean pathIsRelative, String schemaPath, boolean schemaPathIsRelative, boolean visible)
     {
