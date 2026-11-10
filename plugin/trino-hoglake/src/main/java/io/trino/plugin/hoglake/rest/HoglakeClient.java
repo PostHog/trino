@@ -45,11 +45,13 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -541,12 +543,44 @@ public class HoglakeClient
 
     private void commit(HoglakeDtos.Commit request, boolean mutation, boolean claimedUploads, boolean transaction)
     {
+        commitWithRecovery(request.operationId(), timeout -> commitOnce(request, timeout, mutation, claimedUploads, transaction));
+    }
+
+    /**
+     * Ends files and appends files in one snapshot. The result is the number of data files the
+     * commit ended, or empty when only a receipt confirms the commit and so the count is unknown.
+     */
+    public OptionalLong commitReplacement(HoglakeDtos.ReplacementCommit request)
+    {
+        AtomicReference<OptionalLong> ended = new AtomicReference<>(OptionalLong.empty());
+        commitWithRecovery(request.operationId(), timeout -> {
+            HoglakeDtos.CommitResult result = write("POST", catalogPath("/commit/replacements/prepared"), request, new TypeReference<HoglakeDtos.CommitResult>() {}, timeout);
+            if (result.snapshotId() <= 0 || (result.endedFiles() != null && result.endedFiles() < 0)) {
+                throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Hoglake replacement response is missing a valid snapshot; commit outcome may be unknown");
+            }
+            // A replay answered from the receipt has no count
+            if (result.endedFiles() == null) {
+                return;
+            }
+            ended.set(OptionalLong.of(result.endedFiles()));
+        });
+        return ended.get();
+    }
+
+    @FunctionalInterface
+    private interface CommitAttempt
+    {
+        void send(Duration timeout);
+    }
+
+    private void commitWithRecovery(String operationId, CommitAttempt attempt)
+    {
         try {
-            commitOnce(request, requestTimeout, mutation, claimedUploads, transaction);
+            attempt.send(requestTimeout);
             return;
         }
         catch (TrinoException failure) {
-            if (request.operationId() == null || isDefiniteCommitRejection(failure)) {
+            if (operationId == null || isDefiniteCommitRejection(failure)) {
                 throw failure;
             }
             // Absence does not fence the original request. Every retry uses the
@@ -554,12 +588,12 @@ public class HoglakeClient
             // Recovery gets one request-timeout budget, including waits and IO.
             long recoveryStarted = System.nanoTime();
             RuntimeException lastFailure = failure;
-            for (int attempt = 0; attempt < 3; attempt++) {
+            for (int attemptNumber = 0; attemptNumber < 3; attemptNumber++) {
                 if (Thread.currentThread().isInterrupted()) {
                     break;
                 }
                 try {
-                    long backoffMillis = 100L << attempt;
+                    long backoffMillis = 100L << attemptNumber;
                     Duration delay = Duration.ofMillis(backoffMillis + ThreadLocalRandom.current().nextLong(backoffMillis));
                     if (lastFailure instanceof RetryAfterException retryAfter && retryAfter.delay.compareTo(delay) > 0) {
                         delay = retryAfter.delay;
@@ -568,11 +602,11 @@ public class HoglakeClient
                         break;
                     }
                     Thread.sleep(delay);
-                    if (commitReceipt(request.operationId(), remainingRecoveryTime(recoveryStarted)).isPresent()) {
+                    if (commitReceipt(operationId, remainingRecoveryTime(recoveryStarted)).isPresent()) {
                         return;
                     }
-                    if (attempt < 2) {
-                        commitOnce(request, remainingRecoveryTime(recoveryStarted), mutation, claimedUploads, transaction);
+                    if (attemptNumber < 2) {
+                        attempt.send(remainingRecoveryTime(recoveryStarted));
                         return;
                     }
                 }
@@ -588,7 +622,7 @@ public class HoglakeClient
             }
             throw new TrinoException(
                     HOGLAKE_CATALOG_UNAVAILABLE,
-                    "Hoglake write outcome is unknown; preserve files and inspect operation " + request.operationId(),
+                    "Hoglake write outcome is unknown; preserve files and inspect operation " + operationId,
                     failure);
         }
     }
