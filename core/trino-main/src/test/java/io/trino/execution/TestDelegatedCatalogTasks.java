@@ -79,7 +79,6 @@ import static io.trino.execution.querystats.PlanOptimizersStatsCollector.createP
 import static io.trino.spi.StandardErrorCode.CATALOG_NOT_AVAILABLE;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
-import static java.util.Collections.emptyList;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -132,7 +131,7 @@ public class TestDelegatedCatalogTasks
         store.onCreate = request -> publisher.schedule(() -> publish(request.catalogName()), 1200, MILLISECONDS);
 
         QueryStateMachine stateMachine = stateMachine();
-        ListenableFuture<Void> future = createTask.execute(createCatalog(false), stateMachine, emptyList(), WarningCollector.NOOP);
+        ListenableFuture<Void> future = createTask.execute(createCatalog(false), stateMachine, List.of(), WarningCollector.NOOP);
         // Accepted, but not here yet
         assertThat(future.isDone()).isFalse();
         getFutureValue(future);
@@ -157,12 +156,12 @@ public class TestDelegatedCatalogTasks
         publish(new CatalogName(CATALOG));
 
         QueryStateMachine stateMachine = stateMachine();
-        getFutureValue(createTask.execute(createCatalog(true), stateMachine, emptyList(), WarningCollector.NOOP));
+        getFutureValue(createTask.execute(createCatalog(true), stateMachine, List.of(), WarningCollector.NOOP));
         assertThat(store.requests).isEmpty();
 
         // Without IF NOT EXISTS the control plane decides
         store.onCreate = _ -> {};
-        getFutureValue(createTask.execute(createCatalog(false), stateMachine, emptyList(), WarningCollector.NOOP));
+        getFutureValue(createTask.execute(createCatalog(false), stateMachine, List.of(), WarningCollector.NOOP));
         assertThat(store.requests).hasSize(1);
     }
 
@@ -172,7 +171,7 @@ public class TestDelegatedCatalogTasks
         store.visibilityTimeout = Duration.ofSeconds(1);
         store.onCreate = _ -> {};
 
-        assertTrinoExceptionThrownBy(() -> getFutureValue(createTask.execute(createCatalog(true), stateMachine(), emptyList(), WarningCollector.NOOP)))
+        assertTrinoExceptionThrownBy(() -> getFutureValue(createTask.execute(createCatalog(true), stateMachine(), List.of(), WarningCollector.NOOP)))
                 .hasErrorCode(CATALOG_NOT_AVAILABLE)
                 .hasMessage("Catalog '%s' was accepted but is not yet available on this coordinator; retry the statement shortly", CATALOG);
         assertThat(store.requests).hasSize(1);
@@ -198,7 +197,7 @@ public class TestDelegatedCatalogTasks
         store.onCreate = request -> publisher.schedule(() -> publish(request.catalogName()), 300, MILLISECONDS);
 
         QueryStateMachine stateMachine = stateMachine();
-        ListenableFuture<Void> future = createTask.execute(createCatalog(false), stateMachine, emptyList(), WarningCollector.NOOP);
+        ListenableFuture<Void> future = createTask.execute(createCatalog(false), stateMachine, List.of(), WarningCollector.NOOP);
         getFutureValue(future);
 
         // A failed answer is "not yet", and the store is never asked before the catalog is usable here
@@ -214,7 +213,7 @@ public class TestDelegatedCatalogTasks
         store.visibleEverywhere = (_, _) -> false;
         store.onCreate = request -> publish(request.catalogName());
 
-        assertTrinoExceptionThrownBy(() -> getFutureValue(createTask.execute(createCatalog(false), stateMachine(), emptyList(), WarningCollector.NOOP)))
+        assertTrinoExceptionThrownBy(() -> getFutureValue(createTask.execute(createCatalog(false), stateMachine(), List.of(), WarningCollector.NOOP)))
                 .hasErrorCode(CATALOG_NOT_AVAILABLE)
                 .hasMessage("Catalog '%s' is available on this coordinator but not yet on every coordinator; retry the statement shortly", CATALOG);
     }
@@ -228,7 +227,7 @@ public class TestDelegatedCatalogTasks
         store.visibleEverywhere = (_, _) -> false;
 
         QueryStateMachine stateMachine = stateMachine();
-        assertTrinoExceptionThrownBy(() -> getFutureValue(createTask.execute(createCatalog(true), stateMachine, emptyList(), WarningCollector.NOOP)))
+        assertTrinoExceptionThrownBy(() -> getFutureValue(createTask.execute(createCatalog(true), stateMachine, List.of(), WarningCollector.NOOP)))
                 .hasErrorCode(CATALOG_NOT_AVAILABLE)
                 .hasMessage("Catalog '%s' is available on this coordinator but not yet on every coordinator; retry the statement shortly", CATALOG);
         // It never became a request to the writer
@@ -236,7 +235,7 @@ public class TestDelegatedCatalogTasks
         assertThat(store.visibilityRequests).isNotEmpty();
 
         store.visibleEverywhere = (_, _) -> true;
-        getFutureValue(createTask.execute(createCatalog(true), stateMachine, emptyList(), WarningCollector.NOOP));
+        getFutureValue(createTask.execute(createCatalog(true), stateMachine, List.of(), WarningCollector.NOOP));
         assertThat(store.requests).isEmpty();
     }
 
@@ -257,7 +256,7 @@ public class TestDelegatedCatalogTasks
         };
 
         long start = System.nanoTime();
-        assertTrinoExceptionThrownBy(() -> getFutureValue(createTask.execute(createCatalog(true), stateMachine(), emptyList(), WarningCollector.NOOP)))
+        assertTrinoExceptionThrownBy(() -> getFutureValue(createTask.execute(createCatalog(true), stateMachine(), List.of(), WarningCollector.NOOP)))
                 .hasErrorCode(CATALOG_NOT_AVAILABLE);
         assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(3));
     }
@@ -347,7 +346,7 @@ public class TestDelegatedCatalogTasks
     {
         store.onCreate = _ -> {};
         QueryStateMachine stateMachine = stateMachine();
-        ListenableFuture<Void> future = createTask.execute(createCatalog(false), stateMachine, emptyList(), WarningCollector.NOOP);
+        ListenableFuture<Void> future = createTask.execute(createCatalog(false), stateMachine, List.of(), WarningCollector.NOOP);
         assertThat(future.isDone()).isFalse();
         stateMachine.transitionToCanceled();
         assertThat(future.isCancelled()).isTrue();
@@ -359,7 +358,7 @@ public class TestDelegatedCatalogTasks
         store.onCreate = _ -> {
             throw new TrinoException(NOT_SUPPORTED, "rejected by the control plane");
         };
-        assertTrinoExceptionThrownBy(() -> getFutureValue(createTask.execute(createCatalog(false), stateMachine(), emptyList(), WarningCollector.NOOP)))
+        assertTrinoExceptionThrownBy(() -> getFutureValue(createTask.execute(createCatalog(false), stateMachine(), List.of(), WarningCollector.NOOP)))
                 .hasErrorCode(NOT_SUPPORTED)
                 .hasMessage("rejected by the control plane");
     }
@@ -369,7 +368,7 @@ public class TestDelegatedCatalogTasks
     {
         List<Property> properties = ImmutableList.of(new Property(new NodeLocation(1, 1), new Identifier("connection-password"), new LongLiteral(new NodeLocation(1, 1), "12345678901234")));
         CreateCatalog statement = new CreateCatalog(new NodeLocation(1, 1), new Identifier(CATALOG), false, new Identifier("tpch"), properties, Optional.empty(), Optional.empty());
-        assertTrinoExceptionThrownBy(() -> getFutureValue(createTask.execute(statement, stateMachine(), emptyList(), WarningCollector.NOOP)))
+        assertTrinoExceptionThrownBy(() -> getFutureValue(createTask.execute(statement, stateMachine(), List.of(), WarningCollector.NOOP)))
                 .hasMessageContaining("Invalid value for catalog property 'connection-password'")
                 .satisfies(e -> assertThat(e.getMessage()).doesNotContain("12345678901234"))
                 .satisfies(e -> assertThat(e.getCause()).isNull());
@@ -384,7 +383,7 @@ public class TestDelegatedCatalogTasks
         store.onDrop = request -> publisher.schedule(() -> catalogManager.removePublishedCatalog(request.catalogName()), 1200, MILLISECONDS);
 
         QueryStateMachine stateMachine = stateMachine();
-        ListenableFuture<Void> future = dropTask.execute(new DropCatalog(new NodeLocation(1, 1), new Identifier(CATALOG), true, false), stateMachine, emptyList(), WarningCollector.NOOP);
+        ListenableFuture<Void> future = dropTask.execute(new DropCatalog(new NodeLocation(1, 1), new Identifier(CATALOG), true, false), stateMachine, List.of(), WarningCollector.NOOP);
         assertThat(future.isDone()).isFalse();
         getFutureValue(future);
 
@@ -401,7 +400,7 @@ public class TestDelegatedCatalogTasks
     {
         publish(new CatalogName(CATALOG));
         store.visibilityTimeout = Duration.ofSeconds(1);
-        assertTrinoExceptionThrownBy(() -> getFutureValue(dropTask.execute(new DropCatalog(new NodeLocation(1, 1), new Identifier(CATALOG), false, false), stateMachine(), emptyList(), WarningCollector.NOOP)))
+        assertTrinoExceptionThrownBy(() -> getFutureValue(dropTask.execute(new DropCatalog(new NodeLocation(1, 1), new Identifier(CATALOG), false, false), stateMachine(), List.of(), WarningCollector.NOOP)))
                 .hasErrorCode(CATALOG_NOT_AVAILABLE)
                 .hasMessage("Catalog '%s' was accepted for removal but is still present on this coordinator; retry the statement shortly", CATALOG);
     }
@@ -409,7 +408,7 @@ public class TestDelegatedCatalogTasks
     @Test
     public void testDropOfAbsentCatalogCompletesImmediately()
     {
-        getFutureValue(dropTask.execute(new DropCatalog(new NodeLocation(1, 1), new Identifier(CATALOG), true, false), stateMachine(), emptyList(), WarningCollector.NOOP));
+        getFutureValue(dropTask.execute(new DropCatalog(new NodeLocation(1, 1), new Identifier(CATALOG), true, false), stateMachine(), List.of(), WarningCollector.NOOP));
         assertThat(store.requests).hasSize(1);
     }
 
