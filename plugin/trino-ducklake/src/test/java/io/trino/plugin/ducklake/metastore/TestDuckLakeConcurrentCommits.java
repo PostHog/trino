@@ -14,6 +14,7 @@
 package io.trino.plugin.ducklake.metastore;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import io.trino.plugin.ducklake.DuckLakeConfig;
 import io.trino.plugin.ducklake.TestingDuckLakeCatalog;
 import io.trino.spi.TrinoException;
@@ -36,13 +37,20 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static com.google.common.base.Verify.verify;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_COMMIT_CONFLICT;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_CHANGE_TYPE;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
+import static java.util.concurrent.Executors.newSingleThreadExecutor;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.abort;
@@ -50,11 +58,12 @@ import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
 /**
  * An ingest pipeline on DuckDB and a transform pipeline on Trino commit to one DuckLake catalog, so
- * a Trino commit regularly finds that another writer claimed the next snapshot first.
+ * a Trino commit regularly finds that another writer committed first.
  * <p>
- * The race is made deterministic by committing the foreign snapshot from DuckDB inside the
- * connector's own commit action, which is the moment between reading the newest snapshot and
- * writing the new one. The first attempt therefore always loses it.
+ * A commit claims its snapshot before it runs its action, so a foreign commit started during the
+ * action waits for it instead of landing in between. A foreign commit that lands after the
+ * statement read its snapshot but before the commit starts is therefore written before the commit
+ * is called, and the commit is re-based onto it.
  */
 @TestInstance(PER_CLASS)
 final class TestDuckLakeConcurrentCommits
@@ -100,11 +109,12 @@ final class TestDuckLakeConcurrentCommits
         DataFile dataFile = stageDataFile(table, 42);
 
         long readSnapshotId = metastore.currentSnapshotId();
+        executeInDuckDb("INSERT INTO " + other + " VALUES (7)");
         AtomicInteger attempts = new AtomicInteger();
-        long committed = registerDataFile(readSnapshotId, table, dataFile, attempts, () -> executeInDuckDb("INSERT INTO " + other + " VALUES (7)"));
+        long committed = registerDataFile(readSnapshotId, table, dataFile, attempts);
 
-        assertThat(attempts).hasValue(2);
-        // the foreign snapshot took the identifier the first attempt wanted, and this commit took the next one
+        assertThat(attempts).hasValue(1);
+        // the foreign snapshot took the identifier after the one the statement read, and this commit took the next one
         assertThat(committed).isEqualTo(readSnapshotId + 2);
         assertThat(committed).isEqualTo(metastore.currentSnapshotId());
 
@@ -128,16 +138,17 @@ final class TestDuckLakeConcurrentCommits
         DataFile dataFile = stageDataFile(table, 42);
 
         long readSnapshotId = metastore.currentSnapshotId();
+        executeInDuckDb("ALTER TABLE " + table + " ADD COLUMN z INTEGER");
         AtomicInteger attempts = new AtomicInteger();
 
-        assertThatThrownBy(() -> registerDataFile(readSnapshotId, table, dataFile, attempts, () -> executeInDuckDb("ALTER TABLE " + table + " ADD COLUMN z INTEGER")))
+        assertThatThrownBy(() -> registerDataFile(readSnapshotId, table, dataFile, attempts))
                 .isInstanceOf(TrinoException.class)
                 .matches(failure -> ((TrinoException) failure).getErrorCode().equals(DUCKLAKE_COMMIT_CONFLICT.toErrorCode()))
                 .hasMessageContaining("Conflicting concurrent commit to the DuckLake catalog")
                 .hasMessageContaining("but another transaction altered it");
 
-        // every attempt was rolled back, so no row of the statement reached the catalog
-        assertThat(attempts).hasValue(2);
+        // the conflict is not retried, and the attempt was rolled back, so no row of the statement reached the catalog
+        assertThat(attempts).hasValue(1);
         assertThat(dataFileCount(table)).isEqualTo(0);
         assertThat(duckDbRows("SELECT x FROM " + table)).isEmpty();
     }
@@ -155,10 +166,11 @@ final class TestDuckLakeConcurrentCommits
         DataFile dataFile = stageDataFile(table, 42);
 
         long readSnapshotId = metastore.currentSnapshotId();
+        executeInDuckDb("INSERT INTO " + table + " VALUES (7)");
         AtomicInteger attempts = new AtomicInteger();
-        registerDataFile(readSnapshotId, table, dataFile, attempts, () -> executeInDuckDb("INSERT INTO " + table + " VALUES (7)"));
+        registerDataFile(readSnapshotId, table, dataFile, attempts);
 
-        assertThat(attempts).hasValue(2);
+        assertThat(attempts).hasValue(1);
         assertThat(dataFileCount(table)).isEqualTo(2);
         assertThat(duckDbRows("SELECT x FROM " + table + " ORDER BY x")).isEqualTo(List.of(7L, 42L));
     }
@@ -179,24 +191,173 @@ final class TestDuckLakeConcurrentCommits
         DataFile dataFile = stageDataFile(table, 42);
 
         long readSnapshotId = metastore.currentSnapshotId();
+        // a real foreign snapshot, rewritten to record a change this connector cannot interpret
+        executeInDuckDb("INSERT INTO " + other + " VALUES (7)");
+        executeInCatalogDatabase(
+                """
+                UPDATE ducklake_snapshot_changes SET changes_made = 'teleported_table:99'
+                WHERE snapshot_id = (SELECT max(snapshot_id) FROM ducklake_snapshot_changes)""");
         AtomicInteger attempts = new AtomicInteger();
 
-        assertThatThrownBy(() -> registerDataFile(readSnapshotId, table, dataFile, attempts, () -> {
-            // a real foreign snapshot, rewritten to record a change this connector cannot interpret
-            executeInDuckDb("INSERT INTO " + other + " VALUES (7)");
-            executeInCatalogDatabase(
-                    """
-                    UPDATE ducklake_snapshot_changes SET changes_made = 'teleported_table:99'
-                    WHERE snapshot_id = (SELECT max(snapshot_id) FROM ducklake_snapshot_changes)""");
-        }))
+        assertThatThrownBy(() -> registerDataFile(readSnapshotId, table, dataFile, attempts))
                 .isInstanceOf(TrinoException.class)
                 .matches(failure -> ((TrinoException) failure).getErrorCode().equals(DUCKLAKE_UNSUPPORTED_CHANGE_TYPE.toErrorCode()))
                 .hasMessageContaining("recorded the DuckLake change type 'teleported_table'")
                 .hasMessageContaining("Upgrade the DuckLake connector");
 
-        // reading the row again reaches the same conclusion, so the failure is not retried
-        assertThat(attempts).hasValue(2);
+        // reading the row again would reach the same conclusion, so the failure is not retried
+        assertThat(attempts).hasValue(1);
         assertThat(dataFileCount(table)).isEqualTo(0);
+    }
+
+    /**
+     * The commit holds its snapshot from before its action runs until it ends, so another writer
+     * cannot take the identifier in between. The foreign commit waits, loses the claim once the first
+     * commit lands, and is replayed onto the snapshot after it. The action of the first commit runs
+     * once, which is the saving over a commit that finds out only at the end that it lost.
+     */
+    @Test
+    void testForeignCommitWaitsWhileACommitHoldsItsSnapshot()
+            throws Exception
+    {
+        String table = "claim_" + randomNameSuffix();
+        String other = "claim_other_" + randomNameSuffix();
+        createTable(table);
+        createTable(other);
+        long tableId = metastore.findTable(metastore.currentSnapshotId(), "main", table).orElseThrow().tableId();
+        long otherId = metastore.findTable(metastore.currentSnapshotId(), "main", other).orElseThrow().tableId();
+
+        long readSnapshotId = metastore.currentSnapshotId();
+        AtomicInteger actions = new AtomicInteger();
+        AtomicInteger foreignActions = new AtomicInteger();
+        ExecutorService executor = newSingleThreadExecutor();
+        try {
+            AtomicReference<Future<Long>> foreign = new AtomicReference<>();
+            long committed = metastore.commit(readSnapshotId, commit -> {
+                actions.incrementAndGet();
+                commit.recordInsert(tableId);
+                Future<Long> started = executor.submit(() -> metastore.commit(readSnapshotId, foreignCommit -> {
+                    foreignActions.incrementAndGet();
+                    foreignCommit.recordInsert(otherId);
+                    return foreignCommit.effectiveSnapshotId();
+                }));
+                foreign.set(started);
+                // the foreign commit cannot finish while this transaction holds the snapshot
+                assertThatThrownBy(() -> started.get(500, MILLISECONDS)).isInstanceOf(TimeoutException.class);
+                return commit.effectiveSnapshotId();
+            });
+            assertThat(actions).hasValue(1);
+            assertThat(committed).isEqualTo(readSnapshotId + 1);
+            // the foreign commit lost the claim, and took the identifier after this commit
+            assertThat(foreign.get().get(30, SECONDS)).isEqualTo(readSnapshotId + 2);
+            assertThat(foreignActions).hasValue(1);
+            assertThat(metastore.currentSnapshotId()).isEqualTo(readSnapshotId + 2);
+        }
+        finally {
+            executor.shutdownNow();
+        }
+    }
+
+    /**
+     * DuckDB is the other writer in production. It waits on the claimed snapshot as well, retries
+     * once the first commit lands, and its insert lands after that commit.
+     */
+    @Test
+    void testDuckDbWriteWaitsWhileACommitHoldsItsSnapshot()
+            throws Exception
+    {
+        String table = "claim_duck_" + randomNameSuffix();
+        String other = "claim_duck_other_" + randomNameSuffix();
+        createTable(table);
+        createTable(other);
+        long tableId = metastore.findTable(metastore.currentSnapshotId(), "main", table).orElseThrow().tableId();
+
+        long readSnapshotId = metastore.currentSnapshotId();
+        AtomicInteger actions = new AtomicInteger();
+        ExecutorService executor = newSingleThreadExecutor();
+        try {
+            // the first DuckDB statement on the thread loads the extension, which must not be what makes the insert slow
+            executor.submit(() -> executeInDuckDb("SELECT count(*) FROM " + other)).get(60, SECONDS);
+            AtomicReference<Future<?>> foreign = new AtomicReference<>();
+            long committed = metastore.commit(readSnapshotId, commit -> {
+                actions.incrementAndGet();
+                commit.recordInsert(tableId);
+                Future<?> started = executor.submit(() -> executeInDuckDb("INSERT INTO " + other + " VALUES (7)"));
+                foreign.set(started);
+                assertThatThrownBy(() -> started.get(500, MILLISECONDS)).isInstanceOf(TimeoutException.class);
+                return commit.effectiveSnapshotId();
+            });
+
+            assertThat(actions).hasValue(1);
+            assertThat(committed).isEqualTo(readSnapshotId + 1);
+            foreign.get().get(60, SECONDS);
+            assertThat(metastore.currentSnapshotId()).isEqualTo(readSnapshotId + 2);
+            assertThat(duckDbRows("SELECT x FROM " + other)).isEqualTo(List.of(7L));
+        }
+        finally {
+            executor.shutdownNow();
+        }
+    }
+
+    /**
+     * A commit whose action changes nothing writes no snapshot, so the snapshot it claimed is
+     * released rather than left behind as an empty one.
+     */
+    @Test
+    void testCommitThatChangesNothingLeavesNoSnapshot()
+            throws Exception
+    {
+        String table = "empty_" + randomNameSuffix();
+        createTable(table);
+        long snapshotId = metastore.currentSnapshotId();
+
+        long committed = metastore.commit(snapshotId, commit -> {
+            assertThat(commit.findTable("main", table)).isPresent();
+            return commit.effectiveSnapshotId();
+        });
+
+        assertThat(committed).isEqualTo(snapshotId);
+        assertThat(metastore.currentSnapshotId()).isEqualTo(snapshotId);
+        long laterSnapshots = inCatalogDatabase("SELECT count(*) FROM ducklake_snapshot WHERE snapshot_id > " + snapshotId, resultSet -> {
+            verify(resultSet.next());
+            return resultSet.getLong(1);
+        });
+        assertThat(laterSnapshots).isEqualTo(0);
+        // the identifier is free for the next commit
+        executeInDuckDb("INSERT INTO " + table + " VALUES (1)");
+        assertThat(metastore.currentSnapshotId()).isEqualTo(snapshotId + 1);
+    }
+
+    /**
+     * The check inside the commit sees every file recorded under the names to register: the ones
+     * the check read before the commit, and the ones recorded after, including a file that moved to
+     * the files waiting to be deleted, which has no snapshot of its own.
+     */
+    @Test
+    void testCommitSeesFilesRecordedBeforeAndAfterTheCheckRead()
+            throws Exception
+    {
+        String table = "recorded_" + randomNameSuffix();
+        createTable(table);
+        DataFile before = stageDataFile(table, 1);
+        DataFile after = stageDataFile(table, 2);
+        DataFile scheduled = stageDataFile(table, 3);
+        registerDataFile(metastore.currentSnapshotId(), table, before, new AtomicInteger());
+
+        DuckLakeCommit.FileRegistrationState state = metastore.fileRegistrationState(ImmutableSet.of(before.path(), after.path(), scheduled.path()));
+        assertThat(state.recordedFiles()).extracting(DuckLakeCommit.RecordedFile::path).containsExactly(before.path());
+
+        registerDataFile(metastore.currentSnapshotId(), table, after, new AtomicInteger());
+        // an invented file id, and a directory other than the table's with the file name of a file to register
+        String scheduledPath = "elsewhere/" + scheduled.path();
+        executeInCatalogDatabase("INSERT INTO ducklake_files_scheduled_for_deletion (data_file_id, path, path_is_relative, schedule_start) VALUES (999999999, '%s', true, now())".formatted(scheduledPath));
+        try {
+            List<DuckLakeCommit.RecordedFile> recorded = metastore.commit(metastore.currentSnapshotId(), commit -> commit.recordedFiles(state));
+            assertThat(recorded).extracting(DuckLakeCommit.RecordedFile::path).containsExactlyInAnyOrder(before.path(), after.path(), scheduledPath);
+        }
+        finally {
+            executeInCatalogDatabase("DELETE FROM ducklake_files_scheduled_for_deletion WHERE data_file_id = 999999999");
+        }
     }
 
     @Test
@@ -229,16 +390,13 @@ final class TestDuckLakeConcurrentCommits
     }
 
     /**
-     * Registers an already written data file into a table the way {@code finishInsert} does, while
-     * {@code foreignCommit} lands a snapshot from DuckDB during the first attempt. Returns the
-     * snapshot the commit ended up on.
+     * Registers an already written data file into a table the way {@code finishInsert} does.
+     * Returns the snapshot the commit ended up on.
      */
-    private long registerDataFile(long readSnapshotId, String tableName, DataFile dataFile, AtomicInteger attempts, Runnable foreignCommit)
+    private long registerDataFile(long readSnapshotId, String tableName, DataFile dataFile, AtomicInteger attempts)
     {
         return metastore.commit(readSnapshotId, commit -> {
-            if (attempts.incrementAndGet() == 1) {
-                foreignCommit.run();
-            }
+            attempts.incrementAndGet();
             DuckLakeCommit.TableIdentity table = commit.findTable("main", tableName).orElseThrow();
             DuckLakeCommit.TableStatsRow stats = commit.tableStats(table.tableId())
                     .orElseGet(() -> new DuckLakeCommit.TableStatsRow(0, 0, 0));
@@ -283,7 +441,7 @@ final class TestDuckLakeConcurrentCommits
                 "INSERT INTO %s VALUES (%s)".formatted(sourceTable, value));
 
         DataFile source = onlyDataFile(sourceTable);
-        Path staged = tableDirectory(tableName).resolve("staged.parquet");
+        Path staged = tableDirectory(tableName).resolve("staged_" + randomNameSuffix() + ".parquet");
         try {
             Files.createDirectories(staged.getParent());
             Files.copy(tableDirectory(sourceTable).resolve(source.path()), staged, REPLACE_EXISTING);

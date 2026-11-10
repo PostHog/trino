@@ -940,6 +940,10 @@ public class DuckLakeMetadata
         Optional<DuckLakeRangeReplacement.Plan> rangePlan = handle.replacementRange().map(range -> rangeReplacement.plan(session, table, range));
         List<RewrittenDeletes> rangeDeletes = rangePlan.map(plan -> rewriteDeleteFiles(session, target, plan.positions(), plan.inlinedDeletions())).orElse(ImmutableList.of());
         Map<Long, Long> endedInlinedDeletions = rangePlan.map(plan -> inlinedDeletionsOutsideDeleteFiles(session, target, plan.wholeFiles(), plan.inlinedDeletions())).orElse(ImmutableMap.of());
+        // The scan of every recorded file is too slow to hold the snapshot claim of a commit, so it
+        // reads here, and the commit checks these files together with the ones recorded since.
+        Set<String> fileNames = fileNames(handle.files());
+        DuckLakeCommit.FileRegistrationState registration = metastore.fileRegistrationState(fileNames);
         Optional<Long> added = commit(commit -> {
             DuckLakeCommit.TableIdentity current = commit.findTable(table.schemaName(), table.tableName())
                     .orElseThrow(() -> new TrinoException(StandardErrorCode.TABLE_NOT_FOUND, "Import target no longer exists"));
@@ -951,7 +955,7 @@ public class DuckLakeMetadata
                 verifyReceipt(concurrentReceipt.orElseThrow(), fingerprint);
                 return Optional.empty();
             }
-            verifyFilesNotRecorded(commit, table, handle.files());
+            verifyFilesNotRecorded(table, handle.files(), commit.tableLocations(), commit.recordedFiles(registration));
             if (handle.replace()) {
                 removeAllRows(commit, table.tableId());
                 commit.recordDelete(table.tableId());
@@ -1013,11 +1017,11 @@ public class DuckLakeMetadata
      * directory of another table holds rows of that table, which the caller may not be allowed to
      * read.
      */
-    private void verifyFilesNotRecorded(DuckLakeCommit commit, DuckLakeTableHandle table, List<String> files)
+    private void verifyFilesNotRecorded(DuckLakeTableHandle table, List<String> files, List<DuckLakeCommit.TableLocation> locations, List<DuckLakeCommit.RecordedFile> recordedFiles)
     {
         ListMultimap<Long, String> tableLocations = ArrayListMultimap.create();
         Map<String, Long> visibleTableDirectories = new HashMap<>();
-        for (DuckLakeCommit.TableLocation location : commit.tableLocations()) {
+        for (DuckLakeCommit.TableLocation location : locations) {
             String schemaLocation = PathResolver.resolve(dataPath, location.schemaPath(), location.schemaPathIsRelative());
             String tableLocation = PathResolver.resolve(schemaLocation, location.path(), location.pathIsRelative());
             tableLocations.put(location.tableId(), tableLocation);
@@ -1038,10 +1042,7 @@ public class DuckLakeMetadata
                 throw new TrinoException(StandardErrorCode.INVALID_PROCEDURE_ARGUMENT, "Imported files cannot be in the directory of another table: " + file);
             }
         }
-        Set<String> fileNames = files.stream()
-                .map(file -> file.substring(file.lastIndexOf('/') + 1))
-                .collect(toImmutableSet());
-        for (DuckLakeCommit.RecordedFile recorded : commit.recordedFiles(fileNames)) {
+        for (DuckLakeCommit.RecordedFile recorded : recordedFiles) {
             List<String> bases = recorded.tableId().isPresent() ? tableLocations.get(recorded.tableId().orElseThrow()) : ImmutableList.of(dataPath);
             for (String base : bases) {
                 String location;
@@ -1058,6 +1059,13 @@ public class DuckLakeMetadata
                 }
             }
         }
+    }
+
+    private static Set<String> fileNames(List<String> files)
+    {
+        return files.stream()
+                .map(file -> file.substring(file.lastIndexOf('/') + 1))
+                .collect(toImmutableSet());
     }
 
     private void deleteUnreferencedDeleteFiles(ConnectorSession session, DuckLakeWriteTarget target, List<RewrittenDeletes> rewrittenDeletes)
