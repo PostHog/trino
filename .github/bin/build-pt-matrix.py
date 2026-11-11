@@ -235,9 +235,11 @@ def with_available_secrets(config, suites, environment):
     """Drop the suites whose secret is unavailable."""
     available = []
     for suite in suites:
-        secret = config["secret-suites"].get(suite)
-        if secret is not None and not environment.get(secret):
-            logging.warning("Skipping %s, as %s is not available", suite, secret)
+        required_variable = config["secret-suites"].get(suite)
+        # Report the missing suite only, never the environment itself: the value read here is a
+        # secret, and CodeQL flags logging anything derived from the environment.
+        if required_variable is not None and not environment.get(required_variable):
+            logging.warning("Skipping %s, as its required secret is not available", suite)
         else:
             available.append(suite)
     return available
