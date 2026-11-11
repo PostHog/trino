@@ -497,7 +497,7 @@
             <dependency>
                 <groupId>com.microsoft.sqlserver</groupId>
                 <artifactId>mssql-jdbc</artifactId>
-                <version>13.6.1.jre11</version>
+                <version>13.6.2.jre11</version>
             </dependency>
 
             <dependency>
@@ -2155,12 +2155,6 @@
                 <groupId>org.opengis</groupId>
                 <artifactId>geoapi</artifactId>
                 <version>${dep.geoapi.version}</version>
-            </dependency>
-
-            <dependency>
-                <groupId>org.pcollections</groupId>
-                <artifactId>pcollections</artifactId>
-                <version>5.0.0</version>
             </dependency>
 
             <dependency>
