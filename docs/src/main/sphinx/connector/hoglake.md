@@ -23,6 +23,10 @@ the catalog's files.
 | --- | --- | --- |
 | `hoglake.uri` | Hoglake REST base URI; required. | None |
 | `hoglake.catalog` | Hoglake catalog to expose. | `hoglake` |
+| `hoglake.auth.token-uri` | OAuth 2.0 token endpoint that mints Hoglake access tokens with the client-credentials grant. Unset means no token is sent. See [](hoglake-authentication). | None |
+| `hoglake.auth.client-id` | Client id for the token endpoint; required with `hoglake.auth.token-uri`. | None |
+| `hoglake.auth.client-secret` | Client secret for the token endpoint; required with `hoglake.auth.token-uri`. Use Trino's [secrets support](/security/secrets). | None |
+| `hoglake.auth.audience` | Audience requested from the token endpoint. | `hoglake` |
 | `hoglake.client.request-timeout` | Positive request timeout, with `ms`, `s`, `m`, `h`, or `d` suffix. | `2m` |
 | `hoglake.max-split-size` | Largest byte range of one Parquet file assigned to a single split; at least `1MB`. See [](hoglake-split-planning). Use the `max_split_size` catalog session property to change it for a session. | `256MB` |
 | `hoglake.parquet-footer-cache.max-size` | Serialized size of the parsed Parquet footers each worker keeps for the catalog; `0B` disables the cache. See [](hoglake-split-planning). | `64MB` |
@@ -38,8 +42,24 @@ the catalog's files.
 
 The connector uses Trino's shared [S3 filesystem configuration](/object-storage/file-system-s3).
 Use Trino's [secrets support](/security/secrets) for explicit credentials. Workers use the
-configured credentials or the AWS default credential provider chain; the connector
-does not obtain temporary credentials from Hoglake.
+configured credentials or the AWS default credential provider chain. Hoglake authorizes
+catalog metadata only and never vends storage credentials; the connector reads and writes
+S3 with the catalog's own filesystem credentials.
+
+(hoglake-authentication)=
+### Authentication
+
+A Hoglake server verifies bearer JWTs from the issuer it is configured to trust
+when its `HOGLAKE_AUTH_MODE` is `warn` or `enforce`, and accepts unauthenticated
+requests when it is `off`. The connector obtains its token from the issuer, not
+from the Hoglake server: with `hoglake.auth.token-uri`, `hoglake.auth.client-id`
+and `hoglake.auth.client-secret` set, it performs an OAuth 2.0 client-credentials
+grant against that endpoint (`grant_type=client_credentials`, `audience` from
+`hoglake.auth.audience`), caches the token for the catalog, refreshes it before
+expiry, and retries a request once with a fresh token after a `401`. All three
+properties must be set together, or none. The scopes the token carries are decided
+by the issuer; the request carries none. Every query on the catalog presents the
+same token, so the Hoglake server sees the catalog's identity, not the Trino user's.
 
 Existing catalogs can continue using these aliases:
 
@@ -383,9 +403,9 @@ reports an unknown outcome and the operation ID. The receipt remains valid after
 later writes, rename, drop, or snapshot expiry; server receipts do not expire.
 
 Deploy the supporting server before the connector. Servers without the capability
-retain single-attempt INSERT behavior. Receipt lookup requires the same deployment
-access boundary as the catalog API; the standalone server does not implement
-application authentication. Recovery covers publication of one operation only:
+retain single-attempt INSERT behavior. Receipt lookup requires the same token
+as the catalog API: a Hoglake server whose auth mode is on verifies it like any
+other request, and one whose mode is `off` relies on its network boundary. Recovery covers publication of one operation only:
 manual SQL reruns create a new operation and can duplicate rows. Query and task
 retries remain unsupported. Files handed to the coordinator are not
 deleted on an ambiguous commit failure, to avoid removing committed data. Failed
