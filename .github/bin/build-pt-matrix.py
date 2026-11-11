@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import os
 import re
 import sys
 import tarfile
@@ -128,6 +129,8 @@ def main():
         validate_locations(server_plugins(server_files), locations)
         suites = select_suites(config, changed_artifacts(args.changed.read_text()), locations)
     suites = [suite for suite in suites if suite not in EXCLUDED_SUITES]
+    if not os.environ.get("CI_SKIP_SECRETS_PRESENCE_CHECKS"):
+        suites = with_available_secrets(config, suites, os.environ)
     print(json.dumps(build_matrix(suites)))
 
 
@@ -146,7 +149,7 @@ def changed_artifacts(gib_log):
 def load_config(path):
     with path.open() as file:
         config = yaml.safe_load(file)
-    for key in ("smoke-suite", "installed-by-default", "smoke-only", "suites", "disabled-suites"):
+    for key in ("smoke-suite", "installed-by-default", "smoke-only", "suites", "secret-suites", "disabled-suites"):
         if config.get(key) is None:
             raise ValueError(f"{path} must declare {key}")
     for suite, plugins in config["suites"].items():
@@ -172,6 +175,8 @@ def server_plugins(server_files):
 def validate_config(config, suite_classes, plugins):
     """Fail when a suite, or a server plugin, is added or removed without updating the suites file."""
     declared_suites = set(config["suites"]) | {config["smoke-suite"]}
+    if not set(config["secret-suites"]) <= declared_suites:
+        raise ValueError(f"Secret suites not declared in {SUITES_FILE}: {sorted(set(config['secret-suites']) - declared_suites)}")
     if suite_classes != declared_suites:
         raise ValueError(f"Suites missing from {SUITES_FILE}: {sorted(suite_classes - declared_suites)}, "
                          f"declared suites without a class: {sorted(declared_suites - suite_classes)}")
@@ -226,6 +231,20 @@ def select_suites(config, changed_artifacts, locations):
     return suites
 
 
+def with_available_secrets(config, suites, environment):
+    """Drop the suites whose secret is unavailable."""
+    available = []
+    for suite in suites:
+        required_variable = config["secret-suites"].get(suite)
+        # Report the missing suite only, never the environment itself: the value read here is a
+        # secret, and CodeQL flags logging anything derived from the environment.
+        if required_variable is not None and not environment.get(required_variable):
+            logging.warning("Skipping %s, as its required secret is not available", suite)
+        else:
+            available.append(suite)
+    return available
+
+
 def build_matrix(suites):
     include = [{"suite": suite} for suite in suites]
     return {"include": include} if include else {}
@@ -244,6 +263,7 @@ class TestBuildMatrix(unittest.TestCase):
             "SuiteTls": [],
             "SuiteSnowflake": ["snowflake"],
         },
+        "secret-suites": {"SuiteTls": "TLS_SECRET"},
         "disabled-suites": ["SuiteSnowflake"],
     }
     ALL_SUITES = ["SuiteSmoke", "SuiteMysql", "SuiteRanger", "SuiteHive", "SuiteDeltaLake", "SuiteTls"]
@@ -313,6 +333,11 @@ class TestBuildMatrix(unittest.TestCase):
         config = load_config(SUITES_FILE)
         self.assertEqual(all_suites(config)[0], "SuiteAllConnectorsSmoke")
 
+    def test_secret_suites(self):
+        self.assertEqual(with_available_secrets(self.CONFIG, self.ALL_SUITES, {"TLS_SECRET": "secret"}), self.ALL_SUITES)
+        self.assertEqual(with_available_secrets(self.CONFIG, self.ALL_SUITES, {"TLS_SECRET": ""}), ["SuiteSmoke", "SuiteMysql", "SuiteRanger", "SuiteHive", "SuiteDeltaLake"])
+        self.assertEqual(with_available_secrets(self.CONFIG, self.ALL_SUITES, {}), ["SuiteSmoke", "SuiteMysql", "SuiteRanger", "SuiteHive", "SuiteDeltaLake"])
+
     def test_no_changes(self):
         self.assertEqual(self.select(), [])
         self.assertEqual(build_matrix([]), {})
@@ -377,6 +402,8 @@ class TestBuildMatrix(unittest.TestCase):
             validate_config(self.CONFIG, suites, plugins | {"new"})
         with self.assertRaisesRegex(ValueError, r"missing from the server: \['opa'\]"):
             validate_config(self.CONFIG, suites, plugins - {"opa"})
+        with self.assertRaisesRegex(ValueError, r"Secret suites not declared in .*\['SuiteNew'\]"):
+            validate_config({**self.CONFIG, "secret-suites": {"SuiteNew": "SECRET"}}, suites, plugins)
 
 
 if __name__ == "__main__":
