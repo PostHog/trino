@@ -23,7 +23,7 @@ the catalog's files.
 | --- | --- | --- |
 | `hoglake.uri` | Hoglake REST base URI; required. | None |
 | `hoglake.catalog` | Hoglake catalog to expose. | `hoglake` |
-| `hoglake.auth.token-uri` | OAuth 2.0 token endpoint that mints Hoglake access tokens with the client-credentials grant. Unset means no token is sent. See [](hoglake-authentication). | None |
+| `hoglake.auth.token-uri` | OAuth 2.0 token endpoint that mints Hoglake access tokens with the client-credentials grant, and the per-login tokens of the `posthog` schema with a token exchange. Unset means no token is sent. See [](hoglake-authentication). | None |
 | `hoglake.auth.client-id` | Client id for the token endpoint; required with `hoglake.auth.token-uri`. | None |
 | `hoglake.auth.client-secret` | Client secret for the token endpoint; required with `hoglake.auth.token-uri`. Use Trino's [secrets support](/security/secrets). | None |
 | `hoglake.auth.audience` | Audience requested from the token endpoint. | `hoglake` |
@@ -32,6 +32,7 @@ the catalog's files.
 | `hoglake.parquet-footer-cache.max-size` | Serialized size of the parsed Parquet footers each worker keeps for the catalog; `0B` disables the cache. See [](hoglake-split-planning). | `64MB` |
 | `hoglake.variant-path-assembly-enabled` | Build pushed-down `VARIANT` subscripts from the requested keys of each value, instead of from the whole value. See [](hoglake-variant). Use the `variant_path_assembly_enabled` catalog session property to change it for a session. | `true` |
 | `hoglake.variant-lazy-residual-enabled` | With `hoglake.variant-path-assembly-enabled`, read the top-level `metadata` and `value` columns of a shredded `VARIANT` only for the batches of rows that need them. See [](hoglake-variant). Use the `variant_lazy_residual_enabled` catalog session property to change it for a session. | `true` |
+| `hoglake.posthog-schema.enabled` | Show the org's events mount, the Hoglake catalog `<hoglake.catalog>-events` on the same server, as the read-only schema `posthog`, read with a token of the Trino login. Requires `hoglake.catalog` to be an org id (a lowercase UUID). See [](hoglake-posthog-schema). | `false` |
 | `fs.s3.enabled` | Enable the native S3 filesystem. | `true` |
 | `s3.endpoint` | Optional S3-compatible endpoint. | AWS endpoint resolution |
 | `s3.region` | S3 region. | `us-east-1` |
@@ -60,6 +61,33 @@ expiry, and retries a request once with a fresh token after a `401`. All three
 properties must be set together, or none. The scopes the token carries are decided
 by the issuer; the request carries none. Every query on the catalog presents the
 same token, so the Hoglake server sees the catalog's identity, not the Trino user's.
+
+The [`posthog` schema](hoglake-posthog-schema) is the exception. Its requests never
+carry the catalog's token. For each Trino login that reads the schema, the connector
+asks the same token endpoint for a token of that login, with an OAuth 2.0 token
+exchange (RFC 8693), and sends only that token to the events mount:
+
+- The request is authenticated with the catalog's client id and secret, as above. Its
+  fields are `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`,
+  `subject_token` (the Trino login name),
+  `subject_token_type=urn:posthog:params:oauth:token-type:trino-login`, `audience`
+  from `hoglake.auth.audience`, and `scope=hoglake:<hoglake.catalog>-events:read`.
+- The login is the session user, and only when it is the user that authenticated.
+  A session that runs as another user, and the body of a view that runs as its
+  owner, cannot read the schema.
+- The answer must be a bearer token with
+  `issued_token_type=urn:ietf:params:oauth:token-type:access_token`. Any other
+  answer is not used as a token.
+- A token is cached for its login on the coordinator and reused until shortly before
+  it expires, so a change to what a login may read takes effect within one token
+  lifetime. At most 1,000 logins are cached for a catalog. After a `401` from the
+  Hoglake server, the connector drops that login's token, requests a new one and
+  retries the request once.
+- Refusals are cached too, so a refused login does not send a request for every
+  statement: 60 seconds for a refusal, and the `Retry-After` time of the endpoint
+  (at most 30 seconds, 5 seconds without the header) when it is busy or unavailable.
+- There is no fallback. When no token of the login is available, nothing is sent to
+  the events mount.
 
 Existing catalogs can continue using these aliases:
 
@@ -306,6 +334,55 @@ The connector does not support time-travel SQL.
 Only Hoglake's `puffin-dv` deletion-vector format is read; any other format
 fails the query. Equality deletes and any other row-level delete representation
 are not read. SQL `DELETE`, `UPDATE` and `MERGE` write compatible vectors.
+
+(hoglake-posthog-schema)=
+## The `posthog` schema
+
+With `hoglake.posthog-schema.enabled=true`, the catalog shows one more schema,
+`posthog`, whose tables are those of the org's events mount: the Hoglake catalog
+`<hoglake.catalog>-events` on the same server. Requests for it carry a token of the
+Trino login that runs the query, obtained from the endpoint of
+`hoglake.auth.token-uri` as described in [](hoglake-authentication); they never
+carry the catalog's own token. What a login can read in the schema is decided by
+the token that the token service issues for that login, not by the connector. No
+other property is needed.
+
+- The schema is read-only. `INSERT`, `DELETE`, `UPDATE`, `MERGE`, `CREATE TABLE`,
+  `CREATE TABLE AS`, `DROP TABLE`, `TRUNCATE`, renames, column changes, comments,
+  `SET PROPERTIES`, and `CREATE SCHEMA` or `DROP SCHEMA posthog` fail with
+  `NOT_SUPPORTED` before any request is sent or any file is written.
+- The name `posthog` always means the mount. A namespace named `posthog` (in any
+  case) in the org's own Hoglake catalog is not listed and cannot be read or
+  written through this catalog, even when the mount is missing or unavailable.
+- The tables of every namespace the mount serves are shown in `posthog`. If two of
+  its namespaces hold a table of the same name, queries on that table fail.
+- The schema is listed for a login when the mount exists for that login, and also
+  when the server or the token service cannot say (for example, when the mount's
+  host is unavailable). It is not listed when the server has no mount for the login's
+  token, when the token service refuses the login, or when the token service does not
+  issue per-login tokens to the catalog. Other schemas and catalog-wide
+  `information_schema` queries are not affected in any of these cases.
+- Queries that name `posthog` fail with a typed error when the schema cannot be
+  read. The table after this list shows the errors.
+- Mount refusals map to Trino errors: `read_only_catalog` and
+  `mount_operation_unavailable` to `NOT_SUPPORTED`; `mount_scan_too_many_files` to
+  `EXCEEDED_SCAN_LIMIT`; `mount_scan_timeout`, `mount_scan_busy`,
+  `mount_host_unavailable`, `mount_proxy_busy` and `mount_host_invalid_response` to
+  `HOGLAKE_CATALOG_UNAVAILABLE`. Error messages for the schema do not include server
+  URLs, response bodies, login names or tokens.
+- Workers read the mount's files with the catalog's storage credentials. An
+  unfiltered `count(*)` is answered from catalog counts without reading files.
+
+| Why `posthog` cannot be read | Error |
+| --- | --- |
+| The server has no mount for the login's token | `SCHEMA_NOT_FOUND` |
+| The session user is not the login that authenticated | `PERMISSION_DENIED` |
+| The token service refuses the login (`invalid_grant`) | `PERMISSION_DENIED` |
+| The token service does not issue per-login tokens, or refuses the catalog's credential or the request | `HOGLAKE_LOGIN_TOKEN_REFUSED` |
+| `hoglake.auth.token-uri` is not set for the catalog | `HOGLAKE_LOGIN_TOKEN_REFUSED` |
+| The token service is busy, unavailable or unreachable | `HOGLAKE_CATALOG_UNAVAILABLE` |
+| The token service answers outside its contract | `HOGLAKE_INVALID_RESPONSE` |
+| The mount's host is unavailable | `HOGLAKE_CATALOG_UNAVAILABLE` |
 
 ## Writing tables
 

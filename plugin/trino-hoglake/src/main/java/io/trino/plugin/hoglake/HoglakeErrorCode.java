@@ -66,7 +66,13 @@ public enum HoglakeErrorCode
      * The {@code type_params.shredding} of a VARIANT column is not a valid
      * declaration of a shredded layout.
      */
-    HOGLAKE_INVALID_VARIANT_SHREDDING(7, USER_ERROR);
+    HOGLAKE_INVALID_VARIANT_SHREDDING(7, USER_ERROR),
+    /**
+     * The token service did not issue a per-login token for the posthog
+     * schema, for a reason that is not the login's: it does not offer the
+     * exchange, or it refused this catalog's credential or request.
+     */
+    HOGLAKE_LOGIN_TOKEN_REFUSED(8, EXTERNAL);
 
     // Arbitrary plugin-private range; only uniqueness within this
     // connector matters (external plugins pick their own base).

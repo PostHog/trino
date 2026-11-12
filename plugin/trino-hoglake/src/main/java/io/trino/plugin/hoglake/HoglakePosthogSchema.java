@@ -1,0 +1,142 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.trino.plugin.hoglake;
+
+import io.trino.plugin.hoglake.rest.HoglakeClient;
+import io.trino.plugin.hoglake.rest.HoglakeLoginTokenSource;
+import io.trino.spi.TrinoException;
+import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.security.ConnectorIdentity;
+
+import java.io.Closeable;
+import java.security.Principal;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.regex.Pattern;
+
+import static io.trino.spi.StandardErrorCode.PERMISSION_DENIED;
+import static java.util.Objects.requireNonNull;
+
+/**
+ * The read-only schema {@value #SCHEMA_NAME}: the org's events mount, the Hoglake
+ * catalog {@code <orgID>-events} on the same server as the org catalog
+ * {@code <orgID>}.
+ *
+ * <p>The mount is read with a token of the Trino login that asks, never with the
+ * org catalog's token. {@link #client(ConnectorSession)} is the only way to a
+ * client that can send a request, and it binds that client to the session's login.
+ *
+ * <p>With it configured, the name {@value #SCHEMA_NAME} always means the mount: a
+ * namespace of that name in the org's own catalog is never listed, read or written,
+ * whether or not the mount exists or answers. Falling back to the org's namespace
+ * would let a mount outage put user-writable data under the name of PostHog's data.
+ */
+public final class HoglakePosthogSchema
+        implements Closeable
+{
+    public static final String SCHEMA_NAME = "posthog";
+
+    /**
+     * What the subject of a per-login token request is: the name of a Trino login.
+     */
+    public static final String LOGIN_SUBJECT_TOKEN_TYPE = "urn:posthog:params:oauth:token-type:trino-login";
+
+    // hoglake MountNames.PATTERN without the suffix: a canonical lowercase UUID.
+    private static final Pattern ORG_ID = Pattern.compile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
+    private static final String MOUNT_SUFFIX = "-events";
+
+    private final String mountCatalog;
+    // Sends nothing by itself: it has no token until it is bound to a login
+    private final HoglakeClient mountClient;
+    private final HoglakeLoginTokenSource loginTokens;
+
+    public HoglakePosthogSchema(String orgCatalog, HoglakeClient mountClient, HoglakeLoginTokenSource loginTokens)
+    {
+        if (!isOrgCatalog(orgCatalog)) {
+            throw new IllegalArgumentException("The posthog schema requires an org catalog named by a lowercase UUID");
+        }
+        this.mountCatalog = mountCatalog(orgCatalog);
+        this.mountClient = requireNonNull(mountClient, "mountClient is null");
+        this.loginTokens = requireNonNull(loginTokens, "loginTokens is null");
+    }
+
+    public static boolean isOrgCatalog(String catalog)
+    {
+        return catalog != null && ORG_ID.matcher(catalog).matches();
+    }
+
+    public static String mountCatalog(String orgCatalog)
+    {
+        return orgCatalog + MOUNT_SUFFIX;
+    }
+
+    /**
+     * The scope a per-login token request names, so that the issuer returns a token
+     * for the mount and not for the org catalog. This request field is a proposal
+     * that the issuer has not agreed to yet; this method is the only place that
+     * knows its form.
+     */
+    public static String mountScope(String mountCatalog)
+    {
+        return "hoglake:" + mountCatalog + ":read";
+    }
+
+    /**
+     * Whether a Trino schema name addresses this schema. Hoglake namespace names are
+     * compared without case, so no spelling of an org namespace can stand beside it.
+     */
+    public static boolean isPosthogSchema(String schemaName)
+    {
+        return schemaName != null && schemaName.toLowerCase(Locale.ROOT).equals(SCHEMA_NAME);
+    }
+
+    public String mountCatalog()
+    {
+        return mountCatalog;
+    }
+
+    /**
+     * The mount's client for the login of {@code session}. It is made for each call
+     * and must not be kept: the next call may come from another login.
+     */
+    public HoglakeClient client(ConnectorSession session)
+    {
+        return mountClient.withLogin(loginTokens.forLogin(subject(session)));
+    }
+
+    /**
+     * The login a token is requested for: the session user, accepted only when it
+     * is the login that authenticated. Nothing else of the session is read.
+     *
+     * <p>The session user alone is not enough. An impersonated session has another
+     * user than its principal, and the body of a view that runs as its owner is
+     * analyzed with the owner as the user and no principal. Both are refused, so
+     * neither can read the schema as a login that did not authenticate.
+     */
+    private static String subject(ConnectorSession session)
+    {
+        ConnectorIdentity identity = session.getIdentity();
+        Optional<Principal> principal = identity.getPrincipal();
+        if (principal.isEmpty() || !identity.getUser().equals(principal.get().getName())) {
+            throw new TrinoException(PERMISSION_DENIED, "Access Denied: The posthog schema can be read only as the login that authenticated");
+        }
+        return identity.getUser();
+    }
+
+    @Override
+    public void close()
+    {
+        mountClient.close();
+    }
+}

@@ -14,6 +14,8 @@
 package io.trino.plugin.hoglake;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableList;
+import io.airlift.log.Logger;
 import io.airlift.slice.Slice;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
@@ -66,6 +68,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -73,8 +76,11 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
+import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_LOGIN_TOKEN_REFUSED;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.StandardErrorCode.PERMISSION_DENIED;
 import static java.util.Comparator.comparing;
+import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -92,11 +98,16 @@ import static java.util.Objects.requireNonNull;
 public class HoglakeMetadata
         implements ConnectorMetadata
 {
+    private static final Logger log = Logger.get(HoglakeMetadata.class);
+
     private final HoglakeClient client;
     private final TrinoFileSystemFactory fileSystemFactory;
+    private final Optional<HoglakePosthogSchema> posthogSchema;
     private final Map<SchemaTableName, HoglakeDtos.ReplacementTarget> plannedTargets = new ConcurrentHashMap<>();
     private volatile Optional<String> creationOperation = Optional.empty();
     private HoglakeTransactionState transaction;
+    // The mount's read snapshot, pinned once per explicit transaction
+    private Long mountSnapshot;
 
     public HoglakeMetadata(HoglakeClient client)
     {
@@ -105,13 +116,19 @@ public class HoglakeMetadata
 
     public HoglakeMetadata(HoglakeClient client, TrinoFileSystemFactory fileSystemFactory)
     {
+        this(client, fileSystemFactory, Optional.empty());
+    }
+
+    public HoglakeMetadata(HoglakeClient client, TrinoFileSystemFactory fileSystemFactory, Optional<HoglakePosthogSchema> posthogSchema)
+    {
         this.client = requireNonNull(client, "client is null");
         this.fileSystemFactory = fileSystemFactory;
+        this.posthogSchema = requireNonNull(posthogSchema, "posthogSchema is null");
     }
 
     public HoglakeMetadata newTransaction()
     {
-        return new HoglakeMetadata(client, fileSystemFactory);
+        return new HoglakeMetadata(client, fileSystemFactory, posthogSchema);
     }
 
     public HoglakeMetadata newTransaction(boolean autoCommit)
@@ -149,14 +166,124 @@ public class HoglakeMetadata
     @Override
     public List<String> listSchemaNames(ConnectorSession session)
     {
+        List<String> names = orgSchemaNames();
+        if (posthogSchema.isEmpty() || !posthogSchemaListed(session)) {
+            return names;
+        }
+        return ImmutableList.<String>builder().addAll(names).add(HoglakePosthogSchema.SCHEMA_NAME).build();
+    }
+
+    /**
+     * The org catalog's namespaces, without any spelling of the posthog schema's name
+     * when that schema is configured: the mount always takes the name.
+     */
+    private List<String> orgSchemaNames()
+    {
         return client.listNamespaces().stream()
                 .map(HoglakeDtos.Namespace::name)
+                .filter(name -> !isPosthogSchema(name))
                 .toList();
+    }
+
+    /**
+     * Whether listings show the posthog schema to this session's login. It is not
+     * shown when the server has no mount for this login (404), when the login may
+     * not read the schema, or when the token service does not issue per-login
+     * tokens to this catalog: those are steady states. It stays shown when the
+     * mount or the token service cannot be asked, so an outage does not make the
+     * schema come and go.
+     */
+    private boolean posthogSchemaListed(ConnectorSession session)
+    {
+        try {
+            return posthogClient(session).findCatalog().isPresent();
+        }
+        catch (TrinoException e) {
+            if (e.getErrorCode().equals(PERMISSION_DENIED.toErrorCode()) || e.getErrorCode().equals(HOGLAKE_LOGIN_TOKEN_REFUSED.toErrorCode())) {
+                return false;
+            }
+            log.debug("Listing the posthog schema of Hoglake catalog '%s' without asking its mount: %s", client.catalogName(), e.getErrorCode().getName());
+            return true;
+        }
+    }
+
+    @Override
+    public boolean schemaExists(ConnectorSession session, String schemaName)
+    {
+        if (posthogSchema.isEmpty()) {
+            return ConnectorMetadata.super.schemaExists(session, schemaName);
+        }
+        if (!schemaName.equals(schemaName.toLowerCase(ENGLISH))) {
+            // As the engine's default: Trino schemas are lowercase
+            return false;
+        }
+        if (isPosthogSchema(schemaName)) {
+            // A failure other than 404 is reported, not taken as absence.
+            return posthogClient(session).findCatalog().isPresent();
+        }
+        return orgSchemaNames().contains(schemaName);
+    }
+
+    private boolean isPosthogSchema(String schemaName)
+    {
+        return posthogSchema.isPresent() && HoglakePosthogSchema.isPosthogSchema(schemaName);
+    }
+
+    /**
+     * The mount's client for this session's login. Never kept: each call makes its
+     * own from the session it was given.
+     */
+    private HoglakeClient posthogClient(ConnectorSession session)
+    {
+        return posthogSchema.orElseThrow().client(session);
+    }
+
+    /**
+     * Refuses a write to the posthog schema before anything is checked, uploaded or
+     * sent. Only PostHog adds data to it, on the server side.
+     */
+    private void checkWritable(String schemaName)
+    {
+        if (isPosthogSchema(schemaName)) {
+            throw new TrinoException(NOT_SUPPORTED, "The posthog schema is read-only");
+        }
+    }
+
+    private void checkWritable(ConnectorTableHandle tableHandle)
+    {
+        HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
+        if (handle.mount().isPresent()) {
+            throw new TrinoException(NOT_SUPPORTED, "The posthog schema is read-only");
+        }
+        checkWritable(handle.schemaName());
+    }
+
+    /**
+     * The client that serves a handle: the mount's for a posthog schema table, which
+     * must name this catalog's mount, and the org catalog's otherwise. The mount's
+     * client is the one of the calling session's login, whoever resolved the handle.
+     */
+    HoglakeClient clientFor(ConnectorSession session, HoglakeTableHandle handle)
+    {
+        return clientFor(client, posthogSchema, session, handle);
+    }
+
+    static HoglakeClient clientFor(HoglakeClient client, Optional<HoglakePosthogSchema> posthogSchema, ConnectorSession session, HoglakeTableHandle handle)
+    {
+        if (handle.mount().isEmpty()) {
+            return client;
+        }
+        HoglakePosthogSchema schema = posthogSchema.orElseThrow(() -> new TrinoException(NOT_SUPPORTED, "The posthog schema is not configured for this catalog"));
+        if (!schema.mountCatalog().equals(handle.mount().get().catalog())) {
+            throw new TrinoException(NOT_SUPPORTED, "The table handle names another catalog's posthog schema");
+        }
+        return schema.client(session);
     }
 
     @Override
     public void createSchema(ConnectorSession session, String schemaName, Map<String, Object> properties, TrinoPrincipal owner)
     {
+        checkWritable(schemaName);
         if (!properties.isEmpty() || owner.getType() != PrincipalType.USER || !owner.getPrincipalName().equals(session.getUser())) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake schema properties and custom owners are not supported");
         }
@@ -167,6 +294,7 @@ public class HoglakeMetadata
     @Override
     public void dropSchema(ConnectorSession session, String schemaName, boolean cascade)
     {
+        checkWritable(schemaName);
         if (cascade) {
             throw new TrinoException(NOT_SUPPORTED, "Dropping Hoglake schemas with CASCADE is not supported");
         }
@@ -181,6 +309,7 @@ public class HoglakeMetadata
     @Override
     public void addColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnMetadata column, ColumnPosition position)
     {
+        checkWritable(tableHandle);
         if (!(position instanceof ColumnPosition.Last) || !column.isNullable()) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake ADD COLUMN supports nullable columns at the end");
         }
@@ -195,18 +324,21 @@ public class HoglakeMetadata
     @Override
     public void renameColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle source, String target)
     {
+        checkWritable(tableHandle);
         alterColumns((HoglakeTableHandle) tableHandle, Map.of("op", "rename_column", "from", ((HoglakeColumnHandle) source).name(), "to", target));
     }
 
     @Override
     public void dropColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column)
     {
+        checkWritable(tableHandle);
         alterColumns((HoglakeTableHandle) tableHandle, Map.of("op", "drop_column", "name", ((HoglakeColumnHandle) column).name()));
     }
 
     @Override
     public void setColumnType(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column, Type type)
     {
+        checkWritable(tableHandle);
         HoglakeColumnHandle source = (HoglakeColumnHandle) column;
         if (!source.hoglakeType().equals(HoglakeTypes.toHoglakeType(source.type())) || !HoglakeTypes.canPromote(source.type(), type)) {
             throw new TrinoException(NOT_SUPPORTED, "Unsupported Hoglake column type change: %s to %s".formatted(source.type(), type));
@@ -225,6 +357,7 @@ public class HoglakeMetadata
     @Override
     public void setTableComment(ConnectorSession session, ConnectorTableHandle tableHandle, Optional<String> comment)
     {
+        checkWritable(tableHandle);
         checkMetadataSupport();
         Map<String, Object> operation = new HashMap<>();
         operation.put("op", "set_table_comment");
@@ -235,6 +368,7 @@ public class HoglakeMetadata
     @Override
     public void setColumnComment(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column, Optional<String> comment)
     {
+        checkWritable(tableHandle);
         checkMetadataSupport();
         Map<String, Object> operation = new HashMap<>();
         operation.put("op", "set_column_comment");
@@ -246,6 +380,7 @@ public class HoglakeMetadata
     @Override
     public void setTableProperties(ConnectorSession session, ConnectorTableHandle tableHandle, Map<String, Optional<Object>> properties)
     {
+        checkWritable(tableHandle);
         if (!properties.keySet().equals(Set.of("extra_properties"))) {
             throw new TrinoException(NOT_SUPPORTED, "Only extra_properties can be altered; partitioning and sorted_by are creation properties");
         }
@@ -280,6 +415,9 @@ public class HoglakeMetadata
                     NOT_SUPPORTED,
                     "Table versioning (time travel) not yet supported by the hoglake connector");
         }
+        if (isPosthogSchema(tableName.getSchemaName())) {
+            return posthogTableHandle(session, tableName.getTableName());
+        }
         // Pin the query's snapshot: resolve head once, then fetch the
         // table AT that snapshot (not at whatever head is by the time the
         // second request lands) so the handle is consistent-at-N.
@@ -297,11 +435,92 @@ public class HoglakeMetadata
                 .orElse(null);
     }
 
+    /**
+     * A table of the posthog schema, pinned at the mount's head snapshot (once per
+     * explicit transaction), found in whichever of the mount's namespaces holds it.
+     * The mount lists one namespace today; a name in two of them is refused rather
+     * than guessed. A staged-write overlay never applies: the schema is never written.
+     */
+    private HoglakeTableHandle posthogTableHandle(ConnectorSession session, String tableName)
+    {
+        // The connector exposes no system tables, and their names are outside the
+        // server's identifier grammar
+        if (tableName.contains("$")) {
+            return null;
+        }
+        HoglakeClient mount = posthogClient(session);
+        Optional<HoglakeDtos.Catalog> catalog = mount.findCatalog();
+        if (catalog.isEmpty()) {
+            return null;
+        }
+        long snapshot = mountSnapshot(catalog.get());
+        List<HoglakeTableHandle> found = new ArrayList<>();
+        for (HoglakeDtos.Namespace namespace : mount.listNamespaces()) {
+            mount.getTable(namespace.name(), tableName, snapshot).ifPresent(table -> found.add(new HoglakeTableHandle(
+                    HoglakePosthogSchema.SCHEMA_NAME,
+                    tableName,
+                    snapshot,
+                    table.tableUuid(),
+                    table.columns().stream().map(HoglakeMetadata::toColumnHandle).toList())
+                    .withMount(new HoglakeTableHandle.MountTable(mount.catalogName(), namespace.name()))));
+        }
+        if (found.size() > 1) {
+            throw new TrinoException(NOT_SUPPORTED, "Table '%s' is ambiguous in the posthog schema".formatted(tableName));
+        }
+        return found.isEmpty() ? null : found.getFirst();
+    }
+
+    private synchronized long mountSnapshot(HoglakeDtos.Catalog catalog)
+    {
+        if (transaction == null) {
+            return catalog.headSnapshotId();
+        }
+        if (mountSnapshot == null) {
+            mountSnapshot = catalog.headSnapshotId();
+        }
+        return mountSnapshot;
+    }
+
+    /**
+     * The posthog schema's tables: those of every namespace the mount lists, each name
+     * once.
+     */
+    private List<SchemaTableName> posthogTables(ConnectorSession session)
+    {
+        HoglakeClient mount = posthogClient(session);
+        Set<String> names = new LinkedHashSet<>();
+        for (HoglakeDtos.Namespace namespace : mount.listNamespaces()) {
+            try {
+                mount.listTables(namespace.name()).forEach(summary -> names.add(summary.name()));
+            }
+            catch (SchemaNotFoundException e) {
+                // Namespace gone between the listing and this fetch; skip.
+            }
+        }
+        return names.stream()
+                .map(name -> new SchemaTableName(HoglakePosthogSchema.SCHEMA_NAME, name))
+                .toList();
+    }
+
+    /**
+     * A posthog schema table at the mount's head, for listing surfaces; empty when no
+     * namespace, or more than one, holds it.
+     */
+    private Optional<HoglakeDtos.Table> posthogTableAtHead(ConnectorSession session, String tableName)
+    {
+        HoglakeClient mount = posthogClient(session);
+        List<HoglakeDtos.Table> found = new ArrayList<>();
+        for (HoglakeDtos.Namespace namespace : mount.listNamespaces()) {
+            mount.getTable(namespace.name(), tableName).ifPresent(found::add);
+        }
+        return found.size() == 1 ? Optional.of(found.getFirst()) : Optional.empty();
+    }
+
     @Override
     public ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle table)
     {
         HoglakeTableHandle handle = (HoglakeTableHandle) table;
-        HoglakeDtos.Table definition = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId())
+        HoglakeDtos.Table definition = clientFor(session, handle).getTable(handle.namespace(), handle.tableName(), handle.snapshotId())
                 .orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
         return new ConnectorTableMetadata(
                 handle.schemaTableName(),
@@ -317,6 +536,10 @@ public class HoglakeMetadata
     public List<SchemaTableName> listTables(ConnectorSession session, Optional<String> schemaName)
     {
         List<SchemaTableName> tables = new ArrayList<>();
+        if (schemaName.isPresent() && isPosthogSchema(schemaName.get())) {
+            // Failures are the user's to see, typed: the schema was named.
+            return posthogTables(session);
+        }
         if (schemaName.isPresent()) {
             // Nonexistent schema is the user's error, surfaced typed.
             for (HoglakeDtos.TableSummary summary : client.listTables(schemaName.get())) {
@@ -324,7 +547,10 @@ public class HoglakeMetadata
             }
             return tables;
         }
-        for (String schema : listSchemaNames(session)) {
+        if (posthogSchema.isPresent()) {
+            tables.addAll(posthogTablesForListing(session));
+        }
+        for (String schema : posthogSchema.isPresent() ? orgSchemaNames() : listSchemaNames(session)) {
             try {
                 for (HoglakeDtos.TableSummary summary : client.listTables(schema)) {
                     tables.add(new SchemaTableName(schema, summary.name()));
@@ -335,6 +561,25 @@ public class HoglakeMetadata
             }
         }
         return tables;
+    }
+
+    /**
+     * The posthog schema's tables for a listing of the whole catalog, which must not
+     * depend on the mount: none when the mount is missing or cannot be asked, or when
+     * this login gets no token for it.
+     */
+    private List<SchemaTableName> posthogTablesForListing(ConnectorSession session)
+    {
+        try {
+            return posthogTables(session);
+        }
+        catch (SchemaNotFoundException e) {
+            return List.of();
+        }
+        catch (TrinoException e) {
+            log.debug("Listing Hoglake catalog '%s' without the posthog schema's tables: %s", client.catalogName(), e.getErrorCode().getName());
+            return List.of();
+        }
     }
 
     @Override
@@ -367,11 +612,33 @@ public class HoglakeMetadata
                 .orElseGet(() -> listTables(session, prefix.getSchema()));
         List<TableColumnsMetadata> result = new ArrayList<>();
         for (SchemaTableName name : names) {
-            client.getTable(name.getSchemaName(), name.getTableName())
-                    .ifPresent(table -> result.add(
-                            TableColumnsMetadata.forTable(name, columnMetadata(table))));
+            Optional<HoglakeDtos.Table> table;
+            if (isPosthogSchema(name.getSchemaName())) {
+                table = posthogTableForListing(session, name.getTableName(), prefix.getSchema().isEmpty());
+            }
+            else {
+                table = client.getTable(name.getSchemaName(), name.getTableName());
+            }
+            table.ifPresent(definition -> result.add(TableColumnsMetadata.forTable(name, columnMetadata(definition))));
         }
         return result.iterator();
+    }
+
+    private Optional<HoglakeDtos.Table> posthogTableForListing(ConnectorSession session, String tableName, boolean wholeCatalog)
+    {
+        try {
+            return posthogTableAtHead(session, tableName);
+        }
+        catch (SchemaNotFoundException e) {
+            return Optional.empty();
+        }
+        catch (TrinoException e) {
+            if (!wholeCatalog) {
+                throw e;
+            }
+            log.debug("Listing Hoglake catalog '%s' without the posthog schema's columns: %s", client.catalogName(), e.getErrorCode().getName());
+            return Optional.empty();
+        }
     }
 
     @Override
@@ -449,6 +716,7 @@ public class HoglakeMetadata
     @Override
     public void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, SaveMode saveMode)
     {
+        checkWritable(tableMetadata.getTable().getSchemaName());
         checkAutocommitDdl();
         SchemaTableName name = tableMetadata.getTable();
         if (saveMode != SaveMode.REPLACE && client.getTable(name.getSchemaName(), name.getTableName()).isPresent()) {
@@ -496,6 +764,7 @@ public class HoglakeMetadata
     @Override
     public ConnectorOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata metadata, Optional<ConnectorTableLayout> layout, RetryMode retryMode, boolean replace)
     {
+        checkWritable(metadata.getTable().getSchemaName());
         checkAutocommitDdl();
         if (layout.isPresent()) {
             throw new TrinoException(NOT_SUPPORTED, "Custom layouts are not supported");
@@ -552,6 +821,7 @@ public class HoglakeMetadata
     @Override
     public void dropTable(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
+        checkWritable(tableHandle);
         checkLifecycleSupport();
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
         client.dropTable(handle.schemaName(), handle.tableName(), handle.tableUuid(), operationMetadata(session, "DROP TABLE"));
@@ -560,6 +830,8 @@ public class HoglakeMetadata
     @Override
     public void renameTable(ConnectorSession session, ConnectorTableHandle tableHandle, SchemaTableName newTableName)
     {
+        checkWritable(tableHandle);
+        checkWritable(newTableName.getSchemaName());
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
         if (!handle.schemaName().equals(newTableName.getSchemaName())) {
             throw new TrinoException(NOT_SUPPORTED, "Moving Hoglake tables between schemas is not supported");
@@ -571,6 +843,7 @@ public class HoglakeMetadata
     @Override
     public void truncateTable(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
+        checkWritable(tableHandle);
         checkLifecycleSupport();
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
         client.truncateTable(handle.schemaName(), handle.tableName(), handle.tableUuid(), operationMetadata(session, "TRUNCATE TABLE"));
@@ -601,6 +874,7 @@ public class HoglakeMetadata
     @Override
     public ConnectorInsertTableHandle beginInsert(ConnectorSession session, ConnectorTableHandle tableHandle, List<ColumnHandle> columns, RetryMode retryMode)
     {
+        checkWritable(tableHandle);
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
         HoglakeDtos.Table table = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId()).orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
         List<HoglakeDtos.PartitionField> partitionFields = HoglakePartitioning.read(table.partitionSpec());
@@ -632,6 +906,8 @@ public class HoglakeMetadata
     public Optional<ConnectorOutputMetadata> finishCreateTable(ConnectorSession session, ConnectorOutputTableHandle handle, Collection<Slice> fragments, Collection<ComputedStatistics> statistics)
     {
         HoglakeWriteHandle writeHandle = (HoglakeWriteHandle) handle;
+        // Uploads happened already; the barrier against them is in beginCreateTable
+        checkWritable(writeHandle.namespace());
         String operation = writeHandle.creationOperation().orElseThrow();
         List<HoglakeDtos.FileRegistration> files = decodeFragments(fragments);
         HoglakeDtos.TableCreation result;
@@ -674,6 +950,7 @@ public class HoglakeMetadata
     @Override
     public Optional<ConnectorOutputMetadata> finishInsert(ConnectorSession session, ConnectorInsertTableHandle handle, List<ConnectorTableHandle> sources, Collection<Slice> fragments, Collection<ComputedStatistics> statistics)
     {
+        checkWritable(((HoglakeWriteHandle) handle).namespace());
         finishWrite((HoglakeWriteHandle) handle, fragments);
         return Optional.empty();
     }
@@ -697,6 +974,7 @@ public class HoglakeMetadata
             Map<Integer, Collection<ColumnHandle>> updateCaseColumns,
             RetryMode retryMode)
     {
+        checkWritable(tableHandle);
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
         HoglakeDtos.Table table = client.getTable(handle.schemaName(), handle.tableName(), handle.snapshotId()).orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
         Optional<String> insertFailure = Optional.empty();
@@ -756,6 +1034,7 @@ public class HoglakeMetadata
             MemoryContext memoryContext)
     {
         HoglakeDeleteHandle delete = (HoglakeDeleteHandle) handle;
+        checkWritable(delete.table());
         HoglakeDeletePublisher publisher = new HoglakeDeletePublisher(client, fileSystemFactory.create(session));
         if (transaction == null) {
             publisher.publish(delete, fragments, memoryContext);

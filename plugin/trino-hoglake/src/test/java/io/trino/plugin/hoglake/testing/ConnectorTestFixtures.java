@@ -103,6 +103,20 @@ public final class ConnectorTestFixtures
      */
     public static ConnectorSession session(Map<String, Object> properties)
     {
+        return session(properties, ConnectorIdentity.ofUser("test"));
+    }
+
+    /**
+     * A session of the given identity, with the defaults of the connector session
+     * properties.
+     */
+    public static ConnectorSession session(ConnectorIdentity identity)
+    {
+        return session(Map.of(), identity);
+    }
+
+    private static ConnectorSession session(Map<String, Object> properties, ConnectorIdentity identity)
+    {
         Map<String, Object> values = new HashMap<>();
         for (PropertyMetadata<?> property : new HoglakeSessionProperties(new HoglakeConfig()).getSessionProperties()) {
             values.put(property.getName(), property.getDefaultValue());
@@ -125,7 +139,7 @@ public final class ConnectorTestFixtures
             @Override
             public ConnectorIdentity getIdentity()
             {
-                return ConnectorIdentity.ofUser("test");
+                return identity;
             }
 
             @Override
