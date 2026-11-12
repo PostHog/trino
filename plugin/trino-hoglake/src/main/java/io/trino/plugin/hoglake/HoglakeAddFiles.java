@@ -527,7 +527,7 @@ final class HoglakeAddFiles
                 checkColumn(columns.get(i), bindings.get(i).get(), true, metadata, path);
             }
         }
-        checkReadable(columns, bindings, metadata, fileSchema, path);
+        checkReadable(columns, bindings, fileSchema, path);
 
         Optional<HoglakeColumnHandle> partitionColumn = partitionColumn(handle.partitionFields(), handle.table());
         if (partitionColumn.isEmpty()) {
@@ -544,7 +544,7 @@ final class HoglakeAddFiles
     /**
      * Builds the reader's own field for each bound column, which fails for shapes it cannot read.
      */
-    private static void checkReadable(List<HoglakeColumnHandle> columns, List<Optional<Type>> bindings, ParquetMetadata metadata, MessageType fileSchema, String path)
+    private static void checkReadable(List<HoglakeColumnHandle> columns, List<Optional<Type>> bindings, MessageType fileSchema, String path)
     {
         List<Type> boundFields = bindings.stream().flatMap(Optional::stream).toList();
         MessageColumnIO messageColumn = getColumnIO(fileSchema, new MessageType(fileSchema.getName(), boundFields));
