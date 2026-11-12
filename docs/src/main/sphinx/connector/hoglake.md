@@ -469,6 +469,27 @@ same server settings to verify ambiguous responses and concurrent DDL against
 the real catalog through a fault-injecting local proxy.
 The normal test run uses synthetic HTTP fixtures and does not require Docker.
 
+### Per-team S3 credentials (development only)
+
+`hoglake.s3-credentials.source` selects where read credentials come from. The
+default, `none`, reads with the catalog's or the AWS default credentials. Any
+other value gives every split the S3 credential of the team whose
+`team_id=<id>/` prefix holds its file, and the connector then:
+
+- reads each data file and deletion vector only with that credential, after
+  checking that both paths stay under the team's prefix;
+- fails a split that carries no credential, without any storage request;
+- refuses `INSERT`, `CREATE TABLE AS`, `DELETE`, `UPDATE` and `MERGE`;
+- fails catalog initialization when `s3.iam-role`, `s3.aws-access-key`
+  (or `hoglake.s3.access-key`) or `s3.security-mapping.enabled=true` is set.
+
+`direct-sts` exists only for a development smoke test. It serves only the
+`millrace-dev` catalog's `ingest.events` table: the coordinator assumes the
+`hoglake-events-reader-dev` role in its own AWS account once per team, under the
+table location derived from the catalog's data path. It needs
+`hoglake.s3-credentials.direct-sts.org-id`. Make that catalog read-only with
+access control. `hogtower` is reserved and fails catalog initialization.
+
 ### Atomic table replacement
 
 `CREATE OR REPLACE TABLE` and `CREATE OR REPLACE TABLE AS SELECT` require the

@@ -137,6 +137,56 @@ class TestHoglakeFileSystemCache
         }
     }
 
+    /**
+     * A split's team credential, on a catalog whose own credential source is
+     * none and whose catalog key S3 refuses: the split's key alone signs, every
+     * cache hit checks it with one HEAD, a revoked key fails the hit, and a
+     * path outside the credential's prefix fails before any request.
+     */
+    @Test
+    void testSplitCredentialIsCheckedOnEveryCacheHit()
+            throws IOException
+    {
+        try (S3ObjectServer server = new S3ObjectServer()) {
+            server.deniedAccessKeys = Set.of("test-access");
+            BlobCache cache = new MemoryBlobCache(new MemoryBlobCacheConfig());
+            Connector connector = new HoglakeConnectorFactory().create("split_credential_test", Map.of(
+                    "hoglake.uri", "http://localhost:8080",
+                    "hoglake.s3.endpoint", server.endpoint(),
+                    "hoglake.s3.access-key", "test-access",
+                    "hoglake.s3.secret-key", "test-secret",
+                    "hoglake.s3.path-style", "true",
+                    "s3.max-error-retries", "1",
+                    "fs.cache.enabled", "true"), new CacheContext(_ -> Optional.of(cache)));
+            try {
+                ConnectorSession session = TestingConnectorSession.builder().setPropertyMetadata(new HoglakeSessionProperties(new HoglakeConfig()).getSessionProperties()).build();
+                HoglakeSplit split = new HoglakeSplit(1, "s3://test-bucket/data.parquet", server.data.length, 2, Optional.empty(), 0, Optional.empty())
+                        .withCredential(new HoglakeSplitCredential(4, "s3://test-bucket/", "team-access", "team-secret", "team-token", 0));
+                assertThat(read(connector, session, split)).containsExactly(List.of(11L), List.of(22L));
+                int coldReads = server.dataReads.get();
+                assertThat(server.metadataReads).hasValue(1);
+                assertThat(read(connector, session, split)).containsExactly(List.of(11L), List.of(22L));
+                assertThat(server.dataReads).hasValue(coldReads);
+                assertThat(server.metadataReads).hasValue(2);
+
+                server.deniedAccessKeys = Set.of("test-access", "team-access");
+                assertThatThrownBy(() -> read(connector, session, split))
+                        .isInstanceOf(TrinoException.class)
+                        .hasStackTraceContaining("Status Code: 403");
+                assertThat(server.metadataReads).hasValue(3);
+                assertThat(server.dataReads).hasValue(coldReads);
+
+                HoglakeSplitCredential otherTeam = new HoglakeSplitCredential(42, "s3://test-bucket/team_id=42/", "team-access", "team-secret", "team-token", 0);
+                assertThatThrownBy(() -> read(connector, session, new HoglakeSplit(1, split.path(), split.fileSizeBytes(), 2, Optional.empty(), 0, Optional.empty(), 0, split.length(), split.splitWeight(), split.footerSize(), Optional.empty(), Optional.of(otherTeam))))
+                        .hasMessageContaining("s3://test-bucket/data.parquet is not under the prefix s3://test-bucket/team_id=42/");
+                assertThat(server.metadataReads).hasValue(3);
+            }
+            finally {
+                connector.shutdown();
+            }
+        }
+    }
+
     private static ConnectorSession storageSession(String user, String accessKey, boolean securityMapping)
     {
         ConnectorIdentity.Builder identity = ConnectorIdentity.forUser(user);
@@ -325,10 +375,16 @@ class TestHoglakeFileSystemCache
     private static List<List<Object>> read(Connector connector, ConnectorSession session, int fileSize, long dataFileId)
             throws IOException
     {
+        return read(connector, session, new HoglakeSplit(dataFileId, "s3://test-bucket/data.parquet", fileSize, 2, Optional.empty(), 0, Optional.empty()));
+    }
+
+    private static List<List<Object>> read(Connector connector, ConnectorSession session, HoglakeSplit split)
+            throws IOException
+    {
         try (ConnectorPageSource source = connector.getPageSourceProvider().createPageSource(
                 HoglakeTransactionHandle.INSTANCE,
                 session,
-                new HoglakeSplit(dataFileId, "s3://test-bucket/data.parquet", fileSize, 2, Optional.empty(), 0, Optional.empty()),
+                split,
                 new HoglakeTableHandle("test", "table", 1, "test-table", List.of()),
                 Optional.empty(),
                 List.of(new HoglakeColumnHandle("value", 1, BIGINT, true)),

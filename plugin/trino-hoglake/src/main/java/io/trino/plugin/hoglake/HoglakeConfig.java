@@ -51,6 +51,17 @@ public class HoglakeConfig
     private String authClientId;
     private String authClientSecret;
     private String authAudience = "hoglake";
+    private S3CredentialsSource s3CredentialsSource = S3CredentialsSource.NONE;
+    private String directStsOrgId;
+
+    // Any source other than NONE gives every split its team's credential and refuses writes.
+    // DIRECT_STS is the dev-only smoke; HOGTOWER (plan 2.8) is not built and fails at startup.
+    public enum S3CredentialsSource
+    {
+        NONE,
+        DIRECT_STS,
+        HOGTOWER,
+    }
 
     @NotNull
     public String getUri()
@@ -205,6 +216,39 @@ public class HoglakeConfig
     {
         this.authAudience = authAudience;
         return this;
+    }
+
+    @NotNull
+    public S3CredentialsSource getS3CredentialsSource()
+    {
+        return s3CredentialsSource;
+    }
+
+    @Config("hoglake.s3-credentials.source")
+    @ConfigDescription("Per-team S3 credentials for reads: none, direct-sts (dev smoke only) or hogtower")
+    public HoglakeConfig setS3CredentialsSource(S3CredentialsSource s3CredentialsSource)
+    {
+        this.s3CredentialsSource = s3CredentialsSource;
+        return this;
+    }
+
+    public Optional<String> getDirectStsOrgId()
+    {
+        return Optional.ofNullable(directStsOrgId);
+    }
+
+    @Config("hoglake.s3-credentials.direct-sts.org-id")
+    @ConfigDescription("Organization id the direct-sts source tags every session with")
+    public HoglakeConfig setDirectStsOrgId(String directStsOrgId)
+    {
+        this.directStsOrgId = directStsOrgId == null || directStsOrgId.isBlank() ? null : directStsOrgId;
+        return this;
+    }
+
+    @AssertTrue(message = "hoglake.s3-credentials.direct-sts.org-id is required with hoglake.s3-credentials.source=direct-sts")
+    public boolean isDirectStsOrgIdSet()
+    {
+        return s3CredentialsSource != S3CredentialsSource.DIRECT_STS || directStsOrgId != null;
     }
 
     // All three or none: a catalog with a token endpoint and no secret would
