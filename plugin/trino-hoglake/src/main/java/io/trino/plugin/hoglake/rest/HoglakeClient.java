@@ -55,6 +55,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_NOT_FOUND;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_UNAVAILABLE;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
@@ -112,6 +113,22 @@ public class HoglakeClient
      */
     public static final String USER_AGENT = "trino-hoglake/1";
 
+    /**
+     * The token source of a mount client that no login was bound to. It fails, so
+     * a request that did not go through {@link #withLogin} is never sent.
+     */
+    private static final HoglakeTokenSource WITHOUT_LOGIN = new HoglakeTokenSource()
+    {
+        @Override
+        public Optional<String> token(Duration timeout)
+        {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "posthog schema request without a login");
+        }
+
+        @Override
+        public void invalidate(String token) {}
+    };
+
     private final HttpClient httpClient;
     private final HoglakeTokenSource tokenSource;
     private final ObjectMapper mapper;
@@ -119,11 +136,14 @@ public class HoglakeClient
     private final String catalog;
     private final Duration requestTimeout;
     private final Ticker ticker;
-    private final ScanIncludeSupport columnStatsSupport = new ScanIncludeSupport(COLUMN_STATS);
-    private final ScanIncludeSupport splitOffsetsSupport = new ScanIncludeSupport(SPLIT_OFFSETS);
+    private final ScanIncludeSupport columnStatsSupport;
+    private final ScanIncludeSupport splitOffsetsSupport;
     // The client of the posthog schema's mount catalog: its messages name the schema,
     // never a URL or a response body.
     private final boolean mount;
+    // A mount client bound to one login. It shares everything else with the client
+    // it was made from, which stays the owner of the HTTP client.
+    private final boolean loginView;
 
     public HoglakeClient(String baseUri, String catalog)
     {
@@ -154,23 +174,57 @@ public class HoglakeClient
 
     /**
      * The client of the posthog schema: the mount catalog {@code mountCatalog} on the
-     * same server, with the org catalog's own token source. Its 404 for the catalog
-     * means the schema does not exist, and its errors carry no URL or response body.
+     * same server. Its 404 for the catalog means the schema does not exist, and its
+     * errors carry no URL or response body.
+     *
+     * <p>This client has no token of its own and sends nothing: every request fails
+     * until {@link #withLogin} binds it to the token source of one login. The mount
+     * is never asked with the org catalog's token, or with no token.
      */
-    public static HoglakeClient forMount(String baseUri, String mountCatalog, Duration requestTimeout, HoglakeTokenSource tokenSource)
+    public static HoglakeClient forMount(String baseUri, String mountCatalog, Duration requestTimeout)
     {
-        return new HoglakeClient(baseUri, mountCatalog, requestTimeout, Ticker.systemTicker(), tokenSource, true);
+        return new HoglakeClient(baseUri, mountCatalog, requestTimeout, Ticker.systemTicker(), WITHOUT_LOGIN, true);
     }
 
     @VisibleForTesting
     public static HoglakeClient forMount(String baseUri, String mountCatalog)
     {
-        return forMount(baseUri, mountCatalog, DEFAULT_REQUEST_TIMEOUT, HoglakeTokenSource.NONE);
+        return forMount(baseUri, mountCatalog, DEFAULT_REQUEST_TIMEOUT);
+    }
+
+    /**
+     * This mount client for one login: the same server, catalog and connections,
+     * with {@code login} as the only source of its tokens. It is cheap, is made for
+     * each call from the session that calls, and is not closed.
+     */
+    public HoglakeClient withLogin(HoglakeTokenSource login)
+    {
+        checkState(mount && !loginView, "Only the posthog schema's client is bound to a login");
+        return new HoglakeClient(this, login);
+    }
+
+    private HoglakeClient(HoglakeClient mountClient, HoglakeTokenSource login)
+    {
+        this.mount = true;
+        this.loginView = true;
+        this.baseUri = mountClient.baseUri;
+        this.catalog = mountClient.catalog;
+        this.requestTimeout = mountClient.requestTimeout;
+        this.ticker = mountClient.ticker;
+        this.tokenSource = requireNonNull(login, "login is null");
+        this.httpClient = mountClient.httpClient;
+        this.mapper = mountClient.mapper;
+        // What the server supports does not depend on the login
+        this.columnStatsSupport = mountClient.columnStatsSupport;
+        this.splitOffsetsSupport = mountClient.splitOffsetsSupport;
     }
 
     private HoglakeClient(String baseUri, String catalog, Duration requestTimeout, Ticker ticker, HoglakeTokenSource tokenSource, boolean mount)
     {
         this.mount = mount;
+        this.loginView = false;
+        this.columnStatsSupport = new ScanIncludeSupport(COLUMN_STATS);
+        this.splitOffsetsSupport = new ScanIncludeSupport(SPLIT_OFFSETS);
         // Fail at construction (catalog registration), not per query.
         this.baseUri = validateBaseUri(requireNonNull(baseUri, "baseUri is null")).toString();
         this.catalog = requireNonNull(catalog, "catalog is null");
@@ -815,9 +869,6 @@ public class HoglakeClient
             case "mount_host_unavailable" -> new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "The events host serving " + subject + " is unavailable; retry later");
             case "mount_proxy_busy" -> new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "The Hoglake server is busy forwarding requests for " + subject + "; retry later");
             case "mount_host_invalid_response" -> new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "The events host serving " + subject + " answered outside its contract");
-            case "mount_exchange_unavailable" -> new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "The token exchange for " + subject + " is unavailable; retry later");
-            case "mount_exchange_misconfigured" -> new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "The Hoglake server's token exchange for " + subject + " is misconfigured; contact the operator");
-            case "mount_exchange_invalid_response" -> new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "The token exchange for " + subject + " answered outside its contract");
             default -> null;
         };
         return Optional.ofNullable(refusal);
@@ -863,6 +914,10 @@ public class HoglakeClient
     @Override
     public void close()
     {
+        if (loginView) {
+            // The HTTP client belongs to the client this view was made from
+            return;
+        }
         // Release the selector thread and executor without waiting on
         // in-flight requests (connector shutdown must not hang on a
         // stuck control-plane call).
@@ -971,6 +1026,9 @@ public class HoglakeClient
      * cases it covers are the ones a fresh token fixes — revocation, a signing
      * key this Hoglake instance has not loaded yet, expiry by clock skew.
      *
+     * The posthog schema's client follows the same rule with the token of the
+     * login it is bound to.
+     *
      * The request's timeout is one deadline for all of it: getting a token
      * (waiting for another caller's mint included) and both attempts each get
      * only what is left. Write recovery passes its remaining budget in here,
@@ -982,30 +1040,24 @@ public class HoglakeClient
         long deadline = System.nanoTime() + request.timeout().orElseThrow().toNanos();
         Optional<String> token = token(remaining(deadline));
         HttpResponse<String> response = sendOnce(authorized(request, token, remaining(deadline)));
-        // The mount shares the org catalog's token source: a 401 from the mount
-        // alone must not discard the token the org catalog is using. A revoked
-        // token is replaced by the org client's own 401 retry or at its expiry.
-        if (response.statusCode() != 401 || token.isEmpty() || mount) {
+        if (response.statusCode() != 401 || token.isEmpty()) {
             return response;
         }
+        // For the mount this is the login's own source: only that login's token is
+        // dropped, and the org catalog's token is not involved.
         tokenSource.invalidate(token.get());
-        Optional<String> replacement = tokenSource.token(remaining(deadline));
+        Optional<String> replacement = token(remaining(deadline));
         return sendOnce(authorized(request, replacement, remaining(deadline)));
     }
 
     private Optional<String> token(Duration timeout)
     {
-        if (!mount) {
-            return tokenSource.token(timeout);
+        Optional<String> token = tokenSource.token(timeout);
+        if (mount && token.isEmpty()) {
+            // A login's source has a token or fails. The mount is never asked without one.
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "posthog schema request without a token");
         }
-        try {
-            return tokenSource.token(timeout);
-        }
-        catch (TrinoException e) {
-            // The token source's messages name its endpoint and may carry its answer
-            log.debug(e, "No access token for the posthog schema of catalog '%s'", catalog);
-            throw new TrinoException(e::getErrorCode, "No access token is available for the posthog schema");
-        }
+        return token;
     }
 
     /**

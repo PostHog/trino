@@ -25,6 +25,7 @@ import io.trino.filesystem.cache.SplitAffinityProvider;
 import io.trino.filesystem.s3.S3SecurityMappingEnabledConfig;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
+import io.trino.plugin.hoglake.rest.HoglakeLoginTokenSource;
 import io.trino.plugin.hoglake.rest.HoglakeTokenSource;
 import io.trino.spi.NodeVersion;
 import io.trino.spi.PageSorter;
@@ -84,20 +85,37 @@ public class HoglakeModule
     }
 
     /**
-     * The posthog schema's mount, on the same server and with the same token source
-     * as the org catalog: one token, which the server exchanges for the mount's.
+     * The posthog schema's mount, on the same server as the org catalog. It is read
+     * with a token of the Trino login that asks, which the catalog's client obtains
+     * from the same token endpoint by token exchange. The org catalog's own token
+     * source is not given to it.
+     *
+     * <p>A catalog with the schema enabled and no token endpoint still loads: the
+     * control plane sets the two independently, and failing here would take the
+     * org's own catalog down. Every read of the schema then fails.
      */
     @Provides
     @Singleton
-    public static Optional<HoglakePosthogSchema> createPosthogSchema(HoglakeConfig config, HoglakeTokenSource tokenSource)
+    public static Optional<HoglakePosthogSchema> createPosthogSchema(HoglakeConfig config)
     {
         if (!config.isPosthogSchemaEnabled()) {
             return Optional.empty();
         }
         String mountCatalog = HoglakePosthogSchema.mountCatalog(config.getCatalog());
+        HoglakeLoginTokenSource loginTokens = config.getAuthTokenUri()
+                .<HoglakeLoginTokenSource>map(tokenUri -> new HoglakeLoginTokenSource.TokenExchange(
+                        URI.create(tokenUri),
+                        config.getAuthClientId().orElseThrow(),
+                        config.getAuthClientSecret().orElseThrow(),
+                        config.getAuthAudience(),
+                        HoglakePosthogSchema.LOGIN_SUBJECT_TOKEN_TYPE,
+                        Optional.of(HoglakePosthogSchema.mountScope(mountCatalog)),
+                        HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()))
+                .orElse(HoglakeLoginTokenSource.UNCONFIGURED);
         return Optional.of(new HoglakePosthogSchema(
                 config.getCatalog(),
-                HoglakeClient.forMount(config.getUri(), mountCatalog, config.getRequestTimeout(), tokenSource)));
+                HoglakeClient.forMount(config.getUri(), mountCatalog, config.getRequestTimeout()),
+                loginTokens));
     }
 
     @Provides

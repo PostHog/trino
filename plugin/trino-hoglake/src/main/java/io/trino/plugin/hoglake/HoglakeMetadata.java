@@ -76,7 +76,9 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
+import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_LOGIN_TOKEN_REFUSED;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.StandardErrorCode.PERMISSION_DENIED;
 import static java.util.Comparator.comparing;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
@@ -165,7 +167,7 @@ public class HoglakeMetadata
     public List<String> listSchemaNames(ConnectorSession session)
     {
         List<String> names = orgSchemaNames();
-        if (posthogSchema.isEmpty() || !posthogSchemaListed()) {
+        if (posthogSchema.isEmpty() || !posthogSchemaListed(session)) {
             return names;
         }
         return ImmutableList.<String>builder().addAll(names).add(HoglakePosthogSchema.SCHEMA_NAME).build();
@@ -184,16 +186,22 @@ public class HoglakeMetadata
     }
 
     /**
-     * Whether listings show the posthog schema: not when the server has no mount for
-     * this catalog (404), and also when the mount cannot be asked, so a listing never
-     * depends on the mount's host or the token exchange.
+     * Whether listings show the posthog schema to this session's login. It is not
+     * shown when the server has no mount for this login (404), when the login may
+     * not read the schema, or when the token service does not issue per-login
+     * tokens to this catalog: those are steady states. It stays shown when the
+     * mount or the token service cannot be asked, so an outage does not make the
+     * schema come and go.
      */
-    private boolean posthogSchemaListed()
+    private boolean posthogSchemaListed(ConnectorSession session)
     {
         try {
-            return posthogClient().findCatalog().isPresent();
+            return posthogClient(session).findCatalog().isPresent();
         }
         catch (TrinoException e) {
+            if (e.getErrorCode().equals(PERMISSION_DENIED.toErrorCode()) || e.getErrorCode().equals(HOGLAKE_LOGIN_TOKEN_REFUSED.toErrorCode())) {
+                return false;
+            }
             log.debug("Listing the posthog schema of Hoglake catalog '%s' without asking its mount: %s", client.catalogName(), e.getErrorCode().getName());
             return true;
         }
@@ -211,7 +219,7 @@ public class HoglakeMetadata
         }
         if (isPosthogSchema(schemaName)) {
             // A failure other than 404 is reported, not taken as absence.
-            return posthogClient().findCatalog().isPresent();
+            return posthogClient(session).findCatalog().isPresent();
         }
         return orgSchemaNames().contains(schemaName);
     }
@@ -221,9 +229,13 @@ public class HoglakeMetadata
         return posthogSchema.isPresent() && HoglakePosthogSchema.isPosthogSchema(schemaName);
     }
 
-    private HoglakeClient posthogClient()
+    /**
+     * The mount's client for this session's login. Never kept: each call makes its
+     * own from the session it was given.
+     */
+    private HoglakeClient posthogClient(ConnectorSession session)
     {
-        return posthogSchema.orElseThrow().client();
+        return posthogSchema.orElseThrow().client(session);
     }
 
     /**
@@ -248,14 +260,15 @@ public class HoglakeMetadata
 
     /**
      * The client that serves a handle: the mount's for a posthog schema table, which
-     * must name this catalog's mount, and the org catalog's otherwise.
+     * must name this catalog's mount, and the org catalog's otherwise. The mount's
+     * client is the one of the calling session's login, whoever resolved the handle.
      */
-    HoglakeClient clientFor(HoglakeTableHandle handle)
+    HoglakeClient clientFor(ConnectorSession session, HoglakeTableHandle handle)
     {
-        return clientFor(client, posthogSchema, handle);
+        return clientFor(client, posthogSchema, session, handle);
     }
 
-    static HoglakeClient clientFor(HoglakeClient client, Optional<HoglakePosthogSchema> posthogSchema, HoglakeTableHandle handle)
+    static HoglakeClient clientFor(HoglakeClient client, Optional<HoglakePosthogSchema> posthogSchema, ConnectorSession session, HoglakeTableHandle handle)
     {
         if (handle.mount().isEmpty()) {
             return client;
@@ -264,7 +277,7 @@ public class HoglakeMetadata
         if (!schema.mountCatalog().equals(handle.mount().get().catalog())) {
             throw new TrinoException(NOT_SUPPORTED, "The table handle names another catalog's posthog schema");
         }
-        return schema.client();
+        return schema.client(session);
     }
 
     @Override
@@ -403,7 +416,7 @@ public class HoglakeMetadata
                     "Table versioning (time travel) not yet supported by the hoglake connector");
         }
         if (isPosthogSchema(tableName.getSchemaName())) {
-            return posthogTableHandle(tableName.getTableName());
+            return posthogTableHandle(session, tableName.getTableName());
         }
         // Pin the query's snapshot: resolve head once, then fetch the
         // table AT that snapshot (not at whatever head is by the time the
@@ -428,14 +441,14 @@ public class HoglakeMetadata
      * The mount lists one namespace today; a name in two of them is refused rather
      * than guessed. A staged-write overlay never applies: the schema is never written.
      */
-    private HoglakeTableHandle posthogTableHandle(String tableName)
+    private HoglakeTableHandle posthogTableHandle(ConnectorSession session, String tableName)
     {
         // The connector exposes no system tables, and their names are outside the
         // server's identifier grammar
         if (tableName.contains("$")) {
             return null;
         }
-        HoglakeClient mount = posthogClient();
+        HoglakeClient mount = posthogClient(session);
         Optional<HoglakeDtos.Catalog> catalog = mount.findCatalog();
         if (catalog.isEmpty()) {
             return null;
@@ -472,9 +485,9 @@ public class HoglakeMetadata
      * The posthog schema's tables: those of every namespace the mount lists, each name
      * once.
      */
-    private List<SchemaTableName> posthogTables()
+    private List<SchemaTableName> posthogTables(ConnectorSession session)
     {
-        HoglakeClient mount = posthogClient();
+        HoglakeClient mount = posthogClient(session);
         Set<String> names = new LinkedHashSet<>();
         for (HoglakeDtos.Namespace namespace : mount.listNamespaces()) {
             try {
@@ -493,9 +506,9 @@ public class HoglakeMetadata
      * A posthog schema table at the mount's head, for listing surfaces; empty when no
      * namespace, or more than one, holds it.
      */
-    private Optional<HoglakeDtos.Table> posthogTableAtHead(String tableName)
+    private Optional<HoglakeDtos.Table> posthogTableAtHead(ConnectorSession session, String tableName)
     {
-        HoglakeClient mount = posthogClient();
+        HoglakeClient mount = posthogClient(session);
         List<HoglakeDtos.Table> found = new ArrayList<>();
         for (HoglakeDtos.Namespace namespace : mount.listNamespaces()) {
             mount.getTable(namespace.name(), tableName).ifPresent(found::add);
@@ -507,7 +520,7 @@ public class HoglakeMetadata
     public ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle table)
     {
         HoglakeTableHandle handle = (HoglakeTableHandle) table;
-        HoglakeDtos.Table definition = clientFor(handle).getTable(handle.namespace(), handle.tableName(), handle.snapshotId())
+        HoglakeDtos.Table definition = clientFor(session, handle).getTable(handle.namespace(), handle.tableName(), handle.snapshotId())
                 .orElseThrow(() -> new TableNotFoundException(handle.schemaTableName()));
         return new ConnectorTableMetadata(
                 handle.schemaTableName(),
@@ -525,7 +538,7 @@ public class HoglakeMetadata
         List<SchemaTableName> tables = new ArrayList<>();
         if (schemaName.isPresent() && isPosthogSchema(schemaName.get())) {
             // Failures are the user's to see, typed: the schema was named.
-            return posthogTables();
+            return posthogTables(session);
         }
         if (schemaName.isPresent()) {
             // Nonexistent schema is the user's error, surfaced typed.
@@ -535,7 +548,7 @@ public class HoglakeMetadata
             return tables;
         }
         if (posthogSchema.isPresent()) {
-            tables.addAll(posthogTablesForListing());
+            tables.addAll(posthogTablesForListing(session));
         }
         for (String schema : posthogSchema.isPresent() ? orgSchemaNames() : listSchemaNames(session)) {
             try {
@@ -552,12 +565,13 @@ public class HoglakeMetadata
 
     /**
      * The posthog schema's tables for a listing of the whole catalog, which must not
-     * depend on the mount: none when the mount is missing or cannot be asked.
+     * depend on the mount: none when the mount is missing or cannot be asked, or when
+     * this login gets no token for it.
      */
-    private List<SchemaTableName> posthogTablesForListing()
+    private List<SchemaTableName> posthogTablesForListing(ConnectorSession session)
     {
         try {
-            return posthogTables();
+            return posthogTables(session);
         }
         catch (SchemaNotFoundException e) {
             return List.of();
@@ -600,7 +614,7 @@ public class HoglakeMetadata
         for (SchemaTableName name : names) {
             Optional<HoglakeDtos.Table> table;
             if (isPosthogSchema(name.getSchemaName())) {
-                table = posthogTableForListing(name.getTableName(), prefix.getSchema().isEmpty());
+                table = posthogTableForListing(session, name.getTableName(), prefix.getSchema().isEmpty());
             }
             else {
                 table = client.getTable(name.getSchemaName(), name.getTableName());
@@ -610,10 +624,10 @@ public class HoglakeMetadata
         return result.iterator();
     }
 
-    private Optional<HoglakeDtos.Table> posthogTableForListing(String tableName, boolean wholeCatalog)
+    private Optional<HoglakeDtos.Table> posthogTableForListing(ConnectorSession session, String tableName, boolean wholeCatalog)
     {
         try {
-            return posthogTableAtHead(tableName);
+            return posthogTableAtHead(session, tableName);
         }
         catch (SchemaNotFoundException e) {
             return Optional.empty();
