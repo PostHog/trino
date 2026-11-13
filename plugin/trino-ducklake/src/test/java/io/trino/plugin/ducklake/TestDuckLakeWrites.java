@@ -22,6 +22,9 @@ import org.junit.jupiter.api.Test;
 import java.sql.SQLException;
 import java.util.List;
 
+import static io.trino.SystemSessionProperties.REDISTRIBUTE_WRITES;
+import static io.trino.SystemSessionProperties.TASK_MAX_WRITER_COUNT;
+import static io.trino.SystemSessionProperties.TASK_MIN_WRITER_COUNT;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -899,6 +902,59 @@ final class TestDuckLakeWrites
             assertThat(duckDbScalar("SELECT max_value FROM __ducklake_metadata_lake.ducklake_table_column_stats s "
                     + "JOIN __ducklake_metadata_lake.ducklake_table t USING (table_id) WHERE t.table_name = '" + table + "' AND s.column_id = 1"))
                     .isEqualTo("10");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    @Test
+    void testLongDecimalStatisticsCoverNegativeValueAmongPositiveRowGroups()
+    {
+        // the first row group holds the only negative value
+        assertLongDecimalStatistics("IF(n = 1, -1999.92, n)", 1, 999, "-1999.920000", "1000.000000");
+    }
+
+    @Test
+    void testLongDecimalStatisticsCoverRowGroupsOfNegativeValuesOnly()
+    {
+        // every row group holds a negative value, and the first ones hold nothing else
+        assertLongDecimalStatistics("IF(n <= 500 OR n % 2 = 0, -n, n)", 750, 250, "-1000.000000", "999.000000");
+    }
+
+    /**
+     * Writes the values into one file of many row groups. A long decimal is a two's complement byte
+     * array in Parquet, and the bounds recorded for the file, which both engines skip files by,
+     * have to follow the order of the decimals rather than that of their bytes.
+     */
+    private void assertLongDecimalStatistics(@Language("SQL") String value, long negative, long positive, String min, String max)
+    {
+        String table = "long_decimal_" + randomNameSuffix();
+        Session oneFileOfSmallRowGroups = Session.builder(getSession())
+                .setSystemProperty(REDISTRIBUTE_WRITES, "false")
+                .setSystemProperty(TASK_MIN_WRITER_COUNT, "1")
+                .setSystemProperty(TASK_MAX_WRITER_COUNT, "1")
+                .setCatalogSessionProperty("ducklake", "parquet_writer_row_group_size", "1kB")
+                .build();
+        assertUpdate(
+                oneFileOfSmallRowGroups,
+                "CREATE TABLE %s AS SELECT CAST(%s AS DECIMAL(27, 6)) AS amount FROM UNNEST(sequence(1, 1000)) AS t(n)".formatted(table, value),
+                1000);
+        try {
+            String file = duckDbScalar("SELECT data_file FROM ducklake_list_files('lake', '%s')".formatted(table));
+            assertThat(Long.parseLong(duckDbScalar("SELECT count(DISTINCT row_group_id) FROM parquet_metadata('%s')".formatted(file))))
+                    .isGreaterThan(1);
+            assertThat(duckDbRows(
+                    """
+                    SELECT s.min_value, s.max_value FROM __ducklake_metadata_lake.ducklake_file_column_stats s
+                    JOIN __ducklake_metadata_lake.ducklake_table t USING (table_id)
+                    WHERE t.table_name = '%s'""".formatted(table)))
+                    .isEqualTo(List.of(min, max));
+
+            assertQuery("SELECT count(*) FROM %s WHERE amount < 0".formatted(table), "VALUES " + negative);
+            assertQuery("SELECT count(*) FROM %s WHERE amount > 0".formatted(table), "VALUES " + positive);
+            assertThat(duckDbScalar("SELECT count(*) FROM %s WHERE amount < 0".formatted(table))).isEqualTo(String.valueOf(negative));
+            assertThat(duckDbScalar("SELECT count(*) FROM %s WHERE amount > 0".formatted(table))).isEqualTo(String.valueOf(positive));
         }
         finally {
             assertUpdate("DROP TABLE " + table);
