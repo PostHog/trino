@@ -14,6 +14,7 @@
 package io.trino.plugin.hoglake;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableMap;
 import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
 import io.trino.filesystem.Location;
@@ -38,6 +39,7 @@ import io.trino.parquet.reader.RowGroupInfo;
 import io.trino.parquet.variant.ParquetOriginalFieldNames;
 import io.trino.parquet.variant.ShreddedVariantAssembler;
 import io.trino.parquet.variant.VariantShreddingSchema;
+import io.trino.plugin.base.metrics.TDigestHistogram;
 import io.trino.plugin.hoglake.HoglakeParquetFooterCache.Lookup;
 import io.trino.plugin.hoglake.HoglakeParquetFooterCache.ParsedFooter;
 import io.trino.spi.TrinoException;
@@ -53,6 +55,7 @@ import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.EmptyPageSource;
 import io.trino.spi.connector.MemoryContext;
+import io.trino.spi.metrics.Metrics;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.SortedRangeSet;
@@ -138,6 +141,7 @@ import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
 public class HoglakePageSourceProvider
         implements ConnectorPageSourceProvider
 {
+    static final String STORAGE_SESSION_SECONDS_LEFT_AT_START = "storageSessionSecondsLeftAtStart";
     private static final int DOMAIN_COMPACTION_THRESHOLD = 100;
     // Parquet ends with a 4-byte footer length and the 4-byte "PAR1" magic.
     private static final int PARQUET_TRAILER_SIZE = Integer.BYTES + 4;
@@ -148,6 +152,7 @@ public class HoglakePageSourceProvider
     private final boolean s3SecurityMappingEnabled;
     private final ParquetReaderOptions readerOptions;
     private final Clock clock;
+    private final HoglakeStorageSessionStats storageSessionStats;
 
     public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory)
     {
@@ -161,7 +166,20 @@ public class HoglakePageSourceProvider
 
     public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache, Optional<CacheKey> catalogCacheKey, boolean s3SecurityMappingEnabled)
     {
-        this(fileSystemFactory, footerCache, catalogCacheKey, s3SecurityMappingEnabled, Clock.systemUTC());
+        this(fileSystemFactory, footerCache, catalogCacheKey, s3SecurityMappingEnabled, new HoglakeStorageSessionStats());
+    }
+
+    /**
+     * With the catalog's counters of the session splits this node starts.
+     */
+    public HoglakePageSourceProvider(
+            TrinoFileSystemFactory fileSystemFactory,
+            HoglakeParquetFooterCache footerCache,
+            Optional<CacheKey> catalogCacheKey,
+            boolean s3SecurityMappingEnabled,
+            HoglakeStorageSessionStats storageSessionStats)
+    {
+        this(fileSystemFactory, footerCache, catalogCacheKey, s3SecurityMappingEnabled, ParquetReaderOptions.defaultOptions(), Clock.systemUTC(), storageSessionStats);
     }
 
     /**
@@ -170,13 +188,13 @@ public class HoglakePageSourceProvider
     @VisibleForTesting
     HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache, Optional<CacheKey> catalogCacheKey, boolean s3SecurityMappingEnabled, Clock clock)
     {
-        this(fileSystemFactory, footerCache, catalogCacheKey, s3SecurityMappingEnabled, ParquetReaderOptions.defaultOptions(), clock);
+        this(fileSystemFactory, footerCache, catalogCacheKey, s3SecurityMappingEnabled, ParquetReaderOptions.defaultOptions(), clock, new HoglakeStorageSessionStats());
     }
 
     @VisibleForTesting
     HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, ParquetReaderOptions readerOptions)
     {
-        this(fileSystemFactory, HoglakeParquetFooterCache.disabled(), Optional.empty(), false, readerOptions, Clock.systemUTC());
+        this(fileSystemFactory, HoglakeParquetFooterCache.disabled(), Optional.empty(), false, readerOptions, Clock.systemUTC(), new HoglakeStorageSessionStats());
     }
 
     private HoglakePageSourceProvider(
@@ -185,14 +203,22 @@ public class HoglakePageSourceProvider
             Optional<CacheKey> catalogCacheKey,
             boolean s3SecurityMappingEnabled,
             ParquetReaderOptions readerOptions,
-            Clock clock)
+            Clock clock,
+            HoglakeStorageSessionStats storageSessionStats)
     {
         this.clock = requireNonNull(clock, "clock is null");
+        this.storageSessionStats = requireNonNull(storageSessionStats, "storageSessionStats is null");
         this.readerOptions = requireNonNull(readerOptions, "readerOptions is null");
         this.catalogCacheKey = requireNonNull(catalogCacheKey, "catalogCacheKey is null");
         this.s3SecurityMappingEnabled = s3SecurityMappingEnabled;
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.footerCache = requireNonNull(footerCache, "footerCache is null");
+    }
+
+    @VisibleForTesting
+    HoglakeStorageSessionStats storageSessionStats()
+    {
+        return storageSessionStats;
     }
 
     @Override
@@ -282,6 +308,7 @@ public class HoglakePageSourceProvider
                     resources,
                     options,
                     readFailure,
+                    sessionMetrics(hoglakeSplit),
                     isVariantPathAssemblyEnabled(session),
                     isVariantLazyResidualEnabled(session));
             // The page source adopts the owner. Its aggregate already reports
@@ -338,9 +365,12 @@ public class HoglakePageSourceProvider
         HoglakeStorageSession storageSession = split.session()
                 .orElseThrow(() -> new TrinoException(HOGLAKE_STORAGE_SESSION_REFUSED, "A read of the posthog schema has no storage session"));
         storageSession.checkCovers(split);
-        if (storageSession.isExpired(clock.millis())) {
+        long now = clock.millis();
+        if (storageSession.isExpired(now)) {
             throw sessionExpired();
         }
+        // How much of the session the split's wait has left for its read
+        storageSessionStats.splitStarted(storageSession.expirationEpochMillis() - now);
         return fileSystemFactory.create(ConnectorIdentity.forUser(session.getUser())
                 .withExtraCredentials(storageSession.extraCredentials())
                 .build());
@@ -357,6 +387,20 @@ public class HoglakePageSourceProvider
             return sessionExpired();
         }
         return failure;
+    }
+
+    /**
+     * For a split with a storage session, how long the session has left as the
+     * split's read starts: over the splits of a query, how close its reads came
+     * to their sessions' expiry.
+     */
+    private Metrics sessionMetrics(HoglakeSplit split)
+    {
+        if (split.session().isEmpty()) {
+            return Metrics.EMPTY;
+        }
+        double secondsLeft = (split.session().get().expirationEpochMillis() - clock.millis()) / 1000.0;
+        return new Metrics(ImmutableMap.of(STORAGE_SESSION_SECONDS_LEFT_AT_START, TDigestHistogram.fromValue(secondsLeft)));
     }
 
     private boolean hasExpiredSession(HoglakeSplit split)
@@ -525,6 +569,7 @@ public class HoglakePageSourceProvider
             HoglakeSplitResources resources,
             ParquetReaderOptions options,
             UnaryOperator<TrinoException> readFailure,
+            Metrics sessionMetrics,
             boolean variantPathAssembly,
             boolean variantLazyResidual)
             throws IOException
@@ -682,7 +727,7 @@ public class HoglakePageSourceProvider
                 adaptations,
                 deletionVector,
                 resources,
-                HoglakePageSource.splitMetrics(footerCacheHit, rowGroups.size()),
+                HoglakePageSource.splitMetrics(footerCacheHit, rowGroups.size()).mergeWith(sessionMetrics),
                 options.getMaxReadBlockSize().toBytes(),
                 readFailure);
     }

@@ -95,7 +95,7 @@ public record HoglakeStorageSession(
      * {@code team_id=<teamId>}, with no empty, {@code .} or {@code ..} segment
      * and nothing {@link #pathStaysUnder} refuses.
      */
-    static boolean isTeamPrefix(String prefix, long teamId)
+    public static boolean isTeamPrefix(String prefix, long teamId)
     {
         if (teamId <= 0 || !prefix.endsWith("/team_id=" + teamId + "/")) {
             return false;

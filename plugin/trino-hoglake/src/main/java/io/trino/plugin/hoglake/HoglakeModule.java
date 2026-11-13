@@ -26,7 +26,9 @@ import io.trino.filesystem.s3.S3SecurityMappingEnabledConfig;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeLoginTokenSource;
+import io.trino.plugin.hoglake.rest.HoglakeStorageSessionClient;
 import io.trino.plugin.hoglake.rest.HoglakeTokenSource;
+import io.trino.spi.Node;
 import io.trino.spi.NodeVersion;
 import io.trino.spi.PageSorter;
 import io.trino.spi.cache.CacheKey;
@@ -38,6 +40,7 @@ import io.trino.spi.connector.ConnectorSplitManager;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.Optional;
 
@@ -61,6 +64,10 @@ public class HoglakeModule
         Provider<CatalogName> catalogName = binder.getProvider(CatalogName.class);
         newExporter(binder).export(HoglakeParquetFooterCache.class)
                 .as(generator -> generator.generatedNameOf(HoglakeParquetFooterCache.class, catalogName.get().toString()));
+        binder.bind(HoglakeStorageSessionStats.class).in(Scopes.SINGLETON);
+        newExporter(binder).export(HoglakeStorageSessionStats.class)
+                .as(generator -> generator.generatedNameOf(HoglakeStorageSessionStats.class, catalogName.get().toString()));
+        closingBinder(binder).registerResource(new Key<Optional<HoglakeStorageSessions>>() {}, sessions -> sessions.ifPresent(HoglakeStorageSessions::close));
     }
 
     @Provides
@@ -131,6 +138,42 @@ public class HoglakeModule
                 loginTokens));
     }
 
+    /**
+     * The S3 sessions of the posthog schema's files, when the catalog names the
+     * endpoint that issues them. Without the property there is nothing that could
+     * ask for a session, and the schema's splits carry none.
+     *
+     * <p>Only a coordinator has them. A worker reads with the session its split
+     * carries and never asks for one, so no client for the endpoint is built there.
+     *
+     * <p>A request carries a token of the Trino login, from the same token
+     * endpoint and client as the mount's token but for the audience of the service
+     * that issues the sessions. A catalog without a token endpoint still loads, as
+     * for the schema itself, and every read of the schema then fails.
+     */
+    @Provides
+    @Singleton
+    public static Optional<HoglakeStorageSessions> createStorageSessions(HoglakeConfig config, Node node, HoglakeStorageSessionStats stats)
+    {
+        if (!node.isCoordinator() || !config.isPosthogSchemaEnabled() || config.getPosthogSchemaCredentialsUri().isEmpty()) {
+            return Optional.empty();
+        }
+        String mountCatalog = HoglakePosthogSchema.mountCatalog(config.getCatalog());
+        HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+        HoglakeLoginTokenSource loginTokens = config.getAuthTokenUri()
+                .map(tokenUri -> HoglakePosthogSchema.storageSessionTokens(
+                        URI.create(tokenUri),
+                        config.getAuthClientId().orElseThrow(),
+                        config.getAuthClientSecret().orElseThrow(),
+                        httpClient))
+                .orElse(HoglakeLoginTokenSource.UNCONFIGURED);
+        return Optional.of(new HoglakeStorageSessions(
+                mountCatalog,
+                new HoglakeStorageSessionClient(URI.create(config.getPosthogSchemaCredentialsUri().get()), mountCatalog, httpClient, Clock.systemUTC()),
+                loginTokens,
+                stats));
+    }
+
     @Provides
     @Singleton
     public static HoglakeMetadata createMetadata(HoglakeClient client, TrinoFileSystemFactory fileSystemFactory, Optional<HoglakePosthogSchema> posthogSchema)
@@ -140,11 +183,15 @@ public class HoglakeModule
 
     @Provides
     @Singleton
-    public static ConnectorSplitManager createSplitManager(HoglakeClient client, Optional<HoglakePosthogSchema> posthogSchema, SplitAffinityProvider affinityProvider)
+    public static ConnectorSplitManager createSplitManager(
+            HoglakeClient client,
+            Optional<HoglakePosthogSchema> posthogSchema,
+            Optional<HoglakeStorageSessions> storageSessions,
+            SplitAffinityProvider affinityProvider)
     {
         // The filesystem module binds a key-producing provider only when the
         // catalog caches filesystem data, and a no-op provider otherwise.
-        return new HoglakeSplitManager(client, posthogSchema, HoglakeSessionProperties::getMaxSplitSize, affinityProvider);
+        return new HoglakeSplitManager(client, posthogSchema, storageSessions, HoglakeSessionProperties::getMaxSplitSize, affinityProvider);
     }
 
     @Provides
@@ -157,9 +204,19 @@ public class HoglakeModule
 
     @Provides
     @Singleton
-    public static ConnectorPageSourceProvider createPageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache, HoglakeConfig config, S3SecurityMappingEnabledConfig securityMappingConfig)
+    public static ConnectorPageSourceProvider createPageSourceProvider(
+            TrinoFileSystemFactory fileSystemFactory,
+            HoglakeParquetFooterCache footerCache,
+            HoglakeConfig config,
+            S3SecurityMappingEnabledConfig securityMappingConfig,
+            HoglakeStorageSessionStats storageSessionStats)
     {
-        return new HoglakePageSourceProvider(fileSystemFactory, footerCache, Optional.of(CacheKey.of("hoglake-data-v1", config.getUri(), config.getCatalog())), securityMappingConfig.isEnabled());
+        return new HoglakePageSourceProvider(
+                fileSystemFactory,
+                footerCache,
+                Optional.of(CacheKey.of("hoglake-data-v1", config.getUri(), config.getCatalog())),
+                securityMappingConfig.isEnabled(),
+                storageSessionStats);
     }
 
     @Provides

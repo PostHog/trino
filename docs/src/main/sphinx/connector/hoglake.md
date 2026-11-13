@@ -35,6 +35,7 @@ the catalog's files.
 | `hoglake.variant-path-assembly-enabled` | Build pushed-down `VARIANT` subscripts from the requested keys of each value, instead of from the whole value. See [](hoglake-variant). Use the `variant_path_assembly_enabled` catalog session property to change it for a session. | `true` |
 | `hoglake.variant-lazy-residual-enabled` | With `hoglake.variant-path-assembly-enabled`, read the top-level `metadata` and `value` columns of a shredded `VARIANT` only for the batches of rows that need them. See [](hoglake-variant). Use the `variant_lazy_residual_enabled` catalog session property to change it for a session. | `true` |
 | `hoglake.posthog-schema.enabled` | Show the org's events mount, the Hoglake catalog `<hoglake.catalog>-events` on the same server, as the read-only schema `posthog`, read with a token of the Trino login. Requires `hoglake.catalog` to be an org id (a lowercase UUID). See [](hoglake-posthog-schema). | `false` |
+| `hoglake.posthog-schema.credentials-uri` | The `http` or `https` endpoint of the credential service that issues one S3 session for each team of the `posthog` schema. Set, the coordinator attaches the session of a file's team to each split of the schema, and workers read the schema's files with that session. Unset, splits of the schema carry no session and reads of its files fail. Used only with `hoglake.posthog-schema.enabled`. See [](hoglake-posthog-schema-storage). | None |
 | `fs.s3.enabled` | Enable the native S3 filesystem. | `true` |
 | `s3.endpoint` | Optional S3-compatible endpoint. | AWS endpoint resolution |
 | `s3.region` | S3 region. | `us-east-1` |
@@ -47,7 +48,13 @@ The connector uses Trino's shared [S3 filesystem configuration](/object-storage/
 Use Trino's [secrets support](/security/secrets) for explicit credentials. Workers use the
 configured credentials or the AWS default credential provider chain. Hoglake authorizes
 catalog metadata only and never vends storage credentials; the connector reads and writes
-S3 with the catalog's own filesystem credentials.
+the catalog's own tables in S3 with the catalog's filesystem credentials.
+
+The files of the [`posthog` schema](hoglake-posthog-schema) are the exception. They are
+never read with the catalog's filesystem credentials. Each split of the schema is read
+with a short-lived S3 session of the team that owns the file, which the coordinator
+obtains from the credential service of `hoglake.posthog-schema.credentials-uri`, not
+from Hoglake. See [](hoglake-posthog-schema-storage).
 
 (hoglake-authentication)=
 ### Authentication
@@ -113,6 +120,13 @@ exchange (RFC 8693), and sends only that token to the events mount:
   (at most 30 seconds, 5 seconds without the header) when it is busy or unavailable.
 - There is no fallback. When no token of the login is available, nothing is sent to
   the events mount.
+
+With `hoglake.posthog-schema.credentials-uri` set, the coordinator asks the same token
+endpoint for a second token of the login, in the same way but with
+`audience=hogtower-vend` and no `scope`. That token is sent only to the credential
+service, to obtain the S3 sessions of the schema's files; it is cached and replaced as
+the first one is. The token for the events mount is never sent to the credential
+service, and the token for the credential service is never sent to the Hoglake server.
 
 Existing catalogs can continue using these aliases:
 
@@ -369,8 +383,9 @@ With `hoglake.posthog-schema.enabled=true`, the catalog shows one more schema,
 Trino login that runs the query, obtained from the endpoint of
 `hoglake.auth.token-uri` as described in [](hoglake-authentication); they never
 carry the catalog's own token. What a login can read in the schema is decided by
-the token that the token service issues for that login, not by the connector. No
-other property is needed.
+the token that the token service issues for that login, not by the connector. Reading
+the schema's files also needs `hoglake.posthog-schema.credentials-uri`; see
+[](hoglake-posthog-schema-storage).
 
 - The schema is read-only. `INSERT`, `DELETE`, `UPDATE`, `MERGE`, `CREATE TABLE`,
   `CREATE TABLE AS`, `DROP TABLE`, `TRUNCATE`, renames, column changes, comments,
@@ -395,8 +410,10 @@ other property is needed.
   `mount_host_unavailable`, `mount_proxy_busy` and `mount_host_invalid_response` to
   `HOGLAKE_CATALOG_UNAVAILABLE`. Error messages for the schema do not include server
   URLs, response bodies, login names or tokens.
-- Workers read the mount's files with the catalog's storage credentials. An
-  unfiltered `count(*)` is answered from catalog counts without reading files.
+- Workers read the mount's files with per-team S3 sessions, never with the catalog's
+  storage credentials; see [](hoglake-posthog-schema-storage). An unfiltered `count(*)`
+  is answered from catalog counts without reading files, and needs no session unless a
+  file has a deletion vector.
 
 | Why `posthog` cannot be read | Error |
 | --- | --- |
@@ -408,6 +425,87 @@ other property is needed.
 | The token service is busy, unavailable or unreachable | `HOGLAKE_CATALOG_UNAVAILABLE` |
 | The token service answers outside its contract | `HOGLAKE_INVALID_RESPONSE` |
 | The mount's host is unavailable | `HOGLAKE_CATALOG_UNAVAILABLE` |
+
+(hoglake-posthog-schema-storage)=
+### Storage sessions
+
+The files of the `posthog` schema belong to teams: every file is under the prefix
+`.../team_id=<id>/` of one team, and the mount's scan names the team of each file.
+A file is read with an S3 session that can read that team's prefix and nothing else.
+The catalog's own storage credentials (`s3.*`) are not used for these files, and the
+extra credentials of the Trino session are not passed on to them.
+
+With `hoglake.posthog-schema.credentials-uri` set:
+
+- The coordinator plans the scan as for any table, then hands the splits to the engine
+  in team order, at most 100 at a time. When the engine asks for a batch, the
+  coordinator obtains the session of each team in that batch and attaches it to the
+  team's splits. A session is not requested at planning, and not for a team whose
+  splits are not being handed out yet.
+- A session is requested with `POST` to the configured endpoint, with the login's token
+  for the credential service (see [](hoglake-authentication)) and the body
+  `{"catalog":"<hoglake.catalog>-events","access":"read","values":[<team id>, ...]}`,
+  for at most 10 teams. The URL is used as configured; `http` is allowed.
+- An answer is used only when it holds a session for each team asked and for no other,
+  each with a prefix that ends in that team's `team_id=<id>/` and with at least 9
+  minutes left on the coordinator's clock. The region in the answer is not used: the
+  catalog's `s3.region` must be the region of the files.
+- Before a batch is handed out, the data file and the deletion vector of every split in
+  it are checked against the prefix of the split's team. A worker repeats the check and
+  then reads with the session alone. A file outside its team's prefix fails the query
+  before any split of that batch runs.
+- Sessions are kept on the coordinator for each login and team and shared by the
+  queries of that login. They are never shared between logins. At most 10,000 are kept
+  for a catalog.
+- A session is handed out only while at least 10 minutes of it remain. A session lives
+  15 minutes, so a team whose splits are handed out for longer costs one request about
+  every 5 minutes. When the coordinator's clock is ahead of the credential service's,
+  a session can be handed out with between 9 and 10 minutes left.
+- A split must finish within the lifetime of its session, and a worker fails a split
+  only when its session has expired. A split that waits on a busy worker, or a scan
+  that is held up by a slow consumer, can use up the time: the query then fails with
+  `HOGLAKE_STORAGE_SESSION_EXPIRED` and can be run again. For tables of the schema the
+  target split size is at most `64MB`, whatever `hoglake.max-split-size` says, so that
+  the splits queued on a worker hold less data.
+- All logins of a catalog share one request budget at the credential service. The
+  coordinator sends at most 8 requests a second for a catalog (16 at once), at most 3
+  at the same time, and sends the requests of one login that arrive within 25
+  milliseconds as one request of several teams. When the service asks to wait (`429`
+  or `503`) or does not answer, the coordinator waits (the `Retry-After` time, at most
+  30 seconds) and asks again, for at most 60 seconds for a batch.
+- One refused team fails the query; no file is skipped. A refusal for a login and team
+  is remembered for 60 seconds, and so is a refusal that does not depend on the login.
+- Workers never call the credential service, and only the coordinator has a client for
+  it. A worker decides from the table, not from its own configuration, that a split
+  needs a session: a split of the schema without one is refused before any storage
+  request, on every node.
+- No session value, token, response body or URL is logged or put in an error message.
+
+Without the property, splits of the schema carry no session. A query that reads the
+schema's files then fails with `HOGLAKE_STORAGE_SESSION_REFUSED`; a `count(*)` that is
+answered from catalog counts still works.
+
+| Why a read of `posthog` files fails | Error |
+| --- | --- |
+| A split of the schema has no session: the property is not set, or the coordinator runs a version without it | `HOGLAKE_STORAGE_SESSION_REFUSED` |
+| The credential service does not issue sessions for the mount (`404`), or refuses the request (`400`) or the login's token (`401`, twice) | `HOGLAKE_STORAGE_SESSION_REFUSED` |
+| The credential service refuses a team for the login (`403`) | `PERMISSION_DENIED` |
+| The credential service is busy, unavailable or unreachable for 60 seconds | `HOGLAKE_CATALOG_UNAVAILABLE` |
+| The credential service answers outside its contract, or with a session that has less than 9 minutes left | `HOGLAKE_INVALID_RESPONSE` |
+| The mount's scan does not name the team of a file | `HOGLAKE_INVALID_RESPONSE` |
+| A data file or a deletion vector is not under the prefix of its team | `HOGLAKE_PATH_OUTSIDE_TEAM_PREFIX` |
+| A split did not finish before its session expired | `HOGLAKE_STORAGE_SESSION_EXPIRED` |
+| S3 refuses a session that has not expired, or the object does not exist | `GENERIC_INTERNAL_ERROR` |
+
+Each node exports counters for the catalog over JMX as
+`io.trino.plugin.hoglake:type=HoglakeStorageSessionStats,name=<catalog>`. On a coordinator:
+`Requests`, `SessionsIssued`, `SessionsReused`, `Refusals` and `Waits`. On every node:
+`SplitsStarted` and `LeastMillisLeftAtStart`, the least time a session had left when
+the node started a split with it. The same time is a connector metric of each split
+(`storageSessionSecondsLeftAtStart`), and a scan's split source reports
+`storageSessionSplits`, `storageSessionTeams`, `storageSessionWaitMillis` and
+`storageSessionSecondsLeftAtHandOut`. A `LeastMillisLeftAtStart` near zero means that
+splits wait for most of their session before they are read.
 
 ## Writing tables
 
