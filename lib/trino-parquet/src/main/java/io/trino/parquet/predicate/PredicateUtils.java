@@ -187,27 +187,29 @@ public final class PredicateUtils
         ImmutableList.Builder<RowGroupInfo> rowGroupInfoBuilder = ImmutableList.builder();
         for (BlockMetadata block : parquetMetadata.getBlocks(splitStart, splitLength)) {
             PrunedBlockMetadata columnsMetadata = createPrunedColumnsMetadata(block, dataSource.getId(), descriptorsByPath);
-            if (block.rowCount() == 0) {
+            if (columnsMetadata.getRowCount() == 0) {
                 continue;
             }
             Map<ColumnDescriptor, Statistics<?>> columnStatistics = getStatistics(columnsMetadata, descriptorsByPath);
             Map<ColumnDescriptor, Long> columnValueCounts = getColumnValueCounts(columnsMetadata, descriptorsByPath);
             for (int i = 0; i < parquetTupleDomains.size(); i++) {
                 TupleDomain<ColumnDescriptor> parquetTupleDomain = parquetTupleDomains.get(i);
-                TupleDomainParquetPredicate parquetPredicate = parquetPredicates.get(i);
-                Optional<List<ColumnDescriptor>> candidateColumns = parquetPredicate.getIndexLookupCandidates(columnValueCounts, columnStatistics, dataSource.getId());
+                Optional<List<ColumnDescriptor>> candidateColumns = parquetPredicates.get(i).getIndexLookupCandidates(columnValueCounts, columnStatistics, dataSource.getId());
                 if (candidateColumns.isEmpty()) {
                     continue;
                 }
                 if (candidateColumns.get().isEmpty()) {
+                    // The page index cannot exclude any page when the row group statistics already prove that every row matches,
+                    // so the reader is not given the index and does not fetch it
                     rowGroupInfoBuilder.add(new RowGroupInfo(columnsMetadata, block.fileRowCountOffset(), Optional.empty()));
                     break;
                 }
-                // Retain the row-group statistics decision for page filtering too. Indexes cannot prune pages
-                // for a column whose entire row-group domain is contained in the predicate.
+                // Perform column index, bloom filter checks and dictionary lookups only for the subset of columns where it can be useful.
+                // This prevents unnecessary filesystem reads and decoding work when the predicate on a column comes from
+                // file-level min/max stats or more generally when the predicate selects a range equal to or wider than row-group min/max.
+                TupleDomainParquetPredicate indexPredicate = new TupleDomainParquetPredicate(parquetTupleDomain, candidateColumns.get(), timeZone);
                 Optional<ColumnIndexStore> columnIndex = getColumnIndexStore(dataSource, block, descriptorsByPath, candidateColumns.get(), options, parquetMetadata.getDecryptionContext());
                 Optional<BloomFilterStore> bloomFilterStore = getBloomFilterStore(dataSource, block, parquetTupleDomain, options, parquetMetadata.getDecryptionContext());
-                TupleDomainParquetPredicate indexPredicate = new TupleDomainParquetPredicate(parquetTupleDomain, candidateColumns.get(), timeZone);
                 if (predicateMatches(
                         indexPredicate,
                         candidateColumns.get(),
