@@ -20,7 +20,10 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.security.ConnectorIdentity;
 
 import java.io.Closeable;
+import java.net.URI;
+import java.net.http.HttpClient;
 import java.security.Principal;
+import java.time.Duration;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.regex.Pattern;
@@ -51,6 +54,28 @@ public final class HoglakePosthogSchema
      * What the subject of a per-login token request is: the name of a Trino login.
      */
     public static final String LOGIN_SUBJECT_TOKEN_TYPE = "urn:posthog:params:oauth:token-type:trino-login";
+
+    /**
+     * The audience of the per-login token that asks for the S3 sessions the
+     * schema's files are read with. It is a second token of the login: the token
+     * for the mount is not accepted where sessions are issued, and this one is
+     * not accepted by the mount.
+     */
+    public static final String STORAGE_SESSION_AUDIENCE = "hogtower-vend";
+
+    /**
+     * The most teams one request for S3 sessions may name.
+     */
+    public static final int STORAGE_SESSION_TEAMS_PER_REQUEST = 10;
+
+    /**
+     * The least lifetime an issued S3 session must have left to be accepted: the
+     * issuer's floor of ten minutes, less one minute for a difference between the
+     * issuer's clock and this node's.
+     */
+    public static final Duration STORAGE_SESSION_ACCEPT_FLOOR = Duration.ofMinutes(9);
+
+    public static final Duration STORAGE_SESSION_REQUEST_TIMEOUT = Duration.ofSeconds(20);
 
     // hoglake MountNames.PATTERN without the suffix: a canonical lowercase UUID.
     private static final Pattern ORG_ID = Pattern.compile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
@@ -90,6 +115,16 @@ public final class HoglakePosthogSchema
     public static String mountScope(String mountCatalog)
     {
         return "hoglake:" + mountCatalog + ":read";
+    }
+
+    /**
+     * The token source of the requests for S3 sessions: the same token exchange as
+     * for the mount, with the audience of the service that issues the sessions and
+     * no scope. The issuer decides what the token may ask for.
+     */
+    public static HoglakeLoginTokenSource storageSessionTokens(URI tokenUri, String clientId, String clientSecret, HttpClient httpClient)
+    {
+        return new HoglakeLoginTokenSource.TokenExchange(tokenUri, clientId, clientSecret, STORAGE_SESSION_AUDIENCE, LOGIN_SUBJECT_TOKEN_TYPE, Optional.empty(), httpClient);
     }
 
     /**
