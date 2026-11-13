@@ -202,7 +202,7 @@ public class HoglakeSplitManager
         Map<Long, HoglakeDtos.DeleteFile> deletes = handle.stagedDeletes().stream()
                 .collect(Collectors.toMap(HoglakeDtos.DeleteFile::dataFileId, file -> file));
         return Stream.concat(catalogFiles.stream(), handle.stagedFiles().stream())
-                .map(file -> new HoglakeDtos.ScanFile(file.dataFile(), deletes.getOrDefault(file.dataFile().dataFileId(), file.deleteFile())))
+                .map(file -> new HoglakeDtos.ScanFile(file.dataFile(), deletes.getOrDefault(file.dataFile().dataFileId(), file.deleteFile()), file.teamId()))
                 .toList();
     }
 

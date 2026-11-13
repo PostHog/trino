@@ -18,6 +18,7 @@ import com.google.common.base.Ticker;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.sun.net.httpserver.HttpServer;
+import io.airlift.json.JsonCodec;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.TrinoException;
@@ -142,6 +143,19 @@ class TestHoglakeClient
                 ]
                 """);
 
+        // /scan of a mount: every file names the team whose partition holds it.
+        RESPONSES.put("/v1/catalogs/lake/namespaces/analytics/tables/teams/scan",
+                """
+                [
+                  {"team_id": 4, "data_file": {"data_file_id": 30, "path": "s3://lake/teams/team_id=4/a.parquet", "file_format": "parquet",
+                    "record_count": 5, "file_size_bytes": 512, "row_id_start": 0, "stats_state": "pending", "begin_snapshot": 3}},
+                  {"team_id": 42, "data_file": {"data_file_id": 31, "path": "s3://lake/teams/team_id=42/b.parquet", "file_format": "parquet",
+                    "record_count": 5, "file_size_bytes": 512, "row_id_start": 5, "stats_state": "pending", "begin_snapshot": 3},
+                    "delete_file": {"delete_file_id": 6, "data_file_id": 31, "path": "s3://lake/teams/team_id=42/b.dv", "file_format": "puffin-dv",
+                      "delete_count": 1, "file_size_bytes": 64, "begin_snapshot": 5}}
+                ]
+                """);
+
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", exchange -> {
             String rawQuery = exchange.getRequestURI().getRawQuery();
@@ -251,6 +265,30 @@ class TestHoglakeClient
         assertThat(paired.deleteFile()).isNotNull();
         assertThat(paired.deleteFile().path()).isEqualTo("s3://lake/events/b.dv");
         assertThat(paired.deleteFile().deleteCount()).isEqualTo(3);
+    }
+
+    @Test
+    void scanKeepsTheTeamOfEachFileThroughPlanning()
+    {
+        assertThat(client.scan("analytics", "teams", 6)).extracting(HoglakeDtos.ScanFile::teamId).containsExactly(4L, 42L);
+        assertThat(client.scan("analytics", "events", 6)).extracting(HoglakeDtos.ScanFile::teamId).containsOnlyNulls();
+
+        HoglakeTableHandle handle = new HoglakeTableHandle("analytics", "teams", 6, "uuid-teams", List.of());
+        assertThat(HoglakeSplitManager.prunedScan(client, handle)).extracting(HoglakeDtos.ScanFile::teamId).containsExactly(4L, 42L);
+        assertThat(HoglakeSplitManager.scan(client, handle)).extracting(HoglakeDtos.ScanFile::teamId).containsExactly(4L, 42L);
+
+        // A staged deletion vector replaces the file's vector and keeps its team; a staged file has none
+        HoglakeDtos.DeleteFile staged = new HoglakeDtos.DeleteFile(7, 31, "s3://lake/teams/team_id=42/c.dv", 2, 64, 6);
+        HoglakeDtos.DataFile appended = new HoglakeDtos.DataFile(32, "s3://lake/teams/c.parquet", "parquet", 5, 512, null, 0, "pending", 6);
+        HoglakeTableHandle withStaged = new HoglakeTableHandle("analytics", "teams", 6, "uuid-teams", List.of(), handle.constraint(), List.of(new HoglakeDtos.ScanFile(appended, null)), List.of(staged));
+        List<HoglakeDtos.ScanFile> planned = HoglakeSplitManager.prunedScan(client, withStaged);
+        assertThat(planned).extracting(HoglakeDtos.ScanFile::teamId).containsExactly(4L, 42L, null);
+        assertThat(planned.get(1).deleteFile()).isEqualTo(staged);
+
+        // A file without a team is written as before, so a staged handle keeps its wire shape
+        JsonCodec<HoglakeDtos.ScanFile> codec = JsonCodec.jsonCodec(HoglakeDtos.ScanFile.class);
+        assertThat(codec.toJson(new HoglakeDtos.ScanFile(appended, null))).doesNotContain("team_id");
+        assertThat(codec.fromJson(codec.toJson(planned.get(1)))).isEqualTo(planned.get(1));
     }
 
     @Test
