@@ -37,6 +37,7 @@ import io.trino.spi.connector.ConnectorSplitManager;
 
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Optional;
 
@@ -66,6 +67,18 @@ public class HoglakeModule
     @Singleton
     public static HoglakeTokenSource createTokenSource(HoglakeConfig config)
     {
+        // One way to get a token, or none: a catalog given both a token endpoint
+        // and a fixed token would silently use one of them.
+        if (config.configuredAuthSources() > 1) {
+            throw new IllegalArgumentException("hoglake.auth.token, hoglake.auth.token-file and the token endpoint settings "
+                    + "(hoglake.auth.token-uri, hoglake.auth.client-id, hoglake.auth.client-secret) are mutually exclusive");
+        }
+        if (config.getAuthToken().isPresent()) {
+            return new HoglakeTokenSource.Fixed(config.getAuthToken().get());
+        }
+        if (config.getAuthTokenFile().isPresent()) {
+            return new HoglakeTokenSource.TokenFile(Path.of(config.getAuthTokenFile().get()));
+        }
         return config.getAuthTokenUri()
                 .<HoglakeTokenSource>map(tokenUri -> new HoglakeTokenSource.ClientCredentials(
                         URI.create(tokenUri),

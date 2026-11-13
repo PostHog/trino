@@ -51,6 +51,8 @@ public class HoglakeConfig
     private String authClientId;
     private String authClientSecret;
     private String authAudience = "hoglake";
+    private String authToken;
+    private String authTokenFile;
     private boolean posthogSchemaEnabled;
 
     @NotNull
@@ -208,6 +210,33 @@ public class HoglakeConfig
         return this;
     }
 
+    public Optional<String> getAuthToken()
+    {
+        return Optional.ofNullable(authToken);
+    }
+
+    @Config("hoglake.auth.token")
+    @ConfigSecuritySensitive
+    @ConfigDescription("A fixed bearer token for the Hoglake server, instead of a token endpoint")
+    public HoglakeConfig setAuthToken(String authToken)
+    {
+        this.authToken = authToken == null || authToken.isBlank() ? null : authToken.trim();
+        return this;
+    }
+
+    public Optional<String> getAuthTokenFile()
+    {
+        return Optional.ofNullable(authTokenFile);
+    }
+
+    @Config("hoglake.auth.token-file")
+    @ConfigDescription("A file holding a bearer token for the Hoglake server, re-read when it changes, instead of a token endpoint")
+    public HoglakeConfig setAuthTokenFile(String authTokenFile)
+    {
+        this.authTokenFile = authTokenFile == null || authTokenFile.isBlank() ? null : authTokenFile.trim();
+        return this;
+    }
+
     public boolean isPosthogSchemaEnabled()
     {
         return posthogSchemaEnabled;
@@ -236,6 +265,18 @@ public class HoglakeConfig
     {
         int set = (authTokenUri == null ? 0 : 1) + (authClientId == null ? 0 : 1) + (authClientSecret == null ? 0 : 1);
         return set == 0 || set == 3;
+    }
+
+    /**
+     * The ways this catalog can get a token, of which at most one may be
+     * configured. Checked where the source is built rather than as a bean
+     * constraint, so the full-mapping config test can still set every property.
+     */
+    public int configuredAuthSources()
+    {
+        return (authTokenUri == null && authClientId == null && authClientSecret == null ? 0 : 1)
+                + (authToken == null ? 0 : 1)
+                + (authTokenFile == null ? 0 : 1);
     }
 
     private static String validateTokenUri(String value)
