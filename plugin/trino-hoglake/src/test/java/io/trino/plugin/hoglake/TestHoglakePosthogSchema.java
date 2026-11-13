@@ -850,8 +850,11 @@ final class TestHoglakePosthogSchema
     @Test
     void testOnlyTheAuthenticatedLoginIsTheSubject()
     {
-        // Warm: the login has a token, so a refusal below is not for the lack of one
+        // Warm: the login has a token, so a refusal below is not for the lack of one,
+        // and the org catalog has its own, so the org queries below mint nothing
+        // whatever ran before this test.
         assertThat(scalar(login(BOB), "SELECT count(*) FROM org_on.posthog.events")).isEqualTo(30L);
+        assertThat(scalar("SELECT count(*) FROM org_on.analytics.orders")).isEqualTo(5L);
         requests.clear();
         tokenRequests.clear();
         List<Identity> refused = ImmutableList.of(
