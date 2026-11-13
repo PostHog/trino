@@ -256,6 +256,11 @@ final class TestHoglakePosthogSchema
         queryRunner.createCatalog("org_on", "hoglake", catalogProperties(Optional.of("client-on"), true));
         queryRunner.createCatalog("org_off", "hoglake", catalogProperties(Optional.of("client-off"), false));
         queryRunner.createCatalog("org_noauth", "hoglake", catalogProperties(Optional.empty(), true));
+        // A fixed token (a standalone Hoglake, no token endpoint) with the schema enabled
+        queryRunner.createCatalog("org_fixed", "hoglake", ImmutableMap.<String, String>builder()
+                .putAll(catalogProperties(Optional.empty(), true))
+                .put("hoglake.auth.token", "token-for-client-fixed")
+                .buildOrThrow());
         for (Exchange exchange : Exchange.values()) {
             if (exchange == Exchange.ISSUING) {
                 continue;
@@ -850,8 +855,11 @@ final class TestHoglakePosthogSchema
     @Test
     void testOnlyTheAuthenticatedLoginIsTheSubject()
     {
-        // Warm: the login has a token, so a refusal below is not for the lack of one
+        // Warm: the login has a token, so a refusal below is not for the lack of one,
+        // and the org catalog has its own, so the org queries below mint nothing
+        // whatever ran before this test.
         assertThat(scalar(login(BOB), "SELECT count(*) FROM org_on.posthog.events")).isEqualTo(30L);
+        assertThat(scalar("SELECT count(*) FROM org_on.analytics.orders")).isEqualTo(5L);
         requests.clear();
         tokenRequests.clear();
         List<Identity> refused = ImmutableList.of(
@@ -903,6 +911,31 @@ final class TestHoglakePosthogSchema
                 .filteredOn(request -> request.path().startsWith(MOUNT_PATH))
                 .isNotEmpty()
                 .allMatch(request -> loginOf(request.authorization()).equals(Optional.of(frank)));
+    }
+
+    @Test
+    void testFixedTokenCatalogHasNoLoginExchange()
+    {
+        // The catalog's own schemas are read with the fixed token, which is never minted
+        Session session = login(ALICE);
+        assertThat(scalar(session, "SELECT count(*) FROM org_fixed.analytics.orders")).isEqualTo(5L);
+        assertThat(column(session, "SHOW SCHEMAS FROM org_fixed")).containsExactlyInAnyOrder("analytics", "information_schema");
+        // A login's token comes only from a token endpoint, and there is none: the
+        // schema refuses as it does without any token service, and asks nothing
+        for (String statement : List.of(
+                "SELECT count(*) FROM org_fixed.posthog.events",
+                "SHOW TABLES FROM org_fixed.posthog",
+                "DESCRIBE org_fixed.posthog.events")) {
+            assertTrinoExceptionThrownBy(() -> queryRunner.execute(session, statement))
+                    .as(statement)
+                    .hasErrorCode(HOGLAKE_LOGIN_TOKEN_REFUSED)
+                    .hasMessage("The posthog schema is not available: this catalog has no token service configured");
+        }
+        assertThat(requests).noneMatch(request -> request.path().startsWith(MOUNT_PATH));
+        assertThat(requests).filteredOn(request -> request.path().startsWith(ORG_PATH)).isNotEmpty()
+                .allMatch(request -> "Bearer token-for-client-fixed".equals(request.authorization()));
+        assertThat(tokenRequests).isEmpty();
+        assertNoWriteAndNoShadowRequest();
     }
 
     @Test

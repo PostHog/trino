@@ -27,6 +27,8 @@ the catalog's files.
 | `hoglake.auth.client-id` | Client id for the token endpoint; required with `hoglake.auth.token-uri`. | None |
 | `hoglake.auth.client-secret` | Client secret for the token endpoint; required with `hoglake.auth.token-uri`. Use Trino's [secrets support](/security/secrets). | None |
 | `hoglake.auth.audience` | Audience requested from the token endpoint. | `hoglake` |
+| `hoglake.auth.token` | A bearer token to send as-is, for a Hoglake server with no token endpoint (one that signs its own tokens). Mutually exclusive with `hoglake.auth.token-uri` and `hoglake.auth.token-file`. Use Trino's [secrets support](/security/secrets). | None |
+| `hoglake.auth.token-file` | Path of a file holding one bearer token, re-read whenever the file changes, so the token is rotated by rewriting the file. Mutually exclusive with `hoglake.auth.token-uri` and `hoglake.auth.token`. | None |
 | `hoglake.client.request-timeout` | Positive request timeout, with `ms`, `s`, `m`, `h`, or `d` suffix. | `2m` |
 | `hoglake.max-split-size` | Largest byte range of one Parquet file assigned to a single split; at least `1MB`. See [](hoglake-split-planning). Use the `max_split_size` catalog session property to change it for a session. | `256MB` |
 | `hoglake.parquet-footer-cache.max-size` | Serialized size of the parsed Parquet footers each worker keeps for the catalog; `0B` disables the cache. See [](hoglake-split-planning). | `64MB` |
@@ -61,6 +63,29 @@ expiry, and retries a request once with a fresh token after a `401`. All three
 properties must be set together, or none. The scopes the token carries are decided
 by the issuer; the request carries none. Every query on the catalog presents the
 same token, so the Hoglake server sees the catalog's identity, not the Trino user's.
+
+A Hoglake server can also sign its own tokens (`HOGLAKE_AUTH_MODE=local`), in which
+case there is no token endpoint: the operator mints a token and gives it to the
+catalog. `hoglake.auth.token` holds the token itself; `hoglake.auth.token-file` names
+a file that holds it and is re-read when its modification time changes, so a
+rotation is a rewrite of the file, not a catalog restart. A `401` drops the cached
+file content and the one retry re-reads it, so a rotation that kept the
+modification time is picked up too. A fixed token is never refreshed: when it
+expires, the catalog fails until the token is replaced. The three ways of getting a
+token are mutually exclusive, and with none of them configured no `Authorization`
+header is sent, which is what a server with `HOGLAKE_AUTH_MODE=off` expects. The
+[`posthog` schema](hoglake-posthog-schema) needs the token endpoint and is not
+available with a fixed token.
+
+```text
+connector.name=hoglake
+hoglake.uri=http://hoglake:8080
+hoglake.catalog=lake
+hoglake.auth.token-file=/etc/trino/hoglake.token
+```
+
+with the file written from the server's own key, for example
+`hoglake-server token mint --catalog lake --scope write --ttl 720h > /etc/trino/hoglake.token`.
 
 The [`posthog` schema](hoglake-posthog-schema) is the exception. Its requests never
 carry the catalog's token. For each Trino login that reads the schema, the connector

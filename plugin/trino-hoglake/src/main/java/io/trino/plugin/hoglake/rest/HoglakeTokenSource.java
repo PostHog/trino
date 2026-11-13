@@ -25,6 +25,10 @@ import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.Optional;
@@ -41,10 +45,14 @@ import static java.util.concurrent.TimeUnit.NANOSECONDS;
 /**
  * Where the connector's bearer token for the Hoglake REST API comes from.
  *
- * Hoglake verifies tokens; it does not mint them. The issuer is the
- * managed-warehouse control plane (hogtower's {@code POST /oauth/token}),
- * which is also what writes this catalog's properties, so the client
- * credentials arrive with the catalog and nothing here is long-lived.
+ * Hoglake verifies tokens; it does not mint them. Against an issuer, the
+ * connector holds a client credential and mints through {@link ClientCredentials};
+ * in a managed deployment the control plane that writes the catalog's
+ * properties is also that issuer, so nothing here is long-lived. A standalone
+ * Hoglake that signs with its own key ({@code HOGLAKE_AUTH_MODE=local}) has no
+ * token endpoint: the operator mints a token with {@code hoglake-server token mint}
+ * and hands it to the catalog as-is ({@link Fixed}) or through a file that is
+ * rewritten on rotation ({@link TokenFile}).
  */
 public interface HoglakeTokenSource
 {
@@ -229,6 +237,101 @@ public interface HoglakeTokenSource
         private static String form(String value)
         {
             return URLEncoder.encode(value, UTF_8);
+        }
+    }
+
+    /**
+     * One token, given in the catalog properties ({@code hoglake.auth.token}).
+     * Nothing to refresh: a 401 is retried once with the same token, which
+     * covers a Hoglake instance that had not loaded the key yet, and nothing else.
+     */
+    final class Fixed
+            implements HoglakeTokenSource
+    {
+        private final String token;
+
+        public Fixed(String token)
+        {
+            this.token = requireNonNull(token, "token is null").trim();
+            if (this.token.isEmpty()) {
+                throw new IllegalArgumentException("token is empty");
+            }
+        }
+
+        @Override
+        public Optional<String> token(Duration timeout)
+        {
+            return Optional.of(token);
+        }
+
+        @Override
+        public void invalidate(String token) {}
+    }
+
+    /**
+     * One token read from a file ({@code hoglake.auth.token-file}), re-read when
+     * the file's modification time changes, so an operator rotates the token by
+     * rewriting the file and never restarts the catalog. A 401 also drops the
+     * cached value, so a rotation the modification time did not show (same
+     * second, a copy that preserved it) is picked up on the one retry.
+     */
+    final class TokenFile
+            implements HoglakeTokenSource
+    {
+        private final Path file;
+        private final AtomicReference<Cached> cached = new AtomicReference<>();
+
+        private record Cached(String token, FileTime modified) {}
+
+        public TokenFile(Path file)
+        {
+            this.file = requireNonNull(file, "file is null");
+        }
+
+        @Override
+        public Optional<String> token(Duration timeout)
+        {
+            Cached current = cached.get();
+            FileTime modified = modified();
+            if (current != null && current.modified().equals(modified)) {
+                return Optional.of(current.token());
+            }
+            String token;
+            try {
+                token = Files.readString(file, UTF_8).trim();
+            }
+            catch (IOException e) {
+                throw new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "could not read the Hoglake token file " + file, e);
+            }
+            if (token.isEmpty()) {
+                throw new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "the Hoglake token file " + file + " is empty");
+            }
+            // The time read BEFORE the content: a rewrite between the two is
+            // seen as a change on the next call, never missed.
+            cached.set(new Cached(token, modified));
+            return Optional.of(token);
+        }
+
+        @Override
+        public void invalidate(String token)
+        {
+            Cached current = cached.get();
+            if (current != null && current.token().equals(token)) {
+                cached.compareAndSet(current, null);
+            }
+        }
+
+        private FileTime modified()
+        {
+            try {
+                return Files.getLastModifiedTime(file);
+            }
+            catch (NoSuchFileException e) {
+                throw new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "the Hoglake token file " + file + " does not exist", e);
+            }
+            catch (IOException e) {
+                throw new TrinoException(HOGLAKE_CATALOG_UNAVAILABLE, "could not read the Hoglake token file " + file, e);
+            }
         }
     }
 }

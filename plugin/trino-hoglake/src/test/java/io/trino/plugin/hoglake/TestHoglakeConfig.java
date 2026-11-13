@@ -16,6 +16,7 @@ package io.trino.plugin.hoglake;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.configuration.ConfigurationFactory;
 import io.airlift.units.DataSize;
+import io.trino.plugin.hoglake.rest.HoglakeTokenSource;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -46,6 +47,8 @@ class TestHoglakeConfig
                 .setAuthClientId(null)
                 .setAuthClientSecret(null)
                 .setAuthAudience("hoglake")
+                .setAuthToken(null)
+                .setAuthTokenFile(null)
                 .setPosthogSchemaEnabled(false));
     }
 
@@ -64,6 +67,8 @@ class TestHoglakeConfig
                         .put("hoglake.auth.client-id", "hlc_0123")
                         .put("hoglake.auth.client-secret", "s3cret")
                         .put("hoglake.auth.audience", "hoglake-dev")
+                        .put("hoglake.auth.token", "eyJhbGciOiJFUzI1NiJ9.e30.sig")
+                        .put("hoglake.auth.token-file", "/etc/trino/hoglake.token")
                         .put("hoglake.posthog-schema.enabled", "true")
                         .buildOrThrow(),
                 new HoglakeConfig()
@@ -78,6 +83,8 @@ class TestHoglakeConfig
                         .setAuthClientId("hlc_0123")
                         .setAuthClientSecret("s3cret")
                         .setAuthAudience("hoglake-dev")
+                        .setAuthToken("eyJhbGciOiJFUzI1NiJ9.e30.sig")
+                        .setAuthTokenFile("/etc/trino/hoglake.token")
                         .setPosthogSchemaEnabled(true));
     }
 
@@ -117,6 +124,34 @@ class TestHoglakeConfig
                 "hoglake.auth.token-uri", "https://hogtower:8443/oauth/token",
                 "hoglake.auth.client-id", "hlc_0123",
                 "hoglake.auth.client-secret", "s3cret")).getAuthClientId()).contains("hlc_0123");
+    }
+
+    @Test
+    void authSourcesAreMutuallyExclusive()
+    {
+        HoglakeConfig endpointAndToken = parse(Map.of(
+                "hoglake.uri", "http://h:1",
+                "hoglake.auth.token-uri", "https://hogtower:8443/oauth/token",
+                "hoglake.auth.client-id", "hlc_0123",
+                "hoglake.auth.client-secret", "s3cret",
+                "hoglake.auth.token", "t1"));
+        assertThat(endpointAndToken.configuredAuthSources()).isEqualTo(2);
+        assertThatThrownBy(() -> HoglakeModule.createTokenSource(endpointAndToken))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("mutually exclusive");
+        assertThatThrownBy(() -> HoglakeModule.createTokenSource(parse(Map.of(
+                "hoglake.uri", "http://h:1",
+                "hoglake.auth.token", "t1",
+                "hoglake.auth.token-file", "/tmp/t"))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("mutually exclusive");
+        // Each on its own is fine, and none is the unauthenticated source.
+        assertThat(HoglakeModule.createTokenSource(parse(Map.of("hoglake.uri", "http://h:1", "hoglake.auth.token", "t1"))))
+                .isInstanceOf(HoglakeTokenSource.Fixed.class);
+        assertThat(HoglakeModule.createTokenSource(parse(Map.of("hoglake.uri", "http://h:1", "hoglake.auth.token-file", "/tmp/t"))))
+                .isInstanceOf(HoglakeTokenSource.TokenFile.class);
+        assertThat(HoglakeModule.createTokenSource(parse(Map.of("hoglake.uri", "http://h:1"))))
+                .isSameAs(HoglakeTokenSource.NONE);
     }
 
     @Test
