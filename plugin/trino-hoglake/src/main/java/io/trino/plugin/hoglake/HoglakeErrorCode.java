@@ -72,7 +72,21 @@ public enum HoglakeErrorCode
      * schema, for a reason that is not the login's: it does not offer the
      * exchange, or it refused this catalog's credential or request.
      */
-    HOGLAKE_LOGIN_TOKEN_REFUSED(8, EXTERNAL);
+    HOGLAKE_LOGIN_TOKEN_REFUSED(8, EXTERNAL),
+    /**
+     * A read of the posthog schema has no S3 session, for a reason that is
+     * not the login's.
+     */
+    HOGLAKE_STORAGE_SESSION_REFUSED(9, EXTERNAL),
+    /**
+     * A read of the posthog schema did not finish before its S3 session expired.
+     */
+    HOGLAKE_STORAGE_SESSION_EXPIRED(10, EXTERNAL),
+    /**
+     * A data or deletion-vector file of the posthog schema is not under its
+     * team's storage prefix.
+     */
+    HOGLAKE_PATH_OUTSIDE_TEAM_PREFIX(11, EXTERNAL);
 
     // Arbitrary plugin-private range; only uniqueness within this
     // connector matters (external plugins pick their own base).

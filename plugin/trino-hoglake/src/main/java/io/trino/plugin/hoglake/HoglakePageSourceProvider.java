@@ -57,6 +57,7 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.SortedRangeSet;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.security.ConnectorIdentity;
 import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
@@ -70,6 +71,7 @@ import org.apache.parquet.schema.MessageType;
 import org.joda.time.DateTimeZone;
 
 import java.io.IOException;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -79,6 +81,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.function.UnaryOperator;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
@@ -90,6 +93,8 @@ import static io.trino.parquet.ParquetTypeUtils.getDescriptors;
 import static io.trino.parquet.ParquetTypeUtils.lookupColumnByName;
 import static io.trino.parquet.predicate.PredicateUtils.buildPredicate;
 import static io.trino.parquet.predicate.PredicateUtils.getFilteredRowGroups;
+import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_STORAGE_SESSION_EXPIRED;
+import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_STORAGE_SESSION_REFUSED;
 import static io.trino.plugin.hoglake.HoglakeSessionProperties.isVariantLazyResidualEnabled;
 import static io.trino.plugin.hoglake.HoglakeSessionProperties.isVariantPathAssemblyEnabled;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
@@ -122,6 +127,13 @@ import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
  * with their original file row positions and the rows the vector marks
  * deleted are dropped, so the vector stays tied to the snapshot the scan
  * pinned.
+ *
+ * <p>Every storage call of a split goes through {@link #fileSystem}. A split
+ * of a posthog schema table reads with its team's S3 session alone, after its
+ * paths are checked against the team's prefix, and fails before any storage
+ * call when it has no session or the session has expired. A split of an org
+ * table reads with the session's identity, as before, and never carries a
+ * storage session.
  */
 public class HoglakePageSourceProvider
         implements ConnectorPageSourceProvider
@@ -135,6 +147,7 @@ public class HoglakePageSourceProvider
     private final Optional<CacheKey> catalogCacheKey;
     private final boolean s3SecurityMappingEnabled;
     private final ParquetReaderOptions readerOptions;
+    private final Clock clock;
 
     public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory)
     {
@@ -148,13 +161,22 @@ public class HoglakePageSourceProvider
 
     public HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache, Optional<CacheKey> catalogCacheKey, boolean s3SecurityMappingEnabled)
     {
-        this(fileSystemFactory, footerCache, catalogCacheKey, s3SecurityMappingEnabled, ParquetReaderOptions.defaultOptions());
+        this(fileSystemFactory, footerCache, catalogCacheKey, s3SecurityMappingEnabled, Clock.systemUTC());
+    }
+
+    /**
+     * With the clock that storage sessions expire by.
+     */
+    @VisibleForTesting
+    HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, HoglakeParquetFooterCache footerCache, Optional<CacheKey> catalogCacheKey, boolean s3SecurityMappingEnabled, Clock clock)
+    {
+        this(fileSystemFactory, footerCache, catalogCacheKey, s3SecurityMappingEnabled, ParquetReaderOptions.defaultOptions(), clock);
     }
 
     @VisibleForTesting
     HoglakePageSourceProvider(TrinoFileSystemFactory fileSystemFactory, ParquetReaderOptions readerOptions)
     {
-        this(fileSystemFactory, HoglakeParquetFooterCache.disabled(), Optional.empty(), false, readerOptions);
+        this(fileSystemFactory, HoglakeParquetFooterCache.disabled(), Optional.empty(), false, readerOptions, Clock.systemUTC());
     }
 
     private HoglakePageSourceProvider(
@@ -162,8 +184,10 @@ public class HoglakePageSourceProvider
             HoglakeParquetFooterCache footerCache,
             Optional<CacheKey> catalogCacheKey,
             boolean s3SecurityMappingEnabled,
-            ParquetReaderOptions readerOptions)
+            ParquetReaderOptions readerOptions,
+            Clock clock)
     {
+        this.clock = requireNonNull(clock, "clock is null");
         this.readerOptions = requireNonNull(readerOptions, "readerOptions is null");
         this.catalogCacheKey = requireNonNull(catalogCacheKey, "catalogCacheKey is null");
         this.s3SecurityMappingEnabled = s3SecurityMappingEnabled;
@@ -183,8 +207,9 @@ public class HoglakePageSourceProvider
             MemoryContext memoryContext)
     {
         HoglakeSplit hoglakeSplit = (HoglakeSplit) split;
+        HoglakeTableHandle tableHandle = (HoglakeTableHandle) table;
 
-        TupleDomain<HoglakeColumnHandle> predicate = ((HoglakeTableHandle) table).constraint();
+        TupleDomain<HoglakeColumnHandle> predicate = tableHandle.constraint();
         if (predicate.isNone()) {
             return new EmptyPageSource();
         }
@@ -199,7 +224,7 @@ public class HoglakePageSourceProvider
         // Parquet footer or any data.
         if (columns.isEmpty() && predicate.isAll() && hoglakeSplit.recordCount() >= 0) {
             if (hoglakeSplit.start() == 0) {
-                return createCountPageSource(session, hoglakeSplit, memoryContext);
+                return createCountPageSource(session, tableHandle, hoglakeSplit, memoryContext);
             }
             return new EmptyPageSource();
         }
@@ -208,7 +233,7 @@ public class HoglakePageSourceProvider
                 .map(HoglakeColumnHandle.class::cast)
                 .toList();
 
-        TrinoFileSystem fileSystem = fileSystemFactory.create(session);
+        TrinoFileSystem fileSystem = fileSystem(session, tableHandle, hoglakeSplit);
         TrinoInputFile inputFile;
         boolean validateFileAccess = false;
         if (fileSystem instanceof CacheFileSystem cacheFileSystem && catalogCacheKey.isPresent() && hoglakeSplit.dataFileId() > 0) {
@@ -218,13 +243,15 @@ public class HoglakePageSourceProvider
                     .append(Long.toString(hoglakeSplit.dataFileId()))
                     .append(Long.toString(hoglakeSplit.fileSizeBytes()));
             inputFile = cacheFileSystem.newInputFile(Location.of(hoglakeSplit.path()), hoglakeSplit.fileSizeBytes(), version);
-            validateFileAccess = s3SecurityMappingEnabled || !session.getIdentity().getExtraCredentials().isEmpty();
+            // A storage session's own S3 decision must be made even on a cache hit
+            validateFileAccess = s3SecurityMappingEnabled || hoglakeSplit.session().isPresent() || !session.getIdentity().getExtraCredentials().isEmpty();
         }
         else {
             inputFile = fileSystem.newInputFile(Location.of(hoglakeSplit.path()), hoglakeSplit.fileSizeBytes());
         }
 
         ParquetReaderOptions options = readerOptions(readerOptions, hoglakeSplit);
+        UnaryOperator<TrinoException> readFailure = failure -> hasExpiredSession(hoglakeSplit) ? sessionExpired() : failure;
         ParquetDataSource dataSource = null;
         // The split's scope exists before any allocation on its behalf, and
         // owns everything until a page source adopts it.
@@ -254,6 +281,7 @@ public class HoglakePageSourceProvider
                     predicate.simplify(DOMAIN_COMPACTION_THRESHOLD),
                     resources,
                     options,
+                    readFailure,
                     isVariantPathAssemblyEnabled(session),
                     isVariantLazyResidualEnabled(session));
             // The page source adopts the owner. Its aggregate already reports
@@ -274,13 +302,72 @@ public class HoglakePageSourceProvider
                 closeOnFailure(dataSource, e);
             }
             if (e instanceof TrinoException trinoException) {
-                throw trinoException;
+                throw storageFailure(hoglakeSplit, trinoException);
             }
-            throw new TrinoException(
+            throw storageFailure(hoglakeSplit, new TrinoException(
                     GENERIC_INTERNAL_ERROR,
                     "Failed to open parquet file: " + hoglakeSplit.path(),
-                    e);
+                    e));
         }
+    }
+
+    /**
+     * The file system for the split's storage calls, the one place that
+     * chooses its credentials.
+     *
+     * <ul>
+     * <li>A posthog schema split with a storage session: the prefix check,
+     * then the expiry check, then a file system for an identity that holds
+     * nothing but the session's three values, so the catalog's own
+     * credentials and the user's extra credentials are not used.
+     * <li>A posthog schema split without one: refused, whatever this node's
+     * configuration, so its files are never read with the catalog's
+     * credentials.
+     * <li>An org table split: the session's identity, as before. A storage
+     * session is never used for an org table.
+     * </ul>
+     */
+    private TrinoFileSystem fileSystem(ConnectorSession session, HoglakeTableHandle table, HoglakeSplit split)
+    {
+        if (table.mount().isEmpty()) {
+            if (split.session().isPresent()) {
+                throw new TrinoException(GENERIC_INTERNAL_ERROR, "A split of a table outside the posthog schema carries a storage session");
+            }
+            return fileSystemFactory.create(session);
+        }
+        HoglakeStorageSession storageSession = split.session()
+                .orElseThrow(() -> new TrinoException(HOGLAKE_STORAGE_SESSION_REFUSED, "A read of the posthog schema has no storage session"));
+        storageSession.checkCovers(split);
+        if (storageSession.isExpired(clock.millis())) {
+            throw sessionExpired();
+        }
+        return fileSystemFactory.create(ConnectorIdentity.forUser(session.getUser())
+                .withExtraCredentials(storageSession.extraCredentials())
+                .build());
+    }
+
+    /**
+     * A failure of a split's read, as the error the query reports: the
+     * expired error when the split's storage session has expired by now,
+     * since S3 then refuses every request of the split, else the failure.
+     */
+    private RuntimeException storageFailure(HoglakeSplit split, RuntimeException failure)
+    {
+        if (hasExpiredSession(split)) {
+            return sessionExpired();
+        }
+        return failure;
+    }
+
+    private boolean hasExpiredSession(HoglakeSplit split)
+    {
+        return split.session().isPresent() && split.session().get().isExpired(clock.millis());
+    }
+
+    // The failure is not attached as the cause: an S3 error can name the session's key
+    private static TrinoException sessionExpired()
+    {
+        return new TrinoException(HOGLAKE_STORAGE_SESSION_EXPIRED, "A read of the posthog schema did not finish before its storage session expired; run the query again");
     }
 
     /**
@@ -312,7 +399,7 @@ public class HoglakePageSourceProvider
      * and decodes and releases that memory before returning, so a count
      * leaves no reservation behind.
      */
-    private ConnectorPageSource createCountPageSource(ConnectorSession session, HoglakeSplit split, MemoryContext memoryContext)
+    private ConnectorPageSource createCountPageSource(ConnectorSession session, HoglakeTableHandle table, HoglakeSplit split, MemoryContext memoryContext)
     {
         long visibleRows = split.recordCount();
         if (split.deleteFilePath().isPresent()) {
@@ -320,10 +407,14 @@ public class HoglakePageSourceProvider
             // the cardinality has been read. The owner itself is the protected
             // resource: a load that reserves and then throws must still release,
             // and a resource that never finished initializing would not.
+            TrinoFileSystem fileSystem = fileSystem(session, table, split);
             try (HoglakeSplitResources resources = new HoglakeSplitResources(memoryContext)) {
                 HoglakeDeletionVector vector = HoglakeDeletionVectorLoader.load(
-                        fileSystemFactory.create(session), split, split.recordCount(), resources);
+                        fileSystem, split, split.recordCount(), resources);
                 visibleRows -= vector.cardinality();
+            }
+            catch (RuntimeException e) {
+                throw storageFailure(split, e);
             }
         }
         return new HoglakeCountPageSource(visibleRows);
@@ -433,6 +524,7 @@ public class HoglakePageSourceProvider
             TupleDomain<HoglakeColumnHandle> predicate,
             HoglakeSplitResources resources,
             ParquetReaderOptions options,
+            UnaryOperator<TrinoException> readFailure,
             boolean variantPathAssembly,
             boolean variantLazyResidual)
             throws IOException
@@ -579,7 +671,7 @@ public class HoglakePageSourceProvider
                 DateTimeZone.UTC,
                 allocation,
                 options,
-                exception -> HoglakePageSource.handleException(dataSource.getId(), exception),
+                exception -> readFailure.apply(HoglakePageSource.handleException(dataSource.getId(), exception)),
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty(),
@@ -591,7 +683,8 @@ public class HoglakePageSourceProvider
                 deletionVector,
                 resources,
                 HoglakePageSource.splitMetrics(footerCacheHit, rowGroups.size()),
-                options.getMaxReadBlockSize().toBytes());
+                options.getMaxReadBlockSize().toBytes(),
+                readFailure);
     }
 
     /**

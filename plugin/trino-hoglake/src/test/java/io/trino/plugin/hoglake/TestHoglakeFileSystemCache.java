@@ -14,11 +14,13 @@
 package io.trino.plugin.hoglake;
 
 import com.google.common.collect.ImmutableMap;
+import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.trace.Tracer;
 import io.trino.blob.cache.memory.MemoryBlobCache;
 import io.trino.blob.cache.memory.MemoryBlobCacheConfig;
+import io.trino.plugin.hoglake.HoglakeTableHandle.MountTable;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures.FileColumn;
 import io.trino.spi.BlocksHashFactory;
@@ -37,6 +39,7 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.connector.MetadataProvider;
+import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.ConnectorIdentity;
 import io.trino.spi.type.TypeManager;
 import io.trino.testing.TestingConnectorContext;
@@ -71,6 +74,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TestHoglakeFileSystemCache
 {
+    private static final String TEAM_OBJECT = "s3://test-bucket/team_id=4/data.parquet";
+
     @Test
     void testRegisteredReadsValidateStorageAuthorization(@TempDir Path temporaryDirectory)
             throws IOException
@@ -133,6 +138,52 @@ class TestHoglakeFileSystemCache
                 finally {
                     connector.shutdown();
                 }
+            }
+        }
+    }
+
+    /**
+     * A posthog schema split's storage session, on a catalog whose own key S3
+     * refuses: the session's key alone signs, and every cache hit asks S3
+     * with one HEAD under the session, so a refused session fails the hit.
+     */
+    @Test
+    void testStorageSessionIsCheckedOnEveryCacheHit()
+            throws IOException
+    {
+        try (S3ObjectServer server = new S3ObjectServer()) {
+            server.deniedAccessKeys = Set.of("test-access");
+            BlobCache cache = new MemoryBlobCache(new MemoryBlobCacheConfig());
+            Connector connector = new HoglakeConnectorFactory().create("storage_session_test", Map.of(
+                    "hoglake.uri", "http://127.0.0.1:9",
+                    "hoglake.s3.endpoint", server.endpoint(),
+                    "hoglake.s3.access-key", "test-access",
+                    "hoglake.s3.secret-key", "test-secret",
+                    "hoglake.s3.path-style", "true",
+                    "s3.max-error-retries", "1",
+                    "fs.cache.enabled", "true"), new CacheContext(_ -> Optional.of(cache)));
+            try {
+                ConnectorSession session = TestingConnectorSession.builder().setPropertyMetadata(new HoglakeSessionProperties(new HoglakeConfig()).getSessionProperties()).build();
+                HoglakeTableHandle mount = new HoglakeTableHandle("posthog", "events", 1, "test-table", List.of(), TupleDomain.all(), List.of(), List.of(), false, Optional.of(new MountTable("org-events", "ingest")));
+                HoglakeSplit split = new HoglakeSplit(1, TEAM_OBJECT, server.data.length, 2, Optional.empty(), 0, Optional.empty())
+                        .withSession(new HoglakeStorageSession(4, "s3://test-bucket/team_id=4/", "team-access", "team-secret", "team-token", Long.MAX_VALUE));
+                assertThat(read(connector, session, mount, split)).containsExactly(List.of(11L), List.of(22L));
+                int coldReads = server.dataReads.get();
+                assertThat(coldReads).isPositive();
+                assertThat(server.metadataReads).hasValue(1);
+                assertThat(read(connector, session, mount, split)).containsExactly(List.of(11L), List.of(22L));
+                assertThat(server.dataReads).hasValue(coldReads);
+                assertThat(server.metadataReads).hasValue(2);
+
+                server.deniedAccessKeys = Set.of("test-access", "team-access");
+                assertThatThrownBy(() -> read(connector, session, mount, split))
+                        .isInstanceOf(TrinoException.class)
+                        .hasStackTraceContaining("Status Code: 403");
+                assertThat(server.metadataReads).hasValue(3);
+                assertThat(server.dataReads).hasValue(coldReads);
+            }
+            finally {
+                connector.shutdown();
             }
         }
     }
@@ -325,11 +376,17 @@ class TestHoglakeFileSystemCache
     private static List<List<Object>> read(Connector connector, ConnectorSession session, int fileSize, long dataFileId)
             throws IOException
     {
+        return read(connector, session, new HoglakeTableHandle("test", "table", 1, "test-table", List.of()), new HoglakeSplit(dataFileId, "s3://test-bucket/data.parquet", fileSize, 2, Optional.empty(), 0, Optional.empty()));
+    }
+
+    private static List<List<Object>> read(Connector connector, ConnectorSession session, HoglakeTableHandle table, HoglakeSplit split)
+            throws IOException
+    {
         try (ConnectorPageSource source = connector.getPageSourceProvider().createPageSource(
                 HoglakeTransactionHandle.INSTANCE,
                 session,
-                new HoglakeSplit(dataFileId, "s3://test-bucket/data.parquet", fileSize, 2, Optional.empty(), 0, Optional.empty()),
-                new HoglakeTableHandle("test", "table", 1, "test-table", List.of()),
+                split,
+                table,
                 Optional.empty(),
                 List.of(new HoglakeColumnHandle("value", 1, BIGINT, true)),
                 DynamicFilter.EMPTY,
@@ -358,7 +415,7 @@ class TestHoglakeFileSystemCache
                 throws IOException
         {
             server = HttpServer.create(new InetSocketAddress(InetAddress.getByAddress(new byte[] {127, 0, 0, 1}), 0), 0);
-            server.createContext("/test-bucket/data.parquet", exchange -> {
+            HttpHandler handler = exchange -> {
                 try (exchange) {
                     if (exchange.getRequestMethod().equals("HEAD")) {
                         metadataReads.incrementAndGet();
@@ -397,7 +454,9 @@ class TestHoglakeFileSystemCache
                     exchange.sendResponseHeaders(status, end - start + 1);
                     exchange.getResponseBody().write(content, start, end - start + 1);
                 }
-            });
+            };
+            server.createContext("/test-bucket/data.parquet", handler);
+            server.createContext("/" + TEAM_OBJECT.substring("s3://".length()), handler);
             server.start();
         }
 

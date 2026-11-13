@@ -98,6 +98,7 @@ import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_CATALOG_UNAVAILABLE;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE;
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_LOGIN_TOKEN_REFUSED;
+import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_STORAGE_SESSION_REFUSED;
 import static io.trino.plugin.hoglake.testing.ConnectorTestFixtures.session;
 import static io.trino.spi.StandardErrorCode.EXCEEDED_SCAN_LIMIT;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
@@ -483,6 +484,20 @@ final class TestHoglakePosthogSchema
         assertThat(mountTokens).singleElement().satisfies(token -> assertThat(loginOf(token)).contains(ALICE));
         assertThat(tokenRequests).filteredOn(TokenRequest::isExchange).hasSizeLessThanOrEqualTo(1).allMatch(request -> request.subject().equals(ALICE));
         assertNoWriteAndNoShadowRequest();
+    }
+
+    /**
+     * No coordinator attaches storage sessions yet, so a read of the posthog
+     * schema that needs storage is refused before any storage call, and a
+     * count answered from the catalog needs none.
+     */
+    @Test
+    void testReadWithoutAStorageSessionIsRefusedBeforeStorage()
+    {
+        assertTrinoExceptionThrownBy(() -> queryRunner.execute("SELECT event FROM org_on.posthog.events"))
+                .hasErrorCode(HOGLAKE_STORAGE_SESSION_REFUSED)
+                .hasMessage("A read of the posthog schema has no storage session");
+        assertThat(scalar("SELECT count(*) FROM org_on.posthog.events")).isEqualTo(7L);
     }
 
     @Test
