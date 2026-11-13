@@ -24,6 +24,7 @@ import io.opentelemetry.api.OpenTelemetry;
 import io.trino.filesystem.s3.S3FileSystemConfig;
 import io.trino.filesystem.s3.S3FileSystemFactory;
 import io.trino.filesystem.s3.S3FileSystemStats;
+import io.trino.plugin.base.metrics.TDigestHistogram;
 import io.trino.plugin.hoglake.HoglakeTableHandle.MountTable;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures;
 import io.trino.plugin.hoglake.testing.ConnectorTestFixtures.FileColumn;
@@ -39,6 +40,7 @@ import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.connector.SourcePage;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.ConnectorIdentity;
+import io.trino.spi.variant.Variant;
 import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -60,6 +62,7 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -82,6 +85,7 @@ import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_STORAGE_SESSION_E
 import static io.trino.plugin.hoglake.HoglakeErrorCode.HOGLAKE_STORAGE_SESSION_REFUSED;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.VariantType.VARIANT;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
 import static org.apache.parquet.schema.Types.optional;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -576,6 +580,95 @@ public final class TestHoglakeStorageSessions
         }
     }
 
+    /**
+     * A failure of a session split's read that is not a storage failure, here
+     * a shredded VARIANT that cannot be assembled, is reported as the expired
+     * error too once the session has expired: every storage call of the split
+     * fails from then on, so the read cannot finish either way.
+     */
+    @Test
+    void testAnyReadFailureAfterExpiryIsTheExpiredError()
+            throws IOException
+    {
+        // Field "a" has both a value and a typed_value, but it is not an object
+        String path = ROOT + "team_id=4/unreadable.parquet";
+        byte[] file = TestHoglakeShreddedVariant.write(
+                List.of(),
+                List.of(TestHoglakeShreddedVariant.row(TestHoglakeShreddedVariant.METADATA, null, Arrays.asList(Arrays.asList(Variant.ofLong(5).data(), 5L), Arrays.asList(null, null)))),
+                Optional.empty());
+        objects.put(path, file);
+        HoglakeColumnHandle variant = new HoglakeColumnHandle("v", 1, VARIANT, true);
+        HoglakeTableHandle table = new HoglakeTableHandle(
+                "posthog", "events", 7, "synthetic", List.of(variant), TupleDomain.all(), List.of(), List.of(), false, Optional.of(new MountTable("org-events", "ingest")));
+        long expiration = NOW + FIFTEEN_MINUTES;
+        HoglakeSplit split = new HoglakeSplit(3, path, file.length, 1, Optional.empty(), 0, Optional.empty()).withSession(session(4, expiration));
+        try {
+            // While the session lives, the failure is the file's own
+            try (ConnectorPageSource source = pageSource(ConnectorTestFixtures.session(), table, split, List.of(variant))) {
+                assertThatThrownBy(() -> ConnectorTestFixtures.readAll(source, List.of(VARIANT)))
+                        .isInstanceOfSatisfying(TrinoException.class, e -> assertThat(e.getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()))
+                        .hasMessage("Corrupt parquet data: " + path);
+            }
+            // The same read, opened in time and continued after the expiry; S3 serves every request it gets
+            try (ConnectorPageSource source = pageSource(ConnectorTestFixtures.session(), table, split, List.of(variant))) {
+                clock.set(expiration);
+                TrinoException failure = assertRefused(() -> ConnectorTestFixtures.readAll(source, List.of(VARIANT)), HOGLAKE_STORAGE_SESSION_EXPIRED, EXPIRED);
+                assertThat(failure).hasNoCause();
+            }
+            assertThat(s3Requests).isNotEmpty().allSatisfy(request -> assertThat(request).endsWith(accessKey(4) + " served"));
+        }
+        finally {
+            objects.remove(path);
+        }
+    }
+
+    /**
+     * How long a session has left when a worker starts a split with it: for
+     * each split in the page source's metrics, and the least of all splits in
+     * the catalog's counters.
+     */
+    @Test
+    void testTimeLeftAtStartIsReported()
+            throws IOException
+    {
+        // A provider of its own: the counters are those of a node since it started
+        HoglakePageSourceProvider provider = new HoglakePageSourceProvider(fileSystemFactory, HoglakeParquetFooterCache.disabled(), Optional.empty(), false, clock);
+        HoglakeStorageSessionStats stats = provider.storageSessionStats();
+        assertThat(stats.getSplitsStarted()).isZero();
+        assertThat(stats.getLeastMillisLeftAtStart()).isEqualTo(-1);
+        // Ten minutes left for one split, and four for the next
+        for (long minutesLeft : List.of(10L, 4L)) {
+            HoglakeSplit split = split(T4_BARE, Optional.empty()).withSession(session(4, NOW + minutesLeft * 60_000));
+            try (ConnectorPageSource source = pageSource(provider, MOUNT_TABLE, split, List.of(VALUE))) {
+                assertThat(ConnectorTestFixtures.readAll(source, List.of(BIGINT))).hasSize(2);
+                assertThat(source.getMetrics().getMetrics().get(HoglakePageSourceProvider.STORAGE_SESSION_SECONDS_LEFT_AT_START))
+                        .isInstanceOfSatisfying(TDigestHistogram.class, left -> {
+                            assertThat(left.getTotal()).isEqualTo(1);
+                            assertThat(left.getMin()).isEqualTo(minutesLeft * 60.0);
+                        });
+            }
+        }
+        assertThat(stats.getSplitsStarted()).isEqualTo(2);
+        assertThat(stats.getLeastMillisLeftAtStart()).isEqualTo(4 * 60_000);
+        // A count that reads a deletion vector starts with its session too
+        try (ConnectorPageSource source = pageSource(provider, MOUNT_TABLE, split(T4_DATA, Optional.of(T4_DV)).withSession(session(4, NOW + 3 * 60_000)), List.of())) {
+            assertThat(source.getNextSourcePage().getPositionCount()).isEqualTo(3);
+        }
+        assertThat(stats.getSplitsStarted()).isEqualTo(3);
+        assertThat(stats.getLeastMillisLeftAtStart()).isEqualTo(3 * 60_000);
+
+        // A split that is refused, that has expired, or that has no session starts nothing
+        assertRefused(() -> pageSource(provider, MOUNT_TABLE, split(T4_BARE, Optional.empty()).withSession(session(4, NOW)), List.of(VALUE)), HOGLAKE_STORAGE_SESSION_EXPIRED, EXPIRED);
+        assertRefused(() -> pageSource(provider, MOUNT_TABLE, split(T42_DATA, Optional.empty()).withSession(session(4)), List.of(VALUE)), HOGLAKE_PATH_OUTSIDE_TEAM_PREFIX, OUTSIDE);
+        assertRefused(() -> pageSource(provider, MOUNT_TABLE, split(T4_BARE, Optional.empty()), List.of(VALUE)), HOGLAKE_STORAGE_SESSION_REFUSED, REFUSED);
+        try (ConnectorPageSource source = pageSource(provider, ORG_TABLE, split(ORG_DATA, Optional.empty()), List.of(VALUE))) {
+            assertThat(ConnectorTestFixtures.readAll(source, List.of(BIGINT))).hasSize(2);
+            assertThat(source.getMetrics().getMetrics()).doesNotContainKey(HoglakePageSourceProvider.STORAGE_SESSION_SECONDS_LEFT_AT_START);
+        }
+        assertThat(stats.getSplitsStarted()).isEqualTo(3);
+        assertThat(stats.getLeastMillisLeftAtStart()).isEqualTo(3 * 60_000);
+    }
+
     private List<List<Object>> read(HoglakeTableHandle table, HoglakeSplit split)
     {
         return read(table, split, List.of(VALUE));
@@ -611,6 +704,11 @@ public final class TestHoglakeStorageSessions
         catch (IOException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private static ConnectorPageSource pageSource(HoglakePageSourceProvider provider, HoglakeTableHandle table, HoglakeSplit split, List<ColumnHandle> columns)
+    {
+        return provider.createPageSource(HoglakeTransactionHandle.INSTANCE, ConnectorTestFixtures.session(), split, table, Optional.empty(), columns, DynamicFilter.EMPTY, MemoryContext.NO_LIMIT);
     }
 
     private ConnectorPageSource pageSource(ConnectorSession session, HoglakeTableHandle table, HoglakeSplit split, List<ColumnHandle> columns)

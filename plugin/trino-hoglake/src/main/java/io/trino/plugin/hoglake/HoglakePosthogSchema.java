@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.hoglake;
 
+import io.airlift.units.DataSize;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeLoginTokenSource;
 import io.trino.spi.TrinoException;
@@ -28,6 +29,7 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.regex.Pattern;
 
+import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.spi.StandardErrorCode.PERMISSION_DENIED;
 import static java.util.Objects.requireNonNull;
 
@@ -76,6 +78,20 @@ public final class HoglakePosthogSchema
     public static final Duration STORAGE_SESSION_ACCEPT_FLOOR = Duration.ofMinutes(9);
 
     public static final Duration STORAGE_SESSION_REQUEST_TIMEOUT = Duration.ofSeconds(20);
+
+    /**
+     * The most splits of the schema handed to the engine at once, the least the
+     * engine takes: a split's session is then at most one batch old when the
+     * engine receives it.
+     */
+    public static final int SPLITS_PER_BATCH = 100;
+
+    /**
+     * The largest target split size for the schema's tables. A split waits on a
+     * worker behind the splits before it, on the lifetime of its session; smaller
+     * splits make that queue shorter in bytes.
+     */
+    public static final DataSize MAX_SPLIT_SIZE = DataSize.of(64, MEGABYTE);
 
     // hoglake MountNames.PATTERN without the suffix: a canonical lowercase UUID.
     private static final Pattern ORG_ID = Pattern.compile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
@@ -147,19 +163,20 @@ public final class HoglakePosthogSchema
      */
     public HoglakeClient client(ConnectorSession session)
     {
-        return mountClient.withLogin(loginTokens.forLogin(subject(session)));
+        return mountClient.withLogin(loginTokens.forLogin(login(session)));
     }
 
     /**
-     * The login a token is requested for: the session user, accepted only when it
-     * is the login that authenticated. Nothing else of the session is read.
+     * The login a token is requested for, and whose S3 sessions a split source
+     * hands out: the session user, accepted only when it is the login that
+     * authenticated. Nothing else of the session is read.
      *
      * <p>The session user alone is not enough. An impersonated session has another
      * user than its principal, and the body of a view that runs as its owner is
      * analyzed with the owner as the user and no principal. Both are refused, so
      * neither can read the schema as a login that did not authenticate.
      */
-    private static String subject(ConnectorSession session)
+    static String login(ConnectorSession session)
     {
         ConnectorIdentity identity = session.getIdentity();
         Optional<Principal> principal = identity.getPrincipal();

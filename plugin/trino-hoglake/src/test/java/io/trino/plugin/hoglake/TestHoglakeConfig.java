@@ -20,6 +20,7 @@ import io.trino.plugin.hoglake.rest.HoglakeTokenSource;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
@@ -49,7 +50,8 @@ class TestHoglakeConfig
                 .setAuthAudience("hoglake")
                 .setAuthToken(null)
                 .setAuthTokenFile(null)
-                .setPosthogSchemaEnabled(false));
+                .setPosthogSchemaEnabled(false)
+                .setPosthogSchemaCredentialsUri(null));
     }
 
     @Test
@@ -70,6 +72,7 @@ class TestHoglakeConfig
                         .put("hoglake.auth.token", "eyJhbGciOiJFUzI1NiJ9.e30.sig")
                         .put("hoglake.auth.token-file", "/etc/trino/hoglake.token")
                         .put("hoglake.posthog-schema.enabled", "true")
+                        .put("hoglake.posthog-schema.credentials-uri", "http://hogtower:8080/oauth/credentials")
                         .buildOrThrow(),
                 new HoglakeConfig()
                         .setUri("http://localhost:8080")
@@ -85,7 +88,39 @@ class TestHoglakeConfig
                         .setAuthAudience("hoglake-dev")
                         .setAuthToken("eyJhbGciOiJFUzI1NiJ9.e30.sig")
                         .setAuthTokenFile("/etc/trino/hoglake.token")
-                        .setPosthogSchemaEnabled(true));
+                        .setPosthogSchemaEnabled(true)
+                        .setPosthogSchemaCredentialsUri("http://hogtower:8080/oauth/credentials"));
+    }
+
+    @Test
+    void posthogSchemaCredentialsUriIsAnHttpUrl()
+    {
+        // Plain HTTP is allowed, as for the token endpoint
+        assertThat(new HoglakeConfig().setPosthogSchemaCredentialsUri(" http://hogtower:8080/oauth/credentials ").getPosthogSchemaCredentialsUri())
+                .contains("http://hogtower:8080/oauth/credentials");
+        assertThat(new HoglakeConfig().setPosthogSchemaCredentialsUri("https://hogtower/oauth/credentials").getPosthogSchemaCredentialsUri())
+                .contains("https://hogtower/oauth/credentials");
+        // Blank is unset
+        assertThat(new HoglakeConfig().setPosthogSchemaCredentialsUri("  ").getPosthogSchemaCredentialsUri()).isEmpty();
+        assertThat(new HoglakeConfig().getPosthogSchemaCredentialsUri()).isEmpty();
+        for (String invalid : List.of("hogtower:8080/oauth/credentials", "ftp://hogtower/oauth/credentials", "http:///oauth/credentials", "/oauth/credentials", "http://hog tower/")) {
+            assertThatThrownBy(() -> new HoglakeConfig().setPosthogSchemaCredentialsUri(invalid))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageStartingWith("Invalid hoglake.posthog-schema.credentials-uri '" + invalid + "'");
+        }
+        // The token endpoint's message still names its own property
+        assertThatThrownBy(() -> new HoglakeConfig().setAuthTokenUri("ftp://hogtower/oauth/token"))
+                .hasMessage("Invalid hoglake.auth.token-uri 'ftp://hogtower/oauth/token': must be an http(s) URL with a host");
+        // Nothing else fails the load: without the schema, and without a token endpoint
+        assertThat(parse(Map.of(
+                "hoglake.uri", "http://h:1",
+                "hoglake.catalog", "lake",
+                "hoglake.posthog-schema.credentials-uri", "http://hogtower:8080/oauth/credentials")).getPosthogSchemaCredentialsUri()).isPresent();
+        assertThat(parse(Map.of(
+                "hoglake.uri", "http://h:1",
+                "hoglake.catalog", "0b5f0c2e-1111-4222-8333-444455556666",
+                "hoglake.posthog-schema.enabled", "true",
+                "hoglake.posthog-schema.credentials-uri", "http://hogtower:8080/oauth/credentials")).getPosthogSchemaCredentialsUri()).isPresent();
     }
 
     @Test

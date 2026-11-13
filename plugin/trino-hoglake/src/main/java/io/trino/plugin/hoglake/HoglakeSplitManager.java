@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableList;
 import io.airlift.units.DataSize;
 import io.trino.filesystem.cache.NoopSplitAffinityProvider;
 import io.trino.filesystem.cache.SplitAffinityProvider;
+import io.trino.plugin.hoglake.HoglakeStorageSessionSplitSource.TeamSplit;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.SplitWeight;
@@ -31,6 +32,7 @@ import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.FixedSplitSource;
 import io.trino.spi.connector.TableNotFoundException;
 
+import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -74,6 +76,12 @@ import static java.util.Objects.requireNonNull;
  * provider only when the catalog caches filesystem data and to a no-op
  * otherwise, so an uncached catalog schedules splits without constraint.
  *
+ * <p>A table of the posthog schema is planned the same way, through its
+ * mount's scan. When the catalog issues S3 sessions for the schema, its splits
+ * are cut to at most {@link HoglakePosthogSchema#MAX_SPLIT_SIZE}, put in team
+ * order and handed out by {@link HoglakeStorageSessionSplitSource}, which
+ * attaches each team's session when the engine asks for a batch.
+ *
  * <p>The vector's bytes are not fetched at planning: a split describes a
  * worker's job, and the page source reads the vector through the
  * connector's filesystem for the split it is actually running. What is
@@ -90,6 +98,7 @@ public class HoglakeSplitManager
 
     private final HoglakeClient client;
     private final Optional<HoglakePosthogSchema> posthogSchema;
+    private final Optional<HoglakeStorageSessions> storageSessions;
     private final Function<ConnectorSession, DataSize> maxSplitSize;
     private final SplitAffinityProvider affinityProvider;
 
@@ -119,8 +128,25 @@ public class HoglakeSplitManager
      */
     public HoglakeSplitManager(HoglakeClient client, Optional<HoglakePosthogSchema> posthogSchema, Function<ConnectorSession, DataSize> maxSplitSize, SplitAffinityProvider affinityProvider)
     {
+        this(client, posthogSchema, Optional.empty(), maxSplitSize, affinityProvider);
+    }
+
+    /**
+     * A split manager that hands out the posthog schema's splits with the S3
+     * session of each split's team, when the catalog has {@code storageSessions}.
+     * Without them the schema's splits carry no session, and every other table
+     * is planned the same either way.
+     */
+    public HoglakeSplitManager(
+            HoglakeClient client,
+            Optional<HoglakePosthogSchema> posthogSchema,
+            Optional<HoglakeStorageSessions> storageSessions,
+            Function<ConnectorSession, DataSize> maxSplitSize,
+            SplitAffinityProvider affinityProvider)
+    {
         this.client = requireNonNull(client, "client is null");
         this.posthogSchema = requireNonNull(posthogSchema, "posthogSchema is null");
+        this.storageSessions = requireNonNull(storageSessions, "storageSessions is null");
         this.maxSplitSize = requireNonNull(maxSplitSize, "maxSplitSize is null");
         this.affinityProvider = requireNonNull(affinityProvider, "affinityProvider is null");
     }
@@ -138,12 +164,50 @@ public class HoglakeSplitManager
             return new FixedSplitSource(List.of());
         }
         List<HoglakeDtos.ScanFile> scan = prunedScan(HoglakeMetadata.clientFor(client, posthogSchema, session, handle), handle);
+        if (handle.mount().isPresent() && storageSessions.isPresent()) {
+            return sessionSplits(storageSessions.get(), session, handle, scan);
+        }
         // The isAll guard is load-bearing: a count over a pushed predicate
         // reads the files, so it keeps byte ranges and file pruning.
         if (handle.countOnly() && handle.constraint().isAll()) {
             return new FixedSplitSource(wholeFileSplits(scan, affinityProvider));
         }
         return new FixedSplitSource(toSplits(scan, maxSplitSize.apply(session).toBytes(), affinityProvider));
+    }
+
+    /**
+     * The splits of a posthog schema table, to be handed out with S3 sessions
+     * of the login that plans the scan. No session is asked for here.
+     *
+     * <p>Every file must name its team: the session of a file is its team's,
+     * and the team is never read from the file's path. A split that reads no
+     * storage, because its rows are counted from the catalog and it has no
+     * deletion vector, needs no session and gets none.
+     */
+    private ConnectorSplitSource sessionSplits(HoglakeStorageSessions sessions, ConnectorSession session, HoglakeTableHandle handle, List<HoglakeDtos.ScanFile> scan)
+    {
+        boolean countOnly = handle.countOnly() && handle.constraint().isAll();
+        long targetSplitSize = Math.min(maxSplitSize.apply(session).toBytes(), HoglakePosthogSchema.MAX_SPLIT_SIZE.toBytes());
+        ImmutableList.Builder<TeamSplit> splits = ImmutableList.builder();
+        for (HoglakeDtos.ScanFile file : scan) {
+            if (file.teamId() == null || file.teamId() <= 0) {
+                throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "hoglake scan returned a file of the posthog schema without its team");
+            }
+            List<HoglakeSplit> fileSplits;
+            if (countOnly) {
+                fileSplits = wholeFileSplits(ImmutableList.of(file), affinityProvider);
+            }
+            else {
+                fileSplits = toSplits(ImmutableList.of(file), targetSplitSize, affinityProvider);
+            }
+            for (HoglakeSplit split : fileSplits) {
+                // As the worker decides it: a count touches storage only for a file whose
+                // row count the catalog does not have, or for a deletion vector
+                boolean readsStorage = !countOnly || split.recordCount() < 0 || split.deleteFilePath().isPresent();
+                splits.add(new TeamSplit(file.teamId(), split, readsStorage));
+            }
+        }
+        return new HoglakeStorageSessionSplitSource(splits.build(), sessions.forLogin(HoglakePosthogSchema.login(session)), sessions.executor(), Clock.systemUTC());
     }
 
     /**

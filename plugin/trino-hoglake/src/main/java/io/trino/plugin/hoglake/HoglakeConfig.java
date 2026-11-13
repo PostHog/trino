@@ -54,6 +54,7 @@ public class HoglakeConfig
     private String authToken;
     private String authTokenFile;
     private boolean posthogSchemaEnabled;
+    private String posthogSchemaCredentialsUri;
 
     @NotNull
     public String getUri()
@@ -165,7 +166,7 @@ public class HoglakeConfig
     @ConfigDescription("OAuth2 token endpoint that mints Hoglake access tokens (client credentials grant)")
     public HoglakeConfig setAuthTokenUri(String authTokenUri)
     {
-        this.authTokenUri = authTokenUri == null || authTokenUri.isBlank() ? null : validateTokenUri(authTokenUri.trim());
+        this.authTokenUri = authTokenUri == null || authTokenUri.isBlank() ? null : validateHttpUri("hoglake.auth.token-uri", authTokenUri.trim());
         return this;
     }
 
@@ -250,6 +251,27 @@ public class HoglakeConfig
         return this;
     }
 
+    public Optional<String> getPosthogSchemaCredentialsUri()
+    {
+        return Optional.ofNullable(posthogSchemaCredentialsUri);
+    }
+
+    // Nothing but a malformed URL fails the load: set without the schema it is not
+    // used, and set without a token endpoint the schema's reads fail, typed. The
+    // control plane sets these independently, and a catalog that does not load
+    // takes the org's own tables down with it.
+    @Config("hoglake.posthog-schema.credentials-uri")
+    @ConfigDescription("Endpoint that issues the per-team S3 sessions that the coordinator attaches to the splits of the posthog schema; unset, they carry none")
+    public HoglakeConfig setPosthogSchemaCredentialsUri(String posthogSchemaCredentialsUri)
+    {
+        if (posthogSchemaCredentialsUri == null || posthogSchemaCredentialsUri.isBlank()) {
+            this.posthogSchemaCredentialsUri = null;
+            return this;
+        }
+        this.posthogSchemaCredentialsUri = validateHttpUri("hoglake.posthog-schema.credentials-uri", posthogSchemaCredentialsUri.trim());
+        return this;
+    }
+
     // A mount is named <orgID>-events, with the org id a canonical lowercase
     // UUID, so a catalog with any other name can never have one.
     @AssertTrue(message = "hoglake.posthog-schema.enabled requires hoglake.catalog to be an org id (a lowercase UUID)")
@@ -279,17 +301,17 @@ public class HoglakeConfig
                 + (authTokenFile == null ? 0 : 1);
     }
 
-    private static String validateTokenUri(String value)
+    private static String validateHttpUri(String property, String value)
     {
         URI parsed;
         try {
             parsed = new URI(value);
         }
         catch (URISyntaxException e) {
-            throw new IllegalArgumentException("Invalid hoglake.auth.token-uri '" + value + "': " + e.getMessage(), e);
+            throw new IllegalArgumentException("Invalid " + property + " '" + value + "': " + e.getMessage(), e);
         }
         if (!"http".equals(parsed.getScheme()) && !"https".equals(parsed.getScheme()) || parsed.getHost() == null) {
-            throw new IllegalArgumentException("Invalid hoglake.auth.token-uri '" + value + "': must be an http(s) URL with a host");
+            throw new IllegalArgumentException("Invalid " + property + " '" + value + "': must be an http(s) URL with a host");
         }
         return parsed.toString();
     }
