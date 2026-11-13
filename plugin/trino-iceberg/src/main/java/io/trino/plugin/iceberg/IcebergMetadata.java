@@ -164,9 +164,11 @@ import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.DeleteFiles;
+import org.apache.iceberg.ExpireSnapshots;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.FileMetadata;
 import org.apache.iceberg.FileScanTask;
+import org.apache.iceberg.GenericStatisticsFile;
 import org.apache.iceberg.IcebergTransactions;
 import org.apache.iceberg.IsolationLevel;
 import org.apache.iceberg.ManifestFile;
@@ -391,14 +393,17 @@ import static io.trino.plugin.iceberg.IcebergUtil.validateParquetBloomFilterColu
 import static io.trino.plugin.iceberg.IcebergUtil.verifyExtraProperties;
 import static io.trino.plugin.iceberg.PartitionFieldPredicate.canEnforcePartitionRowDomain;
 import static io.trino.plugin.iceberg.PartitionFields.parsePartitionFields;
+import static io.trino.plugin.iceberg.PartitionTransforms.getColumnTransform;
 import static io.trino.plugin.iceberg.SortFieldUtils.parseSortFields;
 import static io.trino.plugin.iceberg.StructLikeWrapperWithFieldIdToIndex.createStructLikeWrapper;
+import static io.trino.plugin.iceberg.TableStatisticsReader.getLatestStatisticsFile;
 import static io.trino.plugin.iceberg.TableStatisticsReader.readNdvs;
 import static io.trino.plugin.iceberg.TableStatisticsWriter.StatsUpdateMode.INCREMENTAL_UPDATE;
 import static io.trino.plugin.iceberg.TableStatisticsWriter.StatsUpdateMode.REPLACE;
 import static io.trino.plugin.iceberg.TableType.DATA;
 import static io.trino.plugin.iceberg.TypeConverter.toIcebergType;
 import static io.trino.plugin.iceberg.TypeConverter.toIcebergTypeForNewColumn;
+import static io.trino.plugin.iceberg.TypeConverter.toTrinoType;
 import static io.trino.plugin.iceberg.procedure.IcebergTableProcedureId.ADD_FILES;
 import static io.trino.plugin.iceberg.procedure.IcebergTableProcedureId.ADD_FILES_FROM_TABLE;
 import static io.trino.plugin.iceberg.procedure.IcebergTableProcedureId.DROP_EXTENDED_STATS;
@@ -488,6 +493,7 @@ import static org.apache.iceberg.expressions.Expressions.alwaysTrue;
 import static org.apache.iceberg.types.TypeUtil.indexParents;
 import static org.apache.iceberg.util.LocationUtil.stripTrailingSlash;
 import static org.apache.iceberg.util.PropertyUtil.propertyAsInt;
+import static org.apache.iceberg.util.SnapshotUtil.ancestorIdsBetween;
 import static org.apache.iceberg.util.SnapshotUtil.schemaFor;
 import static org.apache.iceberg.util.SortOrderUtil.findTableSortOrder;
 
@@ -1759,17 +1765,17 @@ public class IcebergMetadata
                 table.properties());
     }
 
-    private static SortFieldInfo getSupportedSortFields(Schema schema, SortOrder sortOrder, int sortOrderId)
+    private SortFieldInfo getSupportedSortFields(Schema schema, SortOrder sortOrder, int sortOrderId)
     {
         if (!sortOrder.isSorted()) {
             return new SortFieldInfo(SortOrder.unsorted().orderId(), ImmutableList.of());
         }
         ImmutableList.Builder<TrinoSortField> sortFields = ImmutableList.builder();
         for (SortField sortField : sortOrder.fields()) {
-            if (!sortField.transform().isIdentity()) {
+            if (schema.accessorForField(sortField.sourceId()) == null) {
                 continue;
             }
-            if (schema.accessorForField(sortField.sourceId()) == null) {
+            if (!isSupportedSortTransform(schema, sortField)) {
                 continue;
             }
 
@@ -1777,12 +1783,25 @@ public class IcebergMetadata
         }
 
         List<TrinoSortField> supportedSortFields = sortFields.build();
-        // Trino supports sorting only by identity transforms, so the supported sort fields in Trino may be a subset of the iceberg table sort order.
+        // The supported sort fields in Trino may be a subset of the iceberg table sort order (e.g., if a column was dropped).
         // The writer can populate sort_order_id in the iceberg metadata only when the iceberg table sort order is fully supported by Trino.
         if (supportedSortFields.size() == sortOrder.fields().size()) {
             return new SortFieldInfo(sortOrderId, supportedSortFields);
         }
         return new SortFieldInfo(SortOrder.unsorted().orderId(), supportedSortFields);
+    }
+
+    // Transforms that Trino cannot evaluate (e.g. multi-argument transforms of Iceberg v3) are treated as unsupported sort fields
+    private boolean isSupportedSortTransform(Schema schema, SortField sortField)
+    {
+        io.trino.spi.type.Type sourceType = toTrinoType(schema.findType(sortField.sourceId()), typeManager);
+        try {
+            getColumnTransform(sortField.transform().toString(), sourceType);
+            return true;
+        }
+        catch (UnsupportedOperationException e) {
+            return false;
+        }
     }
 
     private record SortFieldInfo(int sortOrderId, List<TrinoSortField> supportedSortFields) {}
@@ -2504,13 +2523,41 @@ public class IcebergMetadata
                 IcebergConfig.EXPIRE_SNAPSHOTS_MIN_RETENTION,
                 IcebergSessionProperties.EXPIRE_SNAPSHOTS_MIN_RETENTION);
 
-        // ForwardingFileIo handles bulk operations so no separate function implementation is needed
+        ExpireSnapshots expireSnapshots = table.expireSnapshots()
+                .expireOlderThan(session.getStart().toEpochMilli() - retention.toMillis())
+                .retainLast(retainLast)
+                .cleanExpiredMetadata(cleanExpiredMetadata)
+                .planWith(icebergScanExecutor);
+
         try {
-            commitUpdate(table.expireSnapshots()
-                    .expireOlderThan(session.getStart().toEpochMilli() - retention.toMillis())
-                    .retainLast(retainLast)
-                    .cleanExpiredMetadata(cleanExpiredMetadata)
-                    .planWith(icebergScanExecutor), "expire snapshots");
+            if (!isS3Tables(table.location()) && table.currentSnapshot() != null) {
+                long currentSnapshotId = table.currentSnapshot().snapshotId();
+                Optional<StatisticsFile> latestStatisticsFile = getLatestStatisticsFile(table, currentSnapshotId);
+                if (latestStatisticsFile.isPresent() && latestStatisticsFile.get().snapshotId() != currentSnapshotId) {
+                    StatisticsFile source = latestStatisticsFile.get();
+                    Set<Long> expiredSnapshotIds = expireSnapshots.apply().stream()
+                            .map(Snapshot::snapshotId)
+                            .collect(toImmutableSet());
+                    boolean sourceExpired = expiredSnapshotIds.contains(source.snapshotId());
+                    boolean intermediateAncestorExpired = Streams.stream(ancestorIdsBetween(currentSnapshotId, source.snapshotId(), table::snapshot))
+                            .anyMatch(expiredSnapshotIds::contains);
+                    if (sourceExpired || intermediateAncestorExpired) {
+                        // Re-register the statistics file on the current snapshot, as the expiry removes a snapshot on the ancestor path to it
+                        commitUpdate(
+                                table.updateStatistics()
+                                        .setStatistics(new GenericStatisticsFile(
+                                                currentSnapshotId,
+                                                source.path(),
+                                                source.fileSizeInBytes(),
+                                                source.fileFooterSizeInBytes(),
+                                                source.blobMetadata())),
+                                "retain statistics file");
+                    }
+                }
+            }
+
+            // ForwardingFileIo handles bulk operations so no separate function implementation is needed
+            commitUpdate(expireSnapshots, "expire snapshots");
         }
         catch (NotFoundException e) {
             throw new TrinoException(ICEBERG_INVALID_METADATA, e);
