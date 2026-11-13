@@ -276,26 +276,23 @@ public class DuckLakeFileWriter
             Optional<String> minValue = Optional.empty();
             Optional<String> maxValue = Optional.empty();
             if (field.statisticsSupported() && !containsNan.orElse(false)) {
-                Comparable<Object> min = null;
-                Comparable<Object> max = null;
+                // merge in the order of the column's Parquet type: Binary.compareTo is unsigned, so it
+                // puts negative long decimals, which are two's complement bytes, above positive ones
+                Statistics<?> merged = null;
                 for (Statistics<?> chunkStatistics : statistics) {
                     if (!chunkStatistics.hasNonNullValue()) {
                         continue;
                     }
-                    @SuppressWarnings("unchecked")
-                    Comparable<Object> chunkMin = (Comparable<Object>) chunkStatistics.genericGetMin();
-                    @SuppressWarnings("unchecked")
-                    Comparable<Object> chunkMax = (Comparable<Object>) chunkStatistics.genericGetMax();
-                    if (min == null || chunkMin.compareTo(min) < 0) {
-                        min = chunkMin;
+                    if (merged == null) {
+                        merged = chunkStatistics.copy();
                     }
-                    if (max == null || chunkMax.compareTo(max) > 0) {
-                        max = chunkMax;
+                    else {
+                        merged.mergeStatistics(chunkStatistics);
                     }
                 }
-                if (min != null) {
-                    minValue = StatsValueFormatter.format(field.type(), min);
-                    maxValue = StatsValueFormatter.format(field.type(), max);
+                if (merged != null) {
+                    minValue = StatsValueFormatter.format(field.type(), merged.genericGetMin());
+                    maxValue = StatsValueFormatter.format(field.type(), merged.genericGetMax());
                 }
             }
             return new DuckLakeFileColumnStatsRow(
