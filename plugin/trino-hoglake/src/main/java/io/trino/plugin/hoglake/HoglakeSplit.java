@@ -29,6 +29,7 @@ import static io.airlift.slice.SizeOf.estimatedSizeOf;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
 import static java.util.Objects.requireNonNull;
+import static java.util.Objects.requireNonNullElse;
 
 /**
  * One byte range of a data file from GET /scan, carrying the deletion
@@ -51,6 +52,11 @@ import static java.util.Objects.requireNonNull;
  * data file. It is compared against the decoded bitmap before a single row
  * is dropped, so a catalog that disagrees with its own vector fails the
  * query instead of returning a wrong row set.
+ *
+ * <p>{@code session} is the S3 session of the team whose prefix holds the
+ * file, for a split of a posthog schema table that reads storage. The worker
+ * reads the data file and its deletion vector with it and nothing else. A
+ * split serialized without the field has none.
  */
 public record HoglakeSplit(
         @JsonProperty("dataFileId") long dataFileId,
@@ -64,7 +70,8 @@ public record HoglakeSplit(
         @JsonProperty("length") long length,
         @JsonProperty("splitWeight") SplitWeight splitWeight,
         @JsonProperty("footerSize") OptionalLong footerSize,
-        @JsonProperty("affinityKey") Optional<String> affinityKey)
+        @JsonProperty("affinityKey") Optional<String> affinityKey,
+        @JsonProperty("session") Optional<HoglakeStorageSession> session)
         implements ConnectorSplit
 {
     private static final int INSTANCE_SIZE = instanceSize(HoglakeSplit.class);
@@ -78,9 +85,31 @@ public record HoglakeSplit(
         requireNonNull(splitWeight, "splitWeight is null");
         requireNonNull(footerSize, "footerSize is null");
         requireNonNull(affinityKey, "affinityKey is null");
+        // A split serialized before storage sessions existed has none
+        session = requireNonNullElse(session, Optional.empty());
         checkArgument(start >= 0, "start is negative: %s", start);
         checkArgument(length >= 0, "length is negative: %s", length);
         checkArgument(start + length <= fileSizeBytes, "range [%s, %s) exceeds file size %s", start, start + length, fileSizeBytes);
+    }
+
+    /**
+     * A split without a storage session.
+     */
+    public HoglakeSplit(
+            long dataFileId,
+            String path,
+            long fileSizeBytes,
+            long recordCount,
+            Optional<String> deleteFilePath,
+            long deleteCount,
+            Optional<String> deleteFileFormat,
+            long start,
+            long length,
+            SplitWeight splitWeight,
+            OptionalLong footerSize,
+            Optional<String> affinityKey)
+    {
+        this(dataFileId, path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat, start, length, splitWeight, footerSize, affinityKey, Optional.empty());
     }
 
     /**
@@ -129,7 +158,15 @@ public record HoglakeSplit(
      */
     public HoglakeSplit withRange(long start, long length, SplitWeight splitWeight, Optional<String> affinityKey)
     {
-        return new HoglakeSplit(dataFileId, path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat, start, length, splitWeight, footerSize, affinityKey);
+        return new HoglakeSplit(dataFileId, path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat, start, length, splitWeight, footerSize, affinityKey, session);
+    }
+
+    /**
+     * The same split carrying the S3 session of its team.
+     */
+    public HoglakeSplit withSession(HoglakeStorageSession session)
+    {
+        return new HoglakeSplit(dataFileId, path, fileSizeBytes, recordCount, deleteFilePath, deleteCount, deleteFileFormat, start, length, splitWeight, footerSize, affinityKey, Optional.of(session));
     }
 
     /**
@@ -184,6 +221,7 @@ public record HoglakeSplit(
                 + sizeOf(deleteFileFormat, SizeOf::estimatedSizeOf)
                 + splitWeight.getRetainedSizeInBytes()
                 + sizeOf(footerSize)
-                + sizeOf(affinityKey, SizeOf::estimatedSizeOf);
+                + sizeOf(affinityKey, SizeOf::estimatedSizeOf)
+                + sizeOf(session, HoglakeStorageSession::getRetainedSizeInBytes);
     }
 }

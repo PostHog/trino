@@ -384,8 +384,17 @@ public final class HoglakeDtos
 
     /**
      * One /scan entry: a data file paired with its live deletion vector, if any.
+     * A mount's scan also names the team whose partition holds the file
+     * ({@code team_id}); an org catalog's scan and a staged file have none.
      */
     public record ScanFile(
             @JsonProperty("data_file") DataFile dataFile,
-            @JsonProperty("delete_file") DeleteFile deleteFile) {}
+            @JsonProperty("delete_file") DeleteFile deleteFile,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("team_id") Long teamId)
+    {
+        public ScanFile(DataFile dataFile, DeleteFile deleteFile)
+        {
+            this(dataFile, deleteFile, null);
+        }
+    }
 }

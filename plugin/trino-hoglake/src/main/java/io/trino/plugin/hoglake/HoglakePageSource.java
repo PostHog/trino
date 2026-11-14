@@ -40,6 +40,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
+import java.util.function.UnaryOperator;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
@@ -331,6 +332,7 @@ public class HoglakePageSource
      */
     private final HoglakeSplitResources resources;
     private final Metrics splitMetrics;
+    private final UnaryOperator<TrinoException> readFailure;
 
     private boolean closed;
     private long completedPositions;
@@ -354,6 +356,23 @@ public class HoglakePageSource
             Metrics splitMetrics,
             long maxShreddedPageSizeInBytes)
     {
+        this(parquetReader, columns, deletionVector, resources, splitMetrics, maxShreddedPageSizeInBytes, UnaryOperator.identity());
+    }
+
+    /**
+     * With {@code readFailure} applied to every read failure, after it is
+     * turned into a {@link TrinoException}.
+     */
+    public HoglakePageSource(
+            ParquetReader parquetReader,
+            List<ColumnAdaptation> columns,
+            HoglakeDeletionVector deletionVector,
+            HoglakeSplitResources resources,
+            Metrics splitMetrics,
+            long maxShreddedPageSizeInBytes,
+            UnaryOperator<TrinoException> readFailure)
+    {
+        this.readFailure = requireNonNull(readFailure, "readFailure is null");
         this.parquetReader = requireNonNull(parquetReader, "parquetReader is null");
         this.columns = List.copyOf(columns);
         this.hasShreddedColumns = columns.stream().anyMatch(ShreddedVariantColumn.class::isInstance);
@@ -380,7 +399,7 @@ public class HoglakePageSource
             }
             catch (IOException | RuntimeException e) {
                 close();
-                throw handleException(parquetReader.getDataSource().getId(), e);
+                throw mapReadFailure(e);
             }
             if (page == null) {
                 close();
@@ -393,7 +412,7 @@ public class HoglakePageSource
                 }
                 catch (RuntimeException e) {
                     close();
-                    throw handleException(parquetReader.getDataSource().getId(), e);
+                    throw mapReadFailure(e);
                 }
                 completedPositions += adapted.getPositionCount();
                 return SourcePage.create(adapted);
@@ -404,7 +423,7 @@ public class HoglakePageSource
             }
             catch (RuntimeException e) {
                 close();
-                throw handleException(parquetReader.getDataSource().getId(), e);
+                throw mapReadFailure(e);
             }
             pendingPosition = 0;
             pendingBlocks = new Block[columns.size()];
@@ -416,7 +435,7 @@ public class HoglakePageSource
         }
         catch (IOException | RuntimeException e) {
             close();
-            throw handleException(parquetReader.getDataSource().getId(), e);
+            throw mapReadFailure(e);
         }
         completedPositions += next.getPositionCount();
         return SourcePage.create(next);
@@ -652,6 +671,11 @@ public class HoglakePageSource
         finally {
             resources.close();
         }
+    }
+
+    private TrinoException mapReadFailure(Exception exception)
+    {
+        return readFailure.apply(handleException(parquetReader.getDataSource().getId(), exception));
     }
 
     static TrinoException handleException(ParquetDataSourceId dataSourceId, Exception exception)
