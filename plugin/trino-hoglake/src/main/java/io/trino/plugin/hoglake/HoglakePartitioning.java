@@ -236,7 +236,7 @@ final class HoglakePartitioning
         if (!field.transform().equals("identity")) {
             long days = type.equals("date") ? column.type().getLong(block, position) : floorDiv(numeric(column, block, position), 86_400_000_000L);
             return switch (field.transform()) {
-                case "day" -> Long.toString(days);
+                case "day" -> dayValue(days);
                 case "hour" -> Long.toString(floorDiv(numeric(column, block, position), 3_600_000_000L));
                 case "year" -> Long.toString((long) LocalDate.ofEpochDay(days).getYear() - 1970);
                 case "month" -> {
@@ -269,6 +269,14 @@ final class HoglakePartitioning
             }
             default -> Long.toString(column.type().getLong(block, position));
         };
+    }
+
+    /**
+     * The partition value of a {@code day} transform: the days since the epoch, for a date or a timestamp.
+     */
+    static String dayValue(long epochDay)
+    {
+        return Long.toString(epochDay);
     }
 
     private static long numeric(HoglakeColumnHandle column, Block block, int position)

@@ -111,8 +111,18 @@ public final class HoglakeDtos
             @JsonProperty("expected_table_uuid") String expectedTableUuid,
             @JsonProperty("files") List<FileRegistration> files) {}
 
+    /**
+     * {@code ended_files} is sent only by the replacement endpoint, and counts the data files it ended.
+     */
     public record CommitResult(
-            @JsonProperty("snapshot_id") long snapshotId) {}
+            @JsonProperty("snapshot_id") long snapshotId,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("ended_files") Long endedFiles)
+    {
+        public CommitResult(long snapshotId)
+        {
+            this(snapshotId, null);
+        }
+    }
 
     public record CommitReceipt(
             @JsonProperty("operation_id") String operationId,
@@ -147,6 +157,52 @@ public final class HoglakeDtos
         public Commit(long readSnapshot, List<Append> appends)
         {
             this(readSnapshot, appends, List.of(), null);
+        }
+    }
+
+    /**
+     * The live data files of a table that a replacement ends: those in one of the partitions, or all of them.
+     * A tuple holds one value per field of the table's partition spec, spelled as in
+     * {@link FileRegistration#partitionValues}. Exactly one of {@code partitions} and {@code allFiles} is set.
+     */
+    public record FileEnd(
+            @JsonProperty("namespace") String namespace,
+            @JsonProperty("table") String table,
+            @JsonProperty("expected_table_uuid") String expectedTableUuid,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("partitions") List<List<String>> partitions,
+            @JsonProperty("all_files") boolean allFiles)
+    {
+        public FileEnd
+        {
+            requireNonNull(expectedTableUuid, "expectedTableUuid is null");
+            if (allFiles == (partitions != null)) {
+                throw new IllegalArgumentException("Exactly one of partitions and allFiles is required");
+            }
+            partitions = partitions == null ? null : partitions.stream().map(List::copyOf).toList();
+        }
+    }
+
+    /**
+     * A commit that ends files and appends files in one snapshot
+     * ({@code POST /commit/replacements/prepared}). It has no deletion vectors, and needs an author and a message.
+     */
+    public record ReplacementCommit(
+            @JsonProperty("read_snapshot") long readSnapshot,
+            @JsonProperty("appends") List<Append> appends,
+            @JsonProperty("deletes") List<Deletes> deletes,
+            @JsonProperty("file_ends") List<FileEnd> fileEnds,
+            @JsonProperty("idempotency_key") String operationId,
+            @JsonProperty("author") String author,
+            @JsonProperty("message") String message)
+    {
+        public ReplacementCommit
+        {
+            requireNonNull(appends, "appends is null");
+            requireNonNull(fileEnds, "fileEnds is null");
+            requireNonNull(operationId, "operationId is null");
+            requireNonNull(author, "author is null");
+            requireNonNull(message, "message is null");
+            deletes = List.of();
         }
     }
 

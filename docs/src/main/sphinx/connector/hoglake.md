@@ -849,6 +849,89 @@ write again. Inspect the durable receipt when publication has an unknown outcome
 All server replicas must support claimed uploads before enabling write retries;
 there is no fallback to unclaimed publication.
 
+### Registering existing Parquet files
+
+`ALTER TABLE ... EXECUTE add_files` registers Parquet files that a writer
+outside Trino already put in the catalog's storage, such as a bulk export. It
+can end the table's old data files in the same snapshot, so readers see the
+old rows or the new rows, never a mix.
+
+```sql
+ALTER TABLE example.team_2.events EXECUTE add_files(
+    location => 's3://bucket/warehouses/org/data/team_2/_backfill/events/day=2026-11-09/',
+    file_prefix => 'run_17_',
+    import_id => 'run_17',
+    allow_missing => true,
+    delete_on_failure => true,
+    replace_range_column => 'timestamp',
+    replace_range_start => '2026-11-09 00:00:00.000000 UTC',
+    replace_range_end => '2026-11-10 00:00:00.000000 UTC');
+```
+
+The procedure returns the metrics `added_data_files` and `ended_data_files`.
+It runs on the coordinator, and uses the filesystem and the catalog's
+credentials. It needs the permission to insert into the table, and to delete
+from it when it replaces data. The name and properties match the DuckLake
+connector's procedure.
+
+| Property | Meaning |
+| --- | --- |
+| `location` | A directory to list recursively. Files whose names end in `.parquet`, and start with `file_prefix` when it is set, are registered. It must lie in the catalog's data path. |
+| `files` | An explicit list of files, instead of `location`. Exactly one of the two is required. |
+| `file_prefix` | Registers only the files of `location` whose names start with it. |
+| `import_id` | Required. A stable identifier of the import, 1 to 128 letters, digits, underscores or hyphens. |
+| `expected_rows` | Refuses the statement unless the files to register hold exactly this many rows, counting files with no rows as zero. It is checked before any commit is sent, so `delete_on_failure` applies. `0` with no files is valid and ends the replaced days. Pass the row count of the export, so that a retry that finds the files already deleted fails instead of silently replacing the days with nothing. |
+| `allow_missing` | Allows a table column that a file lacks, when the column is nullable. Default `false`. |
+| `delete_on_failure` | With `location` only. Deletes the listed files when validation refuses any of them, before a commit is sent. Default `false`. |
+| `replace` | Ends every data file of the table in the same snapshot. |
+| `replace_range_column`, `replace_range_start`, `replace_range_end` | Ends the data files of the days in `[start, end)`. All three are required together, and exclusive with `replace`. |
+
+The statement is idempotent. The commit uses a key derived from the table's UUID and
+`import_id`, so a repeat after `CREATE OR REPLACE TABLE` is not mistaken for the
+earlier import, and a repeat that finds the commit already applied lists and reads
+nothing and returns zero for both metrics. A lost response is resolved from
+the server's receipt, as for INSERT. When only a receipt confirms a
+replacement, whether the connector recovered it or the server replayed it, the
+number of ended files is not known, and `ended_data_files` is `-1`. A failed commit never deletes files: a conflict is the server's answer,
+and the same statement can be repeated.
+
+Each file's footer is read, with bounded concurrency, and the file is refused
+unless:
+
+- it is a Parquet file. Files with no rows are skipped.
+- every file column is a table column, bound by field ID and then by name.
+  A table column that the file lacks is refused, unless `allow_missing` is set
+  and the column is nullable.
+- each column can be read as the table column's type. Physical types and
+  logical annotations must match what the connector writes for the type, with
+  these exceptions: a timestamp's UTC adjustment is ignored but its unit must
+  match, and strings may lack the `STRING` annotation. Other differences,
+  such as a wider integer, are refused. A table column that is not nullable
+  needs a required file column, or statistics that prove it holds no nulls.
+  Lists and maps need the standard three-level layout.
+
+The table must be unpartitioned, or partitioned by one `day` field on a
+top-level date or timestamp column. For a partitioned table each file must
+hold one day: the smallest and largest value in the column's statistics must
+fall in the same day, the column must hold no nulls, and the file must have
+statistics. The partition value is registered with the file. A file that spans
+two days is refused.
+
+A range replacement needs the table partitioned by `day` of `replace_range_column`
+on a date, timestamp or timestamp with time zone column. Both bounds must be
+on UTC day boundaries, at most 3660 days apart, and every registered file must
+fall in the range. A range that matches no data files is allowed, and with no
+files only ends the days. A `location` with no matching file and no replacement
+does nothing. An empty `files` list is accepted only with a replacement.
+
+Registration without replacement requires the server capability
+`idempotent-append-v1`, and replacement requires `atomic-partition-replacement-v1`;
+deploy the server first. The replacement commit is one request that ends files
+and appends files, guarded by the table UUID and the snapshot the statement
+planned against. Concurrent changes to the table reject it, and the statement
+can be repeated. Ended files are retired by the server's normal retention and
+cleanup, not at commit. The procedure is not available in explicit transactions.
+
 ### Multi-statement DML transactions
 
 Servers advertising `atomic-dml-transactions-v1` and `claimed-uploads-v1` support

@@ -25,12 +25,14 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ColumnPosition;
+import io.trino.spi.connector.ConnectorAccessControl;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorOutputMetadata;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorTableExecuteHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableLayout;
 import io.trino.spi.connector.ConnectorTableMetadata;
@@ -900,6 +902,45 @@ public class HoglakeMetadata
             operation = Optional.of(transaction == null ? UUID.randomUUID().toString() : transaction.operation());
         }
         return new HoglakeWriteHandle(handle.schemaName(), handle.tableName(), handle.tableUuid(), handle.snapshotId(), tableWritePath(catalog.dataPath(), handle.schemaName(), handle.tableName()), handle.columns(), inputs, Optional.empty(), operation, partitionFields, sortFields, catalog.capabilities() != null && catalog.capabilities().contains("claimed-uploads-v1"));
+    }
+
+    /**
+     * {@code add_files} needs the permission to insert into the table, and to delete from it
+     * when it replaces data, as DuckLake's does.
+     */
+    @Override
+    public Optional<ConnectorTableExecuteHandle> getTableHandleForExecute(
+            ConnectorSession session,
+            ConnectorAccessControl accessControl,
+            ConnectorTableHandle tableHandle,
+            String procedureName,
+            Map<String, Object> properties,
+            RetryMode retryMode)
+    {
+        if (!procedureName.equalsIgnoreCase(HoglakeAddFilesProcedure.NAME)) {
+            return Optional.empty();
+        }
+        if (transaction != null) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake add_files is not supported in explicit transactions; use an autocommit statement");
+        }
+        HoglakeTableHandle table = (HoglakeTableHandle) tableHandle;
+        accessControl.checkCanInsertIntoTable(null, table.schemaTableName(), Optional.empty());
+        if (HoglakeAddFiles.replaces(properties)) {
+            accessControl.checkCanDeleteFromTable(null, table.schemaTableName(), Optional.empty());
+        }
+        return Optional.of(HoglakeAddFiles.plan(client, table, properties));
+    }
+
+    @Override
+    public Map<String, Long> executeTableExecute(ConnectorSession session, ConnectorTableExecuteHandle tableExecuteHandle)
+    {
+        if (!(tableExecuteHandle instanceof HoglakeAddFilesHandle handle)) {
+            throw new IllegalArgumentException("Unknown table procedure handle: " + tableExecuteHandle);
+        }
+        if (fileSystemFactory == null) {
+            throw new TrinoException(NOT_SUPPORTED, "Hoglake add_files requires a filesystem");
+        }
+        return HoglakeAddFiles.execute(session, client, fileSystemFactory.create(session), handle);
     }
 
     @Override
