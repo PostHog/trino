@@ -754,7 +754,7 @@ class TestHoglakeShreddedVariant
      */
     private static List<List<Object>> read(TrinoFileSystemFactory fileSystem, HoglakeSplit split, List<HoglakeColumnHandle> columns)
     {
-        ConnectorPageSource pageSource = new HoglakePageSourceProvider(fileSystem).createPageSource(
+        try (ConnectorPageSource pageSource = new HoglakePageSourceProvider(fileSystem).createPageSource(
                 HoglakeTransactionHandle.INSTANCE,
                 ConnectorTestFixtures.session(),
                 split,
@@ -762,19 +762,13 @@ class TestHoglakeShreddedVariant
                 Optional.empty(),
                 columns.stream().map(ColumnHandle.class::cast).toList(),
                 DynamicFilter.EMPTY,
-                MemoryContext.NO_LIMIT);
-        try {
+                MemoryContext.NO_LIMIT)) {
             return ConnectorTestFixtures.readAll(pageSource, columns.stream().map(HoglakeColumnHandle::type).toList()).stream()
                     .map(row -> row.stream().map(TestHoglakeShreddedVariant::comparable).toList())
                     .toList();
         }
-        finally {
-            try {
-                pageSource.close();
-            }
-            catch (IOException e) {
-                throw new UncheckedIOException(e);
-            }
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
     }
 
