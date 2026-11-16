@@ -1,6 +1,6 @@
-# Agent guidance
+# TruffleHog — Agent guidance
 
-These instructions apply to all automated coding agents working in this repository.
+These instructions apply to all automated coding agents working in this repository (`PostHog/trufflehog`, PostHog's custom fork of Trino).
 
 ## Public repository and data handling
 

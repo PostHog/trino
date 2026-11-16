@@ -14,8 +14,8 @@
     <packaging>pom</packaging>
 
     <name>${project.artifactId}</name>
-    <description>Trino</description>
-    <url>https://trino.io</url>
+    <description>TruffleHog</description>
+    <url>https://github.com/PostHog/trufflehog</url>
 
     <inceptionYear>2012</inceptionYear>
 
@@ -146,10 +146,10 @@
     </modules>
 
     <scm child.scm.connection.inherit.append.path="false" child.scm.developerConnection.inherit.append.path="false" child.scm.url.inherit.append.path="false">
-        <connection>scm:git:git://github.com/trinodb/trino.git</connection>
-        <developerConnection>scm:git:git@github.com:trinodb/trino.git</developerConnection>
+        <connection>scm:git:https://github.com/PostHog/trufflehog.git</connection>
+        <developerConnection>scm:git:git@github.com:PostHog/trufflehog.git</developerConnection>
         <tag>479</tag>
-        <url>https://github.com/trinodb/trino</url>
+        <url>https://github.com/PostHog/trufflehog</url>
     </scm>
 
     <properties>

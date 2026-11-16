@@ -1,13 +1,11 @@
-# Contributing to Trino
+# Contributing to TruffleHog
 
-## Contributor License Agreement ("CLA")
+TruffleHog is PostHog's custom fork of [Trino](https://github.com/trinodb/trino).
 
-In order to accept your pull request, we need you to [submit a CLA](https://github.com/trinodb/cla).
+## Safety & Public Repository Guidelines
+
+Before opening an issue or pull request, read [AGENTS.md](../AGENTS.md) and [DEVELOPMENT.md](DEVELOPMENT.md). Never include customer data, internal identifiers, private endpoints, or secrets in issues, pull requests, tests, or commit messages.
 
 ## License
 
-By contributing to Trino, you agree that your contributions will be licensed under the [Apache License Version 2.0 (APLv2)](../LICENSE).
-
-## Contribution process
-
-See the suggested [process for contributions](https://trino.io/development/process.html).
+By contributing to TruffleHog, you agree that your contributions will be licensed under the [Apache License Version 2.0 (APLv2)](../LICENSE).

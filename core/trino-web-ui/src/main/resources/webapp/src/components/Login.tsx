@@ -24,7 +24,6 @@ import {
     Typography,
 } from '@mui/material'
 import { useAuth } from './AuthContext'
-import trinoLogo from '../assets/trino.svg'
 import { Texts } from '../constant'
 import { useSnackbar } from './SnackbarContext.ts'
 
@@ -79,7 +78,9 @@ export const Login = (props: ILoginProps) => {
                     <Card sx={{ px: 2, minWidth: 350 }}>
                         <CardContent sx={{ alignItems: 'center', textAlign: 'center' }}>
                             <Grid sx={{ justifyContent: 'center' }}>
-                                <Box component="img" sx={{ height: 80 }} alt="logo" src={trinoLogo} />
+                                <Typography component="div" variant="h4" sx={{ fontWeight: 600, py: 2 }}>
+                                    TruffleHog
+                                </Typography>
                                 <Typography component="h1" variant="h5">
                                     {Texts.Auth.LoginForm.LogIn}
                                 </Typography>

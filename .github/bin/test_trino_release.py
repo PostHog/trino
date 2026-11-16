@@ -10,8 +10,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / ".github/bin/trino-release.sh"
-REPOSITORY = "111122223333.dkr.ecr.us-east-1.amazonaws.com/posthog-trino"
-MIRROR = "ghcr.io/posthog/trino"
+REPOSITORY = "111122223333.dkr.ecr.us-east-1.amazonaws.com/trufflehog"
+MIRROR = "ghcr.io/posthog/trufflehog"
 RAW_DIGEST = "sha256:" + "1" * 64
 RELEASE_DIGEST = "sha256:" + "2" * 64
 
@@ -86,12 +86,12 @@ class ReleaseContractTest(unittest.TestCase):
         self.environment = dict(os.environ, PATH=f"{self.directory}:{os.environ['PATH']}",
                                 ECR_REPOSITORY=REPOSITORY,
                                 MOCK_REGISTRY=str(self.registry), GITHUB_OUTPUT=str(self.output),
-                                GITHUB_REPOSITORY="PostHog/trino", GITHUB_REF="refs/heads/master",
+                                GITHUB_REPOSITORY="PostHog/trufflehog", GITHUB_REF="refs/heads/master",
                                 GITHUB_EVENT_NAME="push", GITHUB_SHA=self.sha,
                                 GITHUB_RUN_ID="12345", GITHUB_RUN_ATTEMPT="1", BUILD_DIGEST=RAW_DIGEST)
         state = self.state()
         state["manifests"][RAW_DIGEST]["annotations"] = {
-            "org.opencontainers.image.source": "https://github.com/PostHog/trino",
+            "org.opencontainers.image.source": "https://github.com/PostHog/trufflehog",
             "org.opencontainers.image.revision": self.sha}
         self.registry.write_text(json.dumps(state))
 
@@ -114,7 +114,7 @@ class ReleaseContractTest(unittest.TestCase):
         self.assertEqual(state["tags"][f"{MIRROR}:{self.tag}"], RELEASE_DIGEST)
         self.assertEqual(state["tags"][f"{MIRROR}:{self.sha}"], RELEASE_DIGEST)
         self.assertEqual(state["manifests"][RELEASE_DIGEST]["annotations"], {
-            "org.opencontainers.image.source": "https://github.com/PostHog/trino",
+            "org.opencontainers.image.source": "https://github.com/PostHog/trufflehog",
             "org.opencontainers.image.revision": self.sha})
         self.environment["BUILD_DIGEST"] = ""
         self.environment["GITHUB_RUN_ATTEMPT"] = "2"
@@ -131,7 +131,8 @@ class ReleaseContractTest(unittest.TestCase):
     def test_rejects_untrusted_refs_events_and_source_mismatch(self):
         for key, value in [("GITHUB_REF", "refs/heads/feature"),
                            ("GITHUB_EVENT_NAME", "pull_request"),
-                           ("GITHUB_REPOSITORY", "someone/trino"),
+                           ("GITHUB_REPOSITORY", "someone/trufflehog"),
+                           ("GITHUB_REPOSITORY", "PostHog/trino"),
                            ("GITHUB_SHA", "a" * 40)]:
             with self.subTest(key=key):
                 original = self.environment[key]
@@ -141,8 +142,8 @@ class ReleaseContractTest(unittest.TestCase):
         self.assertEqual(self.state()["writes"], [])
 
     def test_canonical_ecr_repository_is_required(self):
-        for repository in ["", "ghcr.io/posthog/trino", REPOSITORY.replace("us-east-1", "eu-west-1"),
-                           REPOSITORY.replace("posthog-trino", "other"), "https://" + REPOSITORY]:
+        for repository in ["", "ghcr.io/posthog/trufflehog", REPOSITORY.replace("us-east-1", "eu-west-1"),
+                           REPOSITORY.replace("trufflehog", "other"), "https://" + REPOSITORY]:
             with self.subTest(repository=repository):
                 self.environment["ECR_REPOSITORY"] = repository
                 self.run_phase("prepare", success=False)
@@ -308,7 +309,7 @@ class ImageBuildContractTest(unittest.TestCase):
             command.chmod(0o755)
         self.environment = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}",
                                 TMPDIR=str(self.directory), BUILD_ARGUMENTS=str(self.calls),
-                                OCI_SOURCE="https://github.com/PostHog/trino", OCI_REVISION="a" * 40)
+                                OCI_SOURCE="https://github.com/PostHog/trufflehog", OCI_REVISION="a" * 40)
 
     def build(self, *arguments):
         return subprocess.run(["bash", str(self.script), *arguments], env=self.environment,
@@ -324,7 +325,7 @@ class ImageBuildContractTest(unittest.TestCase):
         self.assertIn("--provenance=false", arguments)
         self.assertEqual(arguments[arguments.index("--tag") + 1], reference)
         self.assertEqual(arguments[arguments.index("--platform") + 1], "linux/arm64")
-        self.assertIn("manifest:org.opencontainers.image.source=https://github.com/PostHog/trino", arguments)
+        self.assertIn("manifest:org.opencontainers.image.source=https://github.com/PostHog/trufflehog", arguments)
         self.assertIn("manifest:org.opencontainers.image.revision=" + "a" * 40, arguments)
 
     def test_default_local_build_stays_local(self):

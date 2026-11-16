@@ -1,12 +1,12 @@
-name: docker-publish-posthog
+name: docker-publish-trufflehog
 
-# Builds the PostHog fork's Trino server image (with the ducklake connector)
+# Builds the TruffleHog server image (with the hoglake and ducklake connectors)
 # for linux/arm64 and publishes the same digest to ECR and GHCR.
-# The managed-warehouse trino Karpenter
+# The managed-warehouse Karpenter
 # node pool is arm64-only, so amd64 is skipped to keep CI fast.
 #
 # Every run also tells PostHog/charts what it built. Charts records the image
-# in state/trino.yaml and rolls the dev cell; the prod cell moves only when
+# in state/trufflehog.yaml and rolls the dev cell; the prod cell moves only when
 # somebody runs promote-to-prod, which the prod-promote-managed-warehouse
 # environment gates. See the deploy job at the end of this file.
 
@@ -33,7 +33,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: trino-image-publisher-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'master' }}
+  group: trufflehog-image-publisher-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'master' }}
   cancel-in-progress: false
 
 jobs:
@@ -50,7 +50,7 @@ jobs:
   build-and-push:
     needs: test-release-contract
     if: >-
-      github.repository == 'PostHog/trino'
+      github.repository == 'PostHog/trufflehog'
       && github.ref == 'refs/heads/master'
       && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04-arm
@@ -87,7 +87,7 @@ jobs:
       - name: Resolve source-ordered release
         id: metadata
         env:
-          ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/posthog-trino
+          ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/trufflehog
         run: bash .github/bin/trino-release.sh prepare
 
       - name: Set up OCI registry exporter
@@ -122,8 +122,8 @@ jobs:
         id: push
         if: steps.metadata.outputs.digest == '' && steps.metadata.outputs.build-digest == ''
         env:
-          ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/posthog-trino
-          OCI_SOURCE: https://github.com/PostHog/trino
+          ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/trufflehog
+          OCI_SOURCE: https://github.com/PostHog/trufflehog
           OCI_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -148,13 +148,13 @@ jobs:
       - name: Publish verified release aliases
         id: release
         env:
-          ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/posthog-trino
+          ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/trufflehog
           BUILD_DIGEST: ${{ steps.push.outputs.digest || steps.metadata.outputs.build-digest }}
           READABLE_TAG: ${{ steps.tag.outputs.tag }}
         run: bash .github/bin/trino-release.sh publish
 
   deploy:
-    # Tells charts what to run. Charts writes state/trino.yaml and rolls the
+    # Tells charts what to run. Charts writes state/trufflehog.yaml and rolls the
     # dev cell; the prod cell waits for promote-to-prod, which the
     # prod-promote-managed-warehouse environment gates.
     #
@@ -164,7 +164,7 @@ jobs:
     # commit and charts would record a deploy it cannot attribute.
     needs: build-and-push
     if: >-
-      github.repository == 'PostHog/trino'
+      github.repository == 'PostHog/trufflehog'
       && github.event_name == 'push'
       && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
@@ -192,7 +192,7 @@ jobs:
                   "sha": "${{ github.sha }}@${{ needs.build-and-push.outputs.digest }}"
                 }
               },
-              "release": "trino",
+              "release": "trufflehog",
               "commit": ${{ toJson(github.event.head_commit) }},
               "repository": ${{ toJson(github.repository) }},
               "labels": [],

@@ -38,7 +38,6 @@ import ChevronRightIcon from '@mui/icons-material/ChevronRight'
 import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord'
 import LogoutIcon from '@mui/icons-material/Logout'
 import { Texts } from '../constant'
-import trinoLogo from '../assets/trino.svg'
 import { RouterItem, routers, routersMapper } from '../router.tsx'
 import { Theme as ThemeStore, useConfigStore } from '../store'
 import { useAuth } from './AuthContext'
@@ -226,23 +225,22 @@ export const RootLayout = (props: { children: React.ReactNode }) => {
         <Box sx={{ display: 'flex' }}>
             <AppBar position="fixed" sx={{ zIndex: (theme) => theme.zIndex.drawer + 1 }}>
                 <Toolbar>
-                    <Box component="img" sx={{ height: 50 }} alt="logo" src={trinoLogo} />
                     <Typography
                         variant="h6"
                         noWrap
                         component="a"
                         href="/"
                         sx={{
-                            mx: 2,
+                            mx: 1,
                             display: 'flex',
                             flexGrow: 1,
                             fontFamily: 'roboto',
-                            fontWeight: 400,
+                            fontWeight: 600,
                             color: 'inherit',
                             textDecoration: 'none',
                         }}
                     >
-                        Trino
+                        TruffleHog
                     </Typography>
                     <Stack
                         direction="row"

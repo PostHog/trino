@@ -109,10 +109,10 @@ public class ClientOptions
     private static final String SOURCE_DEFAULT = "trino-cli";
     static final String DEBUG_OPTION_NAME = "--debug";
 
-    @Parameters(paramLabel = "URL", description = "Trino server URL", arity = "0..1")
+    @Parameters(paramLabel = "URL", description = "TruffleHog server URL", arity = "0..1")
     public Optional<String> url;
 
-    @Option(names = "--server", paramLabel = "<server>", description = "Trino server location (default: " + SERVER_DEFAULT + ")")
+    @Option(names = "--server", paramLabel = "<server>", description = "TruffleHog server location (default: " + SERVER_DEFAULT + ")")
     public Optional<String> server;
 
     @PropertyMapping(KERBEROS_SERVICE_PRINCIPAL_PATTERN)

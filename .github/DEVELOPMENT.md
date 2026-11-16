@@ -1,6 +1,6 @@
 # Development
 
-In this document you can find information about developing Trino.
+In this document you can find information about developing TruffleHog (PostHog's custom fork of Trino). Upstream Trino conventions and SPI guidelines continue to apply unless noted otherwise.
 
 * [Trino organization](#trino-organization)
 * [Trino developer guide](#trino-developer-guide)

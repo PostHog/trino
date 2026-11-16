@@ -43,7 +43,7 @@ public class TerminalUtils
                 return TerminalBuilder.builder()
                         .system(true)
                         .dumb(false)
-                        .name("Trino")
+                        .name("TruffleHog")
                         .build();
             }
             catch (IllegalStateException e) {
@@ -51,7 +51,7 @@ public class TerminalUtils
                 return TerminalBuilder.builder()
                         .system(true)
                         .dumb(true)
-                        .name("Trino")
+                        .name("TruffleHog")
                         .build();
             }
         }

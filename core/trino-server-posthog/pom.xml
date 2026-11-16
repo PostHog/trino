@@ -12,7 +12,7 @@
     <artifactId>trino-server-posthog</artifactId>
     <packaging>provisio</packaging>
     <name>${project.artifactId}</name>
-    <description>Trino - Server package (PostHog fork, managed-warehouse plugin set)</description>
+    <description>TruffleHog - Server package (PostHog fork, managed-warehouse plugin set)</description>
 
     <!--
         Fork-owned server package. This module exists only in the PostHog fork and is

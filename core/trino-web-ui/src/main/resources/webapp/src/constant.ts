@@ -17,7 +17,7 @@ export enum StoreKey {
 
 export const Texts = {
     Auth: {
-        Authenticating: 'Authenticating to Trino...',
+        Authenticating: 'Authenticating to TruffleHog...',
         LoginForm: {
             PasswordNotAllowed: 'Password not allowed',
             Username: 'Username',
@@ -39,7 +39,7 @@ export const Texts = {
     },
     Error: {
         NotImplemented: 'This feature is not implemented',
-        Communication: 'Communication error to Trino.',
+        Communication: 'Communication error to TruffleHog.',
         Forbidden: 'Forbidden',
         Network: 'The network has wandered off, please try again later!',
         NodeInformationNotLoaded: 'Node information could not be loaded',

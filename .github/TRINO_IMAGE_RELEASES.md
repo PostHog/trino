@@ -1,4 +1,4 @@
-# PostHog image releases
+# TruffleHog image releases
 
 The publisher runs only for pushes to `master` and manual dispatches on `master`.
 Tag pushes no longer publish images. Use a manual dispatch on `master` to add a
@@ -9,9 +9,9 @@ The ordered tag is `r<12-digit first-parent commit count>-<6-character revision>
 The checkout must contain complete history and match the workflow revision.
 This orders releases by source history, independently of build completion order.
 
-The canonical image repository is `posthog-trino` in `us-east-1`.
+The canonical image repository is `trufflehog` in `us-east-1`.
 The workflow derives its registry address from the authenticated ECR login.
-The publisher mirrors the same image to `ghcr.io/posthog/trino` for existing
+The publisher mirrors the same image to `ghcr.io/posthog/trufflehog` for existing
 consumers. It builds once, then copies the image and its layers between
 registries without rebuilding.
 
@@ -19,10 +19,10 @@ The image is wrapped in an OCI index carrying manifest-level
 `org.opencontainers.image.source` and `org.opencontainers.image.revision`
 annotations. The ordered tag, full revision alias, and optional readable alias
 resolve to this same index digest. ECR receives only the ordered and full
-revision aliases. Readable aliases remain GHCR-only. The existing charts state
+revision aliases. Readable aliases remain GHCR-only. The charts state
 dispatch receives the digest only after both registries pass read-back checks
 and continues to run only after a push to `master`. Merging this workflow can
-therefore roll the existing dev Trino deployment independently of new cells.
+therefore roll the dev TruffleHog deployment independently of new cells.
 
 The publisher uses a Buildx `docker-container` builder and the registry exporter
 with `oci-mediatypes=true`. The default local `core/docker/build.sh` behavior
@@ -45,10 +45,10 @@ Before merging, apply the separate infrastructure change that creates the
 fully immutable ECR repository and the master-only publisher role. Configure the
 organization Actions secret `AWS_ECR_PUBLISH_IAM_ROLE` with the publisher role ARN
 and grant this repository access:
-`arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-trino-publish-role`. This is an operator
+`arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-trufflehog-publish-role`. This is an operator
 setup step, not a change performed by this workflow. The workflow masks the AWS
 account ID in logs and does not store its registry address in source. OIDC trust must
-allow only `repo:PostHog/trino:ref:refs/heads/master`. The role must allow image
+allow only `repo:PostHog/trufflehog:ref:refs/heads/master`. The role must allow image
 push/read operations but no image deletion or repository-policy changes.
 
 The workflow serializes its publishers. This prevents races within this

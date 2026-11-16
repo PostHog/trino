@@ -11,7 +11,7 @@
 
     <artifactId>trino-cli</artifactId>
     <name>${project.artifactId}</name>
-    <description>Trino - CLI</description>
+    <description>TruffleHog - CLI</description>
 
     <properties>
         <project.build.targetJdk>11</project.build.targetJdk>
