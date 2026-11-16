@@ -271,11 +271,11 @@ public class TestHttpRemoteTask
                 new ProtocolConfig(),
                 QueryDataEncoder.EncoderSelector.noEncoder());
         QuerySessionSupplier sessionSupplier = new QuerySessionSupplier(metadata, new AllowAllAccessControl(), sessionPropertyManager, new SqlEnvironmentConfig());
-        TestingTaskResource testingTaskResource = new TestingTaskResource(new AtomicLong(System.nanoTime()), FailureScenario.NO_FAILURE);
-        HttpRemoteTaskFactory httpRemoteTaskFactory = createHttpRemoteTaskFactory(testingTaskResource);
-        try {
-            int querySequence = 0;
-            for (DispatchCase dispatchCase : dispatchCases) {
+        int querySequence = 0;
+        for (DispatchCase dispatchCase : dispatchCases) {
+            TestingTaskResource testingTaskResource = new TestingTaskResource(new AtomicLong(System.nanoTime()), FailureScenario.NO_FAILURE);
+            HttpRemoteTaskFactory httpRemoteTaskFactory = createHttpRemoteTaskFactory(testingTaskResource);
+            try {
                 MultivaluedMap<String, String> headers = new MultivaluedHashMap<>();
                 headers.putSingle(TRINO_HEADERS.requestUser(), dispatchCase.user());
                 headers.putSingle(TRINO_HEADERS.requestOriginalUser(), dispatchCase.originalUser());
@@ -298,8 +298,10 @@ public class TestHttpRemoteTask
                             .anyMatch(request -> request.session().getQueryId().equals(queryId.id())));
                     remoteTask.addSplits(ImmutableMultimap.of(TABLE_SCAN_NODE_ID, new Split(TEST_CATALOG_HANDLE, TestingSplit.createLocalSplit())));
                     poll(() -> testingTaskResource.getTaskUpdateRequests().stream()
+                            .anyMatch(request -> request.session().getQueryId().equals(queryId.id()) && !request.splitAssignments().isEmpty()));
+                    assertThat(testingTaskResource.getTaskUpdateRequests().stream()
                             .filter(request -> request.session().getQueryId().equals(queryId.id()))
-                            .count() >= 2);
+                            .count()).isGreaterThanOrEqualTo(2);
                     for (TaskUpdateRequest request : testingTaskResource.getTaskUpdateRequests()) {
                         if (!request.session().getQueryId().equals(queryId.id())) {
                             continue;
@@ -323,9 +325,9 @@ public class TestHttpRemoteTask
                     poll(() -> remoteTask.getTaskInfo().taskStatus().state().isDone());
                 }
             }
-        }
-        finally {
-            httpRemoteTaskFactory.stop();
+            finally {
+                httpRemoteTaskFactory.stop();
+            }
         }
     }
 
