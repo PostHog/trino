@@ -794,7 +794,7 @@ public class HoglakePageSourceProvider
      * reads the values of the other one, or fails with an error that does not name
      * the column. A VARIANT column checks its shredded fields when it is parsed.
      */
-    private static void checkNoCaseCollision(MessageType fileSchema, ParquetMetadata parquetMetadata, List<HoglakeColumnHandle> columns, String path)
+    static void checkNoCaseCollision(MessageType fileSchema, ParquetMetadata parquetMetadata, List<HoglakeColumnHandle> columns, String path)
     {
         // The names are lowercase, so names that differ only by case are repeated
         if (!hasRepeatedName(fileSchema)) {
