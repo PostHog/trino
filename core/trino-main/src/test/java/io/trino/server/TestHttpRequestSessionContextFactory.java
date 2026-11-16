@@ -21,6 +21,8 @@ import io.trino.client.ProtocolHeaders;
 import io.trino.security.AllowAllAccessControl;
 import io.trino.server.protocol.PreparedStatementEncoder;
 import io.trino.server.protocol.spooling.QueryDataEncoder;
+import io.trino.server.security.UserMapping;
+import io.trino.spi.security.BasicPrincipal;
 import io.trino.spi.security.Identity;
 import io.trino.spi.security.SelectedRole;
 import jakarta.ws.rs.WebApplicationException;
@@ -29,6 +31,8 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import org.assertj.core.api.AbstractThrowableAssert;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static io.trino.SystemSessionProperties.JOIN_DISTRIBUTION_TYPE;
@@ -42,6 +46,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestHttpRequestSessionContextFactory
 {
+    private static final String HOGLAKE_SESSION_JWT = "internal$hoglake_session_jwt";
+    private static final String CALLER_TOKEN = "synthetic.HeAdEr_Caller.Caller-Signature_01";
+
     @Test
     public void testSessionContext()
     {
@@ -187,6 +194,113 @@ public class TestHttpRequestSessionContextFactory
 
         assertInvalidSession(TRINO_HEADERS, headers)
                 .hasMessage("Invalid extra credential name: internal$abc");
+    }
+
+    @Test
+    public void testProtectedCredentialUserBinding()
+            throws Exception
+    {
+        Identity authenticatedIdentity = UserMapping.createUserMapping(Optional.of("login-(.*)"), Optional.empty())
+                .mapIdentity(Identity.forUser("login-mappedUser")
+                        .withPrincipal(new BasicPrincipal("login-mappedUser"))
+                        .withExtraCredentials(ImmutableMap.of(
+                                HOGLAKE_SESSION_JWT, CALLER_TOKEN,
+                                "ordinary", "authenticated-value",
+                                "overridden", "authenticated-value",
+                                "internal$other", "unrelated-value"))
+                        .build());
+        for (ProtocolHeaders protocolHeaders : List.of(TRINO_HEADERS, createProtocolHeaders("taco"))) {
+            HttpRequestSessionContextFactory factory = sessionContextFactory(protocolHeaders);
+            for (String user : List.of("", "mappedUser", "otherUser")) {
+                for (String originalUser : List.of("", "mappedUser", "otherUser")) {
+                    MultivaluedMap<String, String> headers = new MultivaluedHashMap<>();
+                    if (!user.isEmpty()) {
+                        headers.putSingle(protocolHeaders.requestUser(), user);
+                    }
+                    if (!originalUser.isEmpty()) {
+                        headers.putSingle(protocolHeaders.requestOriginalUser(), originalUser);
+                    }
+                    headers.add(protocolHeaders.requestExtraCredential(), "overridden=client-value");
+                    headers.add(protocolHeaders.requestExtraCredential(), "client-only=client-value");
+                    ImmutableMap.Builder<String, String> expectedCredentials = ImmutableMap.<String, String>builder()
+                            .put("ordinary", "authenticated-value")
+                            .put("overridden", "client-value")
+                            .put("internal$other", "unrelated-value")
+                            .put("client-only", "client-value");
+                    if (!user.equals("otherUser") && !originalUser.equals("otherUser")) {
+                        expectedCredentials.put(HOGLAKE_SESSION_JWT, CALLER_TOKEN);
+                    }
+                    Map<String, String> expected = expectedCredentials.buildOrThrow();
+
+                    SessionContext context = factory.createSessionContext(headers, Optional.empty(), Optional.of(authenticatedIdentity));
+                    assertThat(context.getIdentity().getExtraCredentials()).isEqualTo(expected);
+                    assertThat(factory.extractAuthorizedIdentity(Optional.of(authenticatedIdentity), headers).getExtraCredentials()).isEqualTo(expected);
+                    assertThat(context.getIdentity().getPrincipal()).contains(new BasicPrincipal("login-mappedUser"));
+                    if (originalUser.isEmpty()) {
+                        assertThat(context.getOriginalIdentity().getExtraCredentials()).isEqualTo(expected);
+                    }
+                    else {
+                        assertThat(context.getOriginalIdentity().getExtraCredentials()).isEmpty();
+                    }
+                    assertThat(authenticatedIdentity.getExtraCredentials())
+                            .containsEntry(HOGLAKE_SESSION_JWT, CALLER_TOKEN)
+                            .containsEntry("overridden", "authenticated-value");
+                }
+            }
+        }
+    }
+
+    @Test
+    public void testInterleavedProtectedCredentials()
+    {
+        for (ProtocolHeaders protocolHeaders : List.of(TRINO_HEADERS, createProtocolHeaders("taco"))) {
+            HttpRequestSessionContextFactory factory = sessionContextFactory(protocolHeaders);
+            Identity firstCaller = Identity.forUser("firstCaller")
+                    .withExtraCredentials(ImmutableMap.of(HOGLAKE_SESSION_JWT, CALLER_TOKEN))
+                    .build();
+            Identity secondCaller = Identity.forUser("secondCaller")
+                    .withExtraCredentials(ImmutableMap.of(HOGLAKE_SESSION_JWT, "synthetic.header.second-signature"))
+                    .build();
+            for (Identity identity : List.of(firstCaller, Identity.ofUser("legacyCaller"), secondCaller, firstCaller)) {
+                MultivaluedMap<String, String> headers = new MultivaluedHashMap<>();
+                headers.putSingle(protocolHeaders.requestUser(), identity.getUser());
+                SessionContext context = factory.createSessionContext(headers, Optional.empty(), Optional.of(identity));
+                assertThat(context.getIdentity().getExtraCredentials()).isEqualTo(identity.getExtraCredentials());
+            }
+            MultivaluedMap<String, String> headers = new MultivaluedHashMap<>();
+            headers.putSingle(protocolHeaders.requestUser(), "unauthenticatedCaller");
+            headers.putSingle(protocolHeaders.requestExtraCredential(), "ordinary=client-value");
+            assertThat(factory.createSessionContext(headers, Optional.empty(), Optional.empty()).getIdentity().getExtraCredentials())
+                    .isEqualTo(ImmutableMap.of("ordinary", "client-value"));
+            assertThat(factory.extractAuthorizedIdentity(Optional.empty(), headers).getExtraCredentials())
+                    .isEqualTo(ImmutableMap.of("ordinary", "client-value"));
+        }
+    }
+
+    @Test
+    public void testProtectedCredentialInjection()
+    {
+        for (ProtocolHeaders protocolHeaders : List.of(TRINO_HEADERS, createProtocolHeaders("taco"))) {
+            HttpRequestSessionContextFactory factory = sessionContextFactory(protocolHeaders);
+            MultivaluedMap<String, String> headers = new MultivaluedHashMap<>();
+            headers.putSingle(protocolHeaders.requestUser(), "mappedUser");
+            headers.putSingle(protocolHeaders.requestExtraCredential(), HOGLAKE_SESSION_JWT + "=synthetic.header.injected-signature");
+            Identity authenticatedIdentity = Identity.forUser("mappedUser")
+                    .withExtraCredentials(ImmutableMap.of(HOGLAKE_SESSION_JWT, CALLER_TOKEN))
+                    .build();
+            for (Optional<Identity> identity : List.of(Optional.<Identity>empty(), Optional.of(authenticatedIdentity))) {
+                assertThatThrownBy(() -> factory.createSessionContext(headers, Optional.empty(), identity))
+                        .isInstanceOf(WebApplicationException.class)
+                        .hasMessage("Invalid extra credential name: " + HOGLAKE_SESSION_JWT)
+                        .hasMessageNotContaining(CALLER_TOKEN)
+                        .hasMessageNotContaining("synthetic.header.injected-signature");
+                assertThatThrownBy(() -> factory.extractAuthorizedIdentity(identity, headers))
+                        .isInstanceOf(WebApplicationException.class)
+                        .hasMessage("Invalid extra credential name: " + HOGLAKE_SESSION_JWT)
+                        .hasMessageNotContaining(CALLER_TOKEN)
+                        .hasMessageNotContaining("synthetic.header.injected-signature");
+            }
+        }
     }
 
     private static AbstractThrowableAssert<?, ? extends Throwable> assertInvalidSession(ProtocolHeaders protocolHeaders, MultivaluedMap<String, String> headers)

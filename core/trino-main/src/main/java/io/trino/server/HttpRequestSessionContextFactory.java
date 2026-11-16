@@ -68,6 +68,8 @@ import static java.util.Objects.requireNonNullElse;
 
 public class HttpRequestSessionContextFactory
 {
+    private static final String HOGLAKE_SESSION_JWT = "internal$hoglake_session_jwt";
+
     private final PreparedStatementEncoder preparedStatementEncoder;
     private final Metadata metadata;
     private final GroupProvider groupProvider;
@@ -267,6 +269,18 @@ public class HttpRequestSessionContextFactory
                 .withAdditionalGroups(groupProvider.getGroups(user))
                 .withEnabledRoles(systemEnabledRoles.build())
                 .build();
+        String originalUser = Optional.ofNullable(trimEmptyToNull(headers.getFirst(protocolHeaders.requestOriginalUser()))).orElse(user);
+        // The caller credential belongs only to the mapped authenticated user.
+        if (newIdentity.getExtraCredentials().containsKey(HOGLAKE_SESSION_JWT) &&
+                (authenticatedIdentity.isEmpty() ||
+                        !authenticatedIdentity.get().getUser().equals(user) ||
+                        !authenticatedIdentity.get().getUser().equals(originalUser))) {
+            Map<String, String> extraCredentials = new HashMap<>(newIdentity.getExtraCredentials());
+            extraCredentials.remove(HOGLAKE_SESSION_JWT);
+            newIdentity = Identity.from(newIdentity)
+                    .withExtraCredentials(extraCredentials)
+                    .build();
+        }
         return addEnabledRoles(newIdentity, systemRole, metadata);
     }
 
