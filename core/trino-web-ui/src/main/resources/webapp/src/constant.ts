@@ -16,6 +16,7 @@ export enum StoreKey {
 }
 
 export const Texts = {
+    ProductName: 'TruffleHog',
     Auth: {
         Authenticating: 'Authenticating to TruffleHog...',
         LoginForm: {

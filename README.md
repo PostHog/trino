@@ -20,11 +20,11 @@ TruffleHog decouples compute from object storage so PostHog customers can query,
 
 ## Role in the PostHog Data Warehouse Architecture
 
-TruffleHog is one of three core services that make up PostHog's data warehouse stack alongside **`posthog/hogtower`** and **`posthog/hoglake`**:
+TruffleHog is one of three core services that make up PostHog's data warehouse stack, alongside the warehouse control plane and **`PostHog/hoglake`**:
 
 ```text
                        ┌──────────────────────────────────────────┐
-                       │             posthog/hogtower             │
+                       │         Warehouse control plane          │
                        │    Control Plane, Tenancy & Identity     │
                        │  • Tenant warehouse & catalog lifecycle  │
                        │  • OAuth 2.0 / RFC 8693 token issuer     │
@@ -33,7 +33,7 @@ TruffleHog is one of three core services that make up PostHog's data warehouse s
            Catalog sync, OPA &     │                  │  OAuth 2.0 / token-exchange
            delegated DDL           ▼                  ▼  verification
 ┌──────────────────────────────────────┐          ┌──────────────────────────────────────┐
-│          PostHog/trufflehog          │  REST    │           posthog/hoglake            │
+│          PostHog/trufflehog          │  REST    │           PostHog/hoglake            │
 │      Distributed SQL Compute         ├─────────►│   Lakehouse Format & Catalog API     │
 │  • Stateless coordinators & workers  │ metadata │  • Transactional metadata (Postgres) │
 │  • HogLake, DuckLake, Iceberg &      │          │  • Snapshots, namespaces & schemas   │
@@ -49,9 +49,9 @@ TruffleHog is one of three core services that make up PostHog's data warehouse s
                            └──────────────────────────────────┘
 ```
 
-- **[`posthog/hogtower`](https://github.com/PostHog/hogtower) — Control Plane, Tenancy & Identity:** Manages multi-tenant warehouse provisioning, organization-to-catalog mappings, OPA authorization policies, and identity. HogTower publishes dynamic catalog revisions to TruffleHog coordinators, handles delegated `CREATE CATALOG` / `DROP CATALOG` requests with cluster-wide visibility checks, and acts as the OAuth 2.0 / RFC 8693 token-exchange issuer for catalog and per-user access.
-- **[`posthog/hoglake`](https://github.com/PostHog/hoglake) — Lakehouse Table Format & Metadata Catalog:** PostHog's open lakehouse table format and REST catalog service designed for petabyte-scale warehouse workloads and high snapshot churn. HogLake stores transactional metadata, schema evolution, and snapshots in PostgreSQL while table data lives as Parquet files in S3-compatible object storage. It also exposes each organization's PostHog event stream (`<org-id>-events`) as a read-only `posthog` schema mount.
-- **`PostHog/trufflehog` (this repository) — Distributed SQL Query & Compute Engine:** Executes interactive queries, cross-source joins, and batch materializations across `HogLake`, `DuckLake`, `Iceberg`, and federated external data sources (PostgreSQL, MySQL, Snowflake, BigQuery, S3, and more), reading and writing Parquet files directly against object storage.
+- **Warehouse control plane — Tenancy & Identity:** A PostHog-operated service (not part of this repository) that provisions tenant warehouses, maps organizations to catalogs, rolls out authorization policy, and issues the OAuth 2.0 tokens that TruffleHog and HogLake verify. TruffleHog's side of that contract lives in `plugin/trino-posthog-catalogstore` and `plugin/trino-opa`.
+- **[`PostHog/hoglake`](https://github.com/PostHog/hoglake) — Lakehouse Table Format & Metadata Catalog:** PostHog's open lakehouse table format and REST catalog service designed for petabyte-scale warehouse workloads and high snapshot churn. HogLake stores transactional metadata, schema evolution, and snapshots in PostgreSQL while table data lives as Parquet files in S3-compatible object storage. It also exposes each organization's PostHog event stream as a read-only `posthog` schema mount.
+- **`PostHog/trufflehog` (this repository) — Distributed SQL Query & Compute Engine:** Executes interactive queries, cross-source joins, and batch materializations across `HogLake`, `DuckLake`, `Iceberg`, and federated external data sources, reading and writing Parquet files directly against object storage.
 
 ## How TruffleHog Differs from ClickHouse at PostHog
 
@@ -61,7 +61,7 @@ ClickHouse and TruffleHog solve complementary problems at PostHog:
 | --- | --- | --- |
 | **Primary workload** | Real-time product analytics, session replay metadata, and high-throughput streaming event ingestion | Multi-tenant Data Warehouse queries, ad-hoc SQL joins, federated external sources, and batch transformations / ETL |
 | **Storage & compute model** | Tightly coupled local storage and compute tuned for sub-second scans over PostHog's core tables | Stateless distributed compute decoupled from S3-compatible object storage |
-| **Data formats & sources** | Native ClickHouse MergeTree tables | Open lakehouse formats (`HogLake`, `DuckLake`, `Iceberg`, Parquet with shredded `VARIANT`) plus federated external databases and SaaS sources |
+| **Data formats & sources** | Native ClickHouse MergeTree tables | Open lakehouse formats (`HogLake`, `DuckLake`, `Iceberg`, Parquet with shredded `VARIANT`) plus federated PostgreSQL databases |
 | **Multi-tenancy & isolation** | Shared clusters keyed by team/project ID | Per-tenant dynamic catalogs, OAuth/OPA isolation, resource groups, and read-only `posthog` event mounts per login |
 | **PostHog event access** | Primary store for live product analytics ingestion and queries | Reads organization event mounts via `HogLake` (`posthog` schema) so warehouse tables can join directly with PostHog events, backed by ClickHouse-compatible SQL functions (`trino-posthog-functions`) |
 
@@ -83,7 +83,7 @@ TruffleHog is built on the shoulders of [upstream Trino (`trinodb/trino`)](https
 
 - **Best-effort upstream sync:** We do our best to keep TruffleHog up to date with upstream Trino releases and improvements (query optimizer, vectorized execution, Parquet/filesystem libraries, security fixes, and connectors) on a **best-effort basis where it makes sense** for PostHog's workloads.
 - **Compatibility by design:** To keep upstream merges clean and ensure seamless compatibility with the Trino ecosystem (JDBC, Python `trino` client, BI integrations, and standard plugins), internal Java package names (`io.trino.*`), Maven coordinates, and client wire protocol headers (`X-Trino-*`) intentionally remain unchanged.
-- **Pragmatic divergence:** Where PostHog's multi-tenant control plane (`hogtower`), lakehouse format (`hoglake`), or operational model has different requirements from general-purpose upstream Trino, TruffleHog diverges intentionally.
+- **Pragmatic divergence:** Where PostHog's multi-tenant control plane, lakehouse format (`hoglake`), or operational model has different requirements from general-purpose upstream Trino, TruffleHog diverges intentionally.
 
 ---
 

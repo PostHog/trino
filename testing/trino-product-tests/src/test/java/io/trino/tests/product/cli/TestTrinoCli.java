@@ -77,7 +77,7 @@ class TestTrinoCli
         ExecResult result = env.executeCli("--version");
 
         assertThat(result.getExitCode()).isZero();
-        assertThat(result.getStdout().trim()).isEqualTo("TruffleHog CLI " + readTrinoCliVersion());
+        assertThat(result.getStdout().trim()).isEqualTo("Trino CLI " + readTrinoCliVersion());
     }
 
     @Test

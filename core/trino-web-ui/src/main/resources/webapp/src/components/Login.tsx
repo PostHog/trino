@@ -79,7 +79,7 @@ export const Login = (props: ILoginProps) => {
                         <CardContent sx={{ alignItems: 'center', textAlign: 'center' }}>
                             <Grid sx={{ justifyContent: 'center' }}>
                                 <Typography component="div" variant="h4" sx={{ fontWeight: 600, py: 2 }}>
-                                    TruffleHog
+                                    {Texts.ProductName}
                                 </Typography>
                                 <Typography component="h1" variant="h5">
                                     {Texts.Auth.LoginForm.LogIn}

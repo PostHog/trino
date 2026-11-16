@@ -10,8 +10,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / ".github/bin/trino-release.sh"
-REPOSITORY = "111122223333.dkr.ecr.us-east-1.amazonaws.com/trufflehog"
-MIRROR = "ghcr.io/posthog/trufflehog"
+REPOSITORY = "111122223333.dkr.ecr.us-east-1.amazonaws.com/posthog-trino"
+MIRROR = "ghcr.io/posthog/trino"
 RAW_DIGEST = "sha256:" + "1" * 64
 RELEASE_DIGEST = "sha256:" + "2" * 64
 
@@ -134,16 +134,18 @@ class ReleaseContractTest(unittest.TestCase):
                            ("GITHUB_REPOSITORY", "someone/trufflehog"),
                            ("GITHUB_REPOSITORY", "PostHog/trino"),
                            ("GITHUB_SHA", "a" * 40)]:
-            with self.subTest(key=key):
+            with self.subTest(key=key, value=value):
                 original = self.environment[key]
                 self.environment[key] = value
-                self.run_phase("publish", success=False)
-                self.environment[key] = original
+                try:
+                    self.run_phase("publish", success=False)
+                finally:
+                    self.environment[key] = original
         self.assertEqual(self.state()["writes"], [])
 
     def test_canonical_ecr_repository_is_required(self):
-        for repository in ["", "ghcr.io/posthog/trufflehog", REPOSITORY.replace("us-east-1", "eu-west-1"),
-                           REPOSITORY.replace("trufflehog", "other"), "https://" + REPOSITORY]:
+        for repository in ["", "ghcr.io/posthog/trino", REPOSITORY.replace("us-east-1", "eu-west-1"),
+                           REPOSITORY.replace("posthog-trino", "other"), "https://" + REPOSITORY]:
             with self.subTest(repository=repository):
                 self.environment["ECR_REPOSITORY"] = repository
                 self.run_phase("prepare", success=False)
@@ -224,7 +226,7 @@ class ReleaseContractTest(unittest.TestCase):
         state["tags"][f"{REPOSITORY}:{self.tag}"] = RELEASE_DIGEST
         state["manifests"][RELEASE_DIGEST] = {
             "mediaType": "application/vnd.oci.image.index.v1+json",
-            "annotations": {"org.opencontainers.image.source": "https://github.com/someone/trino",
+            "annotations": {"org.opencontainers.image.source": "https://github.com/someone/trufflehog",
                             "org.opencontainers.image.revision": self.sha}}
         self.registry.write_text(json.dumps(state))
         self.run_phase("prepare", success=False)

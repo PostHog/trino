@@ -12,26 +12,16 @@
  * limitations under the License.
  */
 import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
-import {
-    Box,
-    Button,
-    Container,
-    CssBaseline,
-    Grid,
-    Link,
-    ThemeProvider,
-    Typography,
-    useMediaQuery,
-} from '@mui/material'
+import { Button, Container, CssBaseline, Grid, Link, ThemeProvider, Typography, useMediaQuery } from '@mui/material'
 import { Auth } from './components/Auth'
 import { useAuth } from './components/AuthContext'
 import { AuthProvider } from './components/AuthProvider'
 import { RootLayout as Layout } from './components/Layout'
 import { SnackbarProvider } from './components/SnackbarProvider'
+import { Texts } from './constant'
 import { routers } from './router.tsx'
 import { useConfigStore, Theme as ThemeStore } from './store'
 import { darkTheme, lightTheme } from './theme'
-import trinoLogo from './assets/trino.svg'
 import { QueryDetails } from './components/QueryDetails'
 import { WorkerStatus } from './components/WorkerStatus'
 import { loader } from '@monaco-editor/react'
@@ -93,7 +83,9 @@ const NotFound = () => {
         <Container maxWidth="md">
             <Grid container spacing={2}>
                 <Grid size={12} spacing={{ md: 2 }}>
-                    <Box component="img" sx={{ height: 140 }} alt="logo" src={trinoLogo} />
+                    <Typography variant="h4" sx={{ fontWeight: 600 }}>
+                        {Texts.ProductName}
+                    </Typography>
                 </Grid>
                 <Grid size={12} spacing={{ md: 10 }}>
                     <Typography variant="h3">404</Typography>

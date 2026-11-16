@@ -240,7 +240,7 @@ export const RootLayout = (props: { children: React.ReactNode }) => {
                             textDecoration: 'none',
                         }}
                     >
-                        TruffleHog
+                        {Texts.ProductName}
                     </Typography>
                     <Stack
                         direction="row"

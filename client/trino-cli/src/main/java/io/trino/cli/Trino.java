@@ -127,7 +127,7 @@ public final class Trino
         public String[] getVersion()
         {
             String version = getClass().getPackage().getImplementationVersion();
-            return new String[] {"TruffleHog CLI " + requireNonNullElse(version, "(version unknown)")};
+            return new String[] {"Trino CLI " + requireNonNullElse(version, "(version unknown)")};
         }
     }
 

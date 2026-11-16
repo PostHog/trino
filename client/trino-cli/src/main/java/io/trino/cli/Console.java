@@ -76,7 +76,7 @@ import static org.jline.utils.AttributedStyle.DEFAULT;
 
 @Command(
         name = "trino",
-        header = "TruffleHog command line interface",
+        header = "Trino command line interface",
         synopsisHeading = "%nUSAGE:%n%n",
         optionListHeading = "%nOPTIONS:%n",
         usageHelpAutoWidth = true,
@@ -86,7 +86,7 @@ public class Console
 {
     public static final Set<String> STATEMENT_DELIMITERS = ImmutableSet.of(";", "\\G");
 
-    private static final String PROMPT_NAME = "trufflehog";
+    private static final String PROMPT_NAME = "trino";
     private static final Duration EXIT_DELAY = new Duration(3, SECONDS);
 
     @CommandLine.Spec

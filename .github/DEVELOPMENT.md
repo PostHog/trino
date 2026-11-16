@@ -15,7 +15,7 @@ In this document you can find information about developing TruffleHog (PostHog's
 
 ## Trino organization
 
-Learn about development for all Trino organization projects:
+TruffleHog follows upstream Trino's engineering conventions. Pull requests for this fork go to `PostHog/trufflehog` as described in [CONTRIBUTING.md](CONTRIBUTING.md); the upstream process below is the reference for commit, review, and release-note style:
 
 * [Vision](https://trino.io/development/vision)
 * [Contribution process](https://trino.io/development/process#contribution-process)
