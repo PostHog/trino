@@ -58,12 +58,20 @@ import io.trino.metadata.BlockEncodingManager;
 import io.trino.metadata.HandleJsonModule;
 import io.trino.metadata.InternalBlockEncodingSerde;
 import io.trino.metadata.Metadata;
+import io.trino.metadata.SessionPropertyManager;
 import io.trino.metadata.Split;
 import io.trino.node.InternalNode;
+import io.trino.security.AllowAllAccessControl;
 import io.trino.server.DynamicFilterService;
 import io.trino.server.FailTaskRequest;
 import io.trino.server.HttpRemoteTaskFactory;
+import io.trino.server.HttpRequestSessionContextFactory;
+import io.trino.server.ProtocolConfig;
+import io.trino.server.QuerySessionSupplier;
+import io.trino.server.SessionContext;
 import io.trino.server.TaskUpdateRequest;
+import io.trino.server.protocol.PreparedStatementEncoder;
+import io.trino.server.protocol.spooling.QueryDataEncoder;
 import io.trino.simd.BlockEncodingSimdSupport;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.NodeVersion;
@@ -74,10 +82,12 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.security.Identity;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeDescriptor;
 import io.trino.spi.type.TypeManager;
 import io.trino.sql.DynamicFilters;
+import io.trino.sql.SqlEnvironmentConfig;
 import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.SymbolAllocator;
@@ -100,6 +110,8 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -129,6 +141,7 @@ import static io.trino.SystemSessionProperties.REMOTE_TASK_ADAPTIVE_UPDATE_REQUE
 import static io.trino.SystemSessionProperties.REMOTE_TASK_GUARANTEED_SPLITS_PER_REQUEST;
 import static io.trino.SystemSessionProperties.REMOTE_TASK_MAX_REQUEST_SIZE;
 import static io.trino.SystemSessionProperties.REMOTE_TASK_REQUEST_SIZE_HEADROOM;
+import static io.trino.client.ProtocolHeaders.TRINO_HEADERS;
 import static io.trino.execution.DynamicFiltersCollector.INITIAL_DYNAMIC_FILTERS_VERSION;
 import static io.trino.execution.TaskState.FAILED;
 import static io.trino.execution.TaskTestUtils.TABLE_SCAN_NODE_ID;
@@ -219,6 +232,103 @@ public class TestHttpRemoteTask
         poll(() -> remoteTask.getTaskInfo().taskStatus().state().isDone());
 
         httpRemoteTaskFactory.stop();
+    }
+
+    @Test
+    @Timeout(30)
+    public void testProtectedCredentialDispatch()
+            throws Exception
+    {
+        String credentialName = "internal$hoglake_session_jwt";
+        String firstToken = "synthetic.HeAdEr_First.First-Signature_01";
+        String secondToken = "synthetic.HeAdEr_Second.Second-Signature_02";
+        Identity firstCaller = Identity.forUser("firstCaller")
+                .withExtraCredentials(ImmutableMap.of(credentialName, firstToken))
+                .build();
+        Identity secondCaller = Identity.forUser("secondCaller")
+                .withExtraCredentials(ImmutableMap.of(credentialName, secondToken))
+                .build();
+
+        record DispatchCase(Identity authenticatedIdentity, String user, String originalUser, Map<String, String> expectedCredentials) {}
+
+        Map<String, String> ordinaryCredentials = ImmutableMap.of("ordinary", "client-value");
+        Map<String, String> firstCredentials = ImmutableMap.of(credentialName, firstToken, "ordinary", "client-value");
+        Map<String, String> secondCredentials = ImmutableMap.of(credentialName, secondToken, "ordinary", "client-value");
+        List<DispatchCase> dispatchCases = List.of(
+                new DispatchCase(firstCaller, "firstCaller", "firstCaller", firstCredentials),
+                new DispatchCase(Identity.ofUser("legacyCaller"), "legacyCaller", "legacyCaller", ordinaryCredentials),
+                new DispatchCase(secondCaller, "secondCaller", "secondCaller", secondCredentials),
+                new DispatchCase(firstCaller, "firstCaller", "firstCaller", firstCredentials),
+                new DispatchCase(firstCaller, "otherCaller", "firstCaller", ordinaryCredentials),
+                new DispatchCase(firstCaller, "firstCaller", "otherCaller", ordinaryCredentials));
+        Metadata metadata = createTestingMetadataManager();
+        SessionPropertyManager sessionPropertyManager = TEST_SESSION.getSessionPropertyManager();
+        HttpRequestSessionContextFactory contextFactory = new HttpRequestSessionContextFactory(
+                new PreparedStatementEncoder(new ProtocolConfig()),
+                metadata,
+                ImmutableSet::of,
+                new AllowAllAccessControl(),
+                new ProtocolConfig(),
+                QueryDataEncoder.EncoderSelector.noEncoder());
+        QuerySessionSupplier sessionSupplier = new QuerySessionSupplier(metadata, new AllowAllAccessControl(), sessionPropertyManager, new SqlEnvironmentConfig());
+        int querySequence = 0;
+        for (DispatchCase dispatchCase : dispatchCases) {
+            TestingTaskResource testingTaskResource = new TestingTaskResource(new AtomicLong(System.nanoTime()), FailureScenario.NO_FAILURE);
+            HttpRemoteTaskFactory httpRemoteTaskFactory = createHttpRemoteTaskFactory(testingTaskResource);
+            try {
+                MultivaluedMap<String, String> headers = new MultivaluedHashMap<>();
+                headers.putSingle(TRINO_HEADERS.requestUser(), dispatchCase.user());
+                headers.putSingle(TRINO_HEADERS.requestOriginalUser(), dispatchCase.originalUser());
+                headers.putSingle(TRINO_HEADERS.requestExtraCredential(), "ordinary=client-value");
+                SessionContext context = contextFactory.createSessionContext(headers, Optional.empty(), Optional.of(dispatchCase.authenticatedIdentity()));
+                QueryId queryId = new QueryId("credential_dispatch_" + querySequence++);
+                Session session = sessionSupplier.createSession(queryId, Span.getInvalid(), context);
+                Map<String, String> expectedCredentials = dispatchCase.expectedCredentials();
+                assertThat(session.getIdentity().getExtraCredentials()).isEqualTo(expectedCredentials);
+                assertThat(session.getOriginalIdentity().getExtraCredentials()).isEmpty();
+                RemoteTask remoteTask = createRemoteTask(
+                        httpRemoteTaskFactory,
+                        ImmutableSet.of(),
+                        session,
+                        new TaskId(new StageId(queryId, 1), 2, 0));
+                testingTaskResource.setInitialTaskInfo(remoteTask.getTaskInfo());
+                try {
+                    remoteTask.start();
+                    poll(() -> testingTaskResource.getTaskUpdateRequests().stream()
+                            .anyMatch(request -> request.session().getQueryId().equals(queryId.id())));
+                    remoteTask.addSplits(ImmutableMultimap.of(TABLE_SCAN_NODE_ID, new Split(TEST_CATALOG_HANDLE, TestingSplit.createLocalSplit())));
+                    poll(() -> testingTaskResource.getTaskUpdateRequests().stream()
+                            .anyMatch(request -> request.session().getQueryId().equals(queryId.id()) && !request.splitAssignments().isEmpty()));
+                    assertThat(testingTaskResource.getTaskUpdateRequests().stream()
+                            .filter(request -> request.session().getQueryId().equals(queryId.id()))
+                            .count()).isGreaterThanOrEqualTo(2);
+                    for (TaskUpdateRequest request : testingTaskResource.getTaskUpdateRequests()) {
+                        if (!request.session().getQueryId().equals(queryId.id())) {
+                            continue;
+                        }
+                        assertThat(request.extraCredentials()).isEqualTo(expectedCredentials);
+                        Session restored = request.session().toSession(sessionPropertyManager, request.extraCredentials(), request.exchangeEncryptionKey());
+                        assertThat(restored.getIdentity().getExtraCredentials()).isEqualTo(expectedCredentials);
+                        assertThat(restored.getOriginalIdentity().getExtraCredentials()).isEqualTo(expectedCredentials);
+                        assertThat(restored.getOriginalIdentity().getUser()).isEqualTo(dispatchCase.originalUser());
+                        assertThat(restored.toConnectorSession(TEST_CATALOG_HANDLE).getIdentity().getUser()).isEqualTo(dispatchCase.user());
+                        assertThat(restored.toConnectorSession(TEST_CATALOG_HANDLE).getIdentity().getExtraCredentials()).isEqualTo(expectedCredentials);
+                        assertThat(request.toString()).doesNotContain(firstToken, secondToken);
+                        assertThat(restored.toString()).doesNotContain(firstToken, secondToken);
+                        assertThat(restored.getIdentity().toString()).doesNotContain(firstToken, secondToken);
+                        assertThat(restored.toConnectorSession(TEST_CATALOG_HANDLE).getIdentity().toString()).doesNotContain(firstToken, secondToken);
+                    }
+                }
+                finally {
+                    remoteTask.cancel();
+                    poll(() -> remoteTask.getTaskStatus().state().isDone());
+                    poll(() -> remoteTask.getTaskInfo().taskStatus().state().isDone());
+                }
+            }
+            finally {
+                httpRemoteTaskFactory.stop();
+            }
+        }
     }
 
     @Test
@@ -661,10 +771,15 @@ public class TestHttpRemoteTask
 
     private HttpRemoteTask createRemoteTask(HttpRemoteTaskFactory httpRemoteTaskFactory, Set<DynamicFilterId> outboundDynamicFilterIds, Session session)
     {
+        return createRemoteTask(httpRemoteTaskFactory, outboundDynamicFilterIds, session, new TaskId(new StageId("test", 1), 2, 0));
+    }
+
+    private HttpRemoteTask createRemoteTask(HttpRemoteTaskFactory httpRemoteTaskFactory, Set<DynamicFilterId> outboundDynamicFilterIds, Session session, TaskId taskId)
+    {
         return httpRemoteTaskFactory.createRemoteTask(
                 session,
                 Span.getInvalid(),
-                new TaskId(new StageId("test", 1), 2, 0),
+                taskId,
                 new InternalNode("node-id", URI.create("http://fake.invalid/"), NodeVersion.UNKNOWN, false),
                 false,
                 TaskTestUtils.PLAN_FRAGMENT,
@@ -842,6 +957,7 @@ public class TestHttpRemoteTask
         private long dynamicFiltersFetchCounter;
         private long dynamicFiltersSentCounter;
         private final List<DynamicFiltersFetchRequest> dynamicFiltersFetchRequests = new ArrayList<>();
+        private final List<TaskUpdateRequest> taskUpdateRequests = new ArrayList<>();
 
         public TestingTaskResource(AtomicLong lastActivityNanos, FailureScenario failureScenario)
         {
@@ -878,6 +994,7 @@ public class TestHttpRemoteTask
                 TaskUpdateRequest taskUpdateRequest,
                 @Context UriInfo uriInfo)
         {
+            taskUpdateRequests.add(taskUpdateRequest);
             for (SplitAssignment splitAssignment : taskUpdateRequest.splitAssignments()) {
                 taskSplitAssignmentMap.compute(splitAssignment.getPlanNodeId(), (_, taskSplitAssignment) -> taskSplitAssignment == null ? splitAssignment : taskSplitAssignment.update(splitAssignment));
             }
@@ -888,6 +1005,11 @@ public class TestHttpRemoteTask
             createOrUpdateCounter++;
             lastActivityNanos.set(System.nanoTime());
             return buildTaskInfo();
+        }
+
+        public synchronized List<TaskUpdateRequest> getTaskUpdateRequests()
+        {
+            return ImmutableList.copyOf(taskUpdateRequests);
         }
 
         public synchronized SplitAssignment getTaskSplitAssignment(PlanNodeId planNodeId)

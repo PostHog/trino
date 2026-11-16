@@ -36,3 +36,11 @@ PR titles and descriptions, review comments, issues, screenshots, and CI logs or
   checks. Report failures accurately; do not weaken tests to make CI pass.
 - Document configuration defaults and operational changes where they belong.
 - Report what was tested and distinguish local validation from a real publication or deployment.
+
+## Managed Hoglake sessions
+
+Use the [canonical M2 milestones](https://github.com/PostHog/hogtower/blob/main/docs/jwt-aws-session-design.md#m2-propagate-the-caller-jwt-through-trino).
+The scope clarification is in [PR #217](https://github.com/PostHog/hogtower/pull/217).
+M2a protects opaque credential transport only.
+Authentication acquisition remains a separate checkpoint.
+Do not treat transport tests as connector activation or deployed-worker verification.
