@@ -26,6 +26,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 
 /**
  * A compiled pattern set that returns what ClickHouse's {@code multiMatchAnyIndex} returns.
@@ -83,7 +84,7 @@ final class ClickHouseMultiMatch
         List<Integer> literalIndexes = new ArrayList<>();
         List<RegexPattern> regexes = new ArrayList<>();
         for (int i = 0; i < patterns.size(); i++) {
-            for (Branch branch : HyperscanPatternTranslator.translate(patterns.get(i))) {
+            for (Branch branch : translate(patterns.get(i))) {
                 if (branch.isLiteral()) {
                     literalPatterns.add(branch.literal().getBytes());
                     literalIndexes.add(i + 1);
@@ -97,6 +98,16 @@ final class ClickHouseMultiMatch
         return new ClickHouseMultiMatch(patterns, literals, regexes.toArray(new RegexPattern[0]));
     }
 
+    private static List<Branch> translate(Slice pattern)
+    {
+        try {
+            return HyperscanPatternTranslator.translate(pattern);
+        }
+        catch (StackOverflowError e) {
+            throw new TrinoException(NOT_SUPPORTED, "Pattern '%s' is too complex for Java's regex engine, which ran out of stack compiling it".formatted(HyperscanPatternTranslator.describe(pattern.toStringUtf8())));
+        }
+    }
+
     List<Slice> patterns()
     {
         return patterns;
@@ -106,6 +117,20 @@ final class ClickHouseMultiMatch
      * The 1-based index of the pattern ClickHouse reports, or 0 when none matches.
      */
     long find(Slice haystack)
+    {
+        try {
+            return findUnguarded(haystack);
+        }
+        catch (StackOverflowError e) {
+            // Java's regex engine recurses once per repetition of a group that has an alternative inside
+            // it, such as (?:a|b)+, which overflows a default 1 MB stack after about 2,000 characters.
+            // Hyperscan matches in constant stack, so the pattern is fine for ClickHouse.
+            throw new TrinoException(NOT_SUPPORTED, ("ch_multimatchanyindex ran out of stack matching a value of %s bytes: a repeated group with an alternative, "
+                    + "such as (?:a|b)+, makes Java's regex engine use stack for every repetition, and ClickHouse does not have this limit").formatted(haystack.length()));
+        }
+    }
+
+    private long findUnguarded(Slice haystack)
     {
         Slice bytes = haystack;
         boolean ascii = SliceUtf8.isAscii(bytes);

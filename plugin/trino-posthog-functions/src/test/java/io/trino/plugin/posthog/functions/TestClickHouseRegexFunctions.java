@@ -413,6 +413,76 @@ public class TestClickHouseRegexFunctions
         assertMatch("A", 1, "(?i)^[^\\d]$");
     }
 
+    @Test
+    public void testPatternLength()
+    {
+        // Hyperscan accepts a pattern of up to 16,000 bytes after its first NUL, counted in UTF-8 bytes
+        assertThat(find("a", "a".repeat(16_000))).isEqualTo(0);
+        assertThat(find("a", "é".repeat(8_000))).isEqualTo(0);
+        assertThat(find("a", "a".repeat(16_000) + "\0" + "b".repeat(5_000))).isEqualTo(0);
+        assertThat(find("a", "a" + "|a".repeat(7_999))).isEqualTo(1);
+        assertInvalid("a".repeat(16_001), "Pattern length exceeds limit.");
+        assertInvalid("é".repeat(8_001), "Pattern length exceeds limit.");
+        assertInvalid("€".repeat(5_334), "Pattern length exceeds limit.");
+        assertInvalid("a".repeat(16_001) + "\0b", "Pattern length exceeds limit.");
+
+        // a pattern that long is cut down in the message
+        assertTrinoExceptionThrownBy(() -> ClickHouseMultiMatch.compile(List.of(Slices.utf8Slice("(?:".repeat(10_000) + "a" + ")".repeat(10_000)))))
+                .hasErrorCode(INVALID_FUNCTION_ARGUMENT)
+                .hasMessageContaining("Pattern length exceeds limit.")
+                .hasMessageContaining("(40001 characters)")
+                .satisfies(exception -> assertThat(exception.getMessage()).hasSizeLessThan(500));
+    }
+
+    @Test
+    public void testNesting()
+    {
+        // ClickHouse accepts groups nested thousands deep, Java's regex engine has the stack for a few hundred
+        assertThat(find("a", "(?:".repeat(200) + "a" + ")".repeat(200))).isEqualTo(1);
+        assertThat(find("a", "(".repeat(200) + "a" + ")".repeat(200))).isEqualTo(1);
+        assertThat(find("b", "(?:a|".repeat(200) + "b" + ")".repeat(200))).isEqualTo(1);
+        assertThat(find("a", "(?:".repeat(200) + "a" + "){2}".repeat(0) + ")".repeat(200))).isEqualTo(1);
+        assertNestingNotSupported("(?:".repeat(201) + "a" + ")".repeat(201));
+        assertNestingNotSupported("(".repeat(201) + "a" + ")".repeat(201));
+        assertNestingNotSupported("(?:a|".repeat(201) + "b" + ")".repeat(201));
+        // 10,000 levels used to throw StackOverflowError; it is over the length limit anyway
+        assertInvalid("(?:".repeat(10_000) + "a" + ")".repeat(10_000), "Pattern length exceeds limit.");
+        // nesting that closes again does not count
+        assertThat(find("ab", "(a)(b)".repeat(300))).isEqualTo(0);
+        assertThat(find("ab", "(a)(b)".repeat(1) + "|" + "(?:x)".repeat(300))).isEqualTo(1);
+    }
+
+    @Test
+    public void testStackExhaustionMatching()
+    {
+        // Java's regex engine recurses once per repetition of a group with an alternative in it, so a
+        // long value overflows the stack, which Hyperscan does not. That is an error, not a crash.
+        String haystack = "array_join(repeat('ab', 100000), '')";
+        assertTrinoExceptionThrownBy(assertions.function("ch_multimatchanyindex", haystack, "ARRAY['(?:a|b)+$']")::evaluate)
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessageContaining("ran out of stack matching a value of 200000 bytes");
+        assertTrinoExceptionThrownBy(assertions.function("ch_multimatchanyindex", haystack, "ARRAY['x', '(?:a|b)+b', 'y']")::evaluate)
+                .hasErrorCode(NOT_SUPPORTED);
+        // a loop over a single class, and a loop over a group without alternatives, need no stack
+        assertThat(assertions.function("ch_multimatchanyindex", haystack, "ARRAY['[ab]+$']")).isEqualTo(1L);
+        assertThat(assertions.function("ch_multimatchanyindex", haystack, "ARRAY['(?:ab)+$']")).isEqualTo(1L);
+        assertThat(assertions.function("ch_multimatchanyindex", haystack, "ARRAY['a.*b$']")).isEqualTo(1L);
+        // and the usual sizes are fine
+        assertMatch("ab".repeat(300), 1, "(?:a|b)+$");
+    }
+
+    private static long find(String haystack, String pattern)
+    {
+        return ClickHouseMultiMatch.compile(List.of(Slices.utf8Slice(pattern))).find(Slices.utf8Slice(haystack));
+    }
+
+    private static void assertNestingNotSupported(String pattern)
+    {
+        assertTrinoExceptionThrownBy(() -> ClickHouseMultiMatch.compile(List.of(Slices.utf8Slice(pattern))))
+                .hasErrorCode(NOT_SUPPORTED)
+                .hasMessageContaining("groups nested more than 200 deep");
+    }
+
     private void assertMatch(String haystack, long expected, String... patterns)
     {
         List<Slice> slices = Arrays.stream(patterns).map(Slices::utf8Slice).toList();

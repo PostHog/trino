@@ -54,6 +54,13 @@ final class HyperscanPatternTranslator
     private static final int UNBOUNDED = -1;
     // Hyperscan rejects larger repeat counts with "Number is too big"
     private static final int MAX_REPEAT = 65535;
+    // Hyperscan rejects a pattern longer than this many bytes, after it ends at the first NUL
+    private static final int MAX_PATTERN_BYTES = 16000;
+    // Hyperscan accepts groups nested several thousand deep, but each level costs Java's regex engine
+    // stack frames, and 2,000 levels overflow a default 1 MB stack. Nobody writes patterns this deep.
+    static final int MAX_NESTING_DEPTH = 200;
+    // pattern text in error messages is cut at this many characters
+    private static final int MAX_MESSAGE_PATTERN_LENGTH = 200;
 
     private static final CodePointSet DIGIT = CodePointSet.of('0', '9');
     private static final CodePointSet WORD = CodePointSet.ofRanges('0', '9', 'A', 'Z', '_', '_', 'a', 'z');
@@ -181,6 +188,9 @@ final class HyperscanPatternTranslator
         Slice expression = length < 0 ? pattern : pattern.slice(0, length);
         if (!SliceUtf8.isUtf8(expression)) {
             throw invalid(pattern.toStringUtf8(), "Expression is not valid UTF-8.");
+        }
+        if (expression.length() > MAX_PATTERN_BYTES) {
+            throw invalid(expression.toStringUtf8(), "Pattern length exceeds limit.");
         }
         String text = expression.toStringUtf8();
         Node root = new Parser(text).parse();
@@ -312,12 +322,21 @@ final class HyperscanPatternTranslator
 
     private static TrinoException invalid(String pattern, String error)
     {
-        return new TrinoException(INVALID_FUNCTION_ARGUMENT, "Pattern '%s' failed with error '%s'".formatted(pattern, error));
+        return new TrinoException(INVALID_FUNCTION_ARGUMENT, "Pattern '%s' failed with error '%s'".formatted(describe(pattern), error));
     }
 
     private static TrinoException notSupported(String pattern, String feature)
     {
-        return new TrinoException(NOT_SUPPORTED, "Pattern '%s' uses %s, which ch_multimatchanyindex does not support because Java cannot reproduce ClickHouse's result exactly".formatted(pattern, feature));
+        return new TrinoException(NOT_SUPPORTED, "Pattern '%s' uses %s, which ch_multimatchanyindex does not support because Java cannot reproduce ClickHouse's result exactly".formatted(describe(pattern), feature));
+    }
+
+    // a pattern can be 16,000 bytes long, which is too much for an error message
+    static String describe(String pattern)
+    {
+        if (pattern.codePointCount(0, pattern.length()) <= MAX_MESSAGE_PATTERN_LENGTH) {
+            return pattern;
+        }
+        return pattern.substring(0, pattern.offsetByCodePoints(0, MAX_MESSAGE_PATTERN_LENGTH)) + "... (" + pattern.length() + " characters)";
     }
 
     private sealed interface Node
@@ -666,6 +685,7 @@ final class HyperscanPatternTranslator
         private final int[] pattern;
         private int position;
         private int captureCount;
+        private int depth;
         private final Set<String> groupNames = new HashSet<>();
 
         Parser(String source)
@@ -706,6 +726,22 @@ final class HyperscanPatternTranslator
         }
 
         private Node parseAlternation(Flags outerFlags, boolean inGroup)
+        {
+            if (!inGroup) {
+                return parseBranches(outerFlags, false);
+            }
+            if (++depth > MAX_NESTING_DEPTH) {
+                throw notSupported("groups nested more than %s deep, where Java's regex engine would run out of stack".formatted(MAX_NESTING_DEPTH));
+            }
+            try {
+                return parseBranches(outerFlags, true);
+            }
+            finally {
+                depth--;
+            }
+        }
+
+        private Node parseBranches(Flags outerFlags, boolean inGroup)
         {
             // an inline flag such as (?i) lasts to the end of the group, across later branches
             Flags flags = outerFlags.copy();
@@ -899,7 +935,7 @@ final class HyperscanPatternTranslator
             if (!flags.caseless) {
                 return new Literal(codePoint);
             }
-            CodePointSet variants = CodePointSet.of(codePoint).caseClosure();
+            CodePointSet variants = CodePointSet.caseVariants(codePoint);
             if (variants.singleCodePoint() >= 0) {
                 return new Literal(codePoint);
             }

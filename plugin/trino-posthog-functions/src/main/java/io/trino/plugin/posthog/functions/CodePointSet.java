@@ -26,6 +26,12 @@ import static java.lang.Character.MAX_CODE_POINT;
  */
 final class CodePointSet
 {
+    /**
+     * The scan for code points with another case stops here, as nothing above it has one: the
+     * highest is U+1E943 in Unicode 16. A test checks every code point of the running JDK.
+     */
+    static final int MAX_CASED_CODE_POINT = 0x1FFFF;
+
     static final CodePointSet EMPTY = new CodePointSet(new int[0]);
     static final CodePointSet ALL = of(0, MAX_CODE_POINT);
 
@@ -131,6 +137,18 @@ final class CodePointSet
             }
         }
         return false;
+    }
+
+    /**
+     * A code point and every other case of it.
+     */
+    static CodePointSet caseVariants(int codePoint)
+    {
+        Builder builder = new Builder();
+        for (int variant : CaseFolding.variants(codePoint)) {
+            builder.add(variant, variant);
+        }
+        return builder.build();
     }
 
     /**
@@ -258,7 +276,7 @@ final class CodePointSet
 
         static {
             Map<Integer, List<Integer>> byFold = new HashMap<>();
-            for (int codePoint = 0; codePoint <= MAX_CODE_POINT; codePoint++) {
+            for (int codePoint = 0; codePoint <= MAX_CASED_CODE_POINT; codePoint++) {
                 int fold = fold(codePoint);
                 if (fold != codePoint || Character.toUpperCase(codePoint) != codePoint || Character.toTitleCase(codePoint) != codePoint) {
                     byFold.computeIfAbsent(fold, _ -> new ArrayList<>()).add(codePoint);
