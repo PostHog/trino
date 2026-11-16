@@ -23,6 +23,6 @@ public class PostHogFunctionsPlugin
     @Override
     public Set<Class<?>> getFunctions()
     {
-        return Set.of(ClickHouseHashFunctions.class, ClickHouseJsonFunctions.class);
+        return Set.of(ClickHouseHashFunctions.class, ClickHouseJsonFunctions.class, ClickHouseRegexFunctions.class);
     }
 }
