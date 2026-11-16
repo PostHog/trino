@@ -47,7 +47,7 @@ import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
 /**
- * The fixtures come from real ClickHouse (26.10.3.7; 25.8.33.6 returns the same) by
+ * The fixtures come from real ClickHouse (26.10.3.7; 26.9.5.2 and 25.8.33.6 return the same) by
  * {@code src/test/resources/generate-multimatchanyindex-fixtures.py}, whose docstring has the
  * command. Every expected value below that is not from a fixture was also measured on ClickHouse.
  */
@@ -394,7 +394,7 @@ public class TestClickHouseRegexFunctions
     @Test
     public void testPatternsJavaCannotReproduce()
     {
-        // ClickHouse 26.10 matches these wrongly (^\W$ matches "a"), ClickHouse 25.8 correctly
+        // ClickHouse 26.9 and 26.10 match these wrongly (^\W$ matches "a"), ClickHouse 25.8 correctly
         assertNotSupported("^\\W$");
         assertNotSupported("^\\S$");
         assertNotSupported("\\H");

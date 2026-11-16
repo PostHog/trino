@@ -18,7 +18,7 @@
 bot_definitions.py is products/web_analytics/backend/hogql_queries/bot_definitions.py from
 PostHog/posthog. Only the keys of its BOT_DEFINITIONS dict literal are read, with ast, so the
 file is never imported. The fixtures were generated with ClickHouse 26.10.3.7 from PostHog/posthog
-blob d92137bce4b1d9316cb22d1b4779a09a7e75759e, and ClickHouse 25.8.33.6 returns the same results.
+blob d92137bce4b1d9316cb22d1b4779a09a7e75759e, and ClickHouse 26.9.5.2 and 25.8.33.6 return the same results.
 """
 
 import ast
@@ -95,7 +95,7 @@ FUZZ_CHARS = ['A', 'aa', '\t', '\x0b', ' ', ' ', '\u0085', '\x01', '\x1b', '{
 FUZZ_LITERALS = ['\\141', '\\0141', '\\x61', '\\x{20ac}', '\\Qa.b\\E', 'a{,2}', 'x{', '}', ']', '\\cA', '\\e', '\\t',
                  '\\y', '\\8', '\\11', '\\012', '\\o{142}', 'a', 'b', 'c', ' ', '\\n', 'é', 'K', 'k', 'B', '1',
                  '_', '€', '\U0001f600', 'x', '\\.', '-', '\\x{e9}', 'ab', 'bc', 'S', 'ſ']
-# Only negated classes that exclude a single range: ClickHouse 26.10 matches the others incorrectly
+# Only negated classes that exclude a single range: ClickHouse 26.9 and 26.10 match the others incorrectly
 FUZZ_CLASSES = ['[[:digit:]_]', '[[:^digit:]]', '\\p{L}', '\\pN', '[\\p{Lu}a]', '\\p{Latin}', '[\\x{e9}-\\x{20ac}]',
                 '[]a]', '[a-]', '[\\d-z]', '[\\Q]\\E]', '[\\b]', '[\\141]', '\\v', '[^ab]', '\\p{Xan}', '\\p{Any}',
                 '[[:punct:]]', '.', '[abc]', '[^a]', '[a-c]', '[^\\n]', '\\d', '\\w', '\\s', '\\D', '[[:alpha:]]',

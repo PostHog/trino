@@ -1102,15 +1102,15 @@ final class HyperscanPatternTranslator
         }
 
         /**
-         * ClickHouse 26.10 (Vectorscan in UTF-8 mode) matches a negated class wrongly when the
+         * ClickHouse 26.9 and 26.10 (Vectorscan in UTF-8 mode) match a negated class wrongly when the
          * excluded code points form more than one range: {@code ^\\W$} matches "a" and
          * {@code ^\\S$} matches " ", while ClickHouse 25.8 gets both right. A single excluded
-         * range, as in {@code [^a]}, {@code [^a-c]}, {@code \\D} or {@code [^\\n]}, is right in both.
+         * range, as in {@code [^a]}, {@code [^a-c]}, {@code \\D} or {@code [^\\n]}, is right in all three.
          */
         private void checkExcluded(CodePointSet excluded)
         {
             if (excluded.rangeCount() > 1) {
-                throw notSupported("a negated class that excludes more than one range, which ClickHouse 26.10 matches incorrectly");
+                throw notSupported("a negated class that excludes more than one range, which ClickHouse 26.9 and 26.10 match incorrectly");
             }
         }
 
