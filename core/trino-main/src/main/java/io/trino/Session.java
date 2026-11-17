@@ -66,6 +66,8 @@ import static java.util.Objects.requireNonNull;
 
 public final class Session
 {
+    private static final String HOGLAKE_SESSION_JWT = "internal$hoglake_session_jwt";
+
     private final QueryId queryId;
     private final Span querySpan;
     private final Optional<TransactionId> transactionId;
@@ -557,7 +559,7 @@ public final class Session
 
     public ConnectorSession toConnectorSession()
     {
-        return new FullConnectorSession(this, identity.toConnectorIdentity());
+        return new FullConnectorSession(this, connectorSessionIdentity().toConnectorIdentity());
     }
 
     public ConnectorSession toConnectorSession(CatalogHandle catalogHandle)
@@ -567,11 +569,25 @@ public final class Session
         String catalogName = catalogHandle.getCatalogName().toString();
         return new FullConnectorSession(
                 this,
-                identity.toConnectorIdentity(catalogName),
+                connectorSessionIdentity().toConnectorIdentity(catalogName),
                 catalogProperties.getOrDefault(catalogName, ImmutableMap.of()),
                 catalogHandle,
                 catalogName,
                 sessionPropertyManager);
+    }
+
+    private Identity connectorSessionIdentity()
+    {
+        if (identity.getUser().equals(originalIdentity.getUser()) || !identity.getExtraCredentials().containsKey(HOGLAKE_SESSION_JWT)) {
+            return identity;
+        }
+
+        // Derived users must not reuse the original caller's Hoglake token.
+        Map<String, String> credentials = new HashMap<>(identity.getExtraCredentials());
+        credentials.remove(HOGLAKE_SESSION_JWT);
+        return Identity.from(identity)
+                .withExtraCredentials(credentials)
+                .build();
     }
 
     public SessionRepresentation toSessionRepresentation()

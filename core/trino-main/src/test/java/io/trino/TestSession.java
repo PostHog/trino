@@ -28,7 +28,9 @@ import io.trino.spi.QueryId;
 import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.connector.CatalogVersion;
 import io.trino.spi.security.BasicPrincipal;
+import io.trino.spi.security.ConnectorIdentity;
 import io.trino.spi.security.Identity;
+import io.trino.spi.security.SelectedRole;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.transaction.TransactionId;
 import org.junit.jupiter.api.Test;
@@ -163,6 +165,85 @@ public class TestSession
     }
 
     @Test
+    public void testCallerCredentialRemovedForDerivedIdentities()
+    {
+        Identity originalIdentity = mappedCallerIdentity();
+        Session session = testSessionBuilder()
+                .setIdentity(originalIdentity)
+                .setOriginalIdentity(originalIdentity)
+                .build();
+        Identity definerIdentity = Identity.from(originalIdentity)
+                .withUser("view_owner")
+                .withGroups(ImmutableSet.of("view_group"))
+                .withEnabledRoles(ImmutableSet.of("view_system_role"))
+                .build();
+        Session definerSession = session.createViewSession(
+                Optional.of("hoglake"),
+                Optional.of("test_schema"),
+                definerIdentity,
+                ImmutableList.of());
+        Session impersonatedSession = Session.builder(session)
+                .setIdentity(Identity.from(originalIdentity).withUser("impersonated_user").build())
+                .build();
+        Map<String, String> expectedCredentials = ImmutableMap.of(
+                "internal$unrelated", "synthetic-internal-secret",
+                "storage_token", FIRST_ORDINARY_CREDENTIAL);
+
+        for (Session derivedSession : ImmutableList.of(definerSession, impersonatedSession)) {
+            assertThat(derivedSession.getUser()).isNotEqualTo(derivedSession.getOriginalIdentity().getUser());
+            assertConnectorProjections(derivedSession, expectedCredentials);
+        }
+        assertConnectorProjections(session, originalIdentity.getExtraCredentials());
+    }
+
+    @Test
+    public void testCallerCredentialPreservedForMappedIdentity()
+    {
+        Identity identity = mappedCallerIdentity();
+        Session session = testSessionBuilder()
+                .setIdentity(identity)
+                .setOriginalIdentity(identity)
+                .build();
+
+        assertThat(identity.getPrincipal().orElseThrow().getName()).isEqualTo("example.alice");
+        assertThat(identity.getUser()).isEqualTo("example.mapped_alice");
+        assertConnectorProjections(session, identity.getExtraCredentials());
+    }
+
+    @Test
+    public void testMissingCallerCredentialNotRestoredFromOriginalIdentity()
+    {
+        Identity originalIdentity = mappedCallerIdentity();
+        Map<String, String> credentials = ImmutableMap.of(
+                "internal$unrelated", "synthetic-internal-secret",
+                "storage_token", FIRST_ORDINARY_CREDENTIAL);
+
+        for (String user : ImmutableList.of(originalIdentity.getUser(), "view_owner")) {
+            Session session = testSessionBuilder()
+                    .setIdentity(Identity.from(originalIdentity)
+                            .withUser(user)
+                            .withExtraCredentials(credentials)
+                            .build())
+                    .setOriginalIdentity(originalIdentity)
+                    .build();
+
+            assertThat(session.getOriginalIdentity().getExtraCredentials()).containsKey(CALLER_JWT_CREDENTIAL);
+            assertConnectorProjections(session, credentials);
+        }
+    }
+
+    @Test
+    public void testCredentialFreeDerivedIdentity()
+    {
+        Session session = testSessionBuilder()
+                .setIdentity(Identity.ofUser("view_owner"))
+                .setOriginalIdentity(Identity.ofUser("original_user"))
+                .build();
+
+        assertConnectorProjections(session, ImmutableMap.of());
+    }
+
+    @Test
     public void testCreateViewSession()
     {
         Optional<String> catalog = Optional.of("test_catalog");
@@ -208,6 +289,54 @@ public class TestSession
         assertThat(viewSession.getClientInfo()).isEqualTo(clientInfo);
         assertThat(viewSession.getTraceToken()).isEqualTo(traceToken);
         assertThat(viewSession.getStart()).isEqualTo(start);
+    }
+
+    private static Identity mappedCallerIdentity()
+    {
+        return Identity.forUser("example.mapped_alice")
+                .withPrincipal(new BasicPrincipal("example.alice"))
+                .withGroups(ImmutableSet.of("caller_group"))
+                .withEnabledRoles(ImmutableSet.of("caller_system_role"))
+                .withConnectorRole("hoglake", new SelectedRole(SelectedRole.Type.ROLE, Optional.of("catalog_role")))
+                .withExtraCredentials(ImmutableMap.of(
+                        CALLER_JWT_CREDENTIAL, FIRST_CALLER_JWT,
+                        "internal$unrelated", "synthetic-internal-secret",
+                        "storage_token", FIRST_ORDINARY_CREDENTIAL))
+                .build();
+    }
+
+    private static void assertConnectorProjections(Session session, Map<String, String> expectedCredentials)
+    {
+        var catalogHandle = createRootCatalogHandle(new CatalogName("hoglake"), new CatalogVersion("test"));
+        Session workerSession = session.toSessionRepresentation()
+                .toSession(new SessionPropertyManager(), session.getIdentity().getExtraCredentials(), Optional.empty());
+        assertThat(workerSession.getUser()).isEqualTo(session.getUser());
+        assertThat(workerSession.getOriginalIdentity().getUser()).isEqualTo(session.getOriginalIdentity().getUser());
+
+        for (Session source : ImmutableList.of(session, workerSession)) {
+            Identity identity = source.getIdentity();
+            Identity originalIdentity = source.getOriginalIdentity();
+            Map<String, String> credentials = ImmutableMap.copyOf(identity.getExtraCredentials());
+            Map<String, String> originalCredentials = ImmutableMap.copyOf(originalIdentity.getExtraCredentials());
+            ConnectorIdentity connectorIdentity = source.toConnectorSession().getIdentity();
+            ConnectorIdentity catalogConnectorIdentity = source.toConnectorSession(catalogHandle).getIdentity();
+
+            assertThat(connectorIdentity.getConnectorRole()).isEmpty();
+            assertThat(catalogConnectorIdentity.getConnectorRole())
+                    .isEqualTo(Optional.ofNullable(identity.getCatalogRoles().get("hoglake")));
+            for (ConnectorIdentity projectedIdentity : ImmutableList.of(connectorIdentity, catalogConnectorIdentity)) {
+                assertThat(projectedIdentity.getUser()).isEqualTo(identity.getUser());
+                assertThat(projectedIdentity.getPrincipal()).isEqualTo(identity.getPrincipal());
+                assertThat(projectedIdentity.getGroups()).isEqualTo(identity.getGroups());
+                assertThat(projectedIdentity.getEnabledSystemRoles()).isEqualTo(identity.getEnabledRoles());
+                assertThat(projectedIdentity.getExtraCredentials()).containsExactlyInAnyOrderEntriesOf(expectedCredentials);
+            }
+
+            assertThat(source.getIdentity()).isSameAs(identity);
+            assertThat(source.getOriginalIdentity()).isSameAs(originalIdentity);
+            assertThat(identity.getExtraCredentials()).containsExactlyInAnyOrderEntriesOf(credentials);
+            assertThat(originalIdentity.getExtraCredentials()).containsExactlyInAnyOrderEntriesOf(originalCredentials);
+        }
     }
 
     private static List<Session> callerCredentialSessions()
