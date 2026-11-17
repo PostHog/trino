@@ -28,12 +28,12 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import tools.jackson.databind.JsonNode;
 
 import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
-import tools.jackson.databind.JsonNode;
 
 import static io.airlift.http.client.JsonResponseHandler.createJsonResponseHandler;
 import static io.airlift.http.client.Request.Builder.prepareGet;
@@ -43,10 +43,10 @@ import static io.airlift.http.client.StaticBodyGenerator.createStaticBodyGenerat
 import static io.airlift.http.client.StatusResponseHandler.createStatusResponseHandler;
 import static io.airlift.testing.Closeables.closeAll;
 import static io.trino.client.ProtocolHeaders.TRINO_HEADERS;
-import static io.trino.server.TrinoJsonResponseHandler.createTrinoJsonResponseHandler;
 import static io.trino.server.TestQueryResource.JSON_MAPPER;
 import static io.trino.server.TestQueryResource.QUERY_RESULTS_JSON_CODEC;
 import static io.trino.server.TestQueryResource.REQUEST_USER_HEADER;
+import static io.trino.server.TrinoJsonResponseHandler.createTrinoJsonResponseHandler;
 import static io.trino.testing.assertions.Assert.assertConsistently;
 import static io.trino.testing.assertions.Assert.assertEventually;
 import static java.nio.charset.StandardCharsets.UTF_8;

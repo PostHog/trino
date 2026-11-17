@@ -55,6 +55,7 @@ import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
 import org.junit.jupiter.api.Test;
+import tools.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
 import java.util.HashMap;
@@ -63,7 +64,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.LinkedBlockingQueue;
-import tools.jackson.databind.ObjectMapper;
 
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static io.airlift.opentelemetry.OpenTelemetryExporterConfig.Protocol.GRPC;
