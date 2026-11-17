@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 #
 # Vendored from airlift/github-actions check-commit-messages/check.py at
-# 1652e24519f5c7cec59d841070bf9beffadabdf9 with one addition: the
-# --allow-ai-attribution flag. This fork credits the AI tools that write
-# some of its commits in Co-authored-by trailers, which the upstream rule
-# forbids. Every other rule (subject style and length, description
-# wrapping) is unchanged so the fork keeps upstream's commit style.
+# 1652e24519f5c7cec59d841070bf9beffadabdf9 with two additions:
+#
+# - The --allow-ai-attribution flag. This fork credits the AI tools that
+#   write some of its commits in Co-authored-by trailers, which the upstream
+#   rule forbids.
+# - The --allow-conventional-commits flag. PostHog writes subjects in the
+#   Conventional Commits style (feat(scope): summary), which upstream rejects
+#   for starting lowercase and whose prefix eats into the length limit. With
+#   the flag, a subject with a standard type prefix may start lowercase, and
+#   the period, past-tense and length rules apply to the summary after the
+#   prefix.
+#
+# Every other rule (description wrapping, and the subject rules for subjects
+# without a type prefix) is unchanged.
 
 import argparse
 import re
@@ -31,6 +40,10 @@ TRAILER_PATTERN = re.compile(
 ATTRIBUTION_PATTERN = re.compile(
     r"^(?:Assisted-by|Co-authored-by):\s*\S.*$",
     re.IGNORECASE,
+)
+CONVENTIONAL_SUBJECT_PATTERN = re.compile(
+    r"^(?:build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)"
+    r"(?:\([^()\s]+\))?!?: (?P<summary>\S.*)$"
 )
 PAST_TENSE_SUBJECT_STARTS = {
     "added": "Add",
@@ -74,7 +87,9 @@ SCISSORS_LINE_SUFFIX = " ------------------------ >8 ------------------------"
 class CommitSubjectViolation:
     commit: str
     subject: str
+    # Length of the summary after the type prefix for a conventional subject
     length: int
+    conventional: bool
     starts_with_lowercase: bool
     ends_with_period: bool
     suggested_imperative: str | None
@@ -132,20 +147,30 @@ def get_commit_message(commit: str) -> str:
 
 
 def get_subject_violations(
-    commit: str, message: str
+    commit: str, message: str, allow_conventional_commits: bool = False
 ) -> list[CommitSubjectViolation]:
     lines = message.splitlines()
     if not lines:
         return []
 
     subject = lines[0]
-    starts_with_lowercase = subject[:1].islower()
-    ends_with_period = subject.endswith(".")
-    words = subject.split(maxsplit=1)
+    conventional_match = (
+        CONVENTIONAL_SUBJECT_PATTERN.fullmatch(subject)
+        if allow_conventional_commits
+        else None
+    )
+    if conventional_match is not None:
+        summary = conventional_match["summary"]
+        starts_with_lowercase = False
+    else:
+        summary = subject
+        starts_with_lowercase = subject[:1].islower()
+    ends_with_period = summary.endswith(".")
+    words = summary.split(maxsplit=1)
     first_word = words[0].rstrip(".,:;").casefold() if words else ""
     suggested_imperative = PAST_TENSE_SUBJECT_STARTS.get(first_word)
     if (
-        len(subject) <= MAX_SUBJECT_LENGTH
+        len(summary) <= MAX_SUBJECT_LENGTH
         and not starts_with_lowercase
         and not ends_with_period
         and suggested_imperative is None
@@ -156,7 +181,8 @@ def get_subject_violations(
         CommitSubjectViolation(
             commit=commit,
             subject=subject,
-            length=len(subject),
+            length=len(summary),
+            conventional=conventional_match is not None,
             starts_with_lowercase=starts_with_lowercase,
             ends_with_period=ends_with_period,
             suggested_imperative=suggested_imperative,
@@ -277,13 +303,14 @@ def get_attribution_violations(
 def check_commit_message(
     commit: str,
     message: str,
+    allow_conventional_commits: bool = False,
 ) -> tuple[
     list[CommitSubjectViolation],
     list[CommitDescriptionViolation],
     list[CommitAttributionViolation],
 ]:
     return (
-        get_subject_violations(commit, message),
+        get_subject_violations(commit, message, allow_conventional_commits),
         get_description_violations(commit, message),
         get_attribution_violations(commit, message),
     )
@@ -291,6 +318,7 @@ def check_commit_message(
 
 def check_commit_messages(
     revision_range: str,
+    allow_conventional_commits: bool = False,
 ) -> tuple[
     list[str],
     list[CommitSubjectViolation],
@@ -308,7 +336,7 @@ def check_commit_messages(
             commit_subject_violations,
             commit_description_violations,
             commit_attribution_violations,
-        ) = check_commit_message(commit, message)
+        ) = check_commit_message(commit, message, allow_conventional_commits)
         subject_violations.extend(commit_subject_violations)
         description_violations.extend(commit_description_violations)
         attribution_violations.extend(commit_attribution_violations)
@@ -323,6 +351,7 @@ def check_commit_messages(
 
 def check_commit_message_file(
     message_file: Path,
+    allow_conventional_commits: bool = False,
 ) -> tuple[
     list[CommitSubjectViolation],
     list[CommitDescriptionViolation],
@@ -337,7 +366,9 @@ def check_commit_message_file(
         )
         raise SystemExit(1) from exception
 
-    return check_commit_message("commit message", message)
+    return check_commit_message(
+        "commit message", message, allow_conventional_commits
+    )
 
 
 def clean_commit_message_file(message: str) -> str:
@@ -378,6 +409,7 @@ def strip_commit_comments(message: str) -> str:
 
 def print_subject_violations(
     violations: list[CommitSubjectViolation],
+    allow_conventional_commits: bool = False,
 ) -> None:
     print(
         "Commit subjects must not start with a lowercase letter or end with "
@@ -394,6 +426,12 @@ def print_subject_violations(
         "characters.",
         file=sys.stderr,
     )
+    if allow_conventional_commits:
+        print(
+            "Conventional Commits subjects (type(scope)!: summary) may start "
+            "lowercase; these rules apply to the summary.",
+            file=sys.stderr,
+        )
     print(file=sys.stderr)
 
     for violation in violations:
@@ -408,8 +446,9 @@ def print_subject_violations(
                 file=sys.stderr,
             )
         if violation.length > MAX_SUBJECT_LENGTH:
+            part = "summary" if violation.conventional else "subject"
             print(
-                f"  subject: {violation.length} characters",
+                f"  {part}: {violation.length} characters",
                 file=sys.stderr,
             )
         print(file=sys.stderr)
@@ -498,6 +537,15 @@ def parse_args() -> argparse.Namespace:
             "model or coding tool. Upstream forbids them; this fork does not."
         ),
     )
+    parser.add_argument(
+        "--allow-conventional-commits",
+        action="store_true",
+        help=(
+            "Allow Conventional Commits subjects such as 'feat(scope): add x'. "
+            "They may start lowercase, and the remaining subject rules apply "
+            "to the summary after the prefix. Upstream rejects them."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -508,21 +556,27 @@ def main() -> int:
             subject_violations,
             description_violations,
             attribution_violations,
-        ) = check_commit_message_file(args.message_file)
+        ) = check_commit_message_file(
+            args.message_file, args.allow_conventional_commits
+        )
     else:
         (
             commits,
             subject_violations,
             description_violations,
             attribution_violations,
-        ) = check_commit_messages(args.revision_range)
+        ) = check_commit_messages(
+            args.revision_range, args.allow_conventional_commits
+        )
         commit_count = len(commits)
 
     if args.allow_ai_attribution:
         attribution_violations = []
 
     if subject_violations:
-        print_subject_violations(subject_violations)
+        print_subject_violations(
+            subject_violations, args.allow_conventional_commits
+        )
     if description_violations:
         print_description_violations(description_violations)
     if attribution_violations:
