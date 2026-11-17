@@ -1,6 +1,6 @@
-<!-- Thank you for submitting a pull request to TruffleHog!
-See https://github.com/PostHog/trufflehog/blob/master/.github/DEVELOPMENT.md
-and https://github.com/PostHog/trufflehog/blob/master/AGENTS.md before opening a PR. -->
+<!-- Thank you for submitting a pull request to Calydon!
+See https://github.com/PostHog/calydon/blob/master/.github/DEVELOPMENT.md
+and https://github.com/PostHog/calydon/blob/master/AGENTS.md before opening a PR. -->
 <!-- Provide an overview for maintainers and reviewers. -->
 ## Description
 

@@ -38,7 +38,7 @@ import ChevronRightIcon from '@mui/icons-material/ChevronRight'
 import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord'
 import LogoutIcon from '@mui/icons-material/Logout'
 import { Texts } from '../constant'
-import trufflehogLogo from '../assets/trufflehog-head.png'
+import calydonLogo from '../assets/calydon-head.png'
 import { RouterItem, routers, routersMapper } from '../router.tsx'
 import { Theme as ThemeStore, useConfigStore } from '../store'
 import { useAuth } from './AuthContext'
@@ -226,7 +226,7 @@ export const RootLayout = (props: { children: React.ReactNode }) => {
         <Box sx={{ display: 'flex' }}>
             <AppBar position="fixed" sx={{ zIndex: (theme) => theme.zIndex.drawer + 1 }}>
                 <Toolbar>
-                    <Box component="img" sx={{ height: 44 }} alt="logo" src={trufflehogLogo} />
+                    <Box component="img" sx={{ height: 44 }} alt="logo" src={calydonLogo} />
                     <Typography
                         variant="h6"
                         noWrap

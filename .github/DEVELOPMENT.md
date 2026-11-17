@@ -1,6 +1,6 @@
 # Development
 
-In this document you can find information about developing TruffleHog (PostHog's custom fork of Trino). Upstream Trino conventions and SPI guidelines continue to apply unless noted otherwise.
+In this document you can find information about developing Calydon (PostHog's custom fork of Trino). Upstream Trino conventions and SPI guidelines continue to apply unless noted otherwise.
 
 * [Trino organization](#trino-organization)
 * [Trino developer guide](#trino-developer-guide)
@@ -15,7 +15,7 @@ In this document you can find information about developing TruffleHog (PostHog's
 
 ## Trino organization
 
-TruffleHog follows upstream Trino's engineering conventions. Pull requests for this fork go to `PostHog/trufflehog` as described in [CONTRIBUTING.md](CONTRIBUTING.md); the upstream process below is the reference for commit, review, and release-note style:
+Calydon follows upstream Trino's engineering conventions. Pull requests for this fork go to `PostHog/calydon` as described in [CONTRIBUTING.md](CONTRIBUTING.md); the upstream process below is the reference for commit, review, and release-note style:
 
 * [Vision](https://trino.io/development/vision)
 * [Contribution process](https://trino.io/development/process#contribution-process)

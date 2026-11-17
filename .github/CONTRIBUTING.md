@@ -1,6 +1,6 @@
-# Contributing to TruffleHog
+# Contributing to Calydon
 
-TruffleHog is PostHog's custom fork of [Trino](https://github.com/trinodb/trino).
+Calydon is PostHog's custom fork of [Trino](https://github.com/trinodb/trino).
 
 ## Safety & Public Repository Guidelines
 
@@ -12,4 +12,4 @@ Open a pull request against `master` and follow the pull request template. Code 
 
 ## License
 
-By contributing to TruffleHog, you agree that your contributions will be licensed under the [Apache License Version 2.0 (APLv2)](../LICENSE).
+By contributing to Calydon, you agree that your contributions will be licensed under the [Apache License Version 2.0 (APLv2)](../LICENSE).

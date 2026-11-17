@@ -1,12 +1,12 @@
 ---
 name: Feature request
-description: New features or improvements for TruffleHog
+description: New features or improvements for Calydon
 type: Feature
 body:
   - type: markdown
     attributes:
       value: |
-        * Verify that the request is not already reported by checking [open issues](https://github.com/PostHog/trufflehog/issues).
+        * Verify that the request is not already reported by checking [open issues](https://github.com/PostHog/calydon/issues).
         * Do **NOT** share any sensitive information like customer data, passwords, security tokens, private URLs, or internal identifiers.
 
   - type: textarea

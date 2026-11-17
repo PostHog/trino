@@ -4,7 +4,7 @@ set -euo pipefail
 
 fail() { printf '%s\n' "$*" >&2; exit 1; }
 
-[[ "${GITHUB_REPOSITORY:-}" == PostHog/trufflehog ]] || fail 'Only PostHog/trufflehog can publish releases'
+[[ "${GITHUB_REPOSITORY:-}" == PostHog/calydon ]] || fail 'Only PostHog/calydon can publish releases'
 [[ "${GITHUB_REF:-}" == refs/heads/master ]] || fail 'Only master can publish releases'
 [[ "${GITHUB_EVENT_NAME:-}" == push || "${GITHUB_EVENT_NAME:-}" == workflow_dispatch ]] || fail 'Unsupported release event'
 [[ "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || fail 'A full source revision is required'
@@ -17,7 +17,7 @@ printf -v ordered_tag 'r%012d-%.6s' "$position" "$GITHUB_SHA"
 repository="${ECR_REPOSITORY:-}"
 [[ "$repository" =~ ^[0-9]{12}\.dkr\.ecr\.us-east-1\.amazonaws\.com/posthog-trino$ ]] || fail 'A canonical us-east-1 ECR repository is required'
 mirror=ghcr.io/posthog/trino
-source_url=https://github.com/PostHog/trufflehog
+source_url=https://github.com/PostHog/calydon
 build_tag="build-$GITHUB_SHA"
 
 scratch="$(mktemp -d)"

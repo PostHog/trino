@@ -1,6 +1,6 @@
-# TruffleHog — Claude guidance
+# Calydon — Claude guidance
 
-TruffleHog (`PostHog/trufflehog`) is PostHog's custom fork of Trino. All agents must follow [AGENTS.md](AGENTS.md), including its public-repository data-handling rules.
+Calydon (`PostHog/calydon`) is PostHog's custom fork of Trino. All agents must follow [AGENTS.md](AGENTS.md), including its public-repository data-handling rules.
 
 **Before writing Java code, you must first read [`.github/DEVELOPMENT.md`](.github/DEVELOPMENT.md)
 in full** — it's the authoritative source for code-style rules (mocks, `var`, switch statements,
