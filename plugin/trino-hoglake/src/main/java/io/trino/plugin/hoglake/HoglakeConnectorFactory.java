@@ -13,8 +13,12 @@
  */
 package io.trino.plugin.hoglake;
 
+import com.google.inject.Binder;
 import com.google.inject.Injector;
 import com.google.inject.Key;
+import com.google.inject.Module;
+import com.google.inject.Provides;
+import com.google.inject.Singleton;
 import io.airlift.bootstrap.Bootstrap;
 import io.airlift.bootstrap.LifeCycleManager;
 import io.trino.filesystem.manager.FileSystemModule;
@@ -36,6 +40,7 @@ import org.weakref.jmx.guice.MBeanModule;
 import java.util.Map;
 import java.util.Set;
 
+import static io.airlift.configuration.ConfigBinder.configBinder;
 import static io.trino.plugin.base.Versions.checkStrictSpiVersionMatch;
 
 public class HoglakeConnectorFactory
@@ -53,6 +58,17 @@ public class HoglakeConnectorFactory
         checkStrictSpiVersionMatch(context, this);
         ClassLoader classLoader = getClass().getClassLoader();
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
+            if (sharedMode(config)) {
+                Injector injector = new Bootstrap(
+                        "io.trino.bootstrap.catalog." + catalogName,
+                        new SharedModule(),
+                        new ConnectorContextModule(catalogName, context))
+                        .doNotInitializeLogging()
+                        .disableSystemProperties()
+                        .setRequiredConfigurationProperties(config)
+                        .initialize();
+                return injector.getInstance(HoglakeSharedConnector.class);
+            }
             Injector injector = new Bootstrap(
                     "io.trino.bootstrap.catalog." + catalogName,
                     new MBeanModule(),
@@ -73,6 +89,49 @@ public class HoglakeConnectorFactory
                     new ClassLoaderSafeConnectorPageSinkProvider(injector.getInstance(ConnectorPageSinkProvider.class), classLoader),
                     injector.getInstance(LifeCycleManager.class),
                     injector.getInstance(new Key<Set<SessionPropertiesProvider>>() {}));
+        }
+    }
+
+    private static boolean sharedMode(Map<String, String> config)
+    {
+        String value = config.get("hoglake.multi-tenant");
+        if (value == null || value.equals("false")) {
+            return false;
+        }
+        if (value.equals("true")) {
+            return true;
+        }
+        throw new IllegalArgumentException("hoglake.multi-tenant must be exactly true or false");
+    }
+
+    private static class SharedModule
+            implements Module
+    {
+        @Override
+        public void configure(Binder binder)
+        {
+            configBinder(binder).bindConfig(HoglakeSharedConfig.class);
+        }
+
+        @Provides
+        @Singleton
+        public HoglakeSharedSessionVerifier verifier(HoglakeSharedConfig config)
+        {
+            return new HoglakeSharedSessionVerifier(config);
+        }
+
+        @Provides
+        @Singleton
+        public HoglakeSharedHttpClient client(HoglakeSharedConfig config, HoglakeSharedSessionVerifier verifier)
+        {
+            return new HoglakeSharedHttpClient(config, verifier);
+        }
+
+        @Provides
+        @Singleton
+        public HoglakeSharedConnector connector(HoglakeSharedHttpClient client, HoglakeSharedSessionVerifier verifier, LifeCycleManager lifeCycleManager)
+        {
+            return new HoglakeSharedConnector(client, verifier, lifeCycleManager);
         }
     }
 }

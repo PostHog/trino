@@ -1,10 +1,147 @@
 # Hoglake connector
 
-The Hoglake connector provides read and append access to a Hoglake catalog. It obtains
-metadata and file lists from the Hoglake REST API and reads Parquet files directly
-from S3-compatible object storage. Hoglake namespaces appear as Trino schemas.
+The Hoglake connector supports legacy access to a fixed catalog.
+An explicit default-off mode supports shared metadata discovery.
+Shared mode does not support data execution.
+Hoglake namespaces appear as Trino schemas.
+
+(hoglake-shared-session)=
+## Shared metadata mode
+
+The [approved M2c-A specification](https://github.com/PostHog/hogtower/blob/main/docs/trufflehog-shared-session-http.md)
+defines this boundary.
+Current M1b tokens supply metadata authority only.
+Full M2c, M3, and M4 remain open.
+This implementation authorizes no deployment or activation.
+
+### Shared configuration
+
+Set `hoglake.multi-tenant=true` explicitly to select the separate HTTP-only connector.
+The default is `false`.
+The property accepts only the exact strings `true` and `false`.
+Omitting `hoglake.catalog` does not enable shared mode.
+Legacy mode keeps its existing behavior.
+
+| Property | Type | Default | Requirement |
+| --- | --- | --- | --- |
+| `hoglake.multi-tenant` | Boolean | `false` | Set `true` for shared mode. |
+| `hoglake.uri` | URI | None | Required HTTP or HTTPS base URI. |
+| `hoglake.shared.jwks-file` | File | None | Required mounted public JWKS file. |
+| `hoglake.shared.issuer` | String | None | Required exact accepted issuer. |
+| `hoglake.shared.backend-bindings` | JSON string | None | Required canonical backend UUID mapping to `postgres` or `hoglite`. |
+| `hoglake.client.request-timeout` | Duration | `120s` | Optional; minimum `1ms`. |
+| `hoglake.shared.clock-skew` | Duration | `60s` | Optional; range `0s` through `600s`. |
+| `hoglake.shared.scoped-max-lifetime` | Duration | `900s` | Optional; range `1s` through `900s`. |
+
+The base URI accepts no user information, query, or fragment.
+The connection timeout is `10s`.
+The public-key reload interval is `30s`.
+A reload failure retains the last good public keys.
+This checkpoint adds no stale-key TTL.
+
+The following example uses synthetic values.
+It illustrates configuration only.
+It does not authorize catalog creation or deployment.
+
+```properties
+connector.name=hoglake
+hoglake.multi-tenant=true
+hoglake.uri=https://hoglake.example.invalid
+hoglake.shared.jwks-file=/etc/hoglake/public-jwks.json
+hoglake.shared.issuer=https://issuer.example.invalid
+hoglake.shared.backend-bindings={"00000000-0000-4000-8000-000000000001":"postgres"}
+```
+
+Shared mode rejects unused legacy configuration.
+This includes a fixed catalog, fixed tokens, token files, issuer client secrets, legacy filesystem properties, and deprecated `posthog` schema properties.
+The shared connector loads no filesystem module, AWS SDK provider, or legacy authentication provider.
+Missing session authority never selects a legacy fallback.
+
+### Session authority
+
+Coordinators and workers verify authority independently through mounted public JWKS.
+Verification uses the managed ES256 profile.
+Verification makes no issuer call.
+Token-selected key URLs provide no authority.
+This mode adds no token cache or session-authority cache.
+
+The physical HTTP catalog comes only from the sole exact authorized raw `cat` map key.
+The `org` claim supplies no catalog authority.
+Each request forwards the exact verified JWT bytes.
+The request context retains the caller binding, scopes, predicates, and placement.
+
+Recognized Hoglake grants in `scope` must exactly match `cat`.
+Foreign-only OAuth scopes, such as `openid`, grant no Hoglake authority.
+They retain the generic metadata behavior.
+
+The `usr` claim must equal `Principal.getName()`.
+Approved user mapping can change the effective user.
+The mapping must preserve the qualified database prefix.
+Both core connector projections remove only `internal$hoglake_session_jwt` when the original user differs from the effective user.
+They preserve other credentials.
+
+### Supported metadata routes
+
+Shared mode permits only these GET routes:
+
+- `/v1/catalogs/{catalog}/namespaces`
+- `/v1/catalogs/{catalog}/namespaces/{namespace}/tables`
+- `/v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}`
+
+Requests use the current catalog head.
+Table detail requests set `totals=false`.
+Each request requires verified READ authority.
+Broad JDBC discovery uses these metadata reads.
+
+The connector denies data execution at `getTableHandle`.
+This denial precedes COUNT optimizations, `WHERE false`, `LIMIT 0`, and cache shortcuts.
+DESCRIBE and exact-table metadata filters remain unsupported.
+An exact JDBC column filter can return no rows without HTTP.
+That result does not prove that the table is absent.
+This checkpoint changes no engine behavior for those filters.
+
+Supported discovery verifies authority before metadata access.
+Data paths verify authority before I/O or cache access.
+Unsupported pure DDL can return `NOT_SUPPORTED` without authentication first.
+
+### Resource limits
+
+| Resource | Ceiling |
+| --- | --- |
+| Compact JWT | `64KiB` |
+| Decoded JOSE header | `8KiB` |
+| Mounted verification file | `1MiB` |
+| Usable signing keys | `32` |
+| Metadata HTTP response | `16MiB` |
+
+Shared mode refuses object-storage operations.
+It provides no scans, footer reads, deletion-vector reads, writes, `add_files`, or cleanup.
+Ambient roles, SDK defaults, IMDS, and web identity provide no fallback.
+
+### Compatibility and activation
+
+Reviewed PostgreSQL handlers read metadata without object-storage calls.
+That review proves no storage-free startup or background work.
+Hoglite and Remote Schema paths require separate compatibility evidence.
+
+Current M1b tokens contain `ten=scoped` and predicate authority.
+The generic Hoglite contract rejects that authority.
+Tenant/operator fixtures do not prove a valid M1b-to-Hoglite flow.
+M3 requires an owned scoping contract.
+Never remove predicates or substitute a broader token.
+
+The [canonical milestones](https://github.com/PostHog/hogtower/blob/main/docs/jwt-aws-session-design.md#10-implementation-milestones)
+track the remaining implementation gates.
+Existing issuance shutdown, token drain, retention, capacity, egress, and authentication gates remain mandatory.
+Full storage execution requires separate M4 approval.
+Production activation requires separate approval.
 
 ## Configuration
+
+This section describes legacy mode.
+The remaining sections describe legacy mode unless they explicitly reference shared mode.
+Legacy mode supports direct object-storage access.
+Its authentication providers do not apply to shared mode.
 
 Create `etc/catalog/hoglake.properties`:
 
