@@ -13,6 +13,8 @@
  */
 package io.trino.plugin.password.duckgres;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableSet;
 import com.google.inject.Inject;
@@ -22,6 +24,8 @@ import io.airlift.http.client.Response;
 import io.airlift.http.client.ResponseHandler;
 import io.airlift.json.JsonCodec;
 import io.trino.spi.security.AccessDeniedException;
+import io.trino.spi.security.AuthenticatedPasswordPrincipal;
+import io.trino.spi.security.AuthenticatedPasswordPrincipal.Backend;
 import io.trino.spi.security.BasicPrincipal;
 import io.trino.spi.security.Identity;
 import io.trino.spi.security.LoadedConfiguration;
@@ -41,6 +45,7 @@ import java.util.regex.Pattern;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.hash.Hashing.sha256;
+import static io.airlift.http.client.HeaderNames.ACCEPT;
 import static io.airlift.http.client.HeaderNames.AUTHORIZATION;
 import static io.airlift.http.client.HeaderNames.CONTENT_TYPE;
 import static io.airlift.http.client.Request.Builder.prepareGet;
@@ -59,13 +64,17 @@ public class DuckgresServiceCredentialAuthenticator
     private static final Set<String> TIER_GROUPS = Set.of("tier_free", "tier_growth", "tier_scale");
     private static final int MAX_RESPONSE_BYTES = 64 * 1024;
     private static final int MAX_TOKEN_BYTES = 8192;
+    private static final String AUTH_METADATA_MEDIA_TYPE = "application/vnd.posthog.trufflehog-auth.v2+json";
     private static final JsonCodec<CredentialRequest> REQUEST_CODEC = jsonCodec(CredentialRequest.class);
     private static final JsonCodec<CredentialResponse> RESPONSE_CODEC = jsonCodec(CredentialResponse.class);
     private static final JsonCodec<ReadinessResponse> READINESS_CODEC = jsonCodec(ReadinessResponse.class);
+    private static final JsonCodec<AuthenticationMetadata> AUTH_METADATA_CODEC = jsonCodec(AuthenticationMetadata.class);
+    private static final JsonCodec<NegotiatedReadinessResponse> NEGOTIATED_READINESS_CODEC = jsonCodec(NegotiatedReadinessResponse.class);
 
     private final URI endpoint;
     private final Path tokenFile;
     private final HttpClient httpClient;
+    private final boolean authMetadataEnabled;
 
     @Inject
     public DuckgresServiceCredentialAuthenticator(DuckgresServiceCredentialConfig config, @ForDuckgresServiceCredential HttpClient httpClient)
@@ -77,6 +86,7 @@ public class DuckgresServiceCredentialAuthenticator
                 "Service credential endpoint requires HTTPS unless insecure HTTP is explicitly enabled");
         tokenFile = config.getTokenFile().toPath();
         this.httpClient = httpClient;
+        authMetadataEnabled = config.isAuthMetadataEnabled();
     }
 
     @Override
@@ -92,27 +102,48 @@ public class DuckgresServiceCredentialAuthenticator
             throw denied();
         }
         try {
-            Request request = preparePost()
+            Request.Builder request = preparePost()
                     .setUri(endpoint)
                     .setFollowRedirects(false)
                     .setMaxResponseContentLength(ofBytes(MAX_RESPONSE_BYTES))
                     .setHeader(AUTHORIZATION, "Bearer " + readToken())
                     .setHeader(CONTENT_TYPE, "application/json")
-                    .setBodyGenerator(createStaticBodyGenerator(REQUEST_CODEC.toJsonBytes(new CredentialRequest(user, password))))
-                    .build();
-            CredentialResponse response = httpClient.execute(request, new CredentialResponseHandler());
+                    .setBodyGenerator(createStaticBodyGenerator(REQUEST_CODEC.toJsonBytes(new CredentialRequest(user, password))));
+            if (authMetadataEnabled) {
+                request.setHeader(ACCEPT, AUTH_METADATA_MEDIA_TYPE);
+            }
+            CredentialCallbackResponse callback = httpClient.execute(request.build(), new CredentialResponseHandler(authMetadataEnabled));
+            CredentialResponse response = callback.credential();
             if (!user.equals(response.user()) || response.expiresAt() == null || !Instant.parse(response.expiresAt()).isAfter(Instant.now()) ||
                     !isAuthorizedGroupSet(user, response.groups())) {
                 throw denied();
             }
+            Principal principal = new BasicPrincipal(user);
+            if (callback.metadata().isPresent()) {
+                Optional<Backend> backend = parseBackend(callback.metadata().orElseThrow());
+                if (backend.isPresent()) {
+                    principal = AuthenticatedPasswordPrincipal.tenant(user, backend.orElseThrow());
+                }
+            }
             return Optional.of(Identity.forUser(user)
-                    .withPrincipal(new BasicPrincipal(user))
+                    .withPrincipal(principal)
                     .withGroups(ImmutableSet.copyOf(response.groups()))
                     .build());
         }
         catch (IOException | RuntimeException _) {
             // Upstream errors can contain credentials or response bodies.
             throw denied();
+        }
+    }
+
+    private static Optional<Backend> parseBackend(byte[] metadata)
+    {
+        try {
+            return AUTH_METADATA_CODEC.fromJson(metadata).backend();
+        }
+        catch (RuntimeException _) {
+            // Valid authentication without valid classification remains UNKNOWN.
+            return Optional.empty();
         }
     }
 
@@ -149,17 +180,22 @@ public class DuckgresServiceCredentialAuthenticator
     public String loadedRevision()
     {
         try {
-            Request request = prepareGet()
+            Request.Builder request = prepareGet()
                     .setUri(endpoint)
                     .setFollowRedirects(false)
                     .setMaxResponseContentLength(ofBytes(MAX_RESPONSE_BYTES))
-                    .setHeader(AUTHORIZATION, "Bearer " + readToken())
-                    .build();
-            ReadinessResponse response = httpClient.execute(request, new ReadinessResponseHandler());
+                    .setHeader(AUTHORIZATION, "Bearer " + readToken());
+            if (authMetadataEnabled) {
+                request.setHeader(ACCEPT, AUTH_METADATA_MEDIA_TYPE);
+            }
+            ReadinessResponse response = httpClient.execute(request.build(), new ReadinessResponseHandler(authMetadataEnabled));
             if (response.cellId() == null || response.cellId().isBlank()) {
                 throw unavailable();
             }
             // Fingerprint the authenticated binding, never the callback token or its hash.
+            if (authMetadataEnabled) {
+                return "service-auth-v2:sha256:" + sha256().hashString("duckgres-service-credential-v2\n" + endpoint.toASCIIString() + "\n" + response.cellId() + "\nauth_metadata_version=2", UTF_8);
+            }
             return "service-auth-v1:sha256:" + sha256().hashString("duckgres-service-credential-v1\n" + endpoint.toASCIIString() + "\n" + response.cellId(), UTF_8);
         }
         catch (IOException | RuntimeException _) {
@@ -193,6 +229,13 @@ public class DuckgresServiceCredentialAuthenticator
     private static class ReadinessResponseHandler
             implements ResponseHandler<ReadinessResponse, RuntimeException>
     {
+        private final boolean authMetadataEnabled;
+
+        public ReadinessResponseHandler(boolean authMetadataEnabled)
+        {
+            this.authMetadataEnabled = authMetadataEnabled;
+        }
+
         @Override
         public ReadinessResponse handleException(Request request, Exception exception)
         {
@@ -210,6 +253,17 @@ public class DuckgresServiceCredentialAuthenticator
                 if (bytes.length > MAX_RESPONSE_BYTES) {
                     throw unavailable();
                 }
+                if (authMetadataEnabled) {
+                    if (!hasNegotiatedContentType(response)) {
+                        throw unavailable();
+                    }
+                    NegotiatedReadinessResponse metadata = NEGOTIATED_READINESS_CODEC.fromJson(bytes);
+                    if (!(metadata.cellId() instanceof String cellId) || cellId.isBlank() ||
+                            !(metadata.authMetadataVersion() instanceof Integer version) || version != 2) {
+                        throw unavailable();
+                    }
+                    return new ReadinessResponse(cellId);
+                }
                 return READINESS_CODEC.fromJson(bytes);
             }
             catch (IOException | RuntimeException _) {
@@ -219,16 +273,23 @@ public class DuckgresServiceCredentialAuthenticator
     }
 
     private static class CredentialResponseHandler
-            implements ResponseHandler<CredentialResponse, RuntimeException>
+            implements ResponseHandler<CredentialCallbackResponse, RuntimeException>
     {
+        private final boolean authMetadataEnabled;
+
+        public CredentialResponseHandler(boolean authMetadataEnabled)
+        {
+            this.authMetadataEnabled = authMetadataEnabled;
+        }
+
         @Override
-        public CredentialResponse handleException(Request request, Exception exception)
+        public CredentialCallbackResponse handleException(Request request, Exception exception)
         {
             throw denied();
         }
 
         @Override
-        public CredentialResponse handle(Request request, Response response)
+        public CredentialCallbackResponse handle(Request request, Response response)
         {
             if (response.getStatusCode() != 200) {
                 throw denied();
@@ -238,13 +299,53 @@ public class DuckgresServiceCredentialAuthenticator
                 if (bytes.length > MAX_RESPONSE_BYTES) {
                     throw denied();
                 }
-                return RESPONSE_CODEC.fromJson(bytes);
+                return new CredentialCallbackResponse(
+                        RESPONSE_CODEC.fromJson(bytes),
+                        authMetadataEnabled && hasNegotiatedContentType(response) ? Optional.of(bytes) : Optional.empty());
             }
             catch (IOException | RuntimeException _) {
                 throw denied();
             }
         }
     }
+
+    private static boolean hasNegotiatedContentType(Response response)
+    {
+        return response.getHeaders(CONTENT_TYPE).equals(List.of(AUTH_METADATA_MEDIA_TYPE));
+    }
+
+    private record CredentialCallbackResponse(CredentialResponse credential, Optional<byte[]> metadata) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class AuthenticationMetadata
+    {
+        private Object backend;
+        private int backendFields;
+
+        @JsonCreator
+        public AuthenticationMetadata() {}
+
+        @JsonProperty("backend")
+        public void setBackend(Object backend)
+        {
+            backendFields++;
+            this.backend = backend;
+        }
+
+        public Optional<Backend> backend()
+        {
+            if (backendFields != 1 || !(backend instanceof String value)) {
+                return Optional.empty();
+            }
+            return switch (value) {
+                case "hoglake" -> Optional.of(Backend.HOGLAKE);
+                case "ducklake" -> Optional.of(Backend.DUCKLAKE);
+                default -> Optional.empty();
+            };
+        }
+    }
+
+    public record NegotiatedReadinessResponse(@JsonProperty("cell_id") Object cellId, @JsonProperty("auth_metadata_version") Object authMetadataVersion) {}
 
     public record CredentialRequest(String username, String password)
     {

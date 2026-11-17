@@ -20,6 +20,9 @@ import com.google.common.util.concurrent.ExecutionError;
 import com.google.common.util.concurrent.UncheckedExecutionException;
 import io.airlift.units.Duration;
 import io.trino.cache.NonEvictableCache;
+import io.trino.spi.TrinoException;
+import io.trino.spi.security.AuthenticatedPasswordPrincipal;
+import io.trino.spi.security.BasicPrincipal;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -32,6 +35,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.trino.plugin.password.file.EncryptionUtil.doesBCryptPasswordMatch;
 import static io.trino.plugin.password.file.EncryptionUtil.doesPBKDF2PasswordMatch;
+import static io.trino.spi.security.AuthenticatedPasswordPrincipal.Backend.DUCKLAKE;
+import static io.trino.spi.security.AuthenticatedPasswordPrincipal.Backend.HOGLAKE;
 import static io.trino.testing.assertions.Assert.assertEventually;
 import static java.lang.Thread.State.WAITING;
 import static java.util.concurrent.TimeUnit.SECONDS;
@@ -331,6 +336,192 @@ public class TestPasswordStore
 
         assertThatThrownBy(() -> createStore("x:x:x"))
                 .hasMessage("Error in password file line 1: Invalid PBKDF2 password");
+    }
+
+    @Test
+    public void testMetadataClassification()
+    {
+        PasswordStore store = metadataStore(
+                "",
+                "# trufflehog-auth:1",
+                "# trufflehog-target {\"principal\":\"example-db.alice\",\"backend\":\"hoglake\"}",
+                "# trufflehog-target {\"backend\":\"ducklake\",\"principal\":\"legacy-db.root\"}",
+                "# trufflehog-operator {\"principal\":\"__trino_ops\"}",
+                "unclassified:" + BCRYPT_PASSWORD,
+                "__trino_ops:" + BCRYPT_PASSWORD,
+                "legacy-db.root:" + PBKDF2_PASSWORD,
+                "example-db.alice:" + BCRYPT_PASSWORD);
+
+        assertThat(store.authenticate("example-db.alice", "user123")).isTrue();
+        assertThat(store.principal("example-db.alice")).isEqualTo(AuthenticatedPasswordPrincipal.tenant("example-db.alice", HOGLAKE));
+        assertThat(store.authenticate("legacy-db.root", "password")).isTrue();
+        assertThat(store.principal("legacy-db.root")).isEqualTo(AuthenticatedPasswordPrincipal.tenant("legacy-db.root", DUCKLAKE));
+        assertThat(store.authenticate("__trino_ops", "user123")).isTrue();
+        assertThat(store.principal("__trino_ops")).isEqualTo(AuthenticatedPasswordPrincipal.operator("__trino_ops"));
+        assertThat(store.authenticate("unclassified", "user123")).isTrue();
+        assertThat(store.principal("unclassified")).isExactlyInstanceOf(BasicPrincipal.class);
+        assertThat(store.revision()).isEmpty();
+    }
+
+    @Test
+    public void testMetadataModePreservesLegacyUsernames()
+    {
+        List<String> users = ImmutableList.of("", "unqualified", "example-db.root", "__trino_ops", "user name", "user\u00e9", "# ordinary-user");
+        List<String> lines = users.stream().map(user -> user + ":" + PBKDF2_PASSWORD).toList();
+        for (boolean metadataEnabled : ImmutableList.of(false, true)) {
+            PasswordStore store = new PasswordStore(lines, 1000, metadataEnabled);
+            for (String user : users) {
+                assertThat(store.authenticate(user, "password")).isTrue();
+                assertThat(store.principal(user)).isEqualTo(new BasicPrincipal(user));
+            }
+        }
+    }
+
+    @Test
+    public void testMetadataOffDoesNotReserveUsernames()
+    {
+        List<String> users = ImmutableList.of("# trufflehog-auth", "# trufflehog-target synthetic", "# trufflehog-operator synthetic");
+        PasswordStore store = new PasswordStore(users.stream().map(user -> user + ":" + BCRYPT_PASSWORD).toList(), 1000);
+        for (String user : users) {
+            assertThat(store.authenticate(user, "user123")).isTrue();
+            assertThat(store.principal(user)).isExactlyInstanceOf(BasicPrincipal.class);
+        }
+        assertThatThrownBy(() -> createStore("# trufflehog-auth:1", "user:" + BCRYPT_PASSWORD))
+                .hasMessage("Error in password file line 1: Password hashing algorithm cannot be determined");
+    }
+
+    @Test
+    public void testMetadataModePreservesCredentialErrors()
+    {
+        assertThatThrownBy(() -> metadataStore("# trufflehog-auth:1", "abc:" + BCRYPT_PASSWORD, "abc:" + PBKDF2_PASSWORD))
+                .hasMessage("Error in password file line 3: Duplicate user: abc");
+        assertThatThrownBy(() -> metadataStore("# trufflehog-auth:1", "junk"))
+                .hasMessage("Error in password file line 2: Expected two parts for user and password");
+        assertThatThrownBy(() -> metadataStore("# trufflehog-auth:1", "x:x:x"))
+                .hasMessage("Error in password file line 2: Invalid PBKDF2 password");
+        assertThatThrownBy(() -> metadataStore("# trufflehog-auth:1", "x:$2y$xxx"))
+                .hasMessage("Error in password file line 2: Invalid BCrypt password");
+    }
+
+    @Test
+    public void testInvalidMetadataJson()
+    {
+        List<String> invalidTargets = ImmutableList.of(
+                "",
+                "null",
+                "[]",
+                "\"text\"",
+                "true",
+                "42",
+                "{}",
+                "{\"principal\":\"user\"}",
+                "{\"backend\":\"hoglake\"}",
+                "{\"principal\":\"\",\"backend\":\"hoglake\"}",
+                "{\"principal\":\"user\",\"backend\":\"\"}",
+                "{\"principal\":\"user\",\"backend\":\"unknown\"}",
+                "{\"principal\":\"user\",\"backend\":\"HOGLAKE\"}",
+                "{\"principal\":\"user\",\"backend\":null}",
+                "{\"principal\":\"user\",\"backend\":1}",
+                "{\"principal\":\"user\",\"backend\":true}",
+                "{\"principal\":\"user\",\"backend\":[]}",
+                "{\"principal\":\"user\",\"backend\":{}}",
+                "{\"principal\":null,\"backend\":\"hoglake\"}",
+                "{\"principal\":1,\"backend\":\"hoglake\"}",
+                "{\"principal\":true,\"backend\":\"hoglake\"}",
+                "{\"principal\":[],\"backend\":\"hoglake\"}",
+                "{\"principal\":{},\"backend\":\"hoglake\"}",
+                "{\"principal\":\"user\",\"backend\":\"hoglake\",\"extra\":\"value\"}",
+                "{\"principal\":\"user\",\"principal\":\"user\",\"backend\":\"hoglake\"}",
+                "{\"principal\":\"user\",\"backend\":\"hoglake\",\"backend\":\"ducklake\"}",
+                "{\"principal\":\"user\",\"backend\":\"hoglake\",\"back\\u0065nd\":\"hoglake\"}",
+                "{\"principal\":\"user\",\"backend\":\"hoglake\"} {}",
+                "{\"principal\":\"user\",\"backend\":\"hoglake\"} trailing",
+                "{\"principal\":\"user\",\"backend\":\"hoglake\",}",
+                "{'principal':'user','backend':'hoglake'}",
+                "{\"principal\":\"__trino_ops\",\"backend\":\"ducklake\"}");
+        for (String json : invalidTargets) {
+            assertThatThrownBy(() -> metadataStore(
+                    "# trufflehog-auth:1",
+                    "# trufflehog-target " + json,
+                    "user:" + BCRYPT_PASSWORD,
+                    "__trino_ops:" + BCRYPT_PASSWORD))
+                    .isInstanceOf(TrinoException.class)
+                    .hasMessage("Error in password file line 2: Invalid authentication metadata");
+        }
+        List<String> invalidOperators = ImmutableList.of(
+                "{}",
+                "null",
+                "[]",
+                "{\"principal\":\"\"}",
+                "{\"principal\":null}",
+                "{\"principal\":123}",
+                "{\"principal\":true}",
+                "{\"principal\":[]}",
+                "{\"principal\":{}}",
+                "{\"principal\":\"user\"}",
+                "{\"principal\":\"__trino_ops\",\"backend\":\"hoglake\"}",
+                "{\"principal\":\"__trino_ops\",\"extra\":false}",
+                "{\"principal\":\"__trino_ops\",\"principal\":\"__trino_ops\"}",
+                "{\"principal\":\"__trino_ops\"} {}");
+        for (String json : invalidOperators) {
+            assertThatThrownBy(() -> metadataStore(
+                    "# trufflehog-auth:1",
+                    "# trufflehog-operator " + json,
+                    "__trino_ops:" + BCRYPT_PASSWORD))
+                    .isInstanceOf(TrinoException.class)
+                    .hasMessage("Error in password file line 2: Invalid authentication metadata");
+        }
+    }
+
+    @Test
+    public void testInvalidHeadersAndRecords()
+    {
+        String target = "# trufflehog-target {\"principal\":\"user\",\"backend\":\"hoglake\"}";
+        String operator = "# trufflehog-operator {\"principal\":\"__trino_ops\"}";
+        List<List<String>> invalidFiles = ImmutableList.of(
+                ImmutableList.of("# trufflehog-auth:2", "user:" + BCRYPT_PASSWORD),
+                ImmutableList.of("# trufflehog-auth:01", "user:" + BCRYPT_PASSWORD),
+                ImmutableList.of("# trufflehog-auth:1 ", "user:" + BCRYPT_PASSWORD),
+                ImmutableList.of("# trufflehog-auth:1", "# trufflehog-auth:1"),
+                ImmutableList.of("user:" + BCRYPT_PASSWORD, "# trufflehog-auth:1"),
+                ImmutableList.of(target, "user:" + BCRYPT_PASSWORD),
+                ImmutableList.of(operator, "__trino_ops:" + BCRYPT_PASSWORD),
+                ImmutableList.of(target, "# trufflehog-auth:1", "user:" + BCRYPT_PASSWORD),
+                ImmutableList.of("# trufflehog-auth:1", target, target, "user:" + BCRYPT_PASSWORD),
+                ImmutableList.of(
+                        "# trufflehog-auth:1",
+                        target,
+                        "# trufflehog-target {\"principal\":\"user\",\"backend\":\"ducklake\"}",
+                        "user:" + BCRYPT_PASSWORD),
+                ImmutableList.of("# trufflehog-auth:1", operator, operator, "__trino_ops:" + BCRYPT_PASSWORD),
+                ImmutableList.of(
+                        "# trufflehog-auth:1",
+                        operator,
+                        "# trufflehog-target {\"principal\":\"__trino_ops\",\"backend\":\"hoglake\"}",
+                        "__trino_ops:" + BCRYPT_PASSWORD));
+        for (List<String> lines : invalidFiles) {
+            assertThatThrownBy(() -> new PasswordStore(lines, 1000, true))
+                    .isInstanceOf(TrinoException.class)
+                    .hasMessageContaining("Invalid authentication metadata");
+        }
+        for (String record : ImmutableList.of(target, operator)) {
+            assertThatThrownBy(() -> metadataStore("# trufflehog-auth:1", record))
+                    .isInstanceOf(TrinoException.class)
+                    .hasMessage("Password file contains orphan authentication metadata");
+        }
+    }
+
+    @Test
+    public void testHeaderWithoutRecordsIsUnclassified()
+    {
+        PasswordStore store = metadataStore("# trufflehog-auth:1", "example-db.alice:" + BCRYPT_PASSWORD, "__trino_ops:" + BCRYPT_PASSWORD);
+        assertThat(store.principal("example-db.alice")).isExactlyInstanceOf(BasicPrincipal.class);
+        assertThat(store.principal("__trino_ops")).isExactlyInstanceOf(BasicPrincipal.class);
+    }
+
+    private static PasswordStore metadataStore(String... lines)
+    {
+        return new PasswordStore(ImmutableList.copyOf(lines), 1000, true);
     }
 
     private static PasswordStore createStore(String... lines)

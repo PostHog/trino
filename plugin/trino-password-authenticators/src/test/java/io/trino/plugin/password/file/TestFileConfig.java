@@ -36,6 +36,7 @@ public class TestFileConfig
                 .setPasswordFile(null)
                 .setReservedUserRegex(null)
                 .setRefreshPeriod(new Duration(5, SECONDS))
+                .setAuthMetadataEnabled(false)
                 .setAuthTokenCacheMaxSize(1000));
     }
 
@@ -50,12 +51,14 @@ public class TestFileConfig
                 .put("file.refresh-period", "42s")
                 .put("file.auth-token-cache.max-size", "1234")
                 .put("file.reserved-user-regex", "svc_.*")
+                .put("file.auth-metadata-enabled", "true")
                 .buildOrThrow();
 
         FileConfig expected = new FileConfig()
                 .setPasswordFile(passwordFile.toFile())
                 .setReservedUserRegex("svc_.*")
                 .setRefreshPeriod(new Duration(42, SECONDS))
+                .setAuthMetadataEnabled(true)
                 .setAuthTokenCacheMaxSize(1234);
 
         assertFullMapping(properties, expected);

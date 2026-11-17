@@ -42,6 +42,7 @@ file to put the new token first, and finally remove the previous token from both
 | `duckgres-service-credential.allow-insecure-http` | `false` | Permit HTTP on an explicitly trusted private route. Use network policy to restrict that route. |
 | `duckgres-service-credential.http-client.connect-timeout` | `2s` | Connection timeout. |
 | `duckgres-service-credential.http-client.request-timeout` | `5s` | Whole authentication request timeout. |
+| `duckgres.service-credential.auth-metadata-enabled` | `false` | Request negotiated backend metadata and V2 readiness. |
 
 HTTPS uses normal certificate verification. Redirects are not followed. The HTTP
 client does not inherit environment proxy settings. Authentication responses are
@@ -111,3 +112,62 @@ operation and use an authorized operator connection if the query needs cancellat
 Deploy the control plane validation endpoint and token first, then enable this
 plugin and the file reservation, and only then switch internal callers. External
 users continue using their existing persistent credentials.
+
+## Negotiated authentication metadata
+
+The default-off implementation remains under review.
+Its contract authorizes no deployment or per-login traffic.
+The `duckgres.service-credential.auth-metadata-enabled` property defaults to `false`.
+It does not enable {doc}`caller-token acquisition <caller-tokens>`.
+Existing connection properties retain their `duckgres-service-credential.` prefix.
+
+With metadata enabled, the authenticator sends this header on the existing callback:
+
+```text
+Accept: application/vnd.posthog.trufflehog-auth.v2+json
+```
+
+The request JSON and dedicated cell authentication remain unchanged.
+Non-negotiated requests retain the current V1 response.
+The server requires separate publication support before it returns V2.
+Its V2 response uses the negotiated content type.
+
+A successful V2 POST adds `backend` to the existing response.
+Its recognized values are `hoglake` and `ducklake`.
+The control plane derives backend from the proven warehouse/cell assignment.
+It does not accept backend from the request.
+Ordinary group validation remains unchanged.
+The callback never supplies operator evidence.
+
+Missing, unknown, malformed, or conflicting backend metadata supplies UNKNOWN.
+Enabled managed acquisition treats UNKNOWN as terminal.
+UNKNOWN never selects the legacy DuckLake path.
+An issuer refusal never repairs missing classification.
+The typed Principal carries classification locally until core consumes it.
+It adds no classification field to worker messages, plans, or RPC.
+
+### V2 readiness
+
+A successful negotiated GET returns `cell_id` and integer `auth_metadata_version: 2`.
+The authenticator requires the V2 content type.
+It reports a V2 fingerprint only after that capability check succeeds.
+A V1 response never proves V2 capability.
+
+The fingerprint is `service-auth-v2:sha256:` followed by lowercase SHA-256 hex.
+Its UTF-8 input is:
+
+```text
+duckgres-service-credential-v2\n<endpoint>\n<cell-id>\nauth_metadata_version=2
+```
+
+The input has no trailing newline.
+The endpoint uses the configured URI's ASCII representation.
+The cell comes from the authenticated readiness response.
+The controller computes the same expected value.
+It must require V2 when the configured reader requires V2 metadata.
+V1 responses and V1 fingerprint computation remain unchanged.
+
+File publication, callback publication, reader modes, receipt enforcement, and acquisition remain independent.
+Reader support must precede approved publication.
+The existing admission barrier remains mandatory.
+No setting here authorizes a rollout or backend migration.

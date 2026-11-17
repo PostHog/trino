@@ -16,6 +16,7 @@ package io.trino.plugin.password.file;
 import com.google.common.hash.Hashing;
 import io.airlift.units.Duration;
 import io.trino.spi.security.AccessDeniedException;
+import io.trino.spi.security.AuthenticatedPasswordPrincipal;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -25,6 +26,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static com.google.common.io.BaseEncoding.base16;
+import static io.trino.spi.security.AuthenticatedPasswordPrincipal.Backend.DUCKLAKE;
+import static io.trino.spi.security.AuthenticatedPasswordPrincipal.Backend.HOGLAKE;
 import static io.trino.testing.assertions.Assert.assertEventually;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -102,6 +105,35 @@ final class TestLoadedConfigurationRevisions
         assertThat(after.authenticate("user_1", "password")).isTrue();
         assertThat(after.cachedAuthentications()).hasSize(2);
         assertThat(after.revision()).contains(fingerprint(ROTATED_USER_LINE + "\n"));
+    }
+
+    @Test
+    void testMetadataOnlyChangeReplacesClassificationAndFingerprint()
+            throws IOException
+    {
+        String beforeContent = "# trufflehog-auth:1\n# trufflehog-target {\"principal\":\"user_1\",\"backend\":\"hoglake\"}\n" + USER_LINE + "\n";
+        String afterContent = "# trufflehog-auth:1\n# trufflehog-target {\"principal\":\"user_1\",\"backend\":\"ducklake\"}\n" + USER_LINE + "\n";
+        File passwordFile = write("metadata.db", beforeContent);
+        PasswordStore before = new PasswordStore(passwordFile, 1000, true);
+        assertThat(before.authenticate("user_1", "user123")).isTrue();
+        assertThat(before.cachedAuthentications()).hasSize(1);
+        assertThat(before.revision()).contains(fingerprint(beforeContent));
+
+        write("metadata.db", afterContent);
+        PasswordStore after = new PasswordStore(passwordFile, 1000, true);
+
+        assertThat(before.revision()).contains(fingerprint(beforeContent));
+        assertThat(before.principal("user_1")).isEqualTo(AuthenticatedPasswordPrincipal.tenant("user_1", HOGLAKE));
+        assertThat(after.revision()).contains(fingerprint(afterContent));
+        assertThat(after.revision()).isNotEqualTo(before.revision());
+        assertThat(after.principal("user_1")).isEqualTo(AuthenticatedPasswordPrincipal.tenant("user_1", DUCKLAKE));
+        assertThat(after.cachedAuthentications()).isEmpty();
+        assertThat(after.authenticate("user_1", "user123")).isTrue();
+        assertThat(after.cachedAuthentications()).hasSize(1);
+        var authenticator = new FileAuthenticator(new FileConfig().setPasswordFile(passwordFile).setAuthMetadataEnabled(true));
+        assertThat(authenticator.loadedRevision()).isEqualTo(fingerprint(afterContent));
+        assertThat(authenticator.createAuthenticatedIdentity("user_1", "user123").orElseThrow().getPrincipal())
+                .contains(AuthenticatedPasswordPrincipal.tenant("user_1", DUCKLAKE));
     }
 
     @Test

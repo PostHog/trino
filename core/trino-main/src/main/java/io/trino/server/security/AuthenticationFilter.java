@@ -86,6 +86,10 @@ public class AuthenticationFilter
             try {
                 authenticatedIdentity = authenticator.authenticate(request);
             }
+            catch (TerminalAuthenticationException e) {
+                sendWwwAuthenticate(request, e.getMessage(), e.getAuthenticateHeader().stream().toList());
+                return;
+            }
             catch (AuthenticationException e) {
                 // Some authenticators (e.g. password) nest multiple internal authenticators.
                 // Exceptions from additional failed login attempts are suppressed in the first exception

@@ -14,6 +14,7 @@
 package io.trino.plugin.password.duckgres;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.net.MediaType;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.airlift.http.client.HttpClientConfig;
@@ -22,6 +23,9 @@ import io.airlift.http.client.testing.TestingHttpClient;
 import io.airlift.units.Duration;
 import io.trino.plugin.password.PasswordAuthenticatorPlugin;
 import io.trino.spi.security.AccessDeniedException;
+import io.trino.spi.security.AuthenticatedPasswordPrincipal;
+import io.trino.spi.security.AuthenticatedPasswordPrincipal.Backend;
+import io.trino.spi.security.BasicPrincipal;
 import io.trino.spi.security.LoadedConfiguration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -35,10 +39,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static com.google.common.net.MediaType.JSON_UTF_8;
+import static io.airlift.http.client.HeaderNames.ACCEPT;
 import static io.airlift.http.client.HttpStatus.OK;
 import static io.airlift.http.client.testing.TestingResponse.mockResponse;
 import static io.airlift.json.JsonCodec.jsonCodec;
@@ -52,6 +59,7 @@ class TestDuckgresServiceCredentialAuthenticator
 {
     private static final String USER = "example-team.svc_0123456789abcdef01234567";
     private static final String SECRET = "synthetic-service-secret";
+    private static final String AUTH_METADATA_MEDIA_TYPE = "application/vnd.posthog.trufflehog-auth.v2+json";
 
     @TempDir
     Path temporaryDirectory;
@@ -62,11 +70,13 @@ class TestDuckgresServiceCredentialAuthenticator
     private Path tokenFile;
     private final AtomicInteger requests = new AtomicInteger();
     private final AtomicReference<String> authorization = new AtomicReference<>();
+    private final AtomicReference<String> accept = new AtomicReference<>();
     private final AtomicReference<DuckgresServiceCredentialAuthenticator.CredentialRequest> sentCredential = new AtomicReference<>();
     private volatile String response;
     private volatile int status = 200;
     private volatile int delayMillis;
     private volatile String acceptedToken = "synthetic-current-token";
+    private volatile String contentType = "application/json";
 
     @BeforeEach
     void setUp()
@@ -119,6 +129,7 @@ class TestDuckgresServiceCredentialAuthenticator
         config.setEndpoint(URI.create("https://auth.example.com/auth/trino/service-credentials"));
         try (var client = new TestingHttpClient(request -> {
             assertThat(request.getMethod()).isEqualTo("GET");
+            assertThat(request.getHeader(ACCEPT)).isNull();
             assertThat(request.getUri().getPath()).isEqualTo("/auth/trino/service-credentials");
             return mockResponse(OK, JSON_UTF_8, "{\"cell_id\":\"registered:cell-a\"}");
         })) {
@@ -127,6 +138,190 @@ class TestDuckgresServiceCredentialAuthenticator
             config.setEndpoint(URI.create("https://other.example.com/auth/trino/service-credentials"));
             assertThat(new DuckgresServiceCredentialAuthenticator(config, client).loadedRevision()).isNotEqualTo(authenticator.loadedRevision());
         }
+    }
+
+    @Test
+    void testMetadataIsDisabledByDefault()
+    {
+        response = withMetadata(response, "\"backend\":\"hoglake\"");
+        contentType = AUTH_METADATA_MEDIA_TYPE;
+        var authenticator = new DuckgresServiceCredentialAuthenticator(config, httpClient);
+        assertThat(authenticator.createAuthenticatedPrincipal(USER, SECRET)).isExactlyInstanceOf(BasicPrincipal.class);
+        assertThat(accept.get()).isNull();
+        assertThat(sentCredential.get()).isEqualTo(new DuckgresServiceCredentialAuthenticator.CredentialRequest(USER, SECRET));
+        response = "{\"cell_id\":\"registered:cell-a\",\"auth_metadata_version\":2}";
+        assertThat(authenticator.loadedRevision()).startsWith("service-auth-v1:sha256:");
+        assertThat(accept.get()).isNull();
+    }
+
+    @Test
+    void testNegotiatesTenantClassificationWithoutChangingGroups()
+    {
+        config.setAuthMetadataEnabled(true);
+        contentType = AUTH_METADATA_MEDIA_TYPE;
+        String credential = response;
+        var authenticator = new DuckgresServiceCredentialAuthenticator(config, httpClient);
+        for (Backend backend : Backend.values()) {
+            response = withMetadata(credential, "\"backend\":\"" + backend.name().toLowerCase(Locale.ENGLISH) + "\"");
+            var identity = authenticator.createAuthenticatedIdentity(USER, SECRET).orElseThrow();
+            assertThat(identity.getPrincipal().orElseThrow())
+                    .isInstanceOfSatisfying(AuthenticatedPasswordPrincipal.class, principal -> {
+                        assertThat(principal.getName()).isEqualTo(USER);
+                        assertThat(principal.backend()).isEqualTo(Optional.of(backend));
+                        assertThat(principal.isOperator()).isFalse();
+                    });
+            assertThat(identity.getGroups()).containsExactlyInAnyOrder("org_example_team", "tier_scale");
+            assertThat(accept.get()).isEqualTo(AUTH_METADATA_MEDIA_TYPE);
+            assertThat(sentCredential.get()).isEqualTo(new DuckgresServiceCredentialAuthenticator.CredentialRequest(USER, SECRET));
+        }
+        assertThat(requests.get()).isEqualTo(2);
+    }
+
+    @Test
+    void testInvalidClassificationPreservesSuccessfulAuthenticationAsUnknown()
+    {
+        config.setAuthMetadataEnabled(true);
+        contentType = AUTH_METADATA_MEDIA_TYPE;
+        String credential = response;
+        var authenticator = new DuckgresServiceCredentialAuthenticator(config, httpClient);
+        for (String metadata : List.of(
+                "",
+                "\"backend\":null",
+                "\"backend\":\"unknown\"",
+                "\"backend\":\"HOGLAKE\"",
+                "\"backend\":\"operator\"",
+                "\"backend\":2",
+                "\"backend\":true",
+                "\"backend\":{}",
+                "\"backend\":[\"ducklake\"]",
+                "\"backend\":\"hoglake\",\"backend\":\"ducklake\"",
+                "\"backend\":\"ducklake\",\"backend\":\"ducklake\"",
+                "\"operator\":true")) {
+            response = withMetadata(credential, metadata);
+            var identity = authenticator.createAuthenticatedIdentity(USER, SECRET).orElseThrow();
+            assertThat(identity.getPrincipal().orElseThrow()).isExactlyInstanceOf(BasicPrincipal.class);
+            assertThat(identity.getPrincipal().orElseThrow().getName()).isEqualTo(USER);
+            assertThat(identity.getGroups()).containsExactlyInAnyOrder("org_example_team", "tier_scale");
+        }
+    }
+
+    @Test
+    void testClassificationRequiresNegotiatedContentType()
+    {
+        config.setAuthMetadataEnabled(true);
+        response = withMetadata(response, "\"backend\":\"ducklake\"");
+        var authenticator = new DuckgresServiceCredentialAuthenticator(config, httpClient);
+        for (String type : List.of("", "application/json", "text/plain", AUTH_METADATA_MEDIA_TYPE + ".invalid")) {
+            contentType = type;
+            assertThat(authenticator.createAuthenticatedPrincipal(USER, SECRET)).isExactlyInstanceOf(BasicPrincipal.class);
+        }
+    }
+
+    @Test
+    void testNegotiatedAuthenticationStillRejectsInvalidCredentials()
+    {
+        config.setAuthMetadataEnabled(true);
+        contentType = AUTH_METADATA_MEDIA_TYPE;
+        var authenticator = new DuckgresServiceCredentialAuthenticator(config, httpClient);
+        for (String credential : List.of(
+                "{}",
+                response("other.svc_0123456789abcdef01234567", Instant.now().plusSeconds(900).toString(), List.of("org_other", "tier_scale")),
+                response(USER, Instant.now().minusSeconds(1).toString(), List.of("org_example_team", "tier_scale")),
+                response(USER, Instant.now().plusSeconds(900).toString(), List.of("org_other", "tier_scale")),
+                response(USER, Instant.now().plusSeconds(900).toString(), List.of("org_example_team", "tier_scale", "backend_ducklake")),
+                response(USER, Instant.now().plusSeconds(900).toString(), List.of("org_example_team", "tier_scale", "admin")))) {
+            response = withMetadata(credential, "\"backend\":\"ducklake\"");
+            assertDenied(authenticator);
+        }
+    }
+
+    @Test
+    void testNegotiatedAuthenticationDoesNotCacheClassificationOrRevocation()
+            throws IOException
+    {
+        config.setAuthMetadataEnabled(true);
+        contentType = AUTH_METADATA_MEDIA_TYPE;
+        String credential = response;
+        var authenticator = new DuckgresServiceCredentialAuthenticator(config, httpClient);
+        response = withMetadata(credential, "\"backend\":\"hoglake\"");
+        assertThat(authenticator.createAuthenticatedPrincipal(USER, SECRET)).isInstanceOf(AuthenticatedPasswordPrincipal.class);
+        Files.writeString(tokenFile, "synthetic-rotated-token\n");
+        response = withMetadata(credential, "\"backend\":\"ducklake\"");
+        assertThat(authenticator.createAuthenticatedPrincipal(USER, SECRET))
+                .isInstanceOfSatisfying(AuthenticatedPasswordPrincipal.class, principal -> assertThat(principal.backend()).contains(Backend.DUCKLAKE));
+        assertThat(authorization.get()).isEqualTo("Bearer synthetic-rotated-token");
+        response = credential;
+        assertThat(authenticator.createAuthenticatedPrincipal(USER, SECRET)).isExactlyInstanceOf(BasicPrincipal.class);
+        status = 401;
+        assertDenied(authenticator);
+        assertThat(requests.get()).isEqualTo(4);
+    }
+
+    @Test
+    void testNegotiatedLoadedRevisionContract()
+    {
+        config.setAuthMetadataEnabled(true)
+                .setEndpoint(URI.create("https://auth.example.com/auth/trino/service-credentials"));
+        try (var client = new TestingHttpClient(request -> {
+            assertThat(request.getMethod()).isEqualTo("GET");
+            assertThat(request.getHeader(ACCEPT)).isEqualTo(AUTH_METADATA_MEDIA_TYPE);
+            return mockResponse(OK, MediaType.parse(AUTH_METADATA_MEDIA_TYPE), "{\"cell_id\":\"registered:cell-a\",\"auth_metadata_version\":2}");
+        })) {
+            var authenticator = new DuckgresServiceCredentialAuthenticator(config, client);
+            assertThat(authenticator.loadedRevision()).isEqualTo("service-auth-v2:sha256:f1b0fb1b5613f56f21466b7d6e3f53cb0e8551bc71b2db40affd2b9260b9a025");
+            config.setEndpoint(URI.create("https://other.example.com/auth/trino/service-credentials"));
+            assertThat(new DuckgresServiceCredentialAuthenticator(config, client).loadedRevision()).isNotEqualTo(authenticator.loadedRevision());
+        }
+    }
+
+    @Test
+    void testNegotiatedLoadedRevisionRequiresCapability()
+    {
+        config.setAuthMetadataEnabled(true);
+        contentType = AUTH_METADATA_MEDIA_TYPE;
+        var authenticator = new DuckgresServiceCredentialAuthenticator(config, httpClient);
+        for (String body : List.of(
+                "null",
+                "{}",
+                "{\"cell_id\":\"registered:cell-a\"}",
+                "{\"cell_id\":\"registered:cell-a\",\"auth_metadata_version\":1}",
+                "{\"cell_id\":\"registered:cell-a\",\"auth_metadata_version\":\"2\"}",
+                "{\"cell_id\":\"registered:cell-a\",\"auth_metadata_version\":2.0}",
+                "{\"cell_id\":\"registered:cell-a\",\"auth_metadata_version\":null}",
+                "{\"cell_id\":\"registered:cell-a\",\"auth_metadata_version\":true}",
+                "{\"cell_id\":\"\",\"auth_metadata_version\":2}",
+                "{\"cell_id\":\" \\n\",\"auth_metadata_version\":2}",
+                "{\"cell_id\":2,\"auth_metadata_version\":2}",
+                "{\"auth_metadata_version\":2}",
+                "x".repeat(65537))) {
+            response = body;
+            assertUnavailable(authenticator);
+        }
+        response = "{\"cell_id\":\"registered:cell-a\",\"auth_metadata_version\":2}";
+        for (String type : List.of("", "application/json", "text/plain")) {
+            contentType = type;
+            assertUnavailable(authenticator);
+        }
+    }
+
+    @Test
+    void testNegotiatedLoadedRevisionReloadsTokenAndCell()
+            throws IOException
+    {
+        config.setAuthMetadataEnabled(true);
+        contentType = AUTH_METADATA_MEDIA_TYPE;
+        response = "{\"cell_id\":\"registered:cell-a\",\"auth_metadata_version\":2}";
+        var authenticator = new DuckgresServiceCredentialAuthenticator(config, httpClient);
+        String revision = authenticator.loadedRevision();
+        assertThat(revision).startsWith("service-auth-v2:sha256:").hasSize(87);
+        Files.writeString(tokenFile, "synthetic-rotated-token\n");
+        assertUnavailable(authenticator);
+        acceptedToken = "synthetic-rotated-token";
+        assertThat(authenticator.loadedRevision()).isEqualTo(revision);
+        response = "{\"cell_id\":\"registered:cell-b\",\"auth_metadata_version\":2}";
+        assertThat(authenticator.loadedRevision()).isNotEqualTo(revision);
+        assertThat(accept.get()).isEqualTo(AUTH_METADATA_MEDIA_TYPE);
+        assertThat(requests.get()).isEqualTo(4);
     }
 
     @Test
@@ -317,6 +512,14 @@ class TestDuckgresServiceCredentialAuthenticator
                 .toJson(new DuckgresServiceCredentialAuthenticator.CredentialResponse(user, groups, expiresAt));
     }
 
+    private static String withMetadata(String credential, String metadata)
+    {
+        if (metadata.isEmpty()) {
+            return credential;
+        }
+        return credential.substring(0, credential.length() - 1) + "," + metadata + "}";
+    }
+
     private static void assertDenied(DuckgresServiceCredentialAuthenticator authenticator)
     {
         assertThatThrownBy(() -> authenticator.createAuthenticatedIdentity(USER, SECRET))
@@ -338,6 +541,7 @@ class TestDuckgresServiceCredentialAuthenticator
     {
         requests.incrementAndGet();
         authorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
+        accept.set(exchange.getRequestHeaders().getFirst("Accept"));
         if (exchange.getRequestMethod().equals("GET")) {
             assertThat(exchange.getRequestBody().readAllBytes()).isEmpty();
             if (!("Bearer " + acceptedToken).equals(authorization.get())) {
@@ -356,6 +560,9 @@ class TestDuckgresServiceCredentialAuthenticator
             Thread.currentThread().interrupt();
         }
         exchange.getResponseHeaders().set("Location", config.getEndpoint().toString());
+        if (!contentType.isEmpty()) {
+            exchange.getResponseHeaders().set("Content-Type", contentType);
+        }
         byte[] bytes = response.getBytes(UTF_8);
         exchange.sendResponseHeaders(status, bytes.length);
         try (exchange) {
