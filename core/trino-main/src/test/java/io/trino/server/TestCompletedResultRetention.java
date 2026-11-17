@@ -13,7 +13,6 @@
  */
 package io.trino.server;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.google.inject.Key;
 import io.airlift.http.client.HttpClient;
 import io.airlift.http.client.Request;
@@ -34,6 +33,7 @@ import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import tools.jackson.databind.JsonNode;
 
 import static io.airlift.http.client.JsonResponseHandler.createJsonResponseHandler;
 import static io.airlift.http.client.Request.Builder.prepareGet;
@@ -43,6 +43,7 @@ import static io.airlift.http.client.StaticBodyGenerator.createStaticBodyGenerat
 import static io.airlift.http.client.StatusResponseHandler.createStatusResponseHandler;
 import static io.airlift.testing.Closeables.closeAll;
 import static io.trino.client.ProtocolHeaders.TRINO_HEADERS;
+import static io.trino.server.TrinoJsonResponseHandler.createTrinoJsonResponseHandler;
 import static io.trino.server.TestQueryResource.JSON_MAPPER;
 import static io.trino.server.TestQueryResource.QUERY_RESULTS_JSON_CODEC;
 import static io.trino.server.TestQueryResource.REQUEST_USER_HEADER;
@@ -216,7 +217,7 @@ public class TestCompletedResultRetention
                         .setUri(server.resolve("/v1/statement"))
                         .setBodyGenerator(createStaticBodyGenerator(sql, UTF_8))
                         .build(),
-                createJsonResponseHandler(QUERY_RESULTS_JSON_CODEC));
+                createTrinoJsonResponseHandler(QUERY_RESULTS_JSON_CODEC));
     }
 
     private CompletedResult complete(String sql, Optional<TransactionId> transaction)
@@ -237,7 +238,7 @@ public class TestCompletedResultRetention
 
     private QueryResults fetch(URI uri)
     {
-        return client.execute(prepareGet().setUri(uri).build(), createJsonResponseHandler(QUERY_RESULTS_JSON_CODEC));
+        return client.execute(prepareGet().setUri(uri).build(), createTrinoJsonResponseHandler(QUERY_RESULTS_JSON_CODEC));
     }
 
     private int status(Request.Builder request)

@@ -13,7 +13,6 @@
  */
 package io.trino.tracing;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Injector;
@@ -64,6 +63,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.LinkedBlockingQueue;
+import tools.jackson.databind.ObjectMapper;
 
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static io.airlift.opentelemetry.OpenTelemetryExporterConfig.Protocol.GRPC;
