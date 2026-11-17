@@ -1,145 +1,166 @@
+<h1 align="center">TruffleHog</h1>
+
 <p align="center">
-    <a href="https://trino.io/"><img alt="Trino Logo" src=".github/homepage.png" /></a>
-</p>
-<p align="center">
-    <b>Trino is a fast distributed SQL query engine for big data analytics.</b>
-</p>
-<p align="center">
-    See the <a href="https://trino.io/docs/current/">User Manual</a> for deployment instructions and end user documentation.
-</p>
-<p align="center">
-  <a href="https://trino.io/download.html" style="text-decoration: none"><img
-    src="https://img.shields.io/github/v/release/trinodb/trino"
-    alt="Trino download"
-  /></a>
-  <a href="https://github.com/jvm-repo-rebuild/reproducible-central/blob/master/content/io/trino/README.md" style="text-decoration: none"><img
-    src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/jvm-repo-rebuild/reproducible-central/master/content/io/trino/badge.json"
-    alt="Reproducible builds supported"
-  /></a>
-  <a href="https://trino.io/slack.html" style="text-decoration: none"><img
-    src="https://img.shields.io/static/v1?logo=slack&logoColor=959DA5&label=Slack&labelColor=333a41&message=join%20conversation&color=3AC358"
-    alt="Trino Slack"
-  /></a>
-  <a href="https://trino.io/trino-the-definitive-guide.html" style="text-decoration: none"><img
-    src="https://img.shields.io/badge/Trino%3A%20The%20Definitive%20Guide-download-brightgreen"
-    alt="Trino: The Definitive Guide book download"
-  /></a>
+  <b>PostHog's distributed SQL lakehouse query engine — a custom fork of <a href="https://trino.io/">Trino</a> built to power the <a href="https://posthog.com/docs/data-warehouse">PostHog Data Warehouse</a>.</b>
 </p>
 
-## Development
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="Apache 2.0 License" /></a>
+  <a href="https://posthog.com/docs/data-warehouse"><img src="https://img.shields.io/badge/PostHog-Data_Warehouse-F54E00" alt="PostHog Data Warehouse" /></a>
+  <a href="https://trino.io/docs/current/"><img src="https://img.shields.io/badge/Upstream_Docs-Trino-DD00A1" alt="Upstream Trino Documentation" /></a>
+</p>
 
-See [DEVELOPMENT](.github/DEVELOPMENT.md) for information about development and release process,
-code style and guidelines for implementors of Trino plugins.
+---
 
-See [CONTRIBUTING](.github/CONTRIBUTING.md) for contribution requirements.
+## Overview
 
-## Security
+**TruffleHog** is [PostHog](https://posthog.com)'s custom fork of [Trino](https://github.com/trinodb/trino) and serves as the distributed SQL execution foundation of PostHog's multi-tenant Data Warehouse.
 
-See the project [security policy](.github/SECURITY.md) for
-information about reporting vulnerabilities.
+TruffleHog decouples compute from object storage so PostHog customers can query, join, and transform petabyte-scale lakehouse tables, external databases, and their own PostHog product analytics data through a single horizontally scalable SQL engine — while speaking the standard Trino client protocol so existing JDBC drivers, Python clients, and BI tools work out of the box.
 
-Trino supports [reproducible builds](https://reproducible-builds.org) as of version 449.
+## Role in the PostHog Data Warehouse Architecture
 
-## Build requirements
+TruffleHog is one of three core services that make up PostHog's data warehouse stack, alongside the warehouse control plane and **`PostHog/hoglake`**:
 
-* Mac OS X or Linux
-  * Note that some npm packages used to build the web UI are only available
-    for x86 architectures, so if you're building on Apple Silicon, you need
-    to have Rosetta 2 installed.
-* Java 25.0.1+, 64-bit
-* Docker
-  * Turn SELinux or other systems disabling write access to the local checkout
-    off, to allow containers to mount parts of the Trino source tree
+```text
+                       ┌──────────────────────────────────────────┐
+                       │         Warehouse control plane          │
+                       │    Control Plane, Tenancy & Identity     │
+                       │  • Tenant warehouse & catalog lifecycle  │
+                       │  • OAuth 2.0 / RFC 8693 token issuer     │
+                       │  • Dynamic catalog & OPA policy rollout  │
+                       └───────────┬──────────────────┬───────────┘
+           Catalog sync, OPA &     │                  │  OAuth 2.0 / token-exchange
+           delegated DDL           ▼                  ▼  verification
+┌──────────────────────────────────────┐          ┌──────────────────────────────────────┐
+│          PostHog/trufflehog          │  REST    │           PostHog/hoglake            │
+│      Distributed SQL Compute         ├─────────►│   Lakehouse Format & Catalog API     │
+│  • Stateless coordinators & workers  │ metadata │  • Transactional metadata (Postgres) │
+│  • HogLake, DuckLake, Iceberg &      │          │  • Snapshots, namespaces & schemas   │
+│    federated external connectors     │          │  • Read-only org event mounts        │
+│  • Shredded Parquet VARIANT engine   │          └──────────────────┬───────────────────┘
+└──────────────────┬───────────────────┘                             │
+                   │  Direct Parquet / VARIANT reads & writes        │  Tracks Parquet files
+                   └────────────────────────┬────────────────────────┘
+                                            ▼
+                           ┌──────────────────────────────────┐
+                           │   S3-Compatible Object Storage   │
+                           │    (Parquet + Shredded VARIANT)  │
+                           └──────────────────────────────────┘
+```
 
-## Building Trino
+- **Warehouse control plane — Tenancy & Identity:** A PostHog-operated service (not part of this repository) that provisions tenant warehouses, maps organizations to catalogs, rolls out authorization policy, and issues the OAuth 2.0 tokens that TruffleHog and HogLake verify. TruffleHog's side of that contract lives in `plugin/trino-posthog-catalogstore` and `plugin/trino-opa`.
+- **[`PostHog/hoglake`](https://github.com/PostHog/hoglake) — Lakehouse Table Format & Metadata Catalog:** PostHog's open lakehouse table format and REST catalog service designed for petabyte-scale warehouse workloads and high snapshot churn. HogLake stores transactional metadata, schema evolution, and snapshots in PostgreSQL while table data lives as Parquet files in S3-compatible object storage. It also exposes each organization's PostHog event stream as a read-only `posthog` schema mount.
+- **`PostHog/trufflehog` (this repository) — Distributed SQL Query & Compute Engine:** Executes interactive queries, cross-source joins, and batch materializations across `HogLake`, `DuckLake`, `Iceberg`, and federated external data sources, reading and writing Parquet files directly against object storage.
 
-Trino is a standard Maven project. Simply run the following command from the
-project root directory:
+## How TruffleHog Differs from ClickHouse at PostHog
 
-    ./mvnw clean install -DskipTests
+ClickHouse and TruffleHog solve complementary problems at PostHog:
 
-On the first build, Maven downloads all the dependencies from the internet
-and caches them in the local repository (`~/.m2/repository`), which can take a
-while, depending on your connection speed. Subsequent builds are faster.
+| Dimension | ClickHouse at PostHog | TruffleHog (`PostHog/trufflehog`) |
+| --- | --- | --- |
+| **Primary workload** | Real-time product analytics, session replay metadata, and high-throughput streaming event ingestion | Multi-tenant Data Warehouse queries, ad-hoc SQL joins, federated external sources, and batch transformations / ETL |
+| **Storage & compute model** | Tightly coupled local storage and compute tuned for sub-second scans over PostHog's core tables | Stateless distributed compute decoupled from S3-compatible object storage |
+| **Data formats & sources** | Native ClickHouse MergeTree tables | Open lakehouse formats (`HogLake`, `DuckLake`, `Iceberg`, Parquet with shredded `VARIANT`) plus federated PostgreSQL databases |
+| **Multi-tenancy & isolation** | Shared clusters keyed by team/project ID | Per-tenant dynamic catalogs, OAuth/OPA isolation, resource groups, and read-only `posthog` event mounts per login |
+| **PostHog event access** | Primary store for live product analytics ingestion and queries | Reads organization event mounts via `HogLake` (`posthog` schema) so warehouse tables can join directly with PostHog events, backed by ClickHouse-compatible SQL functions (`trino-posthog-functions`) |
 
-Trino has a comprehensive set of tests that take a considerable amount of time
-to run, and are thus disabled by the above command. These tests are run by the
-CI system when you submit a pull request. We recommend only running tests
-locally for the areas of code that you change.
+## How TruffleHog Differs from Upstream Trino
 
-## Running Trino in your IDE
+While TruffleHog preserves Trino's core SQL optimizer, execution engine, SPI, and wire protocol, it adds several capabilities built specifically for PostHog's warehouse:
 
-### Overview
+- **Native HogLake Connector (`plugin/trino-hoglake`):** Full read/write integration with the `HogLake` REST catalog API, including OAuth 2.0 client-credentials authentication, RFC 8693 per-login token exchange for read-only `posthog` organization event mounts, worker-local Parquet footer caching, and split-planning optimizations.
+- **Native DuckLake Connector (`plugin/trino-ducklake`):** Support for reading, writing, and merging DuckLake-managed lakehouse tables on object storage.
+- **Shredded Parquet `VARIANT` Support (`core/trino-spi`, `lib/trino-parquet`):** End-to-end `VARIANT` data type support, Parquet `VARIANT` shredding on read and write, pushed-down subscript path assembly, and lazy residual decoding for semi-structured event and warehouse properties.
+- **Multi-Tenant Dynamic Catalog Store (`plugin/trino-posthog-catalogstore`):** PostgreSQL-backed catalog synchronization across multiple coordinators, coordinator readiness/drain status endpoints, and control-plane-delegated `CREATE CATALOG` / `DROP CATALOG` execution with cluster-wide visibility waits.
+- **ClickHouse & HogQL Function Compatibility (`plugin/trino-posthog-functions`):** Native implementations of ClickHouse hash (`cityHash64`, etc.), JSON extraction, and numeric functions relied upon by HogQL and PostHog warehouse queries.
+- **Multi-Tenant Authentication & Authorization Extensions:** Service-credential authentication (`plugin/trino-password-authenticators`), live-reloading file authenticators and group providers, and OPA policy revision tracking (`plugin/trino-opa`).
+- **Lean ARM64 Server Distribution (`core/trino-server-posthog`):** A trimmed server assembly and layered OCI container build packaging only the connectors required by PostHog's warehouse infrastructure.
 
-After building Trino for the first time, you can load the project into your IDE
-and run the server.  We recommend using
-[IntelliJ IDEA](http://www.jetbrains.com/idea/). Because Trino is a standard
-Maven project, you can easily import it into your IDE. In IntelliJ, choose
-*Open Project* from the *Quick Start* box or choose *Open*
-from the *File* menu and select the root `pom.xml` file.
+## Upstream Trino Relationship
 
-After opening the project in IntelliJ, double-check that the Java SDK is
-properly configured for the project:
+TruffleHog is built on the shoulders of [upstream Trino (`trinodb/trino`)](https://github.com/trinodb/trino).
 
-* Open the File menu and select Project Structure
-* In the SDKs section, ensure that JDK 25 is selected (create one if none exist)
-* In the Project section, ensure the Project language level is set to 25
+- **Best-effort upstream sync:** We do our best to keep TruffleHog up to date with upstream Trino releases and improvements (query optimizer, vectorized execution, Parquet/filesystem libraries, security fixes, and connectors) on a **best-effort basis where it makes sense** for PostHog's workloads.
+- **Compatibility by design:** To keep upstream merges clean and ensure seamless compatibility with the Trino ecosystem (JDBC, Python `trino` client, BI integrations, and standard plugins), internal Java package names (`io.trino.*`), Maven coordinates, and client wire protocol headers (`X-Trino-*`) intentionally remain unchanged.
+- **Pragmatic divergence:** Where PostHog's multi-tenant control plane, lakehouse format (`hoglake`), or operational model has different requirements from general-purpose upstream Trino, TruffleHog diverges intentionally.
 
-### Running a testing server
+---
 
-The simplest way to run Trino for development is to run the `TpchQueryRunner`
-class. It will start a development version of the server that is configured with
-the TPCH connector. You can then use the CLI to execute queries against this
-server. Many other connectors have their own `*QueryRunner` class that you can
-use when working on a specific connector. The VM option generally required here
-is `--add-modules jdk.incubator.vector`, but various `*QueryRunner` classes
-might require additional options (if necessary, check the `air.test.jvm.additional-arguments`
-property in the `pom.xml` file of the module from which the runner comes).
+## Development & Contributing
 
-### Running tests from the IDE
+- **Agent & contributor safety rules:** Read [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md) before making changes. **This repository is public — never include customer data, internal endpoints, account IDs, or secrets in code, tests, docs, commits, or PRs.**
+- **Developer guide & code style:** See [.github/DEVELOPMENT.md](.github/DEVELOPMENT.md) for Java code style (`airstyle`), configuration conventions, testing, and Web UI build instructions.
+- **Security:** See [.github/SECURITY.md](.github/SECURITY.md) to report security vulnerabilities.
 
-When running individual test classes directly from IntelliJ, you need to
-configure the JUnit run configuration template. Go to Run/Debug Configurations >
-Edit Configuration Templates > JUnit > VM options and set the value to
-`-ea --add-modules=jdk.incubator.vector`. Some tests may rely on JVM options provided
-by airbase (e.g. `-XX:-OmitStackTraceInFastThrow`), so check for that too.
+## Build Requirements
 
-### Running the full server
+- Linux or macOS (on Apple Silicon, Rosetta 2 may be required for legacy npm tooling)
+- Java 25.0.1+, 64-bit (`JAVA_HOME` must point to JDK 25)
+- Docker (required for container builds and Testcontainers-based integration tests)
 
-Trino comes with sample configuration that should work out-of-the-box for
-development. Use the following options to create a run configuration:
+## Building TruffleHog
 
-* Main Class: `io.trino.server.DevelopmentServer`
-* VM Options: `-ea -Dconfig=etc/config.properties -Dlog.levels-file=etc/log.properties -Djdk.attach.allowAttachSelf=true --sun-misc-unsafe-memory-access=allow --add-modules jdk.incubator.vector`
-* Working directory: `$MODULE_DIR$`
-* Use classpath of module: `trino-server-dev`
+TruffleHog is a standard Maven multi-module project. Ensure `JAVA_HOME` points to JDK 25 before invoking `./mvnw` or `mvnd`.
 
-The working directory should be the `trino-server-dev` subdirectory. In
-IntelliJ, using `$MODULE_DIR$` accomplishes this automatically.
+To build only the PostHog warehouse server assembly (`trino-server-posthog`) and CLI:
 
-If `VM options` doesn't exist in the dialog, you need to select `Modify options`
-and enable `Add VM options`.
+```bash
+./mvnw clean install \
+  -pl core/trino-server-posthog,client/trino-cli -am \
+  -T 1C -DskipTests -Dmaven.javadoc.skip=true -Dair.check.skip-all=true
+```
 
-To adjust which plugins are enabled for the development server, adjust the value of
-`plugin.bundles` in `config.properties`. Each entry in this list must represent a plugin
-specified by one of the following options:
-* A path to a `pom.xml` or `*.pom` file describing a Maven project that produces a plugin.
-* Maven coordinates, in the form `<groupId>:<artifactId>[:<extension>[:<classifier>]]:<version>`. The plugin will be loaded via Maven and therefore must be available in your local repository or a remote repository.
-* A path to a plugin directory containing JAR files. See [Deploying a custom plugin](https://trino.io/docs/current/develop/spi-overview.html#deploying-a-custom-plugin) for more details.
+To build and install the entire repository (skipping tests, Javadoc, and static checks for speed):
 
-If you want to use a plugin in a catalog, you must add a corresponding
-`<catalog_name>.properties` file to `testing/trino-server-dev/etc/catalog`.
+```bash
+./mvnw clean install -T 2C -nsu -DskipTests -Dmaven.javadoc.skip=true -Dair.check.skip-all=true
+```
+
+Because the full test suite is large, run tests scoped to the modules you change:
+
+```bash
+./mvnw test -Dair.check.skip-all=true -pl <module> -Dtest=<TestClass>
+```
+
+Before opening a pull request, format Java changes and run the static checks on modified modules (`mvnd` works in place of `./mvnw`):
+
+```bash
+./mvnw -pl <changed-modules> airstyle:format
+./mvnw verify -DskipTests -P ci -pl <changed-modules>
+```
+
+## Running TruffleHog Locally
+
+### Running in IntelliJ IDEA
+
+1. Build the project once from the command line, then open the root `pom.xml` in [IntelliJ IDEA](https://www.jetbrains.com/idea/).
+2. Under **File > Project Structure**, ensure both the Project SDK and Project language level are set to **JDK 25**.
+3. For individual JUnit tests in IntelliJ, set the JUnit run configuration template VM options to:
+   ```text
+   -ea --add-modules=jdk.incubator.vector
+   ```
+4. To start a lightweight development server in the IDE, run a connector `*QueryRunner` (such as `TpchQueryRunner`) or launch the full development server:
+   - **Main Class:** `io.trino.server.DevelopmentServer`
+   - **VM Options:** `-ea -Dconfig=etc/config.properties -Dlog.levels-file=etc/log.properties -Djdk.attach.allowAttachSelf=true --sun-misc-unsafe-memory-access=allow --add-modules jdk.incubator.vector`
+   - **Working directory:** `$MODULE_DIR$` (`testing/trino-server-dev`)
+   - **Use classpath of module:** `trino-server-dev`
 
 ### Running the CLI
 
-Start the CLI to connect to the server and run SQL queries:
+Start the interactive TruffleHog CLI against a local coordinator:
 
-    client/trino-cli/target/trino-cli-*-executable.jar
+```bash
+client/trino-cli/target/trino-cli-*-executable.jar
+```
 
-Run a query to see the nodes in the cluster:
+Run a test query:
 
-    SELECT * FROM system.runtime.nodes;
+```sql
+SELECT * FROM system.runtime.nodes;
+SELECT * FROM tpch.tiny.region;
+```
 
-Run a query against the TPCH connector:
+## License
 
-    SELECT * FROM tpch.tiny.region;
+TruffleHog is licensed under the [Apache License, Version 2.0](LICENSE).

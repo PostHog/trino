@@ -1,4 +1,4 @@
-# PostHog image releases
+# TruffleHog image releases
 
 The publisher runs only for pushes to `master` and manual dispatches on `master`.
 Tag pushes no longer publish images. Use a manual dispatch on `master` to add a
@@ -8,6 +8,13 @@ permission.
 The ordered tag is `r<12-digit first-parent commit count>-<6-character revision>`.
 The checkout must contain complete history and match the workflow revision.
 This orders releases by source history, independently of build completion order.
+
+The image coordinates keep their pre-rename names on purpose: the ECR repository
+`posthog-trino`, the GHCR mirror `ghcr.io/posthog/trino`, and the charts release
+`trino` (`state/trino.yaml`). Deployments pin the image by digest under those
+names, so renaming them is a separate migration that must publish to both names
+while consumers move. Only the source repository identity changed, to
+`PostHog/trufflehog`.
 
 The canonical image repository is `posthog-trino` in `us-east-1`.
 The workflow derives its registry address from the authenticated ECR login.
@@ -48,7 +55,9 @@ and grant this repository access:
 `arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-trino-publish-role`. This is an operator
 setup step, not a change performed by this workflow. The workflow masks the AWS
 account ID in logs and does not store its registry address in source. OIDC trust must
-allow only `repo:PostHog/trino:ref:refs/heads/master`. The role must allow image
+allow only the `master` ref of `PostHog/trufflehog`. GitHub derives the subject
+from the repository name, so a repository rename changes it and the trust must
+follow. The role must allow image
 push/read operations but no image deletion or repository-policy changes.
 
 The workflow serializes its publishers. This prevents races within this

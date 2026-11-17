@@ -11,7 +11,7 @@
 
     <artifactId>trino-web-ui</artifactId>
     <name>${project.artifactId}</name>
-    <description>Trino - Web UI</description>
+    <description>TruffleHog - Web UI</description>
 
     <properties>
         <frontend.package.goal>package</frontend.package.goal>
