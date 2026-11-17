@@ -30,6 +30,7 @@ public class FileConfig
     private Duration refreshPeriod = new Duration(5, SECONDS);
     private int authTokenCacheMaxSize = 1000;
     private String reservedUserRegex;
+    private boolean authMetadataEnabled;
 
     @NotNull
     @FileExists
@@ -84,6 +85,19 @@ public class FileConfig
     public FileConfig setAuthTokenCacheMaxSize(int maxSize)
     {
         this.authTokenCacheMaxSize = maxSize;
+        return this;
+    }
+
+    public boolean isAuthMetadataEnabled()
+    {
+        return authMetadataEnabled;
+    }
+
+    @Config("file.auth-metadata-enabled")
+    @ConfigDescription("Read versioned authentication metadata from the password file")
+    public FileConfig setAuthMetadataEnabled(boolean authMetadataEnabled)
+    {
+        this.authMetadataEnabled = authMetadataEnabled;
         return this;
     }
 }

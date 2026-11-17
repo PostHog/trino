@@ -26,6 +26,7 @@ public class DuckgresServiceCredentialConfig
     private URI endpoint;
     private File tokenFile;
     private boolean allowInsecureHttp;
+    private boolean authMetadataEnabled;
 
     @NotNull
     public URI getEndpoint()
@@ -66,6 +67,19 @@ public class DuckgresServiceCredentialConfig
     public DuckgresServiceCredentialConfig setAllowInsecureHttp(boolean allowInsecureHttp)
     {
         this.allowInsecureHttp = allowInsecureHttp;
+        return this;
+    }
+
+    public boolean isAuthMetadataEnabled()
+    {
+        return authMetadataEnabled;
+    }
+
+    @Config("duckgres.service-credential.auth-metadata-enabled")
+    @ConfigDescription("Request negotiated backend classification from the service credential callback")
+    public DuckgresServiceCredentialConfig setAuthMetadataEnabled(boolean authMetadataEnabled)
+    {
+        this.authMetadataEnabled = authMetadataEnabled;
         return this;
     }
 }

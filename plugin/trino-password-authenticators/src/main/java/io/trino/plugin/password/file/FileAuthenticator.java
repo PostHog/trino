@@ -13,9 +13,10 @@
  */
 package io.trino.plugin.password.file;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.inject.Inject;
 import io.trino.spi.security.AccessDeniedException;
-import io.trino.spi.security.BasicPrincipal;
+import io.trino.spi.security.Identity;
 import io.trino.spi.security.LoadedConfiguration;
 import io.trino.spi.security.PasswordAuthenticator;
 
@@ -26,6 +27,7 @@ import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 import static com.google.common.base.Suppliers.memoizeWithExpiration;
+import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 public class FileAuthenticator
@@ -40,21 +42,41 @@ public class FileAuthenticator
         reservedUserPattern = Optional.ofNullable(config.getReservedUserRegex()).map(Pattern::compile);
         File file = config.getPasswordFile();
         int cacheMaxSize = config.getAuthTokenCacheMaxSize();
+        boolean authMetadataEnabled = config.isAuthMetadataEnabled();
 
         passwordStoreSupplier = memoizeWithExpiration(
-                () -> new PasswordStore(file, cacheMaxSize),
+                () -> new PasswordStore(file, cacheMaxSize, authMetadataEnabled),
                 config.getRefreshPeriod().toMillis(),
                 MILLISECONDS);
+    }
+
+    @VisibleForTesting
+    FileAuthenticator(Supplier<PasswordStore> passwordStoreSupplier, Optional<Pattern> reservedUserPattern)
+    {
+        this.passwordStoreSupplier = requireNonNull(passwordStoreSupplier, "passwordStoreSupplier is null");
+        this.reservedUserPattern = requireNonNull(reservedUserPattern, "reservedUserPattern is null");
     }
 
     @Override
     public Principal createAuthenticatedPrincipal(String user, String password)
     {
-        if (reservedUserPattern.filter(pattern -> pattern.matcher(user).matches()).isPresent() || !passwordStoreSupplier.get().authenticate(user, password)) {
+        return createAuthenticatedIdentity(user, password).orElseThrow().getPrincipal().orElseThrow();
+    }
+
+    @Override
+    public Optional<Identity> createAuthenticatedIdentity(String user, String password)
+    {
+        if (reservedUserPattern.filter(pattern -> pattern.matcher(user).matches()).isPresent()) {
+            throw new AccessDeniedException("Invalid credentials");
+        }
+        PasswordStore store = passwordStoreSupplier.get();
+        if (!store.authenticate(user, password)) {
             throw new AccessDeniedException("Invalid credentials");
         }
 
-        return new BasicPrincipal(user);
+        return Optional.of(Identity.forUser(user)
+                .withPrincipal(store.principal(user))
+                .build());
     }
 
     /**

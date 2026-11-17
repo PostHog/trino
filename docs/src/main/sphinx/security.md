@@ -27,6 +27,7 @@ security/inspect-jks
 security/authentication-types
 security/duckgres-service-credentials
 security/password-file
+security/caller-tokens
 security/ldap
 security/salesforce
 security/oauth2

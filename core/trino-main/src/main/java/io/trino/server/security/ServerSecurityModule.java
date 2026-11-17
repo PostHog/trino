@@ -15,11 +15,14 @@ package io.trino.server.security;
 
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Binder;
+import com.google.inject.Inject;
 import com.google.inject.Module;
+import com.google.inject.Provider;
 import com.google.inject.Provides;
 import com.google.inject.Scopes;
 import com.google.inject.multibindings.MapBinder;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
+import io.airlift.http.client.HttpClient;
 import io.airlift.http.server.HttpServer.ClientCertificate;
 import io.airlift.http.server.HttpServerConfig;
 import io.airlift.openmetrics.MetricsResource;
@@ -39,6 +42,7 @@ import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
 import static com.google.inject.util.Modules.EMPTY_MODULE;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 import static io.airlift.configuration.ConfigurationAwareModule.combine;
+import static io.airlift.http.client.HttpClientBinder.httpClientBinder;
 import static io.airlift.http.server.HttpServer.ClientCertificate.REQUESTED;
 import static io.airlift.http.server.HttpServerConfig.ProcessForwardedMode.ACCEPT;
 import static io.airlift.jaxrs.JaxrsBinder.jaxrsBinder;
@@ -70,9 +74,31 @@ public class ServerSecurityModule
             configBinder(certificateBinder).bindConfig(CertificateConfig.class);
         }));
         installAuthenticator(securityConfig, "kerberos", KerberosAuthenticator.class, KerberosConfig.class);
-        install(authenticatorModule(securityConfig, "password", PasswordAuthenticator.class, _ -> {
-            configBinder(binder).bindConfig(PasswordAuthenticatorConfig.class);
-            binder.bind(PasswordAuthenticatorManager.class).in(Scopes.SINGLETON);
+        install(authenticatorModule(securityConfig, "password", PasswordAuthenticator.class, new AbstractConfigurationAwareModule()
+        {
+            @Override
+            protected void setup(Binder passwordBinder)
+            {
+                configBinder(passwordBinder).bindConfig(PasswordAuthenticatorConfig.class);
+                configBinder(passwordBinder).bindConfig(TrinoCallerTokenConfig.class);
+                passwordBinder.bind(PasswordAuthenticatorManager.class).in(Scopes.SINGLETON);
+                TrinoCallerTokenConfig callerTokenConfig = buildConfigObject(TrinoCallerTokenConfig.class);
+                var callerTokenBinding = newOptionalBinder(passwordBinder, TrinoCallerTokenClient.class);
+                if (callerTokenConfig.isEnabled()) {
+                    callerTokenBinding.setBinding().toProvider(CallerTokenClientProvider.class).in(Scopes.SINGLETON);
+                    httpClientBinder(passwordBinder)
+                            .bindHttpClient("trino-caller-tokens", ForTrinoCallerTokens.class)
+                            .withConfigDefaults(client -> client
+                                    .setHttp2Enabled(false)
+                                    .setGzipCompressionEnabled(false)
+                                    .setBrotliCompressionEnabled(false)
+                                    .setZstdCompressionEnabled(false)
+                                    .setLogEnabled(false)
+                                    .setConnectTimeout(callerTokenConfig.getTimeout())
+                                    .setRequestTimeout(callerTokenConfig.getTimeout())
+                                    .setMaxResponseContentLength(callerTokenConfig.getMaxResponseSize()));
+                }
+            }
         }));
         install(authenticatorModule(securityConfig, "header", HeaderAuthenticator.class, headerBinder -> {
             configBinder(headerBinder).bindConfig(HeaderAuthenticatorConfig.class);
@@ -134,6 +160,24 @@ public class ServerSecurityModule
         if ((httpServerConfig.isHttpsEnabled() || httpServerConfig.getProcessForwarded() == ACCEPT) &&
                 !securityConfig.getAuthenticationTypes().equals(ImmutableList.of("insecure"))) {
             install(binder -> configBinder(binder).bindConfigDefaults(SecurityConfig.class, config -> config.setInsecureAuthenticationOverHttpAllowed(false)));
+        }
+    }
+
+    private static final class CallerTokenClientProvider
+            implements Provider<TrinoCallerTokenClient>
+    {
+        private final TrinoCallerTokenClient client;
+
+        @Inject
+        public CallerTokenClientProvider(@ForTrinoCallerTokens HttpClient httpClient, TrinoCallerTokenConfig config)
+        {
+            client = new TrinoCallerTokenClient(httpClient, config);
+        }
+
+        @Override
+        public TrinoCallerTokenClient get()
+        {
+            return client;
         }
     }
 }

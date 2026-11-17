@@ -22,6 +22,7 @@ import com.google.common.io.Resources;
 import com.google.inject.Inject;
 import com.google.inject.Key;
 import com.google.inject.Module;
+import com.google.inject.TypeLiteral;
 import io.airlift.http.server.HttpConfig;
 import io.airlift.http.server.HttpServerConfig;
 import io.airlift.http.server.HttpServerInfo;
@@ -42,6 +43,7 @@ import io.trino.server.security.oauth2.TokenPairSerializer;
 import io.trino.server.security.oauth2.TokenPairSerializer.TokenPair;
 import io.trino.server.testing.TestingTrinoServer;
 import io.trino.spi.security.AccessDeniedException;
+import io.trino.spi.security.AuthenticatedPasswordPrincipal;
 import io.trino.spi.security.BasicPrincipal;
 import io.trino.spi.security.Identity;
 import jakarta.servlet.http.HttpServlet;
@@ -87,11 +89,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static com.google.common.hash.Hashing.sha256;
 import static com.google.common.net.HttpHeaders.AUTHORIZATION;
+import static com.google.inject.multibindings.MapBinder.newMapBinder;
 import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
 import static io.airlift.http.client.HttpUriBuilder.uriBuilderFrom;
 import static io.airlift.jaxrs.JaxrsBinder.jaxrsBinder;
@@ -110,6 +116,8 @@ import static io.trino.server.ui.OAuthIdTokenCookie.ID_TOKEN_COOKIE;
 import static io.trino.server.ui.OAuthWebUiCookie.OAUTH2_COOKIE;
 import static io.trino.spi.security.AccessDeniedException.denyImpersonateUser;
 import static io.trino.spi.security.AccessDeniedException.denyReadSystemInformationAccess;
+import static io.trino.spi.security.AuthenticatedPasswordPrincipal.Backend.DUCKLAKE;
+import static io.trino.spi.security.AuthenticatedPasswordPrincipal.Backend.HOGLAKE;
 import static jakarta.servlet.http.HttpServletResponse.SC_FORBIDDEN;
 import static jakarta.servlet.http.HttpServletResponse.SC_OK;
 import static jakarta.servlet.http.HttpServletResponse.SC_SEE_OTHER;
@@ -123,6 +131,7 @@ import static java.time.Instant.now;
 import static java.util.Objects.requireNonNull;
 import static java.util.Objects.requireNonNullElse;
 import static java.util.concurrent.TimeUnit.MINUTES;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
@@ -336,6 +345,147 @@ public class TestResourceSecurity
                 assertThat(response.header("user")).isEqualTo(TEST_USER);
                 assertThat(response.header("principal")).isEqualTo(TEST_USER_LOGIN);
             }
+        }
+    }
+
+    @Test
+    public void testCallerAcquisitionStopsBothAuthenticationLoops()
+            throws Exception
+    {
+        String verifiedUser = "example-db.alice@allowed";
+        var passwordFallbacks = new AtomicInteger();
+        var outerFallbacks = new AtomicInteger();
+        var principal = new AtomicReference<Principal>(AuthenticatedPasswordPrincipal.tenant(verifiedUser, HOGLAKE));
+        var issuer = new CallerGrantServlet();
+        Path cellToken = Files.createTempFile("synthetic-cell-token", ".txt");
+        Files.writeString(cellToken, "synthetic-dedicated-cell-token");
+        TestingHttpServer issuerServer = createCallerGrantServer(issuer);
+        try {
+            issuerServer.start();
+            try (TestingTrinoServer server = TestingTrinoServer.builder()
+                    .setProperties(ImmutableMap.<String, String>builder()
+                            .putAll(SECURE_PROPERTIES)
+                            .put("password-authenticator.config-files", passwordConfigDummy.toString())
+                            .put("http-server.authentication.type", "password,caller-sentinel")
+                            .put("http-server.authentication.password.user-mapping.pattern", ALLOWED_USER_MAPPING_PATTERN)
+                            .put("http-server.authentication.password.caller-token.enabled", "true")
+                            .put("http-server.authentication.password.caller-token.issuer-uri", issuerServer.getBaseUrl().resolve("/oauth/token").toString())
+                            .put("http-server.authentication.password.caller-token.cell-token-file", cellToken.toString())
+                            .put("http-server.authentication.password.caller-token.timeout", "2s")
+                            .put("http-server.authentication.password.caller-token.allow-insecure-http-for-development", "true")
+                            .buildOrThrow())
+                    .setAdditionalModule(binder -> {
+                        jaxrsBinder(binder).bind(TestResource.class);
+                        newMapBinder(binder, String.class, Authenticator.class)
+                                .addBinding("caller-sentinel")
+                                .toInstance(_ -> {
+                                    outerFallbacks.incrementAndGet();
+                                    return Identity.ofUser("outer-fallback");
+                                });
+                    })
+                    .setSystemAccessControl(TestSystemAccessControl.NO_IMPERSONATION)
+                    .build()) {
+                server.getInstance(Key.get(PasswordAuthenticatorManager.class)).setAuthenticators(
+                        (user, password) -> {
+                            if (!user.equals(principal.get().getName()) || !password.equals(TEST_PASSWORD)) {
+                                throw new AccessDeniedException("Invalid credentials");
+                            }
+                            return principal.get();
+                        },
+                        (_, _) -> {
+                            passwordFallbacks.incrementAndGet();
+                            return new BasicPrincipal("password-fallback@allowed");
+                        });
+                URI serverUri = server.getInstance(Key.get(HttpServerInfo.class)).getHttpsUri();
+                String location = getLocation(serverUri, "/protocol/identity");
+                for (CallerGrantReply reply : List.of(
+                        new CallerGrantReply(400, "{\"error\":\"invalid_grant\"}"),
+                        new CallerGrantReply(400, "{\"error\":\"unsupported_grant_type\"}"),
+                        new CallerGrantReply(429, "{\"error\":\"throttled\"}"),
+                        new CallerGrantReply(503, "{\"error\":\"signing_failure\"}"),
+                        new CallerGrantReply(302, ""),
+                        new CallerGrantReply(0, ""),
+                        new CallerGrantReply(200, "{\"access_token\":\"synthetic-token\",\"token_type\":\"Bearer\"}"))) {
+                    issuer.reply.set(reply);
+                    Request request = new Request.Builder()
+                            .url(location)
+                            .addHeader("Authorization", Credentials.basic(verifiedUser, TEST_PASSWORD))
+                            .addHeader("X-Trino-User", verifiedUser)
+                            .addHeader("X-Trino-Original-User", verifiedUser)
+                            .build();
+                    try (Response response = client.newCall(request).execute()) {
+                        assertThat(response.code()).isEqualTo(SC_UNAUTHORIZED);
+                        assertThat(requireNonNull(response.body()).string()).isEqualTo("Managed authentication failed");
+                        assertThat(response.header(WWW_AUTHENTICATE)).isEqualTo(BasicAuthCredentials.AUTHENTICATE_HEADER);
+                        assertThat(response.headers().toString()).doesNotContain(TEST_PASSWORD, "synthetic-dedicated-cell-token", "synthetic-token");
+                    }
+                    finally {
+                        if (reply.status() == 0) {
+                            issuer.releaseTimeout.countDown();
+                        }
+                    }
+                    issuer.assertNoAssertionFailure();
+                    assertThat(passwordFallbacks.get()).isZero();
+                    assertThat(outerFallbacks.get()).isZero();
+                }
+                assertThat(issuer.requests.get()).isEqualTo(7);
+
+                principal.set(new BasicPrincipal(verifiedUser));
+                assertResponseCode(client, location, SC_UNAUTHORIZED, verifiedUser, TEST_PASSWORD);
+                principal.set(AuthenticatedPasswordPrincipal.tenant("example-db.no-mapping", HOGLAKE));
+                assertResponseCode(client, location, SC_UNAUTHORIZED, "example-db.no-mapping", TEST_PASSWORD);
+                assertThat(issuer.requests.get()).isEqualTo(7);
+                assertThat(passwordFallbacks.get()).isZero();
+                assertThat(outerFallbacks.get()).isZero();
+
+                principal.set(AuthenticatedPasswordPrincipal.tenant(verifiedUser, DUCKLAKE));
+                assertResponseCode(client, location, SC_OK, verifiedUser, TEST_PASSWORD);
+                assertThat(issuer.requests.get()).isEqualTo(7);
+
+                principal.set(AuthenticatedPasswordPrincipal.tenant(verifiedUser, HOGLAKE));
+                issuer.reply.set(new CallerGrantReply(200, "{\"access_token\":\"synthetic.exact.jwt\",\"token_type\":\"Bearer\",\"expires_in\":60}"));
+                Request request = new Request.Builder()
+                        .url(location)
+                        .addHeader("Authorization", Credentials.basic(verifiedUser, TEST_PASSWORD))
+                        .addHeader("X-Trino-User", verifiedUser)
+                        .addHeader("X-Trino-Original-User", verifiedUser)
+                        .build();
+                try (Response response = client.newCall(request).execute()) {
+                    assertThat(response.code()).isEqualTo(SC_OK);
+                    assertThat(response.header("user")).isEqualTo("example-db.alice");
+                    assertThat(response.header("principal")).isEqualTo(verifiedUser);
+                }
+                issuer.assertNoAssertionFailure();
+                assertThat(issuer.requests.get()).isEqualTo(8);
+                assertThat(passwordFallbacks.get()).isZero();
+                assertThat(outerFallbacks.get()).isZero();
+            }
+        }
+        finally {
+            issuerServer.stop();
+            Files.deleteIfExists(cellToken);
+            issuer.assertNoAssertionFailure();
+        }
+    }
+
+    @Test
+    public void testDisabledCallerAcquisitionHasNoClient()
+            throws Exception
+    {
+        try (TestingTrinoServer server = TestingTrinoServer.builder()
+                .setProperties(ImmutableMap.<String, String>builder()
+                        .putAll(SECURE_PROPERTIES)
+                        .put("password-authenticator.config-files", passwordConfigDummy.toString())
+                        .put("http-server.authentication.type", "password")
+                        .buildOrThrow())
+                .setAdditionalModule(binder -> jaxrsBinder(binder).bind(TestResource.class))
+                .setSystemAccessControl(TestSystemAccessControl.NO_IMPERSONATION)
+                .build()) {
+            assertThat(server.getInstance(Key.get(new TypeLiteral<Optional<TrinoCallerTokenClient>>() {}))).isEmpty();
+            server.getInstance(Key.get(PasswordAuthenticatorManager.class)).setAuthenticators(
+                    (user, _) -> AuthenticatedPasswordPrincipal.tenant(user, HOGLAKE));
+            URI serverUri = server.getInstance(Key.get(HttpServerInfo.class)).getHttpsUri();
+            assertResponseCode(client, getLocation(serverUri, "/protocol/identity"), SC_OK, "example-db.alice", TEST_PASSWORD);
         }
     }
 
@@ -1963,6 +2113,74 @@ public class TestResourceSecurity
         HttpServerInfo httpServerInfo = new HttpServerInfo(config, Optional.of(new HttpConfig().setHttpPort(0)), Optional.empty(), nodeInfo);
 
         return new TestingHttpServer("testing-jwks-server", httpServerInfo, nodeInfo, config, new JwkServlet());
+    }
+
+    private static TestingHttpServer createCallerGrantServer(CallerGrantServlet servlet)
+            throws IOException
+    {
+        NodeInfo nodeInfo = new NodeInfo("test");
+        HttpServerConfig config = new HttpServerConfig();
+        HttpServerInfo httpServerInfo = new HttpServerInfo(config, Optional.of(new HttpConfig().setHttpPort(0)), Optional.empty(), nodeInfo);
+        return new TestingHttpServer("testing-caller-grant", httpServerInfo, nodeInfo, config, servlet);
+    }
+
+    private record CallerGrantReply(int status, String body) {}
+
+    private static class CallerGrantServlet
+            extends HttpServlet
+    {
+        private final AtomicInteger requests = new AtomicInteger();
+        private final AtomicReference<CallerGrantReply> reply = new AtomicReference<>();
+        private final AtomicReference<AssertionError> assertionFailure = new AtomicReference<>();
+        private final CountDownLatch releaseTimeout = new CountDownLatch(1);
+
+        public void assertNoAssertionFailure()
+        {
+            assertThat(assertionFailure.get()).as("The issuer handler must satisfy its assertions").isNull();
+        }
+
+        @Override
+        protected void doPost(HttpServletRequest request, HttpServletResponse response)
+                throws IOException
+        {
+            try {
+                respondToGrant(request, response);
+            }
+            catch (AssertionError e) {
+                assertionFailure.compareAndSet(null, e);
+                throw e;
+            }
+        }
+
+        private void respondToGrant(HttpServletRequest request, HttpServletResponse response)
+                throws IOException
+        {
+            requests.incrementAndGet();
+            assertThat(request.getRequestURI()).isEqualTo("/oauth/token");
+            assertThat(request.getHeader(AUTHORIZATION)).isEqualTo("Bearer synthetic-dedicated-cell-token");
+            assertThat(request.getHeader("X-Trino-Internal-Bearer")).isNull();
+            assertThat(request.getParameterMap()).containsOnlyKeys("grant_type", "username", "password");
+            assertThat(request.getParameter("grant_type")).isEqualTo("urn:posthog:params:oauth:grant-type:trino-login");
+            assertThat(request.getParameter("username")).isEqualTo("example-db.alice@allowed");
+            assertThat(request.getParameter("password")).isEqualTo(TEST_PASSWORD);
+            CallerGrantReply current = requireNonNull(reply.get(), "reply is null");
+            if (current.status() == 0) {
+                try {
+                    assertThat(releaseTimeout.await(10, SECONDS)).isTrue();
+                }
+                catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("The test issuer was interrupted", e);
+                }
+                return;
+            }
+            response.setStatus(current.status());
+            response.setContentType("application/json");
+            if (current.status() == 302) {
+                response.setHeader(LOCATION, "/redirect");
+            }
+            response.getWriter().write(current.body());
+        }
     }
 
     private static class JwkServlet
