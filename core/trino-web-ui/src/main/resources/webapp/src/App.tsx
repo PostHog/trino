@@ -32,7 +32,7 @@ import { Texts } from './constant'
 import { routers } from './router.tsx'
 import { useConfigStore, Theme as ThemeStore } from './store'
 import { darkTheme, lightTheme } from './theme'
-import trufflehogLogo from './assets/trufflehog.svg'
+import trufflehogLogo from './assets/trufflehog.png'
 import { QueryDetails } from './components/QueryDetails'
 import { WorkerStatus } from './components/WorkerStatus'
 import { loader } from '@monaco-editor/react'
@@ -94,7 +94,7 @@ const NotFound = () => {
         <Container maxWidth="md">
             <Grid container spacing={2}>
                 <Grid size={12} spacing={{ md: 2 }}>
-                    <Box component="img" sx={{ height: 140 }} alt="logo" src={trufflehogLogo} />
+                    <Box component="img" sx={{ height: 200 }} alt="logo" src={trufflehogLogo} />
                     <Typography variant="h4" sx={{ fontWeight: 600 }}>
                         {Texts.ProductName}
                     </Typography>

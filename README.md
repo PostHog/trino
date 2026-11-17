@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/trufflehog-mascot.png" alt="The TruffleHog mascot: a grumpy hog with hedgehog spines, holding a trowel and a truffle" width="280" />
+</p>
+
 <h1 align="center">TruffleHog</h1>
 
 <p align="center">
