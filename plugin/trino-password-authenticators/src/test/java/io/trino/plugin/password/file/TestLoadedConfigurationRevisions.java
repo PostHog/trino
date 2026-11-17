@@ -25,6 +25,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static com.google.common.io.BaseEncoding.base16;
+import static io.trino.testing.assertions.Assert.assertEventually;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
@@ -41,6 +42,7 @@ final class TestLoadedConfigurationRevisions
     // user_1 with password "user123", hashed so that the file is a realistic password file
     private static final String USER_LINE = "user_1:$2y$10$BqTb8hScP5DfcpmHo5PeyugxHz5Ky/qf3wrpD7SNm8sWuA3VlGqsa";
     private static final String OTHER_USER_LINE = "user_2:$2y$10$BqTb8hScP5DfcpmHo5PeyugxHz5Ky/qf3wrpD7SNm8sWuA3VlGqsa";
+    private static final String ROTATED_USER_LINE = "user_1:1000:5b4240333032306164:f38d165fce8ce42f59d366139ef5d9e1ca1247f0e06e503ee1a611dd9ec40876bb5edb8409f5abe5504aab6628e70cfb3d3a18e99d70357d295002c3d0a308a0";
 
     @TempDir
     private Path temporaryDirectory;
@@ -75,6 +77,51 @@ final class TestLoadedConfigurationRevisions
         assertThat(authenticator.loadedRevision()).isNotEqualTo(before);
         assertThat(authenticator.loadedRevision()).isEqualTo(fingerprint(USER_LINE + "\n" + OTHER_USER_LINE + "\n"));
         assertThat(authenticator.createAuthenticatedPrincipal("user_2", "user123").getName()).isEqualTo("user_2");
+    }
+
+    @Test
+    void testPasswordRotationReplacesWarmedCacheAndRevision()
+            throws IOException
+    {
+        File passwordFile = write("password.db", USER_LINE + "\n");
+        PasswordStore before = new PasswordStore(passwordFile, 1000);
+        assertThat(before.authenticate("user_1", "user123")).isTrue();
+        assertThat(before.authenticate("user_1", "password")).isFalse();
+        assertThat(before.cachedAuthentications()).hasSize(2);
+        assertThat(before.revision()).contains(fingerprint(USER_LINE + "\n"));
+
+        write("password.db", ROTATED_USER_LINE + "\n");
+
+        assertThat(before.authenticate("user_1", "user123")).isTrue();
+        assertThat(before.authenticate("user_1", "password")).isFalse();
+        assertThat(before.revision()).contains(fingerprint(USER_LINE + "\n"));
+
+        PasswordStore after = new PasswordStore(passwordFile, 1000);
+        assertThat(after.cachedAuthentications()).isEmpty();
+        assertThat(after.authenticate("user_1", "user123")).isFalse();
+        assertThat(after.authenticate("user_1", "password")).isTrue();
+        assertThat(after.cachedAuthentications()).hasSize(2);
+        assertThat(after.revision()).contains(fingerprint(ROTATED_USER_LINE + "\n"));
+    }
+
+    @Test
+    void testAuthenticatorReloadRejectsTheOldPassword()
+            throws IOException
+    {
+        File passwordFile = write("password.db", ROTATED_USER_LINE + "\n");
+        FileAuthenticator authenticator = new FileAuthenticator(new FileConfig()
+                .setPasswordFile(passwordFile)
+                .setRefreshPeriod(new Duration(100, MILLISECONDS)));
+        assertThat(authenticator.createAuthenticatedPrincipal("user_1", "password").getName()).isEqualTo("user_1");
+        assertThatThrownBy(() -> authenticator.createAuthenticatedPrincipal("user_1", "user123"))
+                .isInstanceOf(AccessDeniedException.class);
+
+        write("password.db", USER_LINE + "\n");
+
+        assertEventually(new Duration(5, SECONDS), () -> assertThat(authenticator.loadedRevision()).isEqualTo(fingerprint(USER_LINE + "\n")));
+        assertThatThrownBy(() -> authenticator.createAuthenticatedPrincipal("user_1", "password"))
+                .isInstanceOf(AccessDeniedException.class);
+        assertThat(authenticator.createAuthenticatedPrincipal("user_1", "user123").getName()).isEqualTo("user_1");
     }
 
     /**

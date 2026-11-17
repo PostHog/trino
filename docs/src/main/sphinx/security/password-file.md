@@ -36,7 +36,17 @@ The following configuration properties are available:
 | -------------------------------- | ----------------------------------------------------------------- |
 | `file.password-file`             | Path of the password file.                                        |
 | `file.refresh-period`            | How often to reload the password file. Defaults to `5s`.          |
-| `file.auth-token-cache.max-size` | Max number of cached authenticated passwords. Defaults to `1000`. |
+| `file.auth-token-cache.max-size` | Maximum number of cached verification results. Defaults to `1000`. |
+
+### Verification cache
+
+The file authenticator caches Boolean verification results.
+Each key contains the username plus a complete HMAC-SHA256 identifier.
+The cache does not retain plaintext passwords.
+
+Each loaded password store owns a random HMAC key.
+Reloading the password file replaces that store.
+The password file format remains unchanged.
 
 ## Password files
 
