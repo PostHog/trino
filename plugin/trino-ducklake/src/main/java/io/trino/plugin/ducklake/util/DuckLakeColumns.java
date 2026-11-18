@@ -24,6 +24,7 @@ import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeManager;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -129,7 +130,7 @@ public final class DuckLakeColumns
     /**
      * Rebuilds the column tree of an existing table from the rows visible at a snapshot.
      */
-    public static List<DuckLakeWriteColumn> fromCatalog(List<DuckLakeColumnEntry> entries)
+    public static List<DuckLakeWriteColumn> fromCatalog(List<DuckLakeColumnEntry> entries, TypeManager typeManager)
     {
         ListMultimap<Long, DuckLakeColumnEntry> childrenByParent = index(
                 entries.stream()
@@ -138,20 +139,20 @@ public final class DuckLakeColumns
                 entry -> entry.parentColumn().orElseThrow());
         return entries.stream()
                 .filter(entry -> entry.parentColumn().isEmpty())
-                .map(entry -> toWriteColumn(entry, childrenByParent))
+                .map(entry -> toWriteColumn(entry, childrenByParent, typeManager))
                 .collect(toImmutableList());
     }
 
-    private static DuckLakeWriteColumn toWriteColumn(DuckLakeColumnEntry entry, ListMultimap<Long, DuckLakeColumnEntry> childrenByParent)
+    private static DuckLakeWriteColumn toWriteColumn(DuckLakeColumnEntry entry, ListMultimap<Long, DuckLakeColumnEntry> childrenByParent, TypeManager typeManager)
     {
         List<DuckLakeWriteColumn> children = childrenByParent.get(entry.columnId()).stream()
-                .map(child -> toWriteColumn(child, childrenByParent))
+                .map(child -> toWriteColumn(child, childrenByParent, typeManager))
                 .collect(toImmutableList());
         return new DuckLakeWriteColumn(
                 entry.columnId(),
                 entry.columnName(),
                 entry.columnType(),
-                DuckLakeTypes.toTrinoType(entry, childrenByParent),
+                DuckLakeTypes.toTrinoType(entry, childrenByParent, typeManager),
                 entry.nullsAllowed(),
                 children);
     }

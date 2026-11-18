@@ -312,7 +312,13 @@ final class TestDuckLakeInlinedData
     void testTypes()
             throws SQLException
     {
-        assertThat(query("SELECT * FROM inlined_types WHERE c_boolean"))
+        // a JSON value reads back as the text DuckDB stored, which json_format returns unchanged
+        assertThat(query(
+                """
+                SELECT c_boolean, c_tinyint, c_smallint, c_integer, c_bigint, c_utinyint, c_usmallint, c_uinteger, c_uint64,
+                    c_hugeint, c_decimal_short, c_decimal_long, c_real, c_double, c_varchar, json_format(c_json), c_blob, c_uuid,
+                    c_date, c_time, c_timestamp, c_timestamp_s, c_timestamp_ms, c_timestamp_ns, c_timestamptz
+                FROM inlined_types WHERE c_boolean"""))
                 .matches(
                         """
                         VALUES (

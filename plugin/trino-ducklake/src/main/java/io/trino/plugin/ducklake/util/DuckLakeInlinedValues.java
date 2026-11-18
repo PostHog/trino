@@ -44,6 +44,7 @@ import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_BAD_DATA;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_FEATURE;
 import static io.trino.plugin.ducklake.DuckLakeErrorCode.DUCKLAKE_UNSUPPORTED_TYPE;
+import static io.trino.plugin.ducklake.util.DuckLakeTypes.isJson;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DateTimeEncoding.packDateTimeWithZone;
@@ -173,8 +174,9 @@ public final class DuckLakeInlinedValues
                 DOUBLE.writeDouble(output, value);
             };
         }
-        if (type instanceof VarcharType && stored.equals("bytea")) {
-            // DuckDB reinterprets the stored bytes as its string, without checking them
+        if ((type instanceof VarcharType || isJson(type)) && stored.equals("bytea")) {
+            // DuckDB reinterprets the stored bytes as its string, without checking them; a JSON
+            // value is stored the same way, as its text
             return (row, column, output) -> {
                 byte[] value = row.getBytes(column);
                 if (value == null) {
@@ -184,7 +186,7 @@ public final class DuckLakeInlinedValues
                 type.writeSlice(output, Slices.wrappedBuffer(value));
             };
         }
-        if (type instanceof VarcharType && TEXT_TYPES.contains(stored)) {
+        if ((type instanceof VarcharType || isJson(type)) && TEXT_TYPES.contains(stored)) {
             return (row, column, output) -> {
                 String value = row.getString(column);
                 if (value == null) {

@@ -21,6 +21,7 @@ import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.TypeOperators;
 import org.junit.jupiter.api.Test;
 
@@ -45,56 +46,60 @@ import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.UuidType.UUID;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
+import static io.trino.type.JsonType.JSON;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 final class TestDuckLakeTypes
 {
+    private static final TypeManager TYPE_MANAGER = TESTING_TYPE_MANAGER;
+
     @Test
     void testScalarTypes()
     {
-        assertThat(DuckLakeTypes.toTrinoType("boolean")).isEqualTo(BOOLEAN);
-        assertThat(DuckLakeTypes.toTrinoType("int8")).isEqualTo(TINYINT);
-        assertThat(DuckLakeTypes.toTrinoType("int16")).isEqualTo(SMALLINT);
-        assertThat(DuckLakeTypes.toTrinoType("int32")).isEqualTo(INTEGER);
-        assertThat(DuckLakeTypes.toTrinoType("int64")).isEqualTo(BIGINT);
-        assertThat(DuckLakeTypes.toTrinoType("uint8")).isEqualTo(SMALLINT);
-        assertThat(DuckLakeTypes.toTrinoType("uint16")).isEqualTo(INTEGER);
-        assertThat(DuckLakeTypes.toTrinoType("uint32")).isEqualTo(BIGINT);
-        assertThat(DuckLakeTypes.toTrinoType("uint64")).isEqualTo(DecimalType.createDecimalType(20, 0));
-        assertThat(DuckLakeTypes.toTrinoType("int128")).isEqualTo(DecimalType.createDecimalType(38, 0));
-        assertThat(DuckLakeTypes.toTrinoType("float32")).isEqualTo(REAL);
-        assertThat(DuckLakeTypes.toTrinoType("float64")).isEqualTo(DOUBLE);
-        assertThat(DuckLakeTypes.toTrinoType("decimal(10,2)")).isEqualTo(DecimalType.createDecimalType(10, 2));
-        assertThat(DuckLakeTypes.toTrinoType("decimal(38,10)")).isEqualTo(DecimalType.createDecimalType(38, 10));
-        assertThat(DuckLakeTypes.toTrinoType("varchar")).isEqualTo(VARCHAR);
-        assertThat(DuckLakeTypes.toTrinoType("json")).isEqualTo(VARCHAR);
-        assertThat(DuckLakeTypes.toTrinoType("blob")).isEqualTo(VARBINARY);
-        assertThat(DuckLakeTypes.toTrinoType("uuid")).isEqualTo(UUID);
-        assertThat(DuckLakeTypes.toTrinoType("date")).isEqualTo(DATE);
-        assertThat(DuckLakeTypes.toTrinoType("time")).isEqualTo(TIME_MICROS);
-        assertThat(DuckLakeTypes.toTrinoType("timestamp")).isEqualTo(TIMESTAMP_MICROS);
-        assertThat(DuckLakeTypes.toTrinoType("timestamp_s")).isEqualTo(TIMESTAMP_SECONDS);
-        assertThat(DuckLakeTypes.toTrinoType("timestamp_ms")).isEqualTo(TIMESTAMP_MILLIS);
-        assertThat(DuckLakeTypes.toTrinoType("timestamp_ns")).isEqualTo(TIMESTAMP_NANOS);
-        assertThat(DuckLakeTypes.toTrinoType("timestamptz")).isEqualTo(TIMESTAMP_TZ_MICROS);
+        assertThat(DuckLakeTypes.toTrinoType("boolean", TYPE_MANAGER)).isEqualTo(BOOLEAN);
+        assertThat(DuckLakeTypes.toTrinoType("int8", TYPE_MANAGER)).isEqualTo(TINYINT);
+        assertThat(DuckLakeTypes.toTrinoType("int16", TYPE_MANAGER)).isEqualTo(SMALLINT);
+        assertThat(DuckLakeTypes.toTrinoType("int32", TYPE_MANAGER)).isEqualTo(INTEGER);
+        assertThat(DuckLakeTypes.toTrinoType("int64", TYPE_MANAGER)).isEqualTo(BIGINT);
+        assertThat(DuckLakeTypes.toTrinoType("uint8", TYPE_MANAGER)).isEqualTo(SMALLINT);
+        assertThat(DuckLakeTypes.toTrinoType("uint16", TYPE_MANAGER)).isEqualTo(INTEGER);
+        assertThat(DuckLakeTypes.toTrinoType("uint32", TYPE_MANAGER)).isEqualTo(BIGINT);
+        assertThat(DuckLakeTypes.toTrinoType("uint64", TYPE_MANAGER)).isEqualTo(DecimalType.createDecimalType(20, 0));
+        assertThat(DuckLakeTypes.toTrinoType("int128", TYPE_MANAGER)).isEqualTo(DecimalType.createDecimalType(38, 0));
+        assertThat(DuckLakeTypes.toTrinoType("float32", TYPE_MANAGER)).isEqualTo(REAL);
+        assertThat(DuckLakeTypes.toTrinoType("float64", TYPE_MANAGER)).isEqualTo(DOUBLE);
+        assertThat(DuckLakeTypes.toTrinoType("decimal(10,2)", TYPE_MANAGER)).isEqualTo(DecimalType.createDecimalType(10, 2));
+        assertThat(DuckLakeTypes.toTrinoType("decimal(38,10)", TYPE_MANAGER)).isEqualTo(DecimalType.createDecimalType(38, 10));
+        assertThat(DuckLakeTypes.toTrinoType("varchar", TYPE_MANAGER)).isEqualTo(VARCHAR);
+        assertThat(DuckLakeTypes.toTrinoType("json", TYPE_MANAGER)).isEqualTo(JSON);
+        assertThat(DuckLakeTypes.toTrinoType("blob", TYPE_MANAGER)).isEqualTo(VARBINARY);
+        assertThat(DuckLakeTypes.toTrinoType("uuid", TYPE_MANAGER)).isEqualTo(UUID);
+        assertThat(DuckLakeTypes.toTrinoType("date", TYPE_MANAGER)).isEqualTo(DATE);
+        assertThat(DuckLakeTypes.toTrinoType("time", TYPE_MANAGER)).isEqualTo(TIME_MICROS);
+        assertThat(DuckLakeTypes.toTrinoType("timestamp", TYPE_MANAGER)).isEqualTo(TIMESTAMP_MICROS);
+        assertThat(DuckLakeTypes.toTrinoType("timestamp_s", TYPE_MANAGER)).isEqualTo(TIMESTAMP_SECONDS);
+        assertThat(DuckLakeTypes.toTrinoType("timestamp_ms", TYPE_MANAGER)).isEqualTo(TIMESTAMP_MILLIS);
+        assertThat(DuckLakeTypes.toTrinoType("timestamp_ns", TYPE_MANAGER)).isEqualTo(TIMESTAMP_NANOS);
+        assertThat(DuckLakeTypes.toTrinoType("timestamptz", TYPE_MANAGER)).isEqualTo(TIMESTAMP_TZ_MICROS);
     }
 
     @Test
     void testAliasSpellings()
     {
-        assertThat(DuckLakeTypes.toTrinoType("BOOLEAN")).isEqualTo(BOOLEAN);
-        assertThat(DuckLakeTypes.toTrinoType("TINYINT")).isEqualTo(TINYINT);
-        assertThat(DuckLakeTypes.toTrinoType("SMALLINT")).isEqualTo(SMALLINT);
-        assertThat(DuckLakeTypes.toTrinoType("INTEGER")).isEqualTo(INTEGER);
-        assertThat(DuckLakeTypes.toTrinoType("BIGINT")).isEqualTo(BIGINT);
-        assertThat(DuckLakeTypes.toTrinoType("HUGEINT")).isEqualTo(DecimalType.createDecimalType(38, 0));
-        assertThat(DuckLakeTypes.toTrinoType("UBIGINT")).isEqualTo(DecimalType.createDecimalType(20, 0));
-        assertThat(DuckLakeTypes.toTrinoType("FLOAT")).isEqualTo(REAL);
-        assertThat(DuckLakeTypes.toTrinoType("DOUBLE")).isEqualTo(DOUBLE);
-        assertThat(DuckLakeTypes.toTrinoType("VARCHAR")).isEqualTo(VARCHAR);
-        assertThat(DuckLakeTypes.toTrinoType("Timestamp_US")).isEqualTo(TIMESTAMP_MICROS);
-        assertThat(DuckLakeTypes.toTrinoType("NUMERIC(5,2)")).isEqualTo(DecimalType.createDecimalType(5, 2));
+        assertThat(DuckLakeTypes.toTrinoType("BOOLEAN", TYPE_MANAGER)).isEqualTo(BOOLEAN);
+        assertThat(DuckLakeTypes.toTrinoType("TINYINT", TYPE_MANAGER)).isEqualTo(TINYINT);
+        assertThat(DuckLakeTypes.toTrinoType("SMALLINT", TYPE_MANAGER)).isEqualTo(SMALLINT);
+        assertThat(DuckLakeTypes.toTrinoType("INTEGER", TYPE_MANAGER)).isEqualTo(INTEGER);
+        assertThat(DuckLakeTypes.toTrinoType("BIGINT", TYPE_MANAGER)).isEqualTo(BIGINT);
+        assertThat(DuckLakeTypes.toTrinoType("HUGEINT", TYPE_MANAGER)).isEqualTo(DecimalType.createDecimalType(38, 0));
+        assertThat(DuckLakeTypes.toTrinoType("UBIGINT", TYPE_MANAGER)).isEqualTo(DecimalType.createDecimalType(20, 0));
+        assertThat(DuckLakeTypes.toTrinoType("FLOAT", TYPE_MANAGER)).isEqualTo(REAL);
+        assertThat(DuckLakeTypes.toTrinoType("DOUBLE", TYPE_MANAGER)).isEqualTo(DOUBLE);
+        assertThat(DuckLakeTypes.toTrinoType("VARCHAR", TYPE_MANAGER)).isEqualTo(VARCHAR);
+        assertThat(DuckLakeTypes.toTrinoType("Timestamp_US", TYPE_MANAGER)).isEqualTo(TIMESTAMP_MICROS);
+        assertThat(DuckLakeTypes.toTrinoType("NUMERIC(5,2)", TYPE_MANAGER)).isEqualTo(DecimalType.createDecimalType(5, 2));
     }
 
     @Test
@@ -116,7 +121,7 @@ final class TestDuckLakeTypes
         DuckLakeColumnEntry child = column(2, "element", "int32", OptionalLong.of(1));
         ListMultimap<Long, DuckLakeColumnEntry> childrenByParent = ImmutableListMultimap.of(1L, child);
 
-        assertThat(DuckLakeTypes.toTrinoType(parent, childrenByParent))
+        assertThat(DuckLakeTypes.toTrinoType(parent, childrenByParent, TYPE_MANAGER))
                 .isEqualTo(new ArrayType(INTEGER));
     }
 
@@ -128,7 +133,7 @@ final class TestDuckLakeTypes
         DuckLakeColumnEntry second = column(3, "b", "varchar", OptionalLong.of(1));
         ListMultimap<Long, DuckLakeColumnEntry> childrenByParent = ImmutableListMultimap.of(1L, first, 1L, second);
 
-        assertThat(DuckLakeTypes.toTrinoType(parent, childrenByParent))
+        assertThat(DuckLakeTypes.toTrinoType(parent, childrenByParent, TYPE_MANAGER))
                 .isEqualTo(RowType.rowType(RowType.field("a", BIGINT), RowType.field("b", VARCHAR)));
     }
 
@@ -140,7 +145,7 @@ final class TestDuckLakeTypes
         DuckLakeColumnEntry value = column(3, "value", "int32", OptionalLong.of(1));
         ListMultimap<Long, DuckLakeColumnEntry> childrenByParent = ImmutableListMultimap.of(1L, key, 1L, value);
 
-        assertThat(DuckLakeTypes.toTrinoType(parent, childrenByParent))
+        assertThat(DuckLakeTypes.toTrinoType(parent, childrenByParent, TYPE_MANAGER))
                 .isEqualTo(new MapType(VARCHAR, INTEGER, new TypeOperators()));
     }
 
@@ -152,13 +157,13 @@ final class TestDuckLakeTypes
         DuckLakeColumnEntry field = column(3, "x", "float64", OptionalLong.of(2));
         ListMultimap<Long, DuckLakeColumnEntry> childrenByParent = ImmutableListMultimap.of(1L, structChild, 2L, field);
 
-        assertThat(DuckLakeTypes.toTrinoType(parent, childrenByParent))
+        assertThat(DuckLakeTypes.toTrinoType(parent, childrenByParent, TYPE_MANAGER))
                 .isEqualTo(new ArrayType(RowType.rowType(RowType.field("x", DOUBLE))));
     }
 
     private static void assertUnsupported(String duckLakeType)
     {
-        assertThatThrownBy(() -> DuckLakeTypes.toTrinoType(duckLakeType))
+        assertThatThrownBy(() -> DuckLakeTypes.toTrinoType(duckLakeType, TYPE_MANAGER))
                 .isInstanceOfSatisfying(TrinoException.class, exception ->
                         assertThat(exception.getErrorCode()).isEqualTo(DUCKLAKE_UNSUPPORTED_TYPE.toErrorCode()))
                 .hasMessageContaining(duckLakeType);

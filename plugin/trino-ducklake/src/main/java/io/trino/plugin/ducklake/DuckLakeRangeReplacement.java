@@ -44,6 +44,7 @@ import io.trino.spi.connector.SourcePage;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeManager;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 
 import java.io.IOException;
@@ -100,6 +101,7 @@ public final class DuckLakeRangeReplacement
     private final FileFormatDataSourceStats fileFormatDataSourceStats;
     private final ParquetReaderOptions parquetReaderOptions;
     private final int maxConcurrentFooterReads;
+    private final TypeManager typeManager;
 
     @Inject
     public DuckLakeRangeReplacement(
@@ -108,7 +110,8 @@ public final class DuckLakeRangeReplacement
             TrinoFileSystemFactory fileSystemFactory,
             FileFormatDataSourceStats fileFormatDataSourceStats,
             ParquetReaderConfig parquetReaderConfig,
-            DuckLakeConfig config)
+            DuckLakeConfig config,
+            TypeManager typeManager)
     {
         this.metastore = requireNonNull(metastore, "metastore is null");
         this.pageSources = requireNonNull(pageSources, "pageSources is null");
@@ -116,6 +119,7 @@ public final class DuckLakeRangeReplacement
         this.fileFormatDataSourceStats = requireNonNull(fileFormatDataSourceStats, "fileFormatDataSourceStats is null");
         this.parquetReaderOptions = parquetReaderConfig.toParquetReaderOptions();
         this.maxConcurrentFooterReads = config.getAddFilesProcedureMaxConcurrentFileReads();
+        this.typeManager = requireNonNull(typeManager, "typeManager is null");
     }
 
     /**
@@ -200,7 +204,7 @@ public final class DuckLakeRangeReplacement
         Map<Long, DuckLakeNameMapping> mappings = DuckLakePageSourceProvider.withNestedReadTypes(
                 metastore.nameMappings(files.stream()
                         .filter(file -> file.mappingId().isPresent()).map(file -> file.mappingId().orElseThrow()).collect(toImmutableSet())),
-                () -> DuckLakeColumns.fromCatalog(metastore.columns(table.snapshotId(), table.tableId())));
+                () -> DuckLakeColumns.fromCatalog(metastore.columns(table.snapshotId(), table.tableId()), typeManager));
         Domain range = replacement.domain();
         List<Candidate> candidates = new ArrayList<>();
         for (DuckLakeDataFileEntry file : files) {
@@ -277,7 +281,7 @@ public final class DuckLakeRangeReplacement
             return candidates.stream().map(_ -> Optional.<Domain>empty()).collect(toImmutableList());
         }
         long columnId = replacement.column().columnId();
-        Optional<DuckLakeFooterStatistics.Column> column = DuckLakeColumns.fromCatalog(metastore.columns(table.snapshotId(), table.tableId())).stream()
+        Optional<DuckLakeFooterStatistics.Column> column = DuckLakeColumns.fromCatalog(metastore.columns(table.snapshotId(), table.tableId()), typeManager).stream()
                 .filter(value -> value.columnId() == columnId)
                 .findFirst()
                 .map(DuckLakeFooterStatistics.Column::of);

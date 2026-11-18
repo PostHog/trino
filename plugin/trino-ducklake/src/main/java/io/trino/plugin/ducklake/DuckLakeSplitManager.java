@@ -52,6 +52,7 @@ import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeManager;
 
 import java.util.HashMap;
 import java.util.List;
@@ -96,6 +97,7 @@ public class DuckLakeSplitManager
     private final ParquetReaderOptions parquetReaderOptions;
     private final SplitAffinityProvider affinityProvider;
     private final ExecutorService executor;
+    private final TypeManager typeManager;
 
     @Inject
     public DuckLakeSplitManager(
@@ -104,7 +106,8 @@ public class DuckLakeSplitManager
             FileFormatDataSourceStats fileFormatDataSourceStats,
             ParquetReaderConfig parquetReaderConfig,
             SplitAffinityProvider affinityProvider,
-            @ForDuckLakeSplitManager ExecutorService executor)
+            @ForDuckLakeSplitManager ExecutorService executor,
+            TypeManager typeManager)
     {
         this.metastore = requireNonNull(metastore, "metastore is null");
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
@@ -112,6 +115,7 @@ public class DuckLakeSplitManager
         this.parquetReaderOptions = parquetReaderConfig.toParquetReaderOptions();
         this.affinityProvider = requireNonNull(affinityProvider, "affinityProvider is null");
         this.executor = requireNonNull(executor, "executor is null");
+        this.typeManager = requireNonNull(typeManager, "typeManager is null");
     }
 
     @Override
@@ -210,7 +214,7 @@ public class DuckLakeSplitManager
         List<DuckLakeDataFileEntry> dataFiles = metastore.dataFiles(handle.snapshotId(), handle.tableId());
         Map<Long, DuckLakeNameMapping> nameMappings = DuckLakePageSourceProvider.withNestedReadTypes(
                 nameMappings(dataFiles),
-                () -> DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId())));
+                () -> DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId()), typeManager));
         boolean metadataOnly = handle.projectedColumns().map(Set::isEmpty).orElse(false)
                 && handle.unenforcedConstraint().isAll();
         ImmutableList.Builder<DuckLakeSplit> files = ImmutableList.builder();
