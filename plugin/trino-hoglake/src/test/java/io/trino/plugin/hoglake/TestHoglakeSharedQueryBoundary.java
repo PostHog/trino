@@ -46,6 +46,7 @@ import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -382,7 +383,9 @@ class TestHoglakeSharedQueryBoundary
         assertThat(connector.getTableFunctions()).isEmpty();
         assertThat(HoglakeSharedConnector.class.getDeclaredConstructors()).singleElement().satisfies(constructor ->
                 assertThat(constructor.getParameterTypes()).containsExactly(
-                        HoglakeSharedHttpClient.class, HoglakeSharedSessionVerifier.class, LifeCycleManager.class));
+                        HoglakeSharedHttpClient.class, HoglakeSharedSessionVerifier.class, LifeCycleManager.class, Optional.class));
+        // Discovery only: the one optional part, the read path, is absent
+        assertThat(((HoglakeSharedConnector) connector).readsRemoteTeamSchemas()).isFalse();
         assertThat(Arrays.stream(HoglakeSharedConnector.class.getDeclaredFields()).map(Field::getType).collect(toImmutableSet()))
                 .containsExactlyInAnyOrder(
                         HoglakeSharedHttpClient.class,
@@ -390,7 +393,10 @@ class TestHoglakeSharedQueryBoundary
                         LifeCycleManager.class,
                         ConnectorSplitManager.class,
                         ConnectorPageSourceProvider.class,
-                        ConnectorPageSinkProvider.class);
+                        ConnectorPageSinkProvider.class,
+                        // The read path, absent here, and its session properties, empty here
+                        Optional.class,
+                        List.class);
     }
 
     private static Identity identity(String mappedUser, String principal, String jwt)

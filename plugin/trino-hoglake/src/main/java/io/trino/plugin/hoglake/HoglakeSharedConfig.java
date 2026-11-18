@@ -37,6 +37,7 @@ public class HoglakeSharedConfig
     private Duration requestTimeout = new Duration(120, SECONDS);
     private boolean multiTenant;
     private boolean namespacePointLookupEnabled;
+    private boolean remoteRead;
     private File jwksFile;
     private String issuer;
     private String backendBindings;
@@ -86,6 +87,19 @@ public class HoglakeSharedConfig
     public HoglakeSharedConfig setMultiTenant(boolean multiTenant)
     {
         this.multiTenant = multiTenant;
+        return this;
+    }
+
+    public boolean isRemoteRead()
+    {
+        return remoteRead;
+    }
+
+    @Config("hoglake.shared.remote-read")
+    @ConfigDescription("Read tables of remote team schemas with the storage session carried by the verified session token")
+    public HoglakeSharedConfig setRemoteRead(boolean remoteRead)
+    {
+        this.remoteRead = remoteRead;
         return this;
     }
 

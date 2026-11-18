@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.hoglake;
 
+import com.google.common.collect.ImmutableMap;
 import com.google.inject.Binder;
 import com.google.inject.Injector;
 import com.google.inject.Key;
@@ -21,6 +22,7 @@ import com.google.inject.Provides;
 import com.google.inject.Singleton;
 import io.airlift.bootstrap.Bootstrap;
 import io.airlift.bootstrap.LifeCycleManager;
+import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.filesystem.manager.FileSystemModule;
 import io.trino.plugin.base.ConnectorContextModule;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorPageSinkProvider;
@@ -38,6 +40,7 @@ import io.trino.spi.connector.ConnectorSplitManager;
 import org.weakref.jmx.guice.MBeanModule;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import static io.airlift.configuration.ConfigBinder.configBinder;
@@ -59,9 +62,24 @@ public class HoglakeConnectorFactory
         ClassLoader classLoader = getClass().getClassLoader();
         try (ThreadContextClassLoader _ = new ThreadContextClassLoader(classLoader)) {
             if (sharedMode(config)) {
+                if (remoteRead(config)) {
+                    Map<String, String> properties = remoteReadProperties(config);
+                    Injector injector = new Bootstrap(
+                            "io.trino.bootstrap.catalog." + catalogName,
+                            new MBeanModule(),
+                            new MBeanServerModule(),
+                            new SharedModule(Optional.of(properties.get("s3.region"))),
+                            new FileSystemModule(catalogName, context, false),
+                            new ConnectorContextModule(catalogName, context))
+                            .doNotInitializeLogging()
+                            .disableSystemProperties()
+                            .setRequiredConfigurationProperties(properties)
+                            .initialize();
+                    return injector.getInstance(HoglakeSharedConnector.class);
+                }
                 Injector injector = new Bootstrap(
                         "io.trino.bootstrap.catalog." + catalogName,
-                        new SharedModule(),
+                        new SharedModule(Optional.empty()),
                         new ConnectorContextModule(catalogName, context))
                         .doNotInitializeLogging()
                         .disableSystemProperties()
@@ -104,9 +122,56 @@ public class HoglakeConnectorFactory
         throw new IllegalArgumentException("hoglake.multi-tenant must be exactly true or false");
     }
 
+    private static boolean remoteRead(Map<String, String> config)
+    {
+        String value = config.get("hoglake.shared.remote-read");
+        if (value == null || value.equals("false")) {
+            return false;
+        }
+        if (value.equals("true")) {
+            return true;
+        }
+        throw new IllegalArgumentException("hoglake.shared.remote-read must be exactly true or false");
+    }
+
+    /**
+     * The read path's file system is S3 with no credential of its own: a file is
+     * read only with the storage session of the caller's verified token. So the
+     * catalog may say where S3 is and nothing else about it: a key, a role, a
+     * security mapping, a cache or another file system would each be a second
+     * source of authority or a store shared between callers.
+     */
+    private static Map<String, String> remoteReadProperties(Map<String, String> config)
+    {
+        for (String name : config.keySet()) {
+            boolean storage = name.startsWith("s3.") || name.startsWith("fs.") || name.startsWith("hoglake.s3.") ||
+                    name.startsWith("gcs.") || name.startsWith("azure.") || name.startsWith("hive.") || name.startsWith("local.");
+            if (storage && !REMOTE_READ_STORAGE_PROPERTIES.contains(name)) {
+                throw new IllegalArgumentException("Configuration property '%s' cannot be set with hoglake.shared.remote-read".formatted(name));
+            }
+        }
+        String region = config.get("s3.region");
+        if (region == null || region.isBlank()) {
+            throw new IllegalArgumentException("s3.region is required with hoglake.shared.remote-read");
+        }
+        return ImmutableMap.<String, String>builder()
+                .putAll(config)
+                .put("fs.s3.enabled", "true")
+                .buildOrThrow();
+    }
+
+    private static final Set<String> REMOTE_READ_STORAGE_PROPERTIES = Set.of("s3.region", "s3.endpoint", "s3.path-style-access");
+
     private static class SharedModule
             implements Module
     {
+        private final Optional<String> storageRegion;
+
+        private SharedModule(Optional<String> storageRegion)
+        {
+            this.storageRegion = storageRegion;
+        }
+
         @Override
         public void configure(Binder binder)
         {
@@ -117,7 +182,7 @@ public class HoglakeConnectorFactory
         @Singleton
         public HoglakeSharedSessionVerifier verifier(HoglakeSharedConfig config)
         {
-            return new HoglakeSharedSessionVerifier(config);
+            return new HoglakeSharedSessionVerifier(config, storageRegion);
         }
 
         @Provides
@@ -129,9 +194,19 @@ public class HoglakeConnectorFactory
 
         @Provides
         @Singleton
-        public HoglakeSharedConnector connector(HoglakeSharedHttpClient client, HoglakeSharedSessionVerifier verifier, LifeCycleManager lifeCycleManager)
+        public HoglakeSharedConnector connector(
+                HoglakeSharedConfig config,
+                HoglakeSharedHttpClient client,
+                HoglakeSharedSessionVerifier verifier,
+                LifeCycleManager lifeCycleManager,
+                Injector injector)
         {
-            return new HoglakeSharedConnector(client, verifier, lifeCycleManager);
+            Optional<HoglakeSharedReadPath> readPath = Optional.empty();
+            if (storageRegion.isPresent()) {
+                // Only the read path's bootstrap binds a file system
+                readPath = Optional.of(new HoglakeSharedReadPath(config, verifier, injector.getInstance(TrinoFileSystemFactory.class)));
+            }
+            return new HoglakeSharedConnector(client, verifier, lifeCycleManager, readPath);
         }
     }
 }
