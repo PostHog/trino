@@ -26,10 +26,10 @@ The image is wrapped in an OCI index carrying manifest-level
 `org.opencontainers.image.source` and `org.opencontainers.image.revision`
 annotations. The ordered tag, full revision alias, and optional readable alias
 resolve to this same index digest. ECR receives only the ordered and full
-revision aliases. Readable aliases remain GHCR-only. The existing charts state
-dispatch receives the digest only after both registries pass read-back checks
-and continues to run only after a push to `master`. Merging this workflow can
-therefore roll the existing dev Trino deployment independently of new cells.
+revision aliases. Readable aliases remain GHCR-only. The charts state dispatch runs only after a push to `master`. It sends the
+digest after both registries pass the read-back checks. Keep the release key
+`trino` because deployments read the digest from that state entry. The dispatch
+sends the current GitHub repository name as source metadata.
 
 The publisher uses a Buildx `docker-container` builder and the registry exporter
 with `oci-mediatypes=true`. The default local `core/docker/build.sh` behavior
@@ -48,17 +48,26 @@ the publisher never overwrites them. Only a GHCR readable alias can move.
 Registry read failures or incorrect provenance stop publication. Do not delete
 an ordered tag to force a rebuild; publish a new source commit instead.
 
-Before merging, apply the separate infrastructure change that creates the
-fully immutable ECR repository and the master-only publisher role. Configure the
-organization Actions secret `AWS_ECR_PUBLISH_IAM_ROLE` with the publisher role ARN
-and grant this repository access:
-`arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-trino-publish-role`. This is an operator
-setup step, not a change performed by this workflow. The workflow masks the AWS
-account ID in logs and does not store its registry address in source. OIDC trust must
-allow only the `master` ref of `PostHog/truffle`. GitHub derives the subject
-from the repository name, so a repository rename changes it and the trust must
-follow. The role must allow image
-push/read operations but no image deletion or repository-policy changes.
+The publisher requires a fully immutable ECR repository. Set the organization
+Actions secret `AWS_ECR_PUBLISH_IAM_ROLE` to the publisher role ARN. Grant
+`PostHog/truffle` access to the secret. The workflow masks the AWS account ID in
+logs. It does not store the registry address in source.
+
+The publisher role must allow only the GitHub OIDC subject for `master` in
+`PostHog/truffle`. A repository rename can change this subject. GitHub uses
+[immutable subject claims](https://docs.github.com/en/actions/reference/security/oidc#immutable-subject-claims)
+for repository renames after July 15, 2026. These claims include the owner and
+repository IDs in addition to their names. Check the current subject prefix in
+the repository's [OIDC settings](https://docs.github.com/en/rest/actions/oidc#get-the-customization-template-for-an-oidc-subject-claim-for-a-repository)
+before changing the trust policy. Scope trust to that exact prefix with the
+`:ref:refs/heads/master` suffix.
+
+The role must allow image pushes and reads. It must not allow image deletion
+or repository policy changes. If `Configure AWS credentials` fails after a
+rename, check the role trust before changing any image coordinates. Apply the
+trust change before trying to publish again. Verify that the next push to `master` publishes the image. Check
+that the charts state entry records the new digest and source repository. A
+manual dispatch publishes the image without updating the charts state.
 
 The workflow serializes its publishers. This prevents races within this
 workflow, but does not itself establish registry immutability or exclusive
