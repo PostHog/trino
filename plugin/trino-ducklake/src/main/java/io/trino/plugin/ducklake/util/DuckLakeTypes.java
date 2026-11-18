@@ -23,6 +23,7 @@ import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.StandardTypes;
 import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
@@ -190,6 +191,9 @@ public final class DuckLakeTypes
             // VARCHAR is stored unbounded and reads back that way
             return "varchar";
         }
+        if (isJson(type)) {
+            return "json";
+        }
         if (VARBINARY.equals(type)) {
             return "blob";
         }
@@ -234,6 +238,15 @@ public final class DuckLakeTypes
             return "struct";
         }
         throw new TrinoException(DUCKLAKE_UNSUPPORTED_TYPE, "DuckLake does not support columns of type " + type);
+    }
+
+    /**
+     * Whether the type is Trino's {@code JSON}. The type is defined in the engine rather than the
+     * SPI, so a connector can only recognize it by name.
+     */
+    public static boolean isJson(Type type)
+    {
+        return StandardTypes.JSON.equals(type.getBaseName());
     }
 
     public static boolean isUnsignedBigint(String duckLakeType)

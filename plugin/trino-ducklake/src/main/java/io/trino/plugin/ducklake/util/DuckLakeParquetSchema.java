@@ -257,12 +257,17 @@ public final class DuckLakeParquetSchema
     }
 
     /**
-     * The conversion a top-level column's values need before they are written. A column holding a
-     * nested type needs none: the values of its fields are written as they are, and a field that
-     * would need one is rejected when the schema is built.
+     * The conversion a top-level column's values need before they are written. A column holding
+     * {@code JSON} values, at any depth, has them converted to their text. Otherwise a column
+     * holding a nested type needs none: the values of its fields are written as they are, and a
+     * field that would need one is rejected when the schema is built.
      */
     private static Optional<UnaryOperator<Block>> blockTransform(DuckLakeWriteColumn column)
     {
+        Type type = column.type();
+        if (DuckLakeJsonValues.containsJson(type)) {
+            return Optional.of(block -> DuckLakeJsonValues.toText(type, block));
+        }
         return switch (normalize(column.duckLakeType())) {
             case "list", "map", "struct" -> Optional.empty();
             default -> writerType(column).blockTransform();
@@ -299,7 +304,10 @@ public final class DuckLakeParquetSchema
                     .withTransform(DuckLakeWideIntegers::toInt128Double);
             case "float32", "float", "real" -> primitive(FLOAT, null, REAL);
             case "float64", "double" -> primitive(DOUBLE_PRIMITIVE, null, DOUBLE);
-            case "varchar", "text", "string", "json" -> primitive(BINARY, LogicalTypeAnnotation.stringType(), type);
+            case "varchar", "text", "string" -> primitive(BINARY, LogicalTypeAnnotation.stringType(), type);
+            // DuckDB writes JSON text under the Parquet JSON annotation; JSON values reach the
+            // writer as text, converted by the column's block transform
+            case "json" -> primitive(BINARY, LogicalTypeAnnotation.jsonType(), VARCHAR);
             case "blob", "bytea", "varbinary", "binary" -> primitive(BINARY, null, VARBINARY);
             case "uuid" -> fixedLength(16, LogicalTypeAnnotation.uuidType(), UUID);
             case "date" -> primitive(INT32, LogicalTypeAnnotation.dateType(), DATE);
