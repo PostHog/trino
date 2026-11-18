@@ -15,7 +15,7 @@ position="$(git rev-list --first-parent --count HEAD)"
 [[ "$position" =~ ^[1-9][0-9]{0,11}$ ]] || fail 'Source position is outside the release tag range'
 printf -v ordered_tag 'r%012d-%.6s' "$position" "$GITHUB_SHA"
 repository="${ECR_REPOSITORY:-}"
-[[ "$repository" =~ ^[0-9]{12}\.dkr\.ecr\.us-east-1\.amazonaws\.com/posthog-trino$ ]] || fail 'A canonical us-east-1 ECR repository is required'
+[[ "$repository" =~ ^[0-9]{12}\.dkr\.ecr\.us-east-1\.amazonaws\.com/posthog-truffle$ ]] || fail 'A canonical us-east-1 ECR repository is required'
 mirror=ghcr.io/posthog/trino
 source_url=https://github.com/PostHog/truffle
 build_tag="build-$GITHUB_SHA"
