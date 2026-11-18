@@ -115,6 +115,27 @@ final class HoglakeSharedReadPath
         return pageSources;
     }
 
+    /**
+     * A failure to open a file that S3 refused, as a terminal permission error. The
+     * session policy is the only bound on what a caller's files are, so a refusal is
+     * the expected answer to a read outside it. The error names no object and keeps
+     * no cause: the path and the request are not the caller's to learn from a denial.
+     * Any other failure is returned as it is.
+     */
+    static RuntimeException storageDenial(RuntimeException failure)
+    {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            // By name: the AWS SDK is the file system's dependency, not this plugin's
+            if (cause.getClass().getName().equals("software.amazon.awssdk.services.s3.model.AccessDeniedException")) {
+                return new TrinoException(PERMISSION_DENIED, "Shared Hoglake storage session does not allow this read");
+            }
+            if (cause.getCause() == cause) {
+                break;
+            }
+        }
+        return failure;
+    }
+
     TrinoFileSystemFactory sessionFileSystems()
     {
         return sessionFileSystems;

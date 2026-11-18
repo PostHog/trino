@@ -274,7 +274,12 @@ public final class HoglakeSharedConnector
                 MemoryContext memoryContext)
         {
             reads(session, table);
-            return readPath.orElseThrow().pageSources().createPageSource(transaction, session, split, table, tableCredentials, columns, dynamicFilter, memoryContext);
+            try {
+                return readPath.orElseThrow().pageSources().createPageSource(transaction, session, split, table, tableCredentials, columns, dynamicFilter, memoryContext);
+            }
+            catch (RuntimeException failure) {
+                throw HoglakeSharedReadPath.storageDenial(failure);
+            }
         }
     }
 
