@@ -33,6 +33,7 @@ Legacy mode keeps its existing behavior.
 | `hoglake.shared.clock-skew` | Duration | `60s` | Optional; range `0s` through `600s`. |
 | `hoglake.shared.namespace-point-lookup-enabled` | Boolean | `false` | Use the namespace detail request for schema existence checks. |
 | `hoglake.shared.scoped-max-lifetime` | Duration | `900s` | Optional; range `1s` through `900s`. |
+| `hoglake.shared.remote-read` | Boolean | `false` | Read tables of remote team schemas. See [](hoglake-shared-remote-read). |
 
 The base URI accepts no user information, query, or fragment.
 The connection timeout is `10s`.
@@ -55,7 +56,7 @@ hoglake.shared.backend-bindings={"00000000-0000-4000-8000-000000000001":"postgre
 
 Shared mode rejects unused legacy configuration.
 This includes a fixed catalog, fixed tokens, token files, issuer client secrets, and legacy filesystem properties.
-The shared connector loads no filesystem module, AWS SDK provider, or legacy authentication provider.
+Without `hoglake.shared.remote-read`, the shared connector loads no filesystem module, AWS SDK provider, or legacy authentication provider.
 Missing session authority never selects a legacy fallback.
 
 ### Session authority
@@ -99,7 +100,7 @@ Table detail requests set `totals=false`.
 Each request requires verified READ authority.
 Broad JDBC discovery uses these metadata reads.
 
-The connector denies data execution at `getTableHandle`.
+Without `hoglake.shared.remote-read`, the connector denies data execution at `getTableHandle`.
 This denial precedes COUNT optimizations, `WHERE false`, `LIMIT 0`, and cache shortcuts.
 DESCRIBE and exact-table metadata filters remain unsupported.
 An exact JDBC column filter can return no rows without HTTP.
@@ -120,9 +121,66 @@ Unsupported pure DDL can return `NOT_SUPPORTED` without authentication first.
 | Usable signing keys | `32` |
 | Metadata HTTP response | `16MiB` |
 
-Shared mode refuses object-storage operations.
+Without `hoglake.shared.remote-read`, shared mode refuses object-storage operations.
 It provides no scans, footer reads, deletion-vector reads, writes, `add_files`, or cleanup.
 Ambient roles, SDK defaults, IMDS, and web identity provide no fallback.
+
+(hoglake-shared-remote-read)=
+### Remote team schema reads
+
+The [M2c-B specification](https://github.com/PostHog/hogtower/blob/main/docs/truffle-gigahog-read-slice.md)
+defines this read path.
+It is for development pools only.
+This implementation authorizes no deployment or activation.
+
+Set `hoglake.shared.remote-read=true` to read tables of remote team schemas.
+The default is `false`, and the property accepts only the exact strings `true` and `false`.
+With the default, shared mode behaves exactly as described above, and refuses every token that carries a profile.
+
+The read path accepts one token shape besides the metadata token: the `storage-session` profile at `version` 1 with `purpose` `user-session`.
+The token must also satisfy all of the following:
+
+- `primary_catalog` equals the token's sole `cat` key.
+- `scope` and `cat` grant `read` only, and `prd` holds no write predicate.
+- `remote_schemas` is exactly `{"team": ["read"]}`.
+- `aws` holds exactly `access_key_id`, `secret_access_key`, `session_token`, `region`, and `expires_at`.
+- `aws.region` equals the catalog's `s3.region`.
+- `exp` is not later than `aws.expires_at`.
+- `sid`, `generation`, `session_deadline`, and `grants` are absent.
+
+Any other profile, version, or field is refused.
+A metadata token without a profile still discovers metadata and reads no table.
+
+A table handle exists only for a schema that meets all of the following:
+
+- Its name is the canonical `team_<id>`.
+- The token's `prd.team_id` read values hold that id or `*`.
+- The server answers the namespace as `remote`.
+
+The name and the token decide before any request is sent.
+Every other schema, including a local namespace named like a team, is refused with `NOT_SUPPORTED`.
+All writes, DDL, procedures, and table functions remain refused.
+
+A read sends only these GET routes, each with the caller's exact verified JWT:
+
+- `/v1/catalogs/{catalog}/namespaces/team_<id>`
+- `/v1/catalogs/{catalog}/namespaces/team_<id>/tables/{table}`
+- `/v1/catalogs/{catalog}/namespaces/team_<id>/tables/{table}/scan`
+
+The connector never requests the catalog head for a remote table.
+The first read of a table names no snapshot, and every later read in the transaction uses the table's `read_snapshot_id`, as described in [](hoglake-remote-schemas).
+
+Files are read from S3 with the token's `aws` session and nothing else.
+Coordinators and workers verify the token again before making a file system.
+The catalog must set `s3.region`, and can set `s3.endpoint` and `s3.path-style-access`.
+Catalog creation fails for any other `s3.`, `fs.`, `hoglake.s3.`, `gcs.`, `azure.`, `hive.`, or `local.` property.
+This rules out static keys, IAM roles, security mapping, other file systems, and the file system cache.
+The Parquet footer cache is off.
+The connector does not refresh a token or session: a query that outlives them fails.
+
+The read session properties `max_split_size`, `variant_path_assembly_enabled`, `variant_lazy_residual_enabled`, and `statistics_enabled` are available at their defaults.
+Table reads use the per-catalog HTTP client behind the route allowlist above.
+The `16MiB` metadata response ceiling does not apply to them, and their error messages can include the request URI and the response body.
 
 ### Compatibility and activation
 

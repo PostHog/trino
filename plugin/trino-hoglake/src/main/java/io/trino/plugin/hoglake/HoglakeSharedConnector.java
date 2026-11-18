@@ -81,6 +81,7 @@ import io.trino.spi.connector.TopNApplicationResult;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Constant;
 import io.trino.spi.function.table.ConnectorTableFunctionHandle;
+import io.trino.spi.session.PropertyMetadata;
 import io.trino.spi.statistics.ComputedStatistics;
 import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.statistics.TableStatisticsMetadata;
@@ -101,7 +102,9 @@ import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Shared metadata discovery without filesystem or data execution authority.
+ * Shared metadata discovery. With a read path, it also reads tables of remote team
+ * schemas with the caller's own token and storage session; without one it has no
+ * filesystem or data execution authority. It never writes.
  */
 public final class HoglakeSharedConnector
         implements Connector
@@ -112,15 +115,20 @@ public final class HoglakeSharedConnector
     private final ConnectorSplitManager splitManager;
     private final ConnectorPageSourceProvider pageSourceProvider;
     private final ConnectorPageSinkProvider pageSinkProvider;
+    private final Optional<HoglakeSharedReadPath> readPath;
+    private final List<PropertyMetadata<?>> sessionProperties;
 
-    public HoglakeSharedConnector(HoglakeSharedHttpClient client, HoglakeSharedSessionVerifier verifier, LifeCycleManager lifeCycleManager)
+    public HoglakeSharedConnector(HoglakeSharedHttpClient client, HoglakeSharedSessionVerifier verifier, LifeCycleManager lifeCycleManager, Optional<HoglakeSharedReadPath> readPath)
     {
         this.client = requireNonNull(client, "client is null");
         this.verifier = requireNonNull(verifier, "verifier is null");
         this.lifeCycleManager = requireNonNull(lifeCycleManager, "lifeCycleManager is null");
+        this.readPath = requireNonNull(readPath, "readPath is null");
+        // The read path reads the per-catalog connector's session properties, at their defaults
+        sessionProperties = readPath.isPresent() ? new HoglakeSessionProperties(new HoglakeConfig()).getSessionProperties() : List.of();
         ClassLoader classLoader = getClass().getClassLoader();
-        splitManager = new ClassLoaderSafeConnectorSplitManager(new DenyingSplitManager(), classLoader);
-        pageSourceProvider = new ClassLoaderSafeConnectorPageSourceProvider(new DenyingPageSourceProvider(), classLoader);
+        splitManager = new ClassLoaderSafeConnectorSplitManager(new ReadingSplitManager(), classLoader);
+        pageSourceProvider = new ClassLoaderSafeConnectorPageSourceProvider(new ReadingPageSourceProvider(), classLoader);
         pageSinkProvider = new ClassLoaderSafeConnectorPageSinkProvider(new DenyingPageSinkProvider(), classLoader);
     }
 
@@ -134,14 +142,26 @@ public final class HoglakeSharedConnector
     public ConnectorMetadata getMetadata(ConnectorSession session, ConnectorTransactionHandle transactionHandle)
     {
         verifier.verify(session);
-        return new SharedMetadata();
+        return new SharedMetadata(transactionHandle);
     }
 
     @Override
-    public void commit(ConnectorTransactionHandle handle) {}
+    public void commit(ConnectorTransactionHandle handle)
+    {
+        readPath.ifPresent(path -> path.end(handle));
+    }
 
     @Override
-    public void rollback(ConnectorTransactionHandle handle) {}
+    public void rollback(ConnectorTransactionHandle handle)
+    {
+        readPath.ifPresent(path -> path.end(handle));
+    }
+
+    @Override
+    public List<PropertyMetadata<?>> getSessionProperties()
+    {
+        return sessionProperties;
+    }
 
     @Override
     public ConnectorSplitManager getSplitManager()
@@ -168,17 +188,42 @@ public final class HoglakeSharedConnector
             client.close();
         }
         finally {
-            lifeCycleManager.stop();
+            try {
+                readPath.ifPresent(HoglakeSharedReadPath::close);
+            }
+            finally {
+                lifeCycleManager.stop();
+            }
         }
+    }
+
+    boolean readsRemoteTeamSchemas()
+    {
+        return readPath.isPresent();
     }
 
     private TrinoException denyExecution(ConnectorSession session)
     {
         verifier.verify(session);
+        if (readPath.isPresent()) {
+            return new TrinoException(NOT_SUPPORTED, "Shared Hoglake reads tables of remote team schemas only");
+        }
         return new TrinoException(NOT_SUPPORTED, "Shared Hoglake supports metadata discovery only");
     }
 
-    private final class DenyingSplitManager
+    /**
+     * True when this caller may read this table; any other table, caller or
+     * connector without a read path is refused, never answered with a default.
+     */
+    private boolean reads(ConnectorSession session, ConnectorTableHandle table)
+    {
+        if (readPath.isPresent() && readPath.get().reads(session, table)) {
+            return true;
+        }
+        throw denyExecution(session);
+    }
+
+    private final class ReadingSplitManager
             implements ConnectorSplitManager
     {
         @Override
@@ -189,7 +234,8 @@ public final class HoglakeSharedConnector
                 Set<ColumnHandle> dynamicFilterColumns,
                 Constraint constraint)
         {
-            throw denyExecution(session);
+            reads(session, table);
+            return readPath.orElseThrow().splitManager(session, transaction).getSplits(transaction, session, table, dynamicFilterColumns, constraint);
         }
 
         @Override
@@ -199,7 +245,7 @@ public final class HoglakeSharedConnector
         }
     }
 
-    private final class DenyingPageSourceProvider
+    private final class ReadingPageSourceProvider
             implements ConnectorPageSourceProvider
     {
         @Override
@@ -212,7 +258,8 @@ public final class HoglakeSharedConnector
                 List<ColumnHandle> columns,
                 DynamicFilter dynamicFilter)
         {
-            throw denyExecution(session);
+            reads(session, table);
+            return readPath.orElseThrow().pageSources().createPageSource(transaction, session, split, table, tableCredentials, columns, dynamicFilter);
         }
 
         @Override
@@ -226,7 +273,8 @@ public final class HoglakeSharedConnector
                 DynamicFilter dynamicFilter,
                 MemoryContext memoryContext)
         {
-            throw denyExecution(session);
+            reads(session, table);
+            return readPath.orElseThrow().pageSources().createPageSource(transaction, session, split, table, tableCredentials, columns, dynamicFilter, memoryContext);
         }
     }
 
@@ -282,6 +330,23 @@ public final class HoglakeSharedConnector
     private final class SharedMetadata
             implements ConnectorMetadata
     {
+        private final ConnectorTransactionHandle transaction;
+
+        private SharedMetadata(ConnectorTransactionHandle transaction)
+        {
+            this.transaction = requireNonNull(transaction, "transaction is null");
+        }
+
+        /**
+         * The per-catalog metadata of this transaction's caller, for a table the
+         * caller may read.
+         */
+        private HoglakeMetadata reading(ConnectorSession session, ConnectorTableHandle table)
+        {
+            reads(session, table);
+            return readPath.orElseThrow().reader(session, transaction).metadata();
+        }
+
         @Override
         public boolean schemaExists(ConnectorSession session, String schemaName)
         {
@@ -314,7 +379,18 @@ public final class HoglakeSharedConnector
                 Optional<ConnectorTableVersion> startVersion,
                 Optional<ConnectorTableVersion> endVersion)
         {
-            throw denyExecution(session);
+            // Decided from the verified token alone, before any request: only a team
+            // schema the token holds is looked up at all
+            if (readPath.isEmpty() || !verifier.verify(session).readsTeamSchema(tableName.getSchemaName())) {
+                throw denyExecution(session);
+            }
+            ConnectorTableHandle handle = readPath.get().reader(session, transaction).metadata().getTableHandle(session, tableName, startVersion, endVersion);
+            if (handle == null) {
+                return null;
+            }
+            // The server must have called the schema remote; the name never decides it
+            reads(session, handle);
+            return handle;
         }
 
         @Override
@@ -428,25 +504,25 @@ public final class HoglakeSharedConnector
         @Override
         public ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle table)
         {
-            throw denyExecution(session);
+            return reading(session, table).getTableMetadata(session, table);
         }
 
         @Override
         public Map<String, ColumnHandle> getColumnHandles(ConnectorSession session, ConnectorTableHandle tableHandle)
         {
-            throw denyExecution(session);
+            return reading(session, tableHandle).getColumnHandles(session, tableHandle);
         }
 
         @Override
         public ColumnMetadata getColumnMetadata(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle columnHandle)
         {
-            throw denyExecution(session);
+            return reading(session, tableHandle).getColumnMetadata(session, tableHandle, columnHandle);
         }
 
         @Override
         public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle tableHandle)
         {
-            throw denyExecution(session);
+            return reading(session, tableHandle).getTableStatistics(session, tableHandle);
         }
 
         @Override
@@ -615,31 +691,34 @@ public final class HoglakeSharedConnector
         @Override
         public ConnectorTableProperties getTableProperties(ConnectorSession session, ConnectorTableHandle table)
         {
-            throw denyExecution(session);
+            reads(session, table);
+            return ConnectorMetadata.super.getTableProperties(session, table);
         }
 
         @Override
         public Optional<LimitApplicationResult<ConnectorTableHandle>> applyLimit(ConnectorSession session, ConnectorTableHandle handle, long limit)
         {
-            throw denyExecution(session);
+            reads(session, handle);
+            return Optional.empty();
         }
 
         @Override
         public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(ConnectorSession session, ConnectorTableHandle handle, Constraint constraint)
         {
-            throw denyExecution(session);
+            return reading(session, handle).applyFilter(session, handle, constraint);
         }
 
         @Override
         public Optional<ProjectionApplicationResult<ConnectorTableHandle>> applyProjection(ConnectorSession session, ConnectorTableHandle handle, List<ConnectorExpression> projections, Map<String, ColumnHandle> assignments)
         {
-            throw denyExecution(session);
+            return reading(session, handle).applyProjection(session, handle, projections, assignments);
         }
 
         @Override
         public Optional<SampleApplicationResult<ConnectorTableHandle>> applySample(ConnectorSession session, ConnectorTableHandle handle, SampleType sampleType, double sampleRatio)
         {
-            throw denyExecution(session);
+            reads(session, handle);
+            return Optional.empty();
         }
 
         @Override
@@ -650,7 +729,8 @@ public final class HoglakeSharedConnector
                 Map<String, ColumnHandle> assignments,
                 List<List<ColumnHandle>> groupingSets)
         {
-            throw denyExecution(session);
+            reads(session, handle);
+            return Optional.empty();
         }
 
         @Override
@@ -664,7 +744,9 @@ public final class HoglakeSharedConnector
                 Map<String, ColumnHandle> rightAssignments,
                 JoinStatistics statistics)
         {
-            throw denyExecution(session);
+            reads(session, left);
+            reads(session, right);
+            return Optional.empty();
         }
 
         @Override
@@ -675,7 +757,8 @@ public final class HoglakeSharedConnector
                 List<SortItem> sortItems,
                 Map<String, ColumnHandle> assignments)
         {
-            throw denyExecution(session);
+            reads(session, handle);
+            return Optional.empty();
         }
 
         @Override
@@ -687,25 +770,28 @@ public final class HoglakeSharedConnector
         @Override
         public void validateScan(ConnectorSession session, ConnectorTableHandle handle)
         {
-            throw denyExecution(session);
+            reads(session, handle);
         }
 
         @Override
         public Optional<TableScanRedirectApplicationResult> applyTableScanRedirect(ConnectorSession session, ConnectorTableHandle tableHandle)
         {
-            throw denyExecution(session);
+            reads(session, tableHandle);
+            return Optional.empty();
         }
 
         @Override
         public boolean allowSplittingReadIntoMultipleSubQueries(ConnectorSession session, ConnectorTableHandle tableHandle)
         {
-            throw denyExecution(session);
+            reads(session, tableHandle);
+            return false;
         }
 
         @Override
         public Optional<ConnectorTableCredentials> getTableCredentials(ConnectorSession session, ConnectorTableHandle tableHandle)
         {
-            throw denyExecution(session);
+            reads(session, tableHandle);
+            return Optional.empty();
         }
 
         @Override

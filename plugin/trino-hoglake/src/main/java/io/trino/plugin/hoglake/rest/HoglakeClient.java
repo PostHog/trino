@@ -119,6 +119,8 @@ public class HoglakeClient
     private final Ticker ticker;
     private final ScanIncludeSupport columnStatsSupport;
     private final ScanIncludeSupport splitOffsetsSupport;
+    private final RouteGuard routeGuard;
+    private final boolean ownsHttpClient;
 
     public HoglakeClient(String baseUri, String catalog)
     {
@@ -155,8 +157,43 @@ public class HoglakeClient
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
+        this.ownsHttpClient = true;
+        this.routeGuard = RouteGuard.ALLOW_ALL;
         this.mapper = new ObjectMapper()
                 .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+    }
+
+    /**
+     * A client for one caller of a shared catalog: it borrows the connector's HTTP
+     * client, sends the caller's own token, and sends only the requests the guard
+     * allows. Closing it leaves the borrowed HTTP client open.
+     */
+    public HoglakeClient(String baseUri, String catalog, Duration requestTimeout, HoglakeTokenSource tokenSource, HttpClient httpClient, RouteGuard routeGuard)
+    {
+        this.columnStatsSupport = new ScanIncludeSupport(COLUMN_STATS);
+        this.splitOffsetsSupport = new ScanIncludeSupport(SPLIT_OFFSETS);
+        this.baseUri = validateBaseUri(requireNonNull(baseUri, "baseUri is null")).toString();
+        this.catalog = requireNonNull(catalog, "catalog is null");
+        this.requestTimeout = requireNonNull(requestTimeout, "requestTimeout is null");
+        this.ticker = Ticker.systemTicker();
+        this.tokenSource = requireNonNull(tokenSource, "tokenSource is null");
+        this.httpClient = requireNonNull(httpClient, "httpClient is null");
+        this.ownsHttpClient = false;
+        this.routeGuard = requireNonNull(routeGuard, "routeGuard is null");
+        this.mapper = new ObjectMapper()
+                .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+    }
+
+    /**
+     * Decides, before anything is sent, whether a request may leave this client.
+     * It throws to refuse.
+     */
+    @FunctionalInterface
+    public interface RouteGuard
+    {
+        RouteGuard ALLOW_ALL = (_, _) -> {};
+
+        void check(String method, URI uri);
     }
 
     /**
@@ -804,7 +841,9 @@ public class HoglakeClient
         // Release the selector thread and executor without waiting on
         // in-flight requests (connector shutdown must not hang on a
         // stuck control-plane call).
-        httpClient.shutdownNow();
+        if (ownsHttpClient) {
+            httpClient.shutdownNow();
+        }
     }
 
     // ---- transport ---------------------------------------------------------
@@ -911,6 +950,7 @@ public class HoglakeClient
     private HttpResponse<String> send(HttpRequest request)
             throws IOException, InterruptedException
     {
+        routeGuard.check(request.method(), request.uri());
         long deadline = System.nanoTime() + request.timeout().orElseThrow().toNanos();
         Optional<String> token = tokenSource.token(remaining(deadline));
         HttpResponse<String> response = sendOnce(authorized(request, token, remaining(deadline)));

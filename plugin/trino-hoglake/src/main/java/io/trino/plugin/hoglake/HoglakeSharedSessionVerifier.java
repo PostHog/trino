@@ -24,6 +24,7 @@ import com.google.inject.Inject;
 import io.airlift.units.Duration;
 import io.trino.plugin.hoglake.HoglakeSharedSessionContext.Placement;
 import io.trino.plugin.hoglake.HoglakeSharedSessionContext.Predicate;
+import io.trino.plugin.hoglake.HoglakeSharedSessionContext.StorageSession;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.security.ConnectorIdentity;
@@ -68,6 +69,7 @@ final class HoglakeSharedSessionVerifier
     private static final Pattern BASE64URL = Pattern.compile("[A-Za-z0-9_-]+");
     private static final Pattern CATALOG = Pattern.compile("[a-z0-9][a-z0-9_-]{0,62}");
     private static final Pattern TENANT = Pattern.compile("[A-Za-z0-9._-]{1,128}");
+    private static final Pattern REGION = Pattern.compile("[a-z0-9-]{1,32}");
     private static final Pattern PREDICATE_ID = Pattern.compile("[1-9][0-9]{0,18}");
     private static final Set<String> PRIVATE_KEY_FIELDS = ImmutableSet.of("d", "p", "q", "dp", "dq", "qi", "oth", "k");
     private static final Set<String> PROFILE_FIELDS = ImmutableSet.of("profile", "aws", "primary_catalog", "remote_schemas", "version", "purpose", "sid", "generation", "session_deadline", "grants");
@@ -81,6 +83,8 @@ final class HoglakeSharedSessionVerifier
     private final Map<UUID, String> backends;
     private final long skewSeconds;
     private final long maxLifetimeSeconds;
+    private final boolean remoteRead;
+    private final Optional<String> storageRegion;
     private final Clock clock;
     private final LongSupplier ticker;
     private volatile Map<String, PublicKey> keys;
@@ -89,10 +93,24 @@ final class HoglakeSharedSessionVerifier
     @Inject
     public HoglakeSharedSessionVerifier(HoglakeSharedConfig config)
     {
-        this(config, Clock.systemUTC(), System::nanoTime);
+        this(config, Optional.empty());
+    }
+
+    /**
+     * @param storageRegion the region of the catalog's S3 client, given exactly when
+     *         the read path is on: a token's storage session must name it
+     */
+    public HoglakeSharedSessionVerifier(HoglakeSharedConfig config, Optional<String> storageRegion)
+    {
+        this(config, storageRegion, Clock.systemUTC(), System::nanoTime);
     }
 
     HoglakeSharedSessionVerifier(HoglakeSharedConfig config, Clock clock, LongSupplier ticker)
+    {
+        this(config, Optional.empty(), clock, ticker);
+    }
+
+    HoglakeSharedSessionVerifier(HoglakeSharedConfig config, Optional<String> storageRegion, Clock clock, LongSupplier ticker)
     {
         try {
             require(config.isMultiTenant());
@@ -105,6 +123,11 @@ final class HoglakeSharedSessionVerifier
             require(skewSeconds >= 0 && skewSeconds <= 600);
             require(maxLifetimeSeconds > 0 && maxLifetimeSeconds <= 900);
             backends = parseBackends(config.getBackendBindings());
+            remoteRead = config.isRemoteRead();
+            this.storageRegion = storageRegion;
+            // The read path cannot bind a token's session to a region it was not given.
+            require(remoteRead == storageRegion.isPresent());
+            require(storageRegion.isEmpty() || REGION.matcher(storageRegion.orElseThrow()).matches());
             this.clock = clock;
             this.ticker = ticker;
             keys = readKeys();
@@ -118,8 +141,12 @@ final class HoglakeSharedSessionVerifier
 
     public HoglakeSharedSessionContext verify(ConnectorSession session)
     {
+        return verify(session.getIdentity());
+    }
+
+    public HoglakeSharedSessionContext verify(ConnectorIdentity identity)
+    {
         try {
-            ConnectorIdentity identity = session.getIdentity();
             String token = identity.getExtraCredentials().get(SESSION_TOKEN);
             require(token != null && token.length() <= MAX_TOKEN_BYTES);
             String[] segments = token.split("\\.", -1);
@@ -148,9 +175,12 @@ final class HoglakeSharedSessionVerifier
 
             // No claim is parsed or trusted before signature verification.
             JsonNode claims = object(decode(segments[1], MAX_TOKEN_BYTES));
+            boolean profile = false;
             for (String field : PROFILE_FIELDS) {
-                require(!claims.has(field));
+                profile |= claims.has(field);
             }
+            // Without the read path, a token with any part of the session profile is refused.
+            require(!profile || remoteRead);
             require(text(claims, "iss").equals(issuer));
             text(claims, "sub");
             text(claims, "jti");
@@ -179,12 +209,45 @@ final class HoglakeSharedSessionVerifier
             Placement placement = placement(claims);
             validateAudience(claims.get("aud"), placement.kind().equals("hoglite"));
             Map<String, Predicate> predicates = predicates(claims.get("prd"));
-            return new HoglakeSharedSessionContext(catalog, token, principal, user, scopes, predicates, placement);
+            Optional<StorageSession> storage = Optional.empty();
+            if (profile) {
+                storage = Optional.of(storageSession(claims, catalog, scopes, predicates));
+            }
+            return new HoglakeSharedSessionContext(catalog, token, principal, user, scopes, predicates, placement, storage);
         }
         catch (Exception _) {
             // A refusal carries no token, claim value, parser cause, or suppressed exception.
             throw new TrinoException(PERMISSION_DENIED, "Shared Hoglake session authority is invalid or unavailable");
         }
+    }
+
+    /**
+     * The one accepted session profile: read-only, the team family as its only remote
+     * schema, and one complete storage session that outlives the token. Anything
+     * else, a refresh field included, refuses the token.
+     */
+    private StorageSession storageSession(JsonNode claims, String catalog, Set<String> scopes, Map<String, Predicate> predicates)
+    {
+        require(text(claims, "profile").equals("storage-session"));
+        require(integer(claims, "version") == 1);
+        require(text(claims, "purpose").equals("user-session"));
+        require(text(claims, "primary_catalog").equals(catalog));
+        require(!claims.has("sid") && !claims.has("generation") && !claims.has("session_deadline") && !claims.has("grants"));
+        require(scopes.equals(ImmutableSet.of("read")));
+        require(predicates.values().stream().allMatch(predicate -> predicate.write().isEmpty()));
+
+        JsonNode remoteSchemas = claims.get("remote_schemas");
+        require(remoteSchemas != null && remoteSchemas.isObject() && remoteSchemas.size() == 1);
+        JsonNode team = remoteSchemas.get("team");
+        require(team != null && team.isArray() && team.size() == 1 && team.get(0).isTextual() && team.get(0).textValue().equals("read"));
+
+        JsonNode aws = claims.get("aws");
+        require(aws != null && aws.isObject() && aws.size() == 5);
+        String region = text(aws, "region");
+        require(region.equals(storageRegion.orElseThrow()));
+        long expiresAt = integer(aws, "expires_at");
+        require(integer(claims, "exp") <= expiresAt);
+        return new StorageSession(text(aws, "access_key_id"), text(aws, "secret_access_key"), text(aws, "session_token"), region, expiresAt);
     }
 
     private static long seconds(Duration duration)
