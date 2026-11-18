@@ -490,8 +490,8 @@ counts the rows that deletion vectors mask. In a transaction, the rows the
 transaction has written to the table are added.
 
 The row count is unknown when Hoglake returns no exact total for that snapshot:
-for a table of the `posthog` schema, a remote table whose server leaves the totals
-out, or a server that does not send them. The connector reports no column
+for a table of the `posthog` schema, the first read of a remote table in a
+transaction (see [](hoglake-remote-schemas)), or a server that does not send them. The connector reports no column
 statistics, such as data sizes, null fractions, value ranges or distinct value
 counts, and `ANALYZE` is not supported.
 
@@ -519,6 +519,27 @@ The connector does not support time-travel SQL.
 Only Hoglake's `puffin-dv` deletion-vector format is read; any other format
 fails the query. Equality deletes and any other row-level delete representation
 are not read. SQL `DELETE`, `UPDATE` and `MERGE` write compatible vectors.
+
+(hoglake-remote-schemas)=
+## Remote schemas
+
+A catalog can hold remote schemas, which another Hoglake serves through the
+catalog's server. The server marks them with `"remote": true`. The connector asks
+the server for each schema it reads, once per transaction. It also asks for a
+schema that the namespace listing leaves out, so a caller can open a remote schema
+that its listing does not show.
+
+- A remote table's snapshots belong to the catalog that holds it. The first read of
+  the table in a transaction names no snapshot. The snapshot that read resolved
+  pins the table, and every later read of the table in the transaction uses it.
+  This catalog's snapshot is never sent to a remote schema. Each table is
+  consistent at its own snapshot; tables of different catalogs are not read at
+  one common point in time.
+- Remote schemas are read-only. Writes, DDL and `add_files` on a remote table,
+  `CREATE TABLE` in a remote schema, and `DROP SCHEMA` of one fail with
+  `NOT_SUPPORTED` before any file is written or any change is sent.
+- A remote table has a row count only when it was read at its pin, so the first
+  reference to it in a transaction has none.
 
 (hoglake-posthog-schema)=
 ## The `posthog` schema

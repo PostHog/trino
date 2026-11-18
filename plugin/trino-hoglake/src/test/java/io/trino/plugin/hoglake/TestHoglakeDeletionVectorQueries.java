@@ -104,6 +104,10 @@ final class TestHoglakeDeletionVectorQueries
                         {"name":"lake", "head_snapshot_id":7, "schema_version":1}
                         """;
             }
+            else if (path.equals("/v1/catalogs/lake/namespaces/test")) {
+                // Asked once per transaction, with no snapshot, to tell a remote schema from a local one
+                body = "{\"name\":\"test\", \"namespace_id\":1}";
+            }
             else if (!exchange.getRequestURI().getQuery().split("&")[0].equals("snapshot=7")) {
                 // A pinned-snapshot read must ask for the handle's snapshot;
                 // anything else would be reading a different snapshot's vector.

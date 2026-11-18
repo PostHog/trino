@@ -86,6 +86,7 @@ import static io.trino.spi.StandardErrorCode.PERMISSION_DENIED;
 import static java.util.Comparator.comparing;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
+import static java.util.Objects.requireNonNullElse;
 
 /**
  * Hoglake namespaces are Trino schemas, hoglake
@@ -95,7 +96,9 @@ import static java.util.Objects.requireNonNull;
  * head snapshot once and pins it — snapshot id, table_uuid, and the
  * column list all ride the handle, and every later call in the query
  * (getColumnHandles, getTableMetadata, getSplits) serves from or scans
- * at that pin. Listing surfaces (SHOW SCHEMAS/TABLES, DESCRIBE via
+ * at that pin. A table of a remote schema is pinned at a snapshot of the
+ * catalog that holds it instead, never this catalog's: see
+ * {@code remoteTableHandle}. Listing surfaces (SHOW SCHEMAS/TABLES, DESCRIBE via
  * streamTableColumns) read head; they are not part of any query's
  * consistency contract.
  */
@@ -108,6 +111,10 @@ public class HoglakeMetadata
     private final TrinoFileSystemFactory fileSystemFactory;
     private final Optional<HoglakePosthogSchema> posthogSchema;
     private final Map<SchemaTableName, HoglakeDtos.ReplacementTarget> plannedTargets = new ConcurrentHashMap<>();
+    // This transaction's get-namespace answers, empty for a 404: which schemas are remote
+    private final Map<String, Optional<HoglakeDtos.Namespace>> namespaces = new ConcurrentHashMap<>();
+    // Each remote table's own snapshot, taken from its first read in this transaction
+    private final Map<SchemaTableName, Long> remotePins = new ConcurrentHashMap<>();
     private volatile Optional<String> creationOperation = Optional.empty();
     private HoglakeTransactionState transaction;
     // The mount's read snapshot, pinned once per explicit transaction
@@ -211,12 +218,13 @@ public class HoglakeMetadata
         }
     }
 
+    /**
+     * A schema the listing leaves out is looked up by name: a caller may be allowed to
+     * open a remote schema that its listing does not show.
+     */
     @Override
     public boolean schemaExists(ConnectorSession session, String schemaName)
     {
-        if (posthogSchema.isEmpty()) {
-            return ConnectorMetadata.super.schemaExists(session, schemaName);
-        }
         if (!schemaName.equals(schemaName.toLowerCase(ENGLISH))) {
             // As the engine's default: Trino schemas are lowercase
             return false;
@@ -225,7 +233,41 @@ public class HoglakeMetadata
             // A failure other than 404 is reported, not taken as absence.
             return posthogClient(session).findCatalog().isPresent();
         }
-        return orgSchemaNames().contains(schemaName);
+        boolean listed;
+        if (posthogSchema.isEmpty()) {
+            listed = ConnectorMetadata.super.schemaExists(session, schemaName);
+        }
+        else {
+            listed = orgSchemaNames().contains(schemaName);
+        }
+        return listed || namespace(schemaName).isPresent();
+    }
+
+    /**
+     * The server's answer for a namespace, asked once per transaction, with no snapshot:
+     * empty when it has none of this name (404). Any other failure is reported, never
+     * taken as either answer.
+     */
+    private Optional<HoglakeDtos.Namespace> namespace(String schemaName)
+    {
+        Optional<HoglakeDtos.Namespace> namespace = namespaces.get(schemaName);
+        if (namespace == null) {
+            namespace = client.findNamespace(schemaName);
+            Optional<HoglakeDtos.Namespace> previous = namespaces.putIfAbsent(schemaName, namespace);
+            if (previous != null) {
+                namespace = previous;
+            }
+        }
+        return namespace;
+    }
+
+    /**
+     * Whether the server says the schema is remote: served by another Hoglake through
+     * this catalog's server, with snapshots of its own. Never inferred from the name.
+     */
+    private boolean isRemoteSchema(String schemaName)
+    {
+        return namespace(schemaName).map(HoglakeDtos.Namespace::isRemote).orElse(false);
     }
 
     private boolean isPosthogSchema(String schemaName)
@@ -244,22 +286,40 @@ public class HoglakeMetadata
 
     /**
      * Refuses a write to the posthog schema before anything is checked, uploaded or
-     * sent. Only PostHog adds data to it, on the server side.
+     * sent. Only PostHog adds data to it, on the server side. Also refuses a write to
+     * a schema this transaction has found remote: the engine resolves the target
+     * table before it creates one or writes to it.
      */
     private void checkWritable(String schemaName)
     {
         if (isPosthogSchema(schemaName)) {
             throw new TrinoException(NOT_SUPPORTED, "The posthog schema is read-only");
         }
+        Optional<HoglakeDtos.Namespace> namespace = namespaces.get(schemaName);
+        if (namespace != null && namespace.map(HoglakeDtos.Namespace::isRemote).orElse(false)) {
+            throw remoteReadOnly(schemaName);
+        }
     }
 
+    /**
+     * A remote table is refused before anything is checked, uploaded or sent: its
+     * snapshot belongs to another catalog, so it must never be a commit's read snapshot.
+     */
     private void checkWritable(ConnectorTableHandle tableHandle)
     {
         HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
+        if (handle.remote()) {
+            throw remoteReadOnly(handle.schemaName());
+        }
         if (handle.mount().isPresent()) {
             throw new TrinoException(NOT_SUPPORTED, "The posthog schema is read-only");
         }
         checkWritable(handle.schemaName());
+    }
+
+    private static TrinoException remoteReadOnly(String schemaName)
+    {
+        return new TrinoException(NOT_SUPPORTED, "Hoglake remote schema '%s' is read-only".formatted(schemaName));
     }
 
     /**
@@ -304,6 +364,9 @@ public class HoglakeMetadata
         }
         checkSchemaEvolutionSupport();
         HoglakeDtos.Namespace namespace = client.getNamespace(schemaName);
+        if (namespace.isRemote()) {
+            throw remoteReadOnly(schemaName);
+        }
         if (namespace.namespaceId() == null) {
             throw new TrinoException(HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE, "Hoglake namespace identity is missing");
         }
@@ -422,12 +485,20 @@ public class HoglakeMetadata
         if (isPosthogSchema(tableName.getSchemaName())) {
             return posthogTableHandle(session, tableName.getTableName());
         }
+        if (isRemoteSchema(tableName.getSchemaName())) {
+            return remoteTableHandle(tableName);
+        }
         // Pin the query's snapshot: resolve head once, then fetch the
         // table AT that snapshot (not at whatever head is by the time the
         // second request lands) so the handle is consistent-at-N. That read
         // also carries the table's exact totals at N, kept for statistics.
         long snapshot = transaction == null ? client.getCatalog().headSnapshotId() : transaction.snapshot();
         Optional<HoglakeDtos.Table> plannedTable = client.getTable(tableName.getSchemaName(), tableName.getTableName(), snapshot);
+        if (plannedTable.isPresent() && plannedTable.get().isRemote()) {
+            // The server calls the table remote in a schema it did not call remote: this
+            // catalog's snapshot was just sent to a table of another catalog
+            throw new TrinoException(HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE, "Hoglake table '%s' is remote in a schema that is not".formatted(tableName));
+        }
         plannedTargets.putIfAbsent(tableName, new HoglakeDtos.ReplacementTarget(plannedTable.map(HoglakeDtos.Table::tableUuid).orElse(null), snapshot));
         return plannedTable
                 .map(table -> new HoglakeTableHandle(
@@ -439,6 +510,47 @@ public class HoglakeMetadata
                         .withRecordCount(table.exactRecordCount(snapshot)))
                 .map(handle -> (ConnectorTableHandle) (transaction == null ? handle : transaction.overlay(handle)))
                 .orElse(null);
+    }
+
+    /**
+     * A table of a remote schema, pinned at a snapshot of the catalog that holds it,
+     * which is never this catalog's. The table's first read in this transaction asks
+     * for no snapshot, and the snapshot it was read at is the table's pin: every later
+     * read of the table in this transaction, and the handle, use it. The row count is
+     * kept only when it is exact at the pin. Nothing is staged on it: it is never
+     * written.
+     */
+    private HoglakeTableHandle remoteTableHandle(SchemaTableName tableName)
+    {
+        Long pinned = remotePins.get(tableName);
+        Optional<HoglakeDtos.Table> found;
+        if (pinned == null) {
+            found = client.getTable(tableName.getSchemaName(), tableName.getTableName());
+        }
+        else {
+            found = client.getTable(tableName.getSchemaName(), tableName.getTableName(), pinned);
+        }
+        if (found.isEmpty()) {
+            return null;
+        }
+        HoglakeDtos.Table table = found.get();
+        Long readSnapshot = table.readSnapshotId();
+        if (readSnapshot == null) {
+            throw new TrinoException(HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE, "Hoglake remote table '%s' has no read snapshot".formatted(tableName));
+        }
+        // The first read to store a pin sets it
+        long pin = requireNonNullElse(remotePins.putIfAbsent(tableName, readSnapshot), readSnapshot);
+        if (readSnapshot != pin) {
+            throw new TrinoException(HoglakeErrorCode.HOGLAKE_INVALID_RESPONSE, "Hoglake remote table '%s' was read at snapshot %s, not at its pin %s".formatted(tableName, readSnapshot, pin));
+        }
+        return new HoglakeTableHandle(
+                tableName.getSchemaName(),
+                tableName.getTableName(),
+                pin,
+                table.tableUuid(),
+                table.columns().stream().map(HoglakeMetadata::toColumnHandle).toList())
+                .withRecordCount(table.exactRecordCount(pin))
+                .withRemote();
     }
 
     /**
@@ -949,6 +1061,7 @@ public class HoglakeMetadata
         if (!procedureName.equalsIgnoreCase(HoglakeAddFilesProcedure.NAME)) {
             return Optional.empty();
         }
+        checkWritable(tableHandle);
         if (transaction != null) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake add_files is not supported in explicit transactions; use an autocommit statement");
         }
@@ -966,6 +1079,7 @@ public class HoglakeMetadata
         if (!(tableExecuteHandle instanceof HoglakeAddFilesHandle handle)) {
             throw new IllegalArgumentException("Unknown table procedure handle: " + tableExecuteHandle);
         }
+        checkWritable(handle.table());
         if (fileSystemFactory == null) {
             throw new TrinoException(NOT_SUPPORTED, "Hoglake add_files requires a filesystem");
         }

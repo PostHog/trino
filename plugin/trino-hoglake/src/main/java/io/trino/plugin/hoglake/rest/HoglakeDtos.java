@@ -258,9 +258,26 @@ public final class HoglakeDtos
             @JsonProperty("path") String path,
             @JsonProperty("state") String state) {}
 
+    /**
+     * A namespace. {@code remote} is {@code true} for a remote schema, which another
+     * Hoglake serves through this catalog's server; such a namespace has no
+     * {@code namespace_id}. Absent for a namespace of this catalog.
+     */
     public record Namespace(
             @JsonProperty("name") String name,
-            @JsonProperty("namespace_id") Long namespaceId) {}
+            @JsonProperty("namespace_id") Long namespaceId,
+            @JsonProperty("remote") Boolean remote)
+    {
+        public Namespace(String name, Long namespaceId)
+        {
+            this(name, namespaceId, null);
+        }
+
+        public boolean isRemote()
+        {
+            return Boolean.TRUE.equals(remote);
+        }
+    }
 
     public record TableSummary(
             @JsonProperty("name") String name,
@@ -302,7 +319,10 @@ public final class HoglakeDtos
      * has none for the read (never zeroed): {@code totals=false}, a head read the
      * maintenance sample does not cover, or a scoped read of a mount. A head read's
      * totals are a sample, dated by {@code totals_snapshot_id}; a read at a snapshot
-     * has exact totals and no {@code totals_snapshot_id}.
+     * has exact totals and no {@code totals_snapshot_id}. {@code remote} is {@code true}
+     * for a table of a remote schema, whose {@code read_snapshot_id} is a snapshot of
+     * the catalog that holds the table, not of this catalog; a Hoglake that predates
+     * the flag leaves it out.
      */
     public record Table(
             @JsonProperty("name") String name,
@@ -317,7 +337,8 @@ public final class HoglakeDtos
             @JsonProperty("comment") String comment,
             @JsonProperty("properties") Map<String, String> properties,
             @JsonProperty("totals_snapshot_id") Long totalsSnapshotId,
-            @JsonProperty("read_snapshot_id") Long readSnapshotId)
+            @JsonProperty("read_snapshot_id") Long readSnapshotId,
+            @JsonProperty("remote") Boolean remote)
     {
         public Table
         {
@@ -326,7 +347,7 @@ public final class HoglakeDtos
 
         public Table(String name, String namespace, String tableUuid, List<Column> columns, Long recordCount, Long fileCount, Long fileSizeBytes, Map<String, Object> partitionSpec, Map<String, Object> sortSpec, String comment, Map<String, String> properties)
         {
-            this(name, namespace, tableUuid, columns, recordCount, fileCount, fileSizeBytes, partitionSpec, sortSpec, comment, properties, null, null);
+            this(name, namespace, tableUuid, columns, recordCount, fileCount, fileSizeBytes, partitionSpec, sortSpec, comment, properties, null, null, null);
         }
 
         public Table(String name, String namespace, String tableUuid, List<Column> columns, long recordCount, long fileCount, long fileSizeBytes, Map<String, Object> partitionSpec, Map<String, Object> sortSpec)
@@ -342,6 +363,11 @@ public final class HoglakeDtos
         public Table(String name, String namespace, String tableUuid, List<Column> columns, long recordCount, long fileCount, long fileSizeBytes)
         {
             this(name, namespace, tableUuid, columns, recordCount, fileCount, fileSizeBytes, null, null);
+        }
+
+        public boolean isRemote()
+        {
+            return Boolean.TRUE.equals(remote);
         }
 
         /**
