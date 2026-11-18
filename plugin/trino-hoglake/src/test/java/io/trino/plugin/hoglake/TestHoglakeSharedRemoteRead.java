@@ -32,12 +32,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.file.Path;
 import java.security.KeyPair;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -45,6 +48,7 @@ import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
@@ -320,6 +324,68 @@ final class TestHoglakeSharedRemoteRead
     }
 
     @Test
+    void testTwoCallersReadOnlyWithTheirOwnTokens()
+            throws Exception
+    {
+        try (Fixture fixture = new Fixture(directory);
+                StandaloneQueryRunner runner = fixture.queryRunner(true)) {
+            String alice = fixture.profileToken();
+            Map<String, Object> claims = profileClaims(Instant.now());
+            claims.put("usr", "example.bob");
+            claims.put("prd", new LinkedHashMap<>(Map.of("team_id", new LinkedHashMap<>(Map.of("8", "read")))));
+            String bob = token(fixture.key, KEY_ID, claims);
+            Session aliceSession = querySession(alice);
+            Session bobSession = querySession("example.mapped_bob", "example.bob", bob);
+
+            try (ExecutorService queries = Executors.newVirtualThreadPerTaskExecutor()) {
+                List<Future<?>> results = new ArrayList<>();
+                for (int i = 0; i < 8; i++) {
+                    results.add(queries.submit(() -> assertThat(runner.execute(aliceSession, "SELECT * FROM hoglake.team_7.events").getRowCount()).isZero()));
+                    // Bob holds team 8 only: team_7 is refused from his token alone
+                    results.add(queries.submit(() -> assertThatThrownBy(() -> runner.execute(bobSession, "SELECT * FROM hoglake.team_7.events"))
+                            .isInstanceOf(QueryFailedException.class)
+                            .hasMessageContaining(READS_REMOTE_ONLY)));
+                }
+                for (Future<?> result : results) {
+                    result.get();
+                }
+            }
+            assertThat(fixture.requests).isNotEmpty().allSatisfy(request -> assertThat(request.authorization()).isEqualTo("Bearer " + alice));
+
+            // Bob's token with Alice's principal, and the reverse, read nothing
+            assertThatThrownBy(() -> runner.execute(querySession(bob), "SELECT * FROM hoglake.team_8.events")).hasMessageContaining(INVALID_AUTHORITY);
+            assertThatThrownBy(() -> runner.execute(querySession("example.mapped_bob", "example.bob", alice), "SELECT * FROM hoglake.team_7.events")).hasMessageContaining(INVALID_AUTHORITY);
+        }
+    }
+
+    @Test
+    void testRefusalsNameNoTokenOrCredential()
+            throws Exception
+    {
+        try (Fixture fixture = new Fixture(directory);
+                StandaloneQueryRunner runner = fixture.queryRunner(true)) {
+            String jwt = fixture.profileToken();
+            Session session = querySession(jwt);
+            for (String sql : List.of(
+                    "SELECT * FROM hoglake.ns1.t",
+                    "SELECT * FROM hoglake.team_8.events",
+                    "SELECT * FROM hoglake.team_9.events",
+                    "SELECT * FROM hoglake.team_7.missing",
+                    "INSERT INTO hoglake.team_7.events VALUES 1")) {
+                assertThatThrownBy(() -> runner.execute(session, sql))
+                        .as(sql)
+                        .isInstanceOf(QueryFailedException.class)
+                        .satisfies(failure -> {
+                            StringWriter trace = new StringWriter();
+                            failure.printStackTrace(new PrintWriter(trace));
+                            assertThat(trace.toString())
+                                    .doesNotContain(jwt, "Bearer ", "synthetic-access-key", "synthetic-secret-key", "synthetic-session-token");
+                        });
+            }
+        }
+    }
+
+    @Test
     void testWithoutTheReadPathAProfileTokenIsRefusedAndNothingIsRead()
             throws Exception
     {
@@ -408,7 +474,12 @@ final class TestHoglakeSharedRemoteRead
 
     private static Session querySession(String jwt)
     {
-        Identity.Builder builder = Identity.forUser(USER).withPrincipal(new BasicPrincipal(PRINCIPAL));
+        return querySession(USER, PRINCIPAL, jwt);
+    }
+
+    private static Session querySession(String user, String principal, String jwt)
+    {
+        Identity.Builder builder = Identity.forUser(user).withPrincipal(new BasicPrincipal(principal));
         if (jwt != null) {
             builder.withExtraCredentials(Map.of(SESSION_TOKEN, jwt));
         }
