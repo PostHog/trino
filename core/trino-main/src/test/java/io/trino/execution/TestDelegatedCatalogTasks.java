@@ -330,11 +330,12 @@ public class TestDelegatedCatalogTasks
     {
         CatalogName catalogName = new CatalogName(CATALOG);
         publish(catalogName);
-        // The polls run every 400ms, so the removal at 950ms is first seen by the final check
-        DelegatedCatalogMutations mutations = new DelegatedCatalogMutations(Optional.empty(), catalogManager, new AllowAllAccessControl(), _ -> ImmutableSet.of(), Duration.ofMillis(400));
+        // The polls run at 1s and 2s and the final check at 2.98s, so the removal at 2.5s is first
+        // seen by the final check, with enough slack on both sides for a loaded CI runner
+        DelegatedCatalogMutations mutations = new DelegatedCatalogMutations(Optional.empty(), catalogManager, new AllowAllAccessControl(), _ -> ImmutableSet.of(), Duration.ofSeconds(1));
         try {
-            publisher.schedule(() -> catalogManager.removePublishedCatalog(catalogName), 950, MILLISECONDS);
-            getFutureValue(mutations.awaitDropped(stateMachine(), catalogName, Duration.ofSeconds(1)));
+            publisher.schedule(() -> catalogManager.removePublishedCatalog(catalogName), 2500, MILLISECONDS);
+            getFutureValue(mutations.awaitDropped(stateMachine(), catalogName, Duration.ofSeconds(3)));
         }
         finally {
             mutations.stop();
