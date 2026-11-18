@@ -5,10 +5,7 @@ name: docker-publish-posthog
 # The managed-warehouse trino Karpenter
 # node pool is arm64-only, so amd64 is skipped to keep CI fast.
 #
-# Every run also tells PostHog/charts what it built. Charts records the image
-# in state/trino.yaml and rolls the dev cell; the prod cell moves only when
-# somebody runs promote-to-prod, which the prod-promote-managed-warehouse
-# environment gates. See the deploy job at the end of this file.
+# A master push records the release in state/truffle.yaml in PostHog/charts.
 
 on:
   # Only the deployment branch publishes. Manual runs can add readable aliases.
@@ -70,7 +67,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
         with:
-          role-to-assume: ${{ secrets.AWS_ECR_PUBLISH_IAM_ROLE }}
+          role-to-assume: ${{ secrets.AWS_ECR_TRUFFLE_PUBLISH_IAM_ROLE }}
           aws-region: us-east-1
           mask-aws-account-id: true
 
@@ -87,7 +84,7 @@ jobs:
       - name: Resolve source-ordered release
         id: metadata
         env:
-          ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/posthog-trino
+          ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/posthog-truffle
         run: bash .github/bin/trino-release.sh prepare
 
       - name: Set up OCI registry exporter
@@ -122,7 +119,7 @@ jobs:
         id: push
         if: steps.metadata.outputs.digest == '' && steps.metadata.outputs.build-digest == ''
         env:
-          ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/posthog-trino
+          ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/posthog-truffle
           OCI_SOURCE: https://github.com/PostHog/truffle
           OCI_REVISION: ${{ github.sha }}
         run: |
@@ -148,15 +145,14 @@ jobs:
       - name: Publish verified release aliases
         id: release
         env:
-          ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/posthog-trino
+          ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/posthog-truffle
           BUILD_DIGEST: ${{ steps.push.outputs.digest || steps.metadata.outputs.build-digest }}
           READABLE_TAG: ${{ steps.tag.outputs.tag }}
         run: bash .github/bin/trino-release.sh publish
 
   deploy:
-    # Tells charts what to run. Charts writes state/trino.yaml and rolls the
-    # dev cell; the prod cell waits for promote-to-prod, which the
-    # prod-promote-managed-warehouse environment gates.
+    # Records the shared ECR release in state/truffle.yaml in charts.
+    # The old state/trino.yaml stays pinned to the old image repository.
     #
     # A fork must not deploy PostHog's cells, and a build of some other branch
     # is not what dev should follow. Only a push carries head_commit, which the
@@ -192,7 +188,7 @@ jobs:
                   "sha": "${{ github.sha }}@${{ needs.build-and-push.outputs.digest }}"
                 }
               },
-              "release": "trino",
+              "release": "truffle",
               "commit": ${{ toJson(github.event.head_commit) }},
               "repository": ${{ toJson(github.repository) }},
               "labels": [],

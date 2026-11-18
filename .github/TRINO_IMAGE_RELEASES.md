@@ -9,27 +9,20 @@ The ordered tag is `r<12-digit first-parent commit count>-<6-character revision>
 The checkout must contain complete history and match the workflow revision.
 This orders releases by source history, independently of build completion order.
 
-The image coordinates keep their pre-rename names on purpose: the ECR repository
-`posthog-trino`, the GHCR mirror `ghcr.io/posthog/trino`, and the charts release
-`trino` (`state/trino.yaml`). Deployments pin the image by digest under those
-names, so renaming them is a separate migration that must publish to both names
-while consumers move. Only the source repository identity changed, to
-`PostHog/truffle`.
-
-The canonical image repository is `posthog-trino` in `us-east-1`.
-The workflow derives its registry address from the authenticated ECR login.
-The publisher mirrors the same image to `ghcr.io/posthog/trino` for existing
-consumers. It builds once, then copies the image and its layers between
-registries without rebuilding.
+The canonical image repository is `posthog-truffle` in shared-services ECR
+in `us-east-1`. The workflow gets its registry address from the ECR login.
+The workflow does not publish to `posthog-trino`.
+It builds one image. It copies that image to `ghcr.io/posthog/truffle`.
+Update any GHCR consumers to use the new package for future releases.
 
 The image is wrapped in an OCI index carrying manifest-level
 `org.opencontainers.image.source` and `org.opencontainers.image.revision`
 annotations. The ordered tag, full revision alias, and optional readable alias
 resolve to this same index digest. ECR receives only the ordered and full
-revision aliases. Readable aliases remain GHCR-only. The existing charts state
-dispatch receives the digest only after both registries pass read-back checks
-and continues to run only after a push to `master`. Merging this workflow can
-therefore roll the existing dev Trino deployment independently of new cells.
+revision aliases. Readable aliases remain GHCR-only. A push to `master`
+records the verified digest in `state/truffle.yaml` in charts. A manual
+dispatch publishes the image without updating charts. The publisher does not
+update `state/trino.yaml`, which still points to the old image.
 
 The publisher uses a Buildx `docker-container` builder and the registry exporter
 with `oci-mediatypes=true`. The default local `core/docker/build.sh` behavior
@@ -48,28 +41,25 @@ the publisher never overwrites them. Only a GHCR readable alias can move.
 Registry read failures or incorrect provenance stop publication. Do not delete
 an ordered tag to force a rebuild; publish a new source commit instead.
 
-Before merging, apply the separate infrastructure change that creates the
-fully immutable ECR repository and the master-only publisher role. Configure the
-organization Actions secret `AWS_ECR_PUBLISH_IAM_ROLE` with the publisher role ARN
-and grant this repository access:
-`arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-trino-publish-role`. This is an operator
-setup step, not a change performed by this workflow. The workflow masks the AWS
-account ID in logs and does not store its registry address in source. OIDC trust must
-allow only the `master` ref of `PostHog/truffle`. GitHub derives the subject
-from the repository name, so a repository rename changes it and the trust must
-follow. The role must allow image
-push/read operations but no image deletion or repository-policy changes.
+Before merging, provision the immutable ECR repository and its publisher role.
+Set the repository Actions secret `AWS_ECR_TRUFFLE_PUBLISH_IAM_ROLE` to the
+new role ARN. The workflow masks the AWS account ID in logs.
+
+Scope the OIDC trust to `PostHog/truffle` on `master`. Use the current
+[OIDC subject prefix](https://docs.github.com/en/rest/actions/oidc#get-the-customization-template-for-an-oidc-subject-claim-for-a-repository)
+with the suffix `:ref:refs/heads/master`. A repository rename can change the
+prefix. Give the role permission to push and read images. Do not give it
+permission to delete images or change the repository policy.
 
 The workflow serializes its publishers. This prevents races within this
 workflow, but does not itself establish registry immutability or exclusive
 writers. Before enabling ECR release discovery, verify the applied repository
 immutability, protected source history, repository access, and effective writer
-permissions. GHCR remains a compatibility mirror and is not the new cells'
-trusted release source. This change does not modify repository rules, package
-access, Actions secrets, or registry settings.
+permissions. The cells do not use GHCR as a release source. Check the new GHCR
+package visibility before switching consumers.
 
 Run the local contract tests with `python3 .github/bin/test_trino_release.py`.
 These tests mock the registry commands; they do not publish images. After the
-first authorized real publication, verify its ordered tag, index annotations,
-and revision-alias digest through the registry before enabling deployment
-discovery.
+first publication, verify the digest in shared-services ECR in each deployment
+region. Check that `state/truffle.yaml` records that digest. Then switch the
+deployments to the new image repository and state file.
