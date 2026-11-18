@@ -22,6 +22,7 @@ import io.trino.spi.predicate.TupleDomain;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 import static java.util.Objects.requireNonNull;
 import static java.util.Objects.requireNonNullElse;
@@ -44,6 +45,11 @@ import static java.util.Objects.requireNonNullElse;
  * {@code SELECT count(*) FROM t}: its rows are counted from the catalog and
  * no file is read, so planning needs one split per file rather than byte
  * ranges.
+ *
+ * <p>{@code recordCount} is the table's row count exactly at {@code snapshotId}, as
+ * the catalog reported it when the handle was resolved, for the optimizer's
+ * statistics. It is empty when the catalog reported none for that snapshot, and
+ * always for a posthog schema table.
  */
 public record HoglakeTableHandle(
         @JsonProperty("schemaName") String schemaName,
@@ -55,7 +61,8 @@ public record HoglakeTableHandle(
         @JsonProperty("stagedFiles") List<HoglakeDtos.ScanFile> stagedFiles,
         @JsonProperty("stagedDeletes") List<HoglakeDtos.DeleteFile> stagedDeletes,
         @JsonProperty("countOnly") boolean countOnly,
-        @JsonProperty("mount") Optional<MountTable> mount)
+        @JsonProperty("mount") Optional<MountTable> mount,
+        @JsonProperty("recordCount") OptionalLong recordCount)
         implements ConnectorTableHandle
 {
     /**
@@ -86,8 +93,12 @@ public record HoglakeTableHandle(
         stagedDeletes = stagedDeletes == null ? List.of() : List.copyOf(stagedDeletes);
         // A handle serialized before the posthog schema existed has no mount.
         mount = requireNonNullElse(mount, Optional.empty());
+        recordCount = requireNonNullElse(recordCount, OptionalLong.empty());
         if (mount.isPresent() && (!stagedFiles.isEmpty() || !stagedDeletes.isEmpty())) {
             throw new IllegalArgumentException("A posthog schema table cannot have staged changes");
+        }
+        if (mount.isPresent() && recordCount.isPresent()) {
+            throw new IllegalArgumentException("A posthog schema table has no row count");
         }
     }
 
@@ -102,7 +113,7 @@ public record HoglakeTableHandle(
             List<HoglakeDtos.DeleteFile> stagedDeletes,
             boolean countOnly)
     {
-        this(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, Optional.empty());
+        this(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, Optional.empty(), OptionalLong.empty());
     }
 
     public HoglakeTableHandle(
@@ -130,22 +141,27 @@ public record HoglakeTableHandle(
 
     public HoglakeTableHandle withConstraint(TupleDomain<HoglakeColumnHandle> constraint)
     {
-        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, mount);
+        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, mount, recordCount);
     }
 
     public HoglakeTableHandle withCountOnly()
     {
-        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, true, mount);
+        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, true, mount, recordCount);
     }
 
     public HoglakeTableHandle withStaged(List<HoglakeDtos.ScanFile> stagedFiles, List<HoglakeDtos.DeleteFile> stagedDeletes)
     {
-        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, mount);
+        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, mount, recordCount);
     }
 
     public HoglakeTableHandle withMount(MountTable mount)
     {
-        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, Optional.of(mount));
+        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, Optional.of(mount), recordCount);
+    }
+
+    public HoglakeTableHandle withRecordCount(OptionalLong recordCount)
+    {
+        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, mount, recordCount);
     }
 
     /**

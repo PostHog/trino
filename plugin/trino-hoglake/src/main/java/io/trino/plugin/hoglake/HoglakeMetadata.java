@@ -54,6 +54,8 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.PrincipalType;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.statistics.ComputedStatistics;
+import io.trino.spi.statistics.Estimate;
+import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
@@ -422,7 +424,8 @@ public class HoglakeMetadata
         }
         // Pin the query's snapshot: resolve head once, then fetch the
         // table AT that snapshot (not at whatever head is by the time the
-        // second request lands) so the handle is consistent-at-N.
+        // second request lands) so the handle is consistent-at-N. That read
+        // also carries the table's exact totals at N, kept for statistics.
         long snapshot = transaction == null ? client.getCatalog().headSnapshotId() : transaction.snapshot();
         Optional<HoglakeDtos.Table> plannedTable = client.getTable(tableName.getSchemaName(), tableName.getTableName(), snapshot);
         plannedTargets.putIfAbsent(tableName, new HoglakeDtos.ReplacementTarget(plannedTable.map(HoglakeDtos.Table::tableUuid).orElse(null), snapshot));
@@ -432,7 +435,8 @@ public class HoglakeMetadata
                         tableName.getTableName(),
                         snapshot,
                         table.tableUuid(),
-                        table.columns().stream().map(HoglakeMetadata::toColumnHandle).toList()))
+                        table.columns().stream().map(HoglakeMetadata::toColumnHandle).toList())
+                        .withRecordCount(table.exactRecordCount(snapshot)))
                 .map(handle -> (ConnectorTableHandle) (transaction == null ? handle : transaction.overlay(handle)))
                 .orElse(null);
     }
@@ -442,6 +446,8 @@ public class HoglakeMetadata
      * explicit transaction), found in whichever of the mount's namespaces holds it.
      * The mount lists one namespace today; a name in two of them is refused rather
      * than guessed. A staged-write overlay never applies: the schema is never written.
+     * The handle never has a row count: a mount's table totals would count the whole
+     * source, not the rows this login may read, so they are not used even if sent.
      */
     private HoglakeTableHandle posthogTableHandle(ConnectorSession session, String tableName)
     {
@@ -532,6 +538,29 @@ public class HoglakeMetadata
                         "sorted_by", HoglakeSorting.expressions(HoglakeSorting.read(definition.sortSpec()), handle.columns()),
                         "extra_properties", definition.properties()),
                 Optional.ofNullable(definition.comment()));
+    }
+
+    /**
+     * The table's row count at the handle's snapshot, as the catalog reported it when
+     * the handle was resolved, plus the rows this transaction has staged for the
+     * table: no request is made. Like the catalog's total, it counts rows that a
+     * deletion vector masks. Unknown when the catalog reported no exact total for the
+     * snapshot, such as for a mount or a remote table that omits it. Column statistics
+     * are not reported: the catalog has none at table level, and no distinct counts.
+     */
+    @Override
+    public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        HoglakeTableHandle handle = (HoglakeTableHandle) tableHandle;
+        if (!HoglakeSessionProperties.isStatisticsEnabled(session) || handle.recordCount().isEmpty()) {
+            return TableStatistics.empty();
+        }
+        long staged = handle.stagedFiles().stream()
+                .mapToLong(file -> file.dataFile().recordCount())
+                .sum();
+        return TableStatistics.builder()
+                .setRowCount(Estimate.of(handle.recordCount().orElseThrow() + staged))
+                .build();
     }
 
     @Override

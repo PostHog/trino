@@ -35,6 +35,7 @@ public class HoglakeSessionProperties
     private static final String MAX_SPLIT_SIZE = "max_split_size";
     private static final String VARIANT_PATH_ASSEMBLY_ENABLED = "variant_path_assembly_enabled";
     private static final String VARIANT_LAZY_RESIDUAL_ENABLED = "variant_lazy_residual_enabled";
+    private static final String STATISTICS_ENABLED = "statistics_enabled";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
@@ -57,6 +58,11 @@ public class HoglakeSessionProperties
                         VARIANT_LAZY_RESIDUAL_ENABLED,
                         "Read the metadata and value columns of a shredded VARIANT with pushed-down subscripts only for the batches of rows that need them",
                         config.isVariantLazyResidualEnabled(),
+                        false),
+                booleanProperty(
+                        STATISTICS_ENABLED,
+                        "Give the cost-based optimizer the row count Hoglake reports for a table at the snapshot a query reads",
+                        config.isTableStatisticsEnabled(),
                         false));
     }
 
@@ -79,5 +85,10 @@ public class HoglakeSessionProperties
     public static boolean isVariantLazyResidualEnabled(ConnectorSession session)
     {
         return session.getProperty(VARIANT_LAZY_RESIDUAL_ENABLED, Boolean.class);
+    }
+
+    public static boolean isStatisticsEnabled(ConnectorSession session)
+    {
+        return session.getProperty(STATISTICS_ENABLED, Boolean.class);
     }
 }
