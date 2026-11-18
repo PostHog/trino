@@ -285,8 +285,7 @@ public final class HoglakeSharedConnector
         @Override
         public boolean schemaExists(ConnectorSession session, String schemaName)
         {
-            verifier.verify(session);
-            return listSchemaNames(session).contains(schemaName);
+            return client.namespaceExists(session, schemaName);
         }
 
         @Override
