@@ -1,4 +1,8 @@
-<h1 align="center">TruffleHog</h1>
+<p align="center">
+  <img src=".github/truffle-mascot.png" alt="The Truffle mascot: a grumpy tusked hog with hedgehog spines, holding a trowel and a truffle" width="220" />
+</p>
+
+<h1 align="center">Truffle</h1>
 
 <p align="center">
   <b>PostHog's distributed SQL lakehouse query engine — a custom fork of <a href="https://trino.io/">Trino</a> built to power the <a href="https://posthog.com/docs/data-warehouse">PostHog Data Warehouse</a>.</b>
@@ -14,13 +18,15 @@
 
 ## Overview
 
-**TruffleHog** is [PostHog](https://posthog.com)'s custom fork of [Trino](https://github.com/trinodb/trino) and serves as the distributed SQL execution foundation of PostHog's multi-tenant Data Warehouse.
+**Truffle** is [PostHog](https://posthog.com)'s custom fork of [Trino](https://github.com/trinodb/trino) and serves as the distributed SQL execution foundation of PostHog's multi-tenant Data Warehouse.
 
-TruffleHog decouples compute from object storage so PostHog customers can query, join, and transform petabyte-scale lakehouse tables, external databases, and their own PostHog product analytics data through a single horizontally scalable SQL engine — while speaking the standard Trino client protocol so existing JDBC drivers, Python clients, and BI tools work out of the box.
+Truffle decouples compute from object storage so PostHog customers can query, join, and transform petabyte-scale lakehouse tables, external databases, and their own PostHog product analytics data through a single horizontally scalable SQL engine — while speaking the standard Trino client protocol so existing JDBC drivers, Python clients, and BI tools work out of the box.
+
+The name echoes Trino, which Truffle is a fork of, and hogs love truffles.
 
 ## Role in the PostHog Data Warehouse Architecture
 
-TruffleHog is one of three core services that make up PostHog's data warehouse stack, alongside the warehouse control plane and **`PostHog/hoglake`**:
+Truffle is one of three core services that make up PostHog's data warehouse stack, alongside the warehouse control plane and **`PostHog/hoglake`**:
 
 ```text
                        ┌──────────────────────────────────────────┐
@@ -33,7 +39,7 @@ TruffleHog is one of three core services that make up PostHog's data warehouse s
            Catalog sync, OPA &     │                  │  OAuth 2.0 / token-exchange
            delegated DDL           ▼                  ▼  verification
 ┌──────────────────────────────────────┐          ┌──────────────────────────────────────┐
-│          PostHog/trufflehog          │  REST    │           PostHog/hoglake            │
+│           PostHog/truffle            │  REST    │           PostHog/hoglake            │
 │      Distributed SQL Compute         ├─────────►│   Lakehouse Format & Catalog API     │
 │  • Stateless coordinators & workers  │ metadata │  • Transactional metadata (Postgres) │
 │  • HogLake, DuckLake, Iceberg &      │          │  • Snapshots, namespaces & schemas   │
@@ -49,15 +55,15 @@ TruffleHog is one of three core services that make up PostHog's data warehouse s
                            └──────────────────────────────────┘
 ```
 
-- **Warehouse control plane — Tenancy & Identity:** A PostHog-operated service (not part of this repository) that provisions tenant warehouses, maps organizations to catalogs, rolls out authorization policy, and issues the OAuth 2.0 tokens that TruffleHog and HogLake verify. TruffleHog's side of that contract lives in `plugin/trino-posthog-catalogstore` and `plugin/trino-opa`.
+- **Warehouse control plane — Tenancy & Identity:** A PostHog-operated service (not part of this repository) that provisions tenant warehouses, maps organizations to catalogs, rolls out authorization policy, and issues the OAuth 2.0 tokens that Truffle and HogLake verify. Truffle's side of that contract lives in `plugin/trino-posthog-catalogstore` and `plugin/trino-opa`.
 - **[`PostHog/hoglake`](https://github.com/PostHog/hoglake) — Lakehouse Table Format & Metadata Catalog:** PostHog's open lakehouse table format and REST catalog service designed for petabyte-scale warehouse workloads and high snapshot churn. HogLake stores transactional metadata, schema evolution, and snapshots in PostgreSQL while table data lives as Parquet files in S3-compatible object storage. It also exposes each organization's PostHog event stream as a read-only `posthog` schema mount.
-- **`PostHog/trufflehog` (this repository) — Distributed SQL Query & Compute Engine:** Executes interactive queries, cross-source joins, and batch materializations across `HogLake`, `DuckLake`, `Iceberg`, and federated external data sources, reading and writing Parquet files directly against object storage.
+- **`PostHog/truffle` (this repository) — Distributed SQL Query & Compute Engine:** Executes interactive queries, cross-source joins, and batch materializations across `HogLake`, `DuckLake`, `Iceberg`, and federated external data sources, reading and writing Parquet files directly against object storage.
 
-## How TruffleHog Differs from ClickHouse at PostHog
+## How Truffle Differs from ClickHouse at PostHog
 
-ClickHouse and TruffleHog solve complementary problems at PostHog:
+ClickHouse and Truffle solve complementary problems at PostHog:
 
-| Dimension | ClickHouse at PostHog | TruffleHog (`PostHog/trufflehog`) |
+| Dimension | ClickHouse at PostHog | Truffle (`PostHog/truffle`) |
 | --- | --- | --- |
 | **Primary workload** | Real-time product analytics, session replay metadata, and high-throughput streaming event ingestion | Multi-tenant Data Warehouse queries, ad-hoc SQL joins, federated external sources, and batch transformations / ETL |
 | **Storage & compute model** | Tightly coupled local storage and compute tuned for sub-second scans over PostHog's core tables | Stateless distributed compute decoupled from S3-compatible object storage |
@@ -65,9 +71,9 @@ ClickHouse and TruffleHog solve complementary problems at PostHog:
 | **Multi-tenancy & isolation** | Shared clusters keyed by team/project ID | Per-tenant dynamic catalogs, OAuth/OPA isolation, resource groups, and read-only `posthog` event mounts per login |
 | **PostHog event access** | Primary store for live product analytics ingestion and queries | Reads organization event mounts via `HogLake` (`posthog` schema) so warehouse tables can join directly with PostHog events, backed by ClickHouse-compatible SQL functions (`trino-posthog-functions`) |
 
-## How TruffleHog Differs from Upstream Trino
+## How Truffle Differs from Upstream Trino
 
-While TruffleHog preserves Trino's core SQL optimizer, execution engine, SPI, and wire protocol, it adds several capabilities built specifically for PostHog's warehouse:
+While Truffle preserves Trino's core SQL optimizer, execution engine, SPI, and wire protocol, it adds several capabilities built specifically for PostHog's warehouse:
 
 - **Native HogLake Connector (`plugin/trino-hoglake`):** Full read/write integration with the `HogLake` REST catalog API, including OAuth 2.0 client-credentials authentication, RFC 8693 per-login token exchange for read-only `posthog` organization event mounts, worker-local Parquet footer caching, and split-planning optimizations.
 - **Native DuckLake Connector (`plugin/trino-ducklake`):** Support for reading, writing, and merging DuckLake-managed lakehouse tables on object storage.
@@ -79,11 +85,11 @@ While TruffleHog preserves Trino's core SQL optimizer, execution engine, SPI, an
 
 ## Upstream Trino Relationship
 
-TruffleHog is built on the shoulders of [upstream Trino (`trinodb/trino`)](https://github.com/trinodb/trino).
+Truffle is built on the shoulders of [upstream Trino (`trinodb/trino`)](https://github.com/trinodb/trino).
 
-- **Best-effort upstream sync:** We do our best to keep TruffleHog up to date with upstream Trino releases and improvements (query optimizer, vectorized execution, Parquet/filesystem libraries, security fixes, and connectors) on a **best-effort basis where it makes sense** for PostHog's workloads.
+- **Best-effort upstream sync:** We do our best to keep Truffle up to date with upstream Trino releases and improvements (query optimizer, vectorized execution, Parquet/filesystem libraries, security fixes, and connectors) on a **best-effort basis where it makes sense** for PostHog's workloads.
 - **Compatibility by design:** To keep upstream merges clean and ensure seamless compatibility with the Trino ecosystem (JDBC, Python `trino` client, BI integrations, and standard plugins), internal Java package names (`io.trino.*`), Maven coordinates, and client wire protocol headers (`X-Trino-*`) intentionally remain unchanged.
-- **Pragmatic divergence:** Where PostHog's multi-tenant control plane, lakehouse format (`hoglake`), or operational model has different requirements from general-purpose upstream Trino, TruffleHog diverges intentionally.
+- **Pragmatic divergence:** Where PostHog's multi-tenant control plane, lakehouse format (`hoglake`), or operational model has different requirements from general-purpose upstream Trino, Truffle diverges intentionally.
 
 ---
 
@@ -99,9 +105,9 @@ TruffleHog is built on the shoulders of [upstream Trino (`trinodb/trino`)](https
 - Java 25.0.1+, 64-bit (`JAVA_HOME` must point to JDK 25)
 - Docker (required for container builds and Testcontainers-based integration tests)
 
-## Building TruffleHog
+## Building Truffle
 
-TruffleHog is a standard Maven multi-module project. Ensure `JAVA_HOME` points to JDK 25 before invoking `./mvnw` or `mvnd`.
+Truffle is a standard Maven multi-module project. Ensure `JAVA_HOME` points to JDK 25 before invoking `./mvnw` or `mvnd`.
 
 To build only the PostHog warehouse server assembly (`trino-server-posthog`) and CLI:
 
@@ -130,7 +136,7 @@ Before opening a pull request, format Java changes and run the static checks on 
 ./mvnw verify -DskipTests -P ci -pl <changed-modules>
 ```
 
-## Running TruffleHog Locally
+## Running Truffle Locally
 
 ### Running in IntelliJ IDEA
 
@@ -148,7 +154,7 @@ Before opening a pull request, format Java changes and run the static checks on 
 
 ### Running the CLI
 
-Start the interactive TruffleHog CLI against a local coordinator:
+Start the interactive Truffle CLI against a local coordinator:
 
 ```bash
 client/trino-cli/target/trino-cli-*-executable.jar
@@ -163,4 +169,4 @@ SELECT * FROM tpch.tiny.region;
 
 ## License
 
-TruffleHog is licensed under the [Apache License, Version 2.0](LICENSE).
+Truffle is licensed under the [Apache License, Version 2.0](LICENSE).

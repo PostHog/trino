@@ -16,9 +16,9 @@ export enum StoreKey {
 }
 
 export const Texts = {
-    ProductName: 'TruffleHog',
+    ProductName: 'Truffle',
     Auth: {
-        Authenticating: 'Authenticating to TruffleHog...',
+        Authenticating: 'Authenticating to Truffle...',
         LoginForm: {
             PasswordNotAllowed: 'Password not allowed',
             Username: 'Username',
@@ -40,7 +40,7 @@ export const Texts = {
     },
     Error: {
         NotImplemented: 'This feature is not implemented',
-        Communication: 'Communication error to TruffleHog.',
+        Communication: 'Communication error to Truffle.',
         Forbidden: 'Forbidden',
         Network: 'The network has wandered off, please try again later!',
         NodeInformationNotLoaded: 'Node information could not be loaded',
