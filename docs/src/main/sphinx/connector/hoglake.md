@@ -177,6 +177,7 @@ the catalog's files.
 | `hoglake.parquet-footer-cache.max-size` | Serialized size of the parsed Parquet footers each worker keeps for the catalog; `0B` disables the cache. See [](hoglake-split-planning). | `64MB` |
 | `hoglake.variant-path-assembly-enabled` | Build pushed-down `VARIANT` subscripts from the requested keys of each value, instead of from the whole value. See [](hoglake-variant). Use the `variant_path_assembly_enabled` catalog session property to change it for a session. | `true` |
 | `hoglake.variant-lazy-residual-enabled` | With `hoglake.variant-path-assembly-enabled`, read the top-level `metadata` and `value` columns of a shredded `VARIANT` only for the batches of rows that need them. See [](hoglake-variant). Use the `variant_lazy_residual_enabled` catalog session property to change it for a session. | `true` |
+| `hoglake.table-statistics-enabled` | Give the [cost-based optimizer](/optimizer/cost-based-optimizations) each table's row count. See [](hoglake-table-statistics). Use the `statistics_enabled` catalog session property to change it for a session. | `true` |
 | `hoglake.posthog-schema.enabled` | Show the org's events mount, the Hoglake catalog `<hoglake.catalog>-events` on the same server, as the read-only schema `posthog`, read with a token of the Trino login. Requires `hoglake.catalog` to be an org id (a lowercase UUID). See [](hoglake-posthog-schema). | `false` |
 | `fs.s3.enabled` | Enable the native S3 filesystem. | `true` |
 | `s3.endpoint` | Optional S3-compatible endpoint. | AWS endpoint resolution |
@@ -477,6 +478,22 @@ recorded bounds in it, or when a bound cannot be decoded. A column that holds
 only nulls in a file prunes that file for any predicate that rejects nulls.
 Pruning never changes results: the engine still evaluates every predicate on
 the rows it reads.
+
+(hoglake-table-statistics)=
+## Table statistics
+
+The connector gives the [cost-based optimizer](/optimizer/cost-based-optimizations)
+each table's row count, which `SHOW STATS` shows. It is the total Hoglake returns
+when the connector resolves the table at the snapshot the query reads, so it
+describes that snapshot and costs no extra request. Like Hoglake's total, it
+counts the rows that deletion vectors mask. In a transaction, the rows the
+transaction has written to the table are added.
+
+The row count is unknown when Hoglake returns no exact total for that snapshot:
+for a table of the `posthog` schema, a remote table whose server leaves the totals
+out, or a server that does not send them. The connector reports no column
+statistics, such as data sizes, null fractions, value ranges or distinct value
+counts, and `ANALYZE` is not supported.
 
 ## Read consistency and limitations
 

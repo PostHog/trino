@@ -83,6 +83,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -1019,6 +1020,27 @@ final class TestHoglakePosthogSchema
         assertThatThrownBy(() -> alice.withLogin(fixedToken(loginToken(BOB, 0)))).isInstanceOf(IllegalStateException.class);
     }
 
+    /**
+     * A mount's table totals would count the whole source, not the rows the login may
+     * read: a posthog schema table has no statistics even when the mount sends totals.
+     */
+    @Test
+    void testMountTablesHaveNoStatistics()
+    {
+        assertThat(showStatsRowCount("org_on.posthog.events")).isNull();
+        assertThat(showStatsRowCount("org_on.analytics.orders")).isEqualTo(0.0);
+    }
+
+    private Object showStatsRowCount(String table)
+    {
+        // The summary row has no column name; row_count is the fifth column
+        return queryRunner.execute("SHOW STATS FOR " + table).getMaterializedRows().stream()
+                .filter(row -> row.getField(0) == null)
+                .findFirst()
+                .orElseThrow()
+                .getField(4);
+    }
+
     @Test
     void testPlanningUsesTheCallingSessionsLogin()
             throws Exception
@@ -1262,6 +1284,8 @@ final class TestHoglakePosthogSchema
                 .withMount(new HoglakeTableHandle.MountTable(MOUNT, "ingest"))
                 .withCountOnly();
         assertThat(codec.fromJson(codec.toJson(orgHandle))).isEqualTo(orgHandle);
+        HoglakeTableHandle counted = orgHandle.withRecordCount(OptionalLong.of(12));
+        assertThat(codec.fromJson(codec.toJson(counted))).isEqualTo(counted);
         assertThat(codec.fromJson(codec.toJson(mountHandle))).isEqualTo(mountHandle);
         assertThat(codec.fromJson(codec.toJson(mountHandle)).namespace()).isEqualTo("ingest");
         assertThat(mountHandle.toString()).isEqualTo("posthog.events@42 mount countOnly");
@@ -1270,6 +1294,8 @@ final class TestHoglakePosthogSchema
         assertThat(withoutMount).doesNotContain("\"mount\"");
         assertThat(codec.fromJson(withoutMount)).isEqualTo(orgHandle);
         assertThatThrownBy(() -> mountHandle.withStaged(List.of(), List.of(new HoglakeDtos.DeleteFile(1, 1, "s3://bucket/dv", 1, 1, 1))))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> mountHandle.withRecordCount(OptionalLong.of(12)))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 

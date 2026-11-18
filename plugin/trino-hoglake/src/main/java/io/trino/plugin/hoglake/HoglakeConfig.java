@@ -48,6 +48,7 @@ public class HoglakeConfig
     private DataSize parquetFooterCacheMaxSize = DataSize.of(64, MEGABYTE);
     private boolean variantPathAssemblyEnabled = true;
     private boolean variantLazyResidualEnabled = true;
+    private boolean tableStatisticsEnabled = true;
     private String authTokenUri;
     private String authClientId;
     private String authClientSecret;
@@ -164,6 +165,19 @@ public class HoglakeConfig
     public HoglakeConfig setVariantLazyResidualEnabled(boolean variantLazyResidualEnabled)
     {
         this.variantLazyResidualEnabled = variantLazyResidualEnabled;
+        return this;
+    }
+
+    public boolean isTableStatisticsEnabled()
+    {
+        return tableStatisticsEnabled;
+    }
+
+    @Config("hoglake.table-statistics-enabled")
+    @ConfigDescription("Give the cost-based optimizer the row count Hoglake reports for a table at the snapshot a query reads")
+    public HoglakeConfig setTableStatisticsEnabled(boolean tableStatisticsEnabled)
+    {
+        this.tableStatisticsEnabled = tableStatisticsEnabled;
         return this;
     }
 

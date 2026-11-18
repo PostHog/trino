@@ -23,6 +23,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.OptionalLong;
 
 import static java.util.Objects.requireNonNull;
 
@@ -296,22 +297,36 @@ public final class HoglakeDtos
         }
     }
 
+    /**
+     * A table as the server resolved it. The three totals are absent when the server
+     * has none for the read (never zeroed): {@code totals=false}, a head read the
+     * maintenance sample does not cover, or a scoped read of a mount. A head read's
+     * totals are a sample, dated by {@code totals_snapshot_id}; a read at a snapshot
+     * has exact totals and no {@code totals_snapshot_id}.
+     */
     public record Table(
             @JsonProperty("name") String name,
             @JsonProperty("namespace") String namespace,
             @JsonProperty("table_uuid") String tableUuid,
             @JsonProperty("columns") List<Column> columns,
-            @JsonProperty("record_count") long recordCount,
-            @JsonProperty("file_count") long fileCount,
-            @JsonProperty("file_size_bytes") long fileSizeBytes,
+            @JsonProperty("record_count") Long recordCount,
+            @JsonProperty("file_count") Long fileCount,
+            @JsonProperty("file_size_bytes") Long fileSizeBytes,
             @JsonProperty("partition_spec") Map<String, Object> partitionSpec,
             @JsonProperty("sort_spec") Map<String, Object> sortSpec,
             @JsonProperty("comment") String comment,
-            @JsonProperty("properties") Map<String, String> properties)
+            @JsonProperty("properties") Map<String, String> properties,
+            @JsonProperty("totals_snapshot_id") Long totalsSnapshotId,
+            @JsonProperty("read_snapshot_id") Long readSnapshotId)
     {
         public Table
         {
             properties = properties == null ? Map.of() : Map.copyOf(properties);
+        }
+
+        public Table(String name, String namespace, String tableUuid, List<Column> columns, Long recordCount, Long fileCount, Long fileSizeBytes, Map<String, Object> partitionSpec, Map<String, Object> sortSpec, String comment, Map<String, String> properties)
+        {
+            this(name, namespace, tableUuid, columns, recordCount, fileCount, fileSizeBytes, partitionSpec, sortSpec, comment, properties, null, null);
         }
 
         public Table(String name, String namespace, String tableUuid, List<Column> columns, long recordCount, long fileCount, long fileSizeBytes, Map<String, Object> partitionSpec, Map<String, Object> sortSpec)
@@ -327,6 +342,20 @@ public final class HoglakeDtos
         public Table(String name, String namespace, String tableUuid, List<Column> columns, long recordCount, long fileCount, long fileSizeBytes)
         {
             this(name, namespace, tableUuid, columns, recordCount, fileCount, fileSizeBytes, null, null);
+        }
+
+        /**
+         * The rows of the table's live data files exactly at {@code snapshot}, the
+         * snapshot this response was asked for, gross of deletion vectors as the server
+         * counts them. Empty when the response has no total, has a sampled one, or was
+         * resolved at another snapshot.
+         */
+        public OptionalLong exactRecordCount(long snapshot)
+        {
+            if (recordCount == null || recordCount < 0 || totalsSnapshotId != null || (readSnapshotId != null && readSnapshotId != snapshot)) {
+                return OptionalLong.empty();
+            }
+            return OptionalLong.of(recordCount);
         }
     }
 
