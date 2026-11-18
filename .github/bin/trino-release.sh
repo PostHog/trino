@@ -16,7 +16,7 @@ position="$(git rev-list --first-parent --count HEAD)"
 printf -v ordered_tag 'r%012d-%.6s' "$position" "$GITHUB_SHA"
 repository="${ECR_REPOSITORY:-}"
 [[ "$repository" =~ ^[0-9]{12}\.dkr\.ecr\.us-east-1\.amazonaws\.com/posthog-truffle$ ]] || fail 'A canonical us-east-1 ECR repository is required'
-mirror=ghcr.io/posthog/trino
+mirror=ghcr.io/posthog/truffle
 source_url=https://github.com/PostHog/truffle
 build_tag="build-$GITHUB_SHA"
 

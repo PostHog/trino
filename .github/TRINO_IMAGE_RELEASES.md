@@ -12,8 +12,8 @@ This orders releases by source history, independently of build completion order.
 The canonical image repository is `posthog-truffle` in shared-services ECR
 in `us-east-1`. The workflow gets its registry address from the ECR login.
 The workflow does not publish to `posthog-trino`.
-It builds one image. It copies that image to `ghcr.io/posthog/trino` for
-existing GHCR consumers.
+It builds one image. It copies that image to `ghcr.io/posthog/truffle`.
+Update any GHCR consumers to use the new package for future releases.
 
 The image is wrapped in an OCI index carrying manifest-level
 `org.opencontainers.image.source` and `org.opencontainers.image.revision`
@@ -55,9 +55,8 @@ The workflow serializes its publishers. This prevents races within this
 workflow, but does not itself establish registry immutability or exclusive
 writers. Before enabling ECR release discovery, verify the applied repository
 immutability, protected source history, repository access, and effective writer
-permissions. GHCR remains a compatibility mirror and is not the new cells'
-trusted release source. This change does not modify repository rules, package
-access, Actions secrets, or registry settings.
+permissions. The cells do not use GHCR as a release source. Check the new GHCR
+package visibility before switching consumers.
 
 Run the local contract tests with `python3 .github/bin/test_trino_release.py`.
 These tests mock the registry commands; they do not publish images. After the

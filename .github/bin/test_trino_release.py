@@ -11,7 +11,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / ".github/bin/trino-release.sh"
 REPOSITORY = "111122223333.dkr.ecr.us-east-1.amazonaws.com/posthog-truffle"
-MIRROR = "ghcr.io/posthog/trino"
+MIRROR = "ghcr.io/posthog/truffle"
 RAW_DIGEST = "sha256:" + "1" * 64
 RELEASE_DIGEST = "sha256:" + "2" * 64
 
@@ -144,7 +144,7 @@ class ReleaseContractTest(unittest.TestCase):
         self.assertEqual(self.state()["writes"], [])
 
     def test_canonical_ecr_repository_is_required(self):
-        for repository in ["", "ghcr.io/posthog/trino", REPOSITORY.replace("us-east-1", "eu-west-1"),
+        for repository in ["", MIRROR, REPOSITORY.replace("us-east-1", "eu-west-1"),
                            REPOSITORY.replace("posthog-truffle", "posthog-trino"), "https://" + REPOSITORY]:
             with self.subTest(repository=repository):
                 self.environment["ECR_REPOSITORY"] = repository
