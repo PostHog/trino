@@ -21,7 +21,6 @@ import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.predicate.TupleDomain;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.OptionalLong;
 
 import static java.util.Objects.requireNonNull;
@@ -48,13 +47,12 @@ import static java.util.Objects.requireNonNullElse;
  *
  * <p>{@code recordCount} is the table's row count exactly at {@code snapshotId}, as
  * the catalog reported it when the handle was resolved, for the optimizer's
- * statistics. It is empty when the catalog reported none for that snapshot, and
- * always for a posthog schema table.
+ * statistics. It is empty when the catalog reported none for that snapshot.
  *
  * <p>{@code remote} marks a table of a remote schema, which another Hoglake serves
  * through this catalog's server. Its {@code snapshotId} is a snapshot of the
  * catalog that holds the table, never of this catalog. Such a table is read-only:
- * it has no staged changes and no mount.
+ * it has no staged changes.
  */
 public record HoglakeTableHandle(
         @JsonProperty("schemaName") String schemaName,
@@ -66,27 +64,10 @@ public record HoglakeTableHandle(
         @JsonProperty("stagedFiles") List<HoglakeDtos.ScanFile> stagedFiles,
         @JsonProperty("stagedDeletes") List<HoglakeDtos.DeleteFile> stagedDeletes,
         @JsonProperty("countOnly") boolean countOnly,
-        @JsonProperty("mount") Optional<MountTable> mount,
         @JsonProperty("recordCount") OptionalLong recordCount,
         @JsonProperty("remote") boolean remote)
         implements ConnectorTableHandle
 {
-    /**
-     * Where a table of the read-only posthog schema lives: the mount catalog and the
-     * namespace inside it. Absent for every table of the org catalog.
-     */
-    public record MountTable(
-            @JsonProperty("catalog") String catalog,
-            @JsonProperty("namespace") String namespace)
-    {
-        @JsonCreator
-        public MountTable
-        {
-            requireNonNull(catalog, "catalog is null");
-            requireNonNull(namespace, "namespace is null");
-        }
-    }
-
     @JsonCreator
     public HoglakeTableHandle
     {
@@ -97,17 +78,9 @@ public record HoglakeTableHandle(
         columns = List.copyOf(requireNonNull(columns, "columns is null"));
         stagedFiles = stagedFiles == null ? List.of() : List.copyOf(stagedFiles);
         stagedDeletes = stagedDeletes == null ? List.of() : List.copyOf(stagedDeletes);
-        // A handle serialized before the posthog schema existed has no mount.
-        mount = requireNonNullElse(mount, Optional.empty());
         recordCount = requireNonNullElse(recordCount, OptionalLong.empty());
-        if (mount.isPresent() && (!stagedFiles.isEmpty() || !stagedDeletes.isEmpty())) {
-            throw new IllegalArgumentException("A posthog schema table cannot have staged changes");
-        }
-        if (mount.isPresent() && recordCount.isPresent()) {
-            throw new IllegalArgumentException("A posthog schema table has no row count");
-        }
-        if (remote && (mount.isPresent() || !stagedFiles.isEmpty() || !stagedDeletes.isEmpty())) {
-            throw new IllegalArgumentException("A remote table cannot have staged changes or a mount");
+        if (remote && (!stagedFiles.isEmpty() || !stagedDeletes.isEmpty())) {
+            throw new IllegalArgumentException("A remote table cannot have staged changes");
         }
     }
 
@@ -122,7 +95,7 @@ public record HoglakeTableHandle(
             List<HoglakeDtos.DeleteFile> stagedDeletes,
             boolean countOnly)
     {
-        this(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, Optional.empty(), OptionalLong.empty(), false);
+        this(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, OptionalLong.empty(), false);
     }
 
     public HoglakeTableHandle(
@@ -150,41 +123,27 @@ public record HoglakeTableHandle(
 
     public HoglakeTableHandle withConstraint(TupleDomain<HoglakeColumnHandle> constraint)
     {
-        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, mount, recordCount, remote);
+        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, recordCount, remote);
     }
 
     public HoglakeTableHandle withCountOnly()
     {
-        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, true, mount, recordCount, remote);
+        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, true, recordCount, remote);
     }
 
     public HoglakeTableHandle withStaged(List<HoglakeDtos.ScanFile> stagedFiles, List<HoglakeDtos.DeleteFile> stagedDeletes)
     {
-        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, mount, recordCount, remote);
-    }
-
-    public HoglakeTableHandle withMount(MountTable mount)
-    {
-        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, Optional.of(mount), recordCount, remote);
+        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, recordCount, remote);
     }
 
     public HoglakeTableHandle withRecordCount(OptionalLong recordCount)
     {
-        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, mount, recordCount, remote);
+        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, recordCount, remote);
     }
 
     public HoglakeTableHandle withRemote()
     {
-        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, mount, recordCount, true);
-    }
-
-    /**
-     * The namespace the Hoglake requests for this table name: the mount's namespace for a
-     * posthog schema table, the schema itself otherwise.
-     */
-    public String namespace()
-    {
-        return mount.map(MountTable::namespace).orElse(schemaName);
+        return new HoglakeTableHandle(schemaName, tableName, snapshotId, tableUuid, columns, constraint, stagedFiles, stagedDeletes, countOnly, recordCount, true);
     }
 
     public SchemaTableName schemaTableName()
@@ -196,9 +155,6 @@ public record HoglakeTableHandle(
     public String toString()
     {
         String table = schemaName + "." + tableName + "@" + snapshotId;
-        if (mount.isPresent()) {
-            table += " mount";
-        }
         if (remote) {
             table += " remote";
         }

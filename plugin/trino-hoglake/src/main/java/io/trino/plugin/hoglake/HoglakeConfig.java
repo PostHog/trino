@@ -16,6 +16,7 @@ package io.trino.plugin.hoglake;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.ConfigSecuritySensitive;
+import io.airlift.configuration.DefunctConfig;
 import io.airlift.units.DataSize;
 import io.airlift.units.MinDataSize;
 import io.trino.plugin.hoglake.rest.HoglakeClient;
@@ -31,6 +32,7 @@ import java.util.regex.Pattern;
 
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 
+@DefunctConfig("hoglake.posthog-schema.enabled")
 public class HoglakeConfig
 {
     // With the footer cache, a split costs a cache hit plus reader setup, so a smaller
@@ -55,7 +57,6 @@ public class HoglakeConfig
     private String authAudience = "hoglake";
     private String authToken;
     private String authTokenFile;
-    private boolean posthogSchemaEnabled;
 
     @NotNull
     public String getUri()
@@ -263,27 +264,6 @@ public class HoglakeConfig
     {
         this.authTokenFile = authTokenFile == null || authTokenFile.isBlank() ? null : authTokenFile.trim();
         return this;
-    }
-
-    public boolean isPosthogSchemaEnabled()
-    {
-        return posthogSchemaEnabled;
-    }
-
-    @Config("hoglake.posthog-schema.enabled")
-    @ConfigDescription("Show the org's events mount, the Hoglake catalog <hoglake.catalog>-events on the same server, as the read-only schema posthog")
-    public HoglakeConfig setPosthogSchemaEnabled(boolean posthogSchemaEnabled)
-    {
-        this.posthogSchemaEnabled = posthogSchemaEnabled;
-        return this;
-    }
-
-    // A mount is named <orgID>-events, with the org id a canonical lowercase
-    // UUID, so a catalog with any other name can never have one.
-    @AssertTrue(message = "hoglake.posthog-schema.enabled requires hoglake.catalog to be an org id (a lowercase UUID)")
-    public boolean isPosthogSchemaCatalogValid()
-    {
-        return !posthogSchemaEnabled || HoglakePosthogSchema.isOrgCatalog(catalog);
     }
 
     // All three or none: a catalog with a token endpoint and no secret would

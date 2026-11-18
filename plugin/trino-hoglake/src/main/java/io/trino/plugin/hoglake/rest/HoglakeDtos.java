@@ -316,8 +316,8 @@ public final class HoglakeDtos
 
     /**
      * A table as the server resolved it. The three totals are absent when the server
-     * has none for the read (never zeroed): {@code totals=false}, a head read the
-     * maintenance sample does not cover, or a scoped read of a mount. A head read's
+     * has none for the read (never zeroed): {@code totals=false}, or a head read the
+     * maintenance sample does not cover. A head read's
      * totals are a sample, dated by {@code totals_snapshot_id}; a read at a snapshot
      * has exact totals and no {@code totals_snapshot_id}. {@code remote} is {@code true}
      * for a table of a remote schema, whose {@code read_snapshot_id} is a snapshot of
