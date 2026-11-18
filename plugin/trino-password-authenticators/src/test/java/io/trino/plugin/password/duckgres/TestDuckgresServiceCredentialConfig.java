@@ -37,7 +37,8 @@ class TestDuckgresServiceCredentialConfig
         assertRecordedDefaults(recordDefaults(DuckgresServiceCredentialConfig.class)
                 .setEndpoint(null)
                 .setTokenFile(null)
-                .setAllowInsecureHttp(false));
+                .setAllowInsecureHttp(false)
+                .setAuthMetadataEnabled(false));
     }
 
     @Test
@@ -48,10 +49,12 @@ class TestDuckgresServiceCredentialConfig
         assertFullMapping(ImmutableMap.of(
                         "duckgres-service-credential.endpoint", "https://auth.example.com/auth/trino/service-credentials",
                         "duckgres-service-credential.token-file", tokenFile.toString(),
-                        "duckgres-service-credential.allow-insecure-http", "true"),
+                        "duckgres-service-credential.allow-insecure-http", "true",
+                        "duckgres.service-credential.auth-metadata-enabled", "true"),
                 new DuckgresServiceCredentialConfig()
                         .setEndpoint(URI.create("https://auth.example.com/auth/trino/service-credentials"))
                         .setTokenFile(tokenFile.toFile())
-                        .setAllowInsecureHttp(true));
+                        .setAllowInsecureHttp(true)
+                        .setAuthMetadataEnabled(true));
     }
 }

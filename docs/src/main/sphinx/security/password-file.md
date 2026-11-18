@@ -36,7 +36,18 @@ The following configuration properties are available:
 | -------------------------------- | ----------------------------------------------------------------- |
 | `file.password-file`             | Path of the password file.                                        |
 | `file.refresh-period`            | How often to reload the password file. Defaults to `5s`.          |
-| `file.auth-token-cache.max-size` | Max number of cached authenticated passwords. Defaults to `1000`. |
+| `file.auth-token-cache.max-size` | Maximum number of cached verification results. Defaults to `1000`. |
+| `file.auth-metadata-enabled` | Read versioned authentication metadata. Defaults to `false`. |
+
+### Verification cache
+
+The file authenticator caches Boolean verification results.
+Each key contains the username plus a complete HMAC-SHA256 identifier.
+The cache does not retain plaintext passwords.
+
+Each loaded password store owns a random HMAC key.
+Reloading the password file replaces that store.
+The verification cache does not change the password file format.
 
 ## Password files
 
@@ -57,6 +68,56 @@ hex encoded salt and hash:
 ```text
 test:1000:5b4240333032306164:f38d165fce8ce42f59d366139ef5d9e1ca1247f0e06e503ee1a611dd9ec40876bb5edb8409f5abe5504aab6628e70cfb3d3a18e99d70357d295002c3d0a308a0
 ```
+
+### Managed authentication metadata
+
+The default-off implementation remains under review.
+Its contract authorizes no deployment or per-login traffic.
+The `file.auth-metadata-enabled` property defaults to `false`.
+The reader reserves metadata syntax only when that property is enabled.
+Otherwise, it preserves the existing generic username and file behavior.
+
+The opt-in format places a header before any nonempty credential row:
+
+```text
+# trufflehog-auth:1
+# trufflehog-target {"principal":"example-db.alice","backend":"hoglake"}
+example-db.alice:<hash>
+# trufflehog-target {"principal":"legacy-db.root","backend":"ducklake"}
+legacy-db.root:<hash>
+# trufflehog-operator {"principal":"__trino_ops"}
+__trino_ops:<hash>
+```
+
+The hashes above are placeholders.
+Actual rows still use the existing bcrypt or PBKDF2 format.
+The reader splits each credential row at its first colon.
+It preserves colons inside PBKDF2 hashes.
+Metadata does not change username validation.
+
+Each target record identifies an exact credential principal.
+It requires exactly one recognized backend: `hoglake` or `ducklake`.
+The operator record identifies only `__trino_ops`.
+It supplies operator evidence instead of tenant backend evidence.
+The reader rejects duplicate, conflicting, orphan, malformed, or unsupported metadata.
+It also rejects a target record for the operator.
+
+A legacy file without metadata remains supported.
+Its credentials have UNKNOWN classification.
+UNKNOWN never means DuckLake.
+When {doc}`managed acquisition <caller-tokens>` is enabled, UNKNOWN terminates authentication.
+Merely enabling the file reader does not enable acquisition.
+
+The authenticator captures one password store for each authentication attempt.
+That store supplies both password verification and classification.
+The loaded revision fingerprints the complete raw file, including metadata.
+It requires no backend groups or separate inventory file.
+
+Old readers reject the new metadata lines.
+Reader support must precede approved publication.
+The existing admission barrier must acknowledge the complete artifact.
+These prerequisites authorize no rollout.
+A stale complete snapshot does not provide immediate revocation.
 
 ### Creating a password file
 

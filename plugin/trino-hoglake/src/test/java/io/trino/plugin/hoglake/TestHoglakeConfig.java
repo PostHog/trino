@@ -37,6 +37,7 @@ class TestHoglakeConfig
     {
         assertRecordedDefaults(recordDefaults(HoglakeConfig.class)
                 .setUri(null)
+                .setMultiTenant(false)
                 .setCatalog("hoglake")
                 .setRequestTimeout("2m")
                 .setMaxSplitSize(DataSize.of(256, MEGABYTE))
@@ -57,6 +58,7 @@ class TestHoglakeConfig
     {
         assertFullMapping(ImmutableMap.<String, String>builder()
                         .put("hoglake.uri", "http://localhost:8080")
+                        .put("hoglake.multi-tenant", "true")
                         .put("hoglake.catalog", "0b5f0c2e-1111-4222-8333-444455556666")
                         .put("hoglake.client.request-timeout", "45s")
                         .put("hoglake.max-split-size", "1GB")
@@ -73,6 +75,7 @@ class TestHoglakeConfig
                         .buildOrThrow(),
                 new HoglakeConfig()
                         .setUri("http://localhost:8080")
+                        .setMultiTenant(true)
                         .setCatalog("0b5f0c2e-1111-4222-8333-444455556666")
                         .setRequestTimeout("45s")
                         .setMaxSplitSize(DataSize.of(1, GIGABYTE))

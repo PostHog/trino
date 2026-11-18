@@ -41,6 +41,7 @@ public class HoglakeConfig
     private static final Pattern DURATION = Pattern.compile("\\s*(\\d+(?:\\.\\d+)?)\\s*(ms|s|m|h|d)\\s*");
 
     private String uri;
+    private boolean multiTenant;
     private String catalog = "hoglake";
     private Duration requestTimeout = Duration.ofMinutes(2);
     private DataSize maxSplitSize = DEFAULT_MAX_SPLIT_SIZE;
@@ -66,6 +67,19 @@ public class HoglakeConfig
     public HoglakeConfig setUri(String uri)
     {
         this.uri = uri == null ? null : HoglakeClient.validateBaseUri(uri).toString();
+        return this;
+    }
+
+    public boolean isMultiTenant()
+    {
+        return multiTenant;
+    }
+
+    @Config("hoglake.multi-tenant")
+    @ConfigDescription("Enable independently verified session authority for shared metadata requests")
+    public HoglakeConfig setMultiTenant(boolean multiTenant)
+    {
+        this.multiTenant = multiTenant;
         return this;
     }
 

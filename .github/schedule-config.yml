@@ -46,6 +46,7 @@
 - { modules: plugin/trino-hive, profile: fte-tests }
 - { modules: plugin/trino-hive, profile: test-parquet, timeout-minutes: 60 }
 - { modules: plugin/trino-posthog-catalogstore }
+- { modules: plugin/trino-posthog-functions }
 - { modules: plugin/trino-resource-group-managers }
 - { modules: testing/trino-faulttolerant-tests, profile: default }
 - { modules: testing/trino-tests, timeout-minutes: 60 }
