@@ -75,6 +75,7 @@ public final class HoglakeSharedHttpClient
     private final HttpClient httpClient;
     private final String baseUri;
     private final Duration requestTimeout;
+    private final boolean namespacePointLookupEnabled;
     private final LongSupplier ticker;
 
     @Inject
@@ -89,6 +90,7 @@ public final class HoglakeSharedHttpClient
         this.ticker = requireNonNull(ticker, "ticker is null");
         baseUri = endpoint(config.getUri());
         requestTimeout = Duration.ofNanos(config.getRequestTimeout().roundTo(NANOSECONDS));
+        namespacePointLookupEnabled = config.isNamespacePointLookupEnabled();
         if (requestTimeout.isNegative() || requestTimeout.isZero()) {
             throw new IllegalArgumentException("Invalid shared Hoglake request timeout");
         }
@@ -116,6 +118,29 @@ public final class HoglakeSharedHttpClient
     public void close()
     {
         httpClient.close();
+    }
+
+    public boolean namespaceExists(ConnectorSession session, String namespace)
+    {
+        if (!namespacePointLookupEnabled) {
+            return listNamespaces(session).stream().anyMatch(candidate -> candidate.name().equals(namespace));
+        }
+        HoglakeSharedSessionContext context = verify(session);
+        RequestBudget budget = new RequestBudget(ticker, requestTimeout.toNanos());
+        Optional<JsonNode> response = request(context, catalogPath(context) + "/namespaces/" + segment(namespace), budget);
+        if (response.isEmpty()) {
+            budget.check();
+            return false;
+        }
+        JsonNode value = response.orElseThrow();
+        requireObject(value);
+        requireText(value, "name");
+        optionalInteger(value, "namespace_id");
+        if (!namespace.equals(value.path("name").textValue())) {
+            throw invalidResponse();
+        }
+        budget.check();
+        return true;
     }
 
     public List<HoglakeDtos.Namespace> listNamespaces(ConnectorSession session)

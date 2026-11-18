@@ -36,6 +36,7 @@ public class HoglakeSharedConfig
     private URI uri;
     private Duration requestTimeout = new Duration(120, SECONDS);
     private boolean multiTenant;
+    private boolean namespacePointLookupEnabled;
     private File jwksFile;
     private String issuer;
     private String backendBindings;
@@ -85,6 +86,19 @@ public class HoglakeSharedConfig
     public HoglakeSharedConfig setMultiTenant(boolean multiTenant)
     {
         this.multiTenant = multiTenant;
+        return this;
+    }
+
+    public boolean isNamespacePointLookupEnabled()
+    {
+        return namespacePointLookupEnabled;
+    }
+
+    @Config("hoglake.shared.namespace-point-lookup-enabled")
+    @ConfigDescription("Use a namespace detail request to check schema existence")
+    public HoglakeSharedConfig setNamespacePointLookupEnabled(boolean enabled)
+    {
+        namespacePointLookupEnabled = enabled;
         return this;
     }
 

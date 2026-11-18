@@ -31,6 +31,7 @@ Legacy mode keeps its existing behavior.
 | `hoglake.shared.backend-bindings` | JSON string | None | Required canonical backend UUID mapping to `postgres` or `hoglite`. |
 | `hoglake.client.request-timeout` | Duration | `120s` | Optional; minimum `1ms`. |
 | `hoglake.shared.clock-skew` | Duration | `60s` | Optional; range `0s` through `600s`. |
+| `hoglake.shared.namespace-point-lookup-enabled` | Boolean | `false` | Use the namespace detail request for schema existence checks. |
 | `hoglake.shared.scoped-max-lifetime` | Duration | `900s` | Optional; range `1s` through `900s`. |
 
 The base URI accepts no user information, query, or fragment.
@@ -87,6 +88,11 @@ Shared mode permits only these GET routes:
 - `/v1/catalogs/{catalog}/namespaces`
 - `/v1/catalogs/{catalog}/namespaces/{namespace}/tables`
 - `/v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}`
+
+The optional namespace lookup adds `GET /v1/catalogs/{catalog}/namespaces/{namespace}` for schema existence checks.
+`USE` uses this check.
+The lookup does not change namespace listings.
+It does not fall back to a list if the detail request fails.
 
 Requests use the current catalog head.
 Table detail requests set `totals=false`.

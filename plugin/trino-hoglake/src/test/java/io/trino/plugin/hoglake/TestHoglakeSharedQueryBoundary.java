@@ -143,6 +143,53 @@ class TestHoglakeSharedQueryBoundary
     }
 
     @Test
+    void testUseCanCheckOneNamespaceWithoutListing()
+            throws Exception
+    {
+        try (Fixture fixture = new Fixture(directory);
+                StandaloneQueryRunner runner = fixture.queryRunner(true)) {
+            Caller alice = fixture.caller("a", "example.alice", "example.mapped_alice");
+            Caller bob = fixture.caller("b", "example.bob", "example.bob");
+            runner.execute(alice.querySession(), "USE hoglake.team_a");
+            runner.execute(bob.querySession(), "USE hoglake.team_b");
+            assertThatThrownBy(() -> runner.execute(alice.querySession(), "USE hoglake.missing"))
+                    .isInstanceOf(QueryFailedException.class)
+                    .hasMessageContaining("Schema does not exist");
+            assertThatThrownBy(() -> runner.execute(alice.querySession(), "USE hoglake.unavailable"))
+                    .isInstanceOf(QueryFailedException.class)
+                    .hasMessageContaining("Shared Hoglake service unavailable");
+            assertThatThrownBy(() -> runner.execute(alice.querySession(), "USE hoglake.wrong_name"))
+                    .isInstanceOf(QueryFailedException.class)
+                    .hasMessageContaining("Invalid shared Hoglake metadata response");
+            assertThat(fixture.requests.stream().map(Request::target)).containsExactly(
+                    alice.catalogPath() + "/namespaces/team_a",
+                    bob.catalogPath() + "/namespaces/team_b",
+                    alice.catalogPath() + "/namespaces/missing",
+                    alice.catalogPath() + "/namespaces/unavailable",
+                    alice.catalogPath() + "/namespaces/wrong_name");
+            assertThatThrownBy(() -> runner.execute(alice.querySession(), "SELECT count(*) FROM hoglake.team_a.events_a"))
+                    .isInstanceOf(QueryFailedException.class)
+                    .hasMessageContaining(DISCOVERY_ONLY);
+            assertThat(fixture.requests).hasSize(5);
+
+            runner.execute(alice.querySession(), "SHOW SCHEMAS FROM hoglake");
+            assertThat(fixture.requests.stream().map(Request::target)).endsWith(alice.catalogPath() + "/namespaces");
+        }
+    }
+
+    @Test
+    void testUseListsNamespacesByDefault()
+            throws Exception
+    {
+        try (Fixture fixture = new Fixture(directory);
+                StandaloneQueryRunner runner = fixture.queryRunner()) {
+            Caller alice = fixture.caller("a", "example.alice", "example.alice");
+            runner.execute(alice.querySession(), "USE hoglake.team_a");
+            assertThat(fixture.requests.stream().map(Request::target)).containsExactly(alice.catalogPath() + "/namespaces");
+        }
+    }
+
+    @Test
     void testDescribeExactJdbcAndMutationsNeverAcquireExecutionAuthority()
             throws Exception
     {
@@ -424,10 +471,22 @@ class TestHoglakeSharedQueryBoundary
 
         public StandaloneQueryRunner queryRunner()
         {
+            return queryRunner(false);
+        }
+
+        public StandaloneQueryRunner queryRunner(boolean pointLookup)
+        {
             StandaloneQueryRunner runner = new StandaloneQueryRunner(testSessionBuilder().setCatalog("hoglake").setSchema("team_a").build());
             try {
                 runner.installPlugin(new HoglakePlugin());
-                runner.createCatalog("hoglake", "hoglake", properties(jwks));
+                Map<String, String> properties = properties(jwks);
+                if (pointLookup) {
+                    properties = ImmutableMap.<String, String>builder()
+                            .putAll(properties)
+                            .put("hoglake.shared.namespace-point-lookup-enabled", "true")
+                            .buildOrThrow();
+                }
+                runner.createCatalog("hoglake", "hoglake", properties);
                 return runner;
             }
             catch (RuntimeException | Error exception) {
@@ -478,6 +537,22 @@ class TestHoglakeSharedQueryBoundary
             assertThat(authorization).isEqualTo("Bearer " + caller.jwt());
             assertThat(exchange.getRequestBody().readAllBytes()).isEmpty();
 
+            String namespacePath = caller.catalogPath() + "/namespaces/";
+            if (target.equals(namespacePath + caller.schema()) || target.equals(namespacePath + "wrong_name")) {
+                byte[] body = "{\"name\":\"%s\",\"namespace_id\":7}".formatted(caller.schema()).getBytes(UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+                return;
+            }
+            if (target.equals(namespacePath + "missing")) {
+                exchange.sendResponseHeaders(404, -1);
+                return;
+            }
+            if (target.equals(namespacePath + "unavailable")) {
+                exchange.sendResponseHeaders(503, -1);
+                return;
+            }
             String body;
             if (target.equals(caller.catalogPath() + "/namespaces")) {
                 awaitConcurrentRequests();
