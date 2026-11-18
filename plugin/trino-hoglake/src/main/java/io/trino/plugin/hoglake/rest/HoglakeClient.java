@@ -308,8 +308,15 @@ public class HoglakeClient
 
     public HoglakeDtos.Namespace getNamespace(String name)
     {
-        return get(namespacePath(name, ""), new TypeReference<HoglakeDtos.Namespace>() {})
-                .orElseThrow(() -> new SchemaNotFoundException(name));
+        return findNamespace(name).orElseThrow(() -> new SchemaNotFoundException(name));
+    }
+
+    /**
+     * The namespace, or empty when the server has none of this name for this caller.
+     */
+    public Optional<HoglakeDtos.Namespace> findNamespace(String name)
+    {
+        return get(namespacePath(name, ""), new TypeReference<HoglakeDtos.Namespace>() {});
     }
 
     public void dropNamespace(String name, long expectedNamespaceId, HoglakeDtos.OperationMetadata operationMetadata)

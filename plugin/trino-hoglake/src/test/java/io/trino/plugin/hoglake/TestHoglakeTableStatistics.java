@@ -123,7 +123,8 @@ final class TestHoglakeTableStatistics
         HoglakeMetadata metadata = new HoglakeMetadata(client);
         HoglakeTableHandle handle = (HoglakeTableHandle) metadata.getTableHandle(session(), EVENTS, Optional.empty(), Optional.empty());
         assertThat(handle.snapshotId()).isEqualTo(4);
-        assertThat(requests).containsExactly(CATALOG_PATH, TABLE_PATH + "?snapshot=4");
+        // The namespace is asked first, to tell a remote schema from a local one
+        assertThat(requests).containsExactly(CATALOG_PATH + "/namespaces/analytics", CATALOG_PATH, TABLE_PATH + "?snapshot=4");
 
         // A commit moves head on: the statistics still describe the pinned snapshot,
         // from the read that resolved the handle, without another request
