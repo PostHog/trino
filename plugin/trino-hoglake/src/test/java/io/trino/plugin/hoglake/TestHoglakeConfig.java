@@ -20,6 +20,7 @@ import io.trino.plugin.hoglake.rest.HoglakeTokenSource;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
@@ -50,8 +51,7 @@ class TestHoglakeConfig
                 .setAuthClientSecret(null)
                 .setAuthAudience("hoglake")
                 .setAuthToken(null)
-                .setAuthTokenFile(null)
-                .setPosthogSchemaEnabled(false));
+                .setAuthTokenFile(null));
     }
 
     @Test
@@ -60,7 +60,7 @@ class TestHoglakeConfig
         assertFullMapping(ImmutableMap.<String, String>builder()
                         .put("hoglake.uri", "http://localhost:8080")
                         .put("hoglake.multi-tenant", "true")
-                        .put("hoglake.catalog", "0b5f0c2e-1111-4222-8333-444455556666")
+                        .put("hoglake.catalog", "lake")
                         .put("hoglake.client.request-timeout", "45s")
                         .put("hoglake.max-split-size", "1GB")
                         .put("hoglake.parquet-footer-cache.max-size", "16MB")
@@ -73,12 +73,11 @@ class TestHoglakeConfig
                         .put("hoglake.auth.audience", "hoglake-dev")
                         .put("hoglake.auth.token", "eyJhbGciOiJFUzI1NiJ9.e30.sig")
                         .put("hoglake.auth.token-file", "/etc/trino/hoglake.token")
-                        .put("hoglake.posthog-schema.enabled", "true")
                         .buildOrThrow(),
                 new HoglakeConfig()
                         .setUri("http://localhost:8080")
                         .setMultiTenant(true)
-                        .setCatalog("0b5f0c2e-1111-4222-8333-444455556666")
+                        .setCatalog("lake")
                         .setRequestTimeout("45s")
                         .setMaxSplitSize(DataSize.of(1, GIGABYTE))
                         .setParquetFooterCacheMaxSize(DataSize.of(16, MEGABYTE))
@@ -90,31 +89,20 @@ class TestHoglakeConfig
                         .setAuthClientSecret("s3cret")
                         .setAuthAudience("hoglake-dev")
                         .setAuthToken("eyJhbGciOiJFUzI1NiJ9.e30.sig")
-                        .setAuthTokenFile("/etc/trino/hoglake.token")
-                        .setPosthogSchemaEnabled(true));
+                        .setAuthTokenFile("/etc/trino/hoglake.token"));
     }
 
     @Test
-    void posthogSchemaRequiresAnOrgCatalog()
+    void removedSchemaPropertyIsDefunct()
     {
-        assertThatThrownBy(() -> parse(Map.of(
-                "hoglake.uri", "http://h:1",
-                "hoglake.catalog", "lake",
-                "hoglake.posthog-schema.enabled", "true")))
-                .isInstanceOf(RuntimeException.class)
-                .hasStackTraceContaining("requires hoglake.catalog to be an org id");
-        assertThatThrownBy(() -> parse(Map.of(
-                "hoglake.uri", "http://h:1",
-                "hoglake.catalog", "0B5F0C2E-1111-4222-8333-444455556666",
-                "hoglake.posthog-schema.enabled", "true")))
-                .isInstanceOf(RuntimeException.class)
-                .hasStackTraceContaining("requires hoglake.catalog to be an org id");
-        assertThat(parse(Map.of(
-                "hoglake.uri", "http://h:1",
-                "hoglake.catalog", "0b5f0c2e-1111-4222-8333-444455556666",
-                "hoglake.posthog-schema.enabled", "true")).isPosthogSchemaEnabled()).isTrue();
-        // Off, any catalog name is fine, as before
-        assertThat(parse(Map.of("hoglake.uri", "http://h:1", "hoglake.catalog", "lake")).isPosthogSchemaEnabled()).isFalse();
+        for (String value : List.of("true", "false")) {
+            assertThatThrownBy(() -> parse(Map.of(
+                    "hoglake.uri", "http://h:1",
+                    "hoglake.posthog-schema.enabled", value)))
+                    .isInstanceOf(RuntimeException.class)
+                    .hasStackTraceContaining("Defunct property 'hoglake.posthog-schema.enabled'")
+                    .hasStackTraceContaining("cannot be configured");
+        }
     }
 
     @Test

@@ -310,6 +310,16 @@ final class TestHoglakeRemoteTablePin
     }
 
     @Test
+    void testSchemaListingIsWhatTheServerLists()
+    {
+        assertThat(queryRunner.execute("SHOW SCHEMAS FROM hoglake").getOnlyColumnAsSet()).containsOnly("information_schema", "ns1", "team_42");
+        listsRemoteSchema = false;
+        assertThat(queryRunner.execute("SHOW SCHEMAS FROM hoglake").getOnlyColumnAsSet()).containsOnly("information_schema", "ns1");
+        // The namespace listing is the only request: no other catalog is asked
+        assertThat(requests).containsOnly(get(NAMESPACES_PATH));
+    }
+
+    @Test
     void testSchemaTheListingLeavesOutIsOpenedByName()
     {
         // Mode A: the listing holds it, and nothing else is asked
@@ -484,10 +494,8 @@ final class TestHoglakeRemoteTablePin
         assertThat(withoutRemote).doesNotContain("\"remote\"");
         assertThat(codec.fromJson(withoutRemote).remote()).isFalse();
         assertThat(codec.fromJson(withoutRemote)).isEqualTo(local);
-        // A remote table is never written, and is never a posthog schema table
+        // A remote table is never written
         assertThatThrownBy(() -> remote.withStaged(List.of(), List.of(new HoglakeDtos.DeleteFile(1, 1, "s3://lake/dv", 1, 1, 1))))
-                .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> remote.withMount(new HoglakeTableHandle.MountTable("lake-events", "ingest")))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
