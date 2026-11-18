@@ -169,6 +169,60 @@ final class TestHoglakeSharedRemoteRead
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
+    /**
+     * The claims of a token as Hogtower's dev switch mints it for the trino-login
+     * grant (PostHog/hogtower internal/oauth/trino_session_token.go), for a grant of
+     * every team and for a grant of listed teams. Only the issuer, the times and the
+     * credentials are this test's own.
+     */
+    @Test
+    void testTheIssuersMintedShapeIsAccepted()
+    {
+        KeyPair key = keyPair();
+        Path jwks = directory.resolve("issuer-shape.jwks");
+        writeJwks(jwks, key, KEY_ID);
+        HoglakeSharedConfig configuration = config(jwks, URI.create("https://metadata.example.test")).setRemoteRead(true);
+        HoglakeSharedSessionVerifier verifier = new HoglakeSharedSessionVerifier(configuration, Optional.of(REGION));
+        String org = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+        long now = Instant.now().getEpochSecond();
+
+        for (Map<String, String> teams : List.of(Map.of("*", "read"), Map.of("42", "read", "7", "read"))) {
+            Map<String, Object> claims = new LinkedHashMap<>();
+            claims.put("aud", List.of("hoglake", "hoglite"));
+            claims.put("aws", new LinkedHashMap<>(Map.of(
+                    "access_key_id", "synthetic-access-key",
+                    "expires_at", now + 900,
+                    "region", REGION,
+                    "secret_access_key", "synthetic-secret-key",
+                    "session_token", "synthetic-session-token")));
+            claims.put("cat", Map.of(org, List.of("read")));
+            claims.put("cli", "pyhoglake");
+            claims.put("exp", now + 900);
+            claims.put("iat", now);
+            claims.put("iss", HoglakeSharedSessionTestSupport.ISSUER);
+            claims.put("jti", "6f1c1f9e-2b7c-4a55-9d3e-0a1b2c3d4e5f");
+            claims.put("nbf", now);
+            claims.put("org", org);
+            claims.put("prd", Map.of("team_id", teams));
+            claims.put("primary_catalog", org);
+            claims.put("profile", "storage-session");
+            claims.put("purpose", "user-session");
+            claims.put("remote_schemas", Map.of("team", List.of("read")));
+            claims.put("rtg", Map.of("b", "hoglite", "be", HoglakeSharedSessionTestSupport.BACKEND_ID, "t", "tenant-a_1"));
+            claims.put("sub", "hlc_0123456789abcdef01234567");
+            claims.put("ten", "scoped");
+            claims.put("usr", "acme.analyst");
+            claims.put("version", 1);
+
+            HoglakeSharedSessionContext context = verifier.verify(session("acme.analyst", "acme.analyst", token(key, KEY_ID, claims)));
+            assertThat(context.catalog()).isEqualTo(org);
+            assertThat(context.storage()).isPresent();
+            assertThat(context.readsTeamSchema("team_7")).isTrue();
+            assertThat(context.readsTeamSchema("team_42")).isTrue();
+            assertThat(context.readsTeamSchema("team_8")).isEqualTo(teams.containsKey("*"));
+        }
+    }
+
     @Test
     void testFilesAreReadOnlyWithTheVerifiedSession()
     {

@@ -177,6 +177,7 @@ Catalog creation fails for any other `s3.`, `fs.`, `hoglake.s3.`, `gcs.`, `azure
 This rules out static keys, IAM roles, security mapping, other file systems, and the file system cache.
 The Parquet footer cache is off.
 The connector does not refresh a token or session: a query that outlives them fails.
+When S3 refuses to open a file, the query fails with `PERMISSION_DENIED` and a message that names no object.
 
 The read session properties `max_split_size`, `variant_path_assembly_enabled`, `variant_lazy_residual_enabled`, and `statistics_enabled` are available at their defaults.
 Table reads use the per-catalog HTTP client behind the route allowlist above.
