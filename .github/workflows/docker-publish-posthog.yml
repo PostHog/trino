@@ -1,6 +1,6 @@
 name: docker-publish-posthog
 
-# Builds the TruffleHog (PostHog's Trino fork) server image (with the ducklake connector)
+# Builds the Truffle (PostHog's Trino fork) server image (with the ducklake connector)
 # for linux/arm64 and publishes the same digest to ECR and GHCR.
 # The managed-warehouse trino Karpenter
 # node pool is arm64-only, so amd64 is skipped to keep CI fast.
@@ -50,7 +50,7 @@ jobs:
   build-and-push:
     needs: test-release-contract
     if: >-
-      github.repository == 'PostHog/trufflehog'
+      github.repository == 'PostHog/truffle'
       && github.ref == 'refs/heads/master'
       && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04-arm
@@ -123,7 +123,7 @@ jobs:
         if: steps.metadata.outputs.digest == '' && steps.metadata.outputs.build-digest == ''
         env:
           ECR_REPOSITORY: ${{ steps.ecr.outputs.registry }}/posthog-trino
-          OCI_SOURCE: https://github.com/PostHog/trufflehog
+          OCI_SOURCE: https://github.com/PostHog/truffle
           OCI_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -164,7 +164,7 @@ jobs:
     # commit and charts would record a deploy it cannot attribute.
     needs: build-and-push
     if: >-
-      github.repository == 'PostHog/trufflehog'
+      github.repository == 'PostHog/truffle'
       && github.event_name == 'push'
       && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest

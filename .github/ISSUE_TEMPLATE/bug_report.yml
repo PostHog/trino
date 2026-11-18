@@ -1,20 +1,20 @@
 ---
 name: Bug report 🐞
-description: Problems, bugs and issues with TruffleHog
+description: Problems, bugs and issues with Truffle
 type: Bug
 body:
   - type: markdown
     attributes:
       value: |
-        * Verify that the issue is not already reported by checking [open issues](https://github.com/PostHog/trufflehog/issues).
+        * Verify that the issue is not already reported by checking [open issues](https://github.com/PostHog/truffle/issues).
         * **Possible security vulnerabilities**: STOP here and contact `security@posthog.com` instead!
         * Do **NOT** share any sensitive information like customer data, passwords, security tokens, private URLs, or internal identifiers.
 
   - type: input
     attributes:
-      label: TruffleHog version
-      description: Which TruffleHog server version or commit are you using?
-      placeholder: "Run `SELECT version();` on your TruffleHog server"
+      label: Truffle version
+      description: Which Truffle server version or commit are you using?
+      placeholder: "Run `SELECT version();` on your Truffle server"
     validations:
       required: true
 

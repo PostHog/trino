@@ -14,8 +14,8 @@
     <packaging>pom</packaging>
 
     <name>${project.artifactId}</name>
-    <description>TruffleHog</description>
-    <url>https://github.com/PostHog/trufflehog</url>
+    <description>Truffle</description>
+    <url>https://github.com/PostHog/truffle</url>
 
     <inceptionYear>2012</inceptionYear>
 
