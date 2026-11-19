@@ -80,7 +80,9 @@ The client keeps at most 10,000 tokens and shares them with no other node.
 The issuer checks the login when it grants the token, not for each reusing request.
 A change at the issuer reaches new statements at most one reuse period later.
 A reused token has less time left, so a statement can count on the token lifetime less the reuse period.
-A changed password is refused by password authentication before reuse.
+A changed password is refused by password authentication once the coordinator has the change.
+Until the password file is reloaded, the old password can still start statements on a kept token.
+Without reuse, the issuer refuses it in that window.
 
 ## Authenticated selection
 
