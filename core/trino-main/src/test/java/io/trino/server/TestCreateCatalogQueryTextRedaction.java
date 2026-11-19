@@ -36,7 +36,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-import static io.airlift.http.client.JsonResponseHandler.createJsonResponseHandler;
 import static io.airlift.http.client.Request.Builder.prepareGet;
 import static io.airlift.http.client.Request.Builder.preparePost;
 import static io.airlift.http.client.StaticBodyGenerator.createStaticBodyGenerator;
@@ -46,6 +45,7 @@ import static io.trino.client.ProtocolHeaders.TRINO_HEADERS;
 import static io.trino.execution.CatalogPropertyRedaction.REDACTED_STATEMENT;
 import static io.trino.server.TestQueryResource.QUERY_RESULTS_JSON_CODEC;
 import static io.trino.server.TestQueryResource.REQUEST_USER_HEADER;
+import static io.trino.server.TrinoJsonResponseHandler.createTrinoJsonResponseHandler;
 import static io.trino.testing.assertions.Assert.assertEventually;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.concurrent.TimeUnit.SECONDS;
@@ -259,14 +259,14 @@ public class TestCreateCatalogQueryTextRedaction
         if (preparedStatement != null) {
             builder.setHeader(PREPARED_STATEMENT_HEADER, preparedStatement);
         }
-        QueryResults results = client.execute(builder.build(), createJsonResponseHandler(QUERY_RESULTS_JSON_CODEC));
+        QueryResults results = client.execute(builder.build(), createTrinoJsonResponseHandler(QUERY_RESULTS_JSON_CODEC));
         while (results.getNextUri() != null) {
             results = client.execute(
                     prepareGet()
                             .setHeader(REQUEST_USER_HEADER, "user")
                             .setUri(results.getNextUri())
                             .build(),
-                    createJsonResponseHandler(QUERY_RESULTS_JSON_CODEC));
+                    createTrinoJsonResponseHandler(QUERY_RESULTS_JSON_CODEC));
         }
         return results;
     }
