@@ -589,6 +589,64 @@ class TestTrinoCallerTokenClient
     }
 
     @Test
+    void testConcurrentRequestsShareOneReplacementGrant(@TempDir Path directory)
+            throws Exception
+    {
+        Path file = Files.writeString(directory.resolve("cell-token"), "synthetic-cell-token");
+        var requests = new AtomicInteger();
+        var ticker = new TestingTicker();
+        var release = new CountDownLatch(1);
+        ExecutorService executor = newFixedThreadPool(8);
+        try (var httpClient = new TestingHttpClient(_ -> {
+            if (requests.get() >= 1) {
+                release.await();
+            }
+            return numberedToken(requests, 40);
+        })) {
+            // Reuse ends at half the lifetime, before the entry itself expires
+            var client = new TrinoCallerTokenClient(httpClient, config(file).setReusePeriod(new Duration(60, SECONDS)), ticker);
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-1");
+            ticker.increment(20, SECONDS);
+            List<Future<String>> tokens = new ArrayList<>();
+            for (int i = 0; i < 8; i++) {
+                tokens.add(executor.submit(() -> client.acquire(LOGIN, PASSWORD)));
+                // Each caller sees the ended entry, or the replacement in flight, in turn
+                Thread.sleep(50);
+            }
+            release.countDown();
+            for (Future<String> token : tokens) {
+                assertThat(token.get(10, SECONDS)).isEqualTo("token-2");
+            }
+            assertThat(requests.get()).isEqualTo(2);
+        }
+        finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void testReuseIsCountedFromBeforeTheRequest(@TempDir Path directory)
+            throws IOException
+    {
+        Path file = Files.writeString(directory.resolve("cell-token"), "synthetic-cell-token");
+        var requests = new AtomicInteger();
+        var ticker = new TestingTicker();
+        try (var httpClient = new TestingHttpClient(_ -> {
+            // The issuer takes four seconds to answer
+            ticker.increment(4, SECONDS);
+            return numberedToken(requests, 900);
+        })) {
+            var client = new TrinoCallerTokenClient(httpClient, config(file).setReusePeriod(new Duration(60, SECONDS)), ticker);
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-1");
+            ticker.increment(55, SECONDS);
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-1");
+            ticker.increment(1, SECONDS);
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-2");
+        }
+    }
+
+    @Test
     void testReusableEntryHoldsNoEvidence(@TempDir Path directory)
             throws Exception
     {

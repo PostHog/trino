@@ -156,7 +156,9 @@ public final class TrinoCallerTokenClient
                 if (ticker.read() - held.reusableUntilNanos() < 0) {
                     return held.token();
                 }
-                tokens.invalidate(evidence);
+                // Only the entry this call saw: a concurrent call may already hold or
+                // be loading its replacement, which must stay shared
+                tokens.asMap().remove(evidence, held);
             }
             // The loader holds the password only for the grant request. A token that
             // this call or a concurrent one was just granted is returned as it is.
@@ -213,6 +215,8 @@ public final class TrinoCallerTokenClient
                 throw new AcquisitionException();
             }
             String cellToken = readCellToken();
+            // Reuse is counted from before the request: the issuer's checks are no later
+            long requestedNanos = ticker.read();
             // Streaming content cannot rewind. The transport must not replay password evidence.
             try (var body = new ByteArrayInputStream(formBytes)) {
                 Request request = preparePost()
@@ -231,7 +235,7 @@ public final class TrinoCallerTokenClient
                 Grant grant = httpClient.execute(request, new GrantResponseHandler(toIntExact(maxResponseSize.toBytes())));
                 // Never past half of the lifetime the issuer stated
                 long reusableNanos = Math.min(reusePeriodNanos, SECONDS.toNanos(grant.expiresInSeconds()) / 2);
-                return new ReusableToken(grant.token(), ticker.read() + reusableNanos);
+                return new ReusableToken(grant.token(), requestedNanos + reusableNanos);
             }
         }
         catch (IOException | RuntimeException _) {
