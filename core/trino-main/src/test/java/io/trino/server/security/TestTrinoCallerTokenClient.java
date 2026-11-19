@@ -16,14 +16,17 @@ package io.trino.server.security;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableListMultimap;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.hash.HashCode;
 import com.sun.net.httpserver.HttpServer;
 import io.airlift.http.client.HeaderName;
 import io.airlift.http.client.HttpClientConfig;
 import io.airlift.http.client.HttpStatus;
+import io.airlift.http.client.Response;
 import io.airlift.http.client.StreamingBodyGenerator;
 import io.airlift.http.client.jetty.JettyHttpClient;
 import io.airlift.http.client.testing.TestingHttpClient;
 import io.airlift.http.client.testing.TestingResponse;
+import io.airlift.testing.TestingTicker;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.server.security.TrinoCallerTokenClient.AcquisitionException;
@@ -32,14 +35,21 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.lang.reflect.RecordComponent;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.GZIPOutputStream;
@@ -49,10 +59,12 @@ import static io.airlift.http.client.HeaderNames.ACCEPT_ENCODING;
 import static io.airlift.http.client.HeaderNames.AUTHORIZATION;
 import static io.airlift.http.client.HeaderNames.CONTENT_ENCODING;
 import static io.airlift.http.client.HeaderNames.CONTENT_TYPE;
+import static io.airlift.http.client.HttpStatus.BAD_REQUEST;
 import static io.airlift.http.client.HttpStatus.OK;
 import static io.airlift.http.client.HttpVersion.HTTP_1;
 import static io.airlift.http.client.testing.TestingResponse.mockResponse;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.concurrent.Executors.newFixedThreadPool;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -448,6 +460,228 @@ class TestTrinoCallerTokenClient
         finally {
             server.stop(0);
         }
+    }
+
+    @Test
+    void testNoReuseByDefault(@TempDir Path directory)
+            throws IOException
+    {
+        Path file = Files.writeString(directory.resolve("cell-token"), "synthetic-cell-token");
+        var requests = new AtomicInteger();
+        try (var httpClient = new TestingHttpClient(_ -> numberedToken(requests, 900))) {
+            var client = new TrinoCallerTokenClient(httpClient, config(file));
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-1");
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-2");
+            assertThat(client.reusableEntries()).isEmpty();
+        }
+    }
+
+    @Test
+    void testReuseForTheSameEvidenceOnly(@TempDir Path directory)
+            throws IOException
+    {
+        Path file = Files.writeString(directory.resolve("cell-token"), "synthetic-cell-token");
+        var requests = new AtomicInteger();
+        var ticker = new TestingTicker();
+        try (var httpClient = new TestingHttpClient(_ -> numberedToken(requests, 900))) {
+            var client = new TrinoCallerTokenClient(httpClient, config(file).setReusePeriod(new Duration(60, SECONDS)), ticker);
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-1");
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-1");
+            assertThat(requests.get()).isEqualTo(1);
+
+            // Another password, another login, and a login and password that join to the same text
+            assertThat(client.acquire(LOGIN, PASSWORD + "x")).isEqualTo("token-2");
+            assertThat(client.acquire(LOGIN + "x", PASSWORD)).isEqualTo("token-3");
+            assertThat(client.acquire(LOGIN + PASSWORD.substring(0, 1), PASSWORD.substring(1))).isEqualTo("token-4");
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-1");
+            assertThat(requests.get()).isEqualTo(4);
+
+            ticker.increment(59, SECONDS);
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-1");
+            ticker.increment(1, SECONDS);
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-5");
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-5");
+            assertThat(requests.get()).isEqualTo(5);
+        }
+    }
+
+    @Test
+    void testReuseEndsAtHalfTheStatedLifetime(@TempDir Path directory)
+            throws IOException
+    {
+        Path file = Files.writeString(directory.resolve("cell-token"), "synthetic-cell-token");
+        var requests = new AtomicInteger();
+        var ticker = new TestingTicker();
+        try (var httpClient = new TestingHttpClient(_ -> numberedToken(requests, 40))) {
+            var client = new TrinoCallerTokenClient(httpClient, config(file).setReusePeriod(new Duration(60, SECONDS)), ticker);
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-1");
+            ticker.increment(19, SECONDS);
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-1");
+            ticker.increment(1, SECONDS);
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-2");
+        }
+        // A lifetime of one second is reused for half of it
+        requests.set(0);
+        try (var httpClient = new TestingHttpClient(_ -> numberedToken(requests, 1))) {
+            var client = new TrinoCallerTokenClient(httpClient, config(file).setReusePeriod(new Duration(60, SECONDS)), ticker);
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-1");
+            ticker.increment(499, MILLISECONDS);
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-1");
+            ticker.increment(1, MILLISECONDS);
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-2");
+        }
+    }
+
+    @Test
+    void testFailedGrantIsNotKept(@TempDir Path directory)
+            throws IOException
+    {
+        Path file = Files.writeString(directory.resolve("cell-token"), "synthetic-cell-token");
+        var requests = new AtomicInteger();
+        try (var httpClient = new TestingHttpClient(_ -> {
+            if (requests.incrementAndGet() <= 2) {
+                return mockResponse(BAD_REQUEST, JSON_UTF_8, "{\"error\":\"invalid_grant\"}");
+            }
+            return mockResponse(OK, JSON_UTF_8, SUCCESS);
+        })) {
+            var client = new TrinoCallerTokenClient(httpClient, config(file).setReusePeriod(new Duration(60, SECONDS)), new TestingTicker());
+            assertSanitizedFailure(client);
+            assertSanitizedFailure(client);
+            assertThat(client.reusableEntries()).isEmpty();
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("synthetic-opaque-token");
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("synthetic-opaque-token");
+            assertThat(requests.get()).isEqualTo(3);
+        }
+    }
+
+    @Test
+    void testConcurrentRequestsShareOneGrant(@TempDir Path directory)
+            throws Exception
+    {
+        Path file = Files.writeString(directory.resolve("cell-token"), "synthetic-cell-token");
+        var requests = new AtomicInteger();
+        var granting = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        ExecutorService executor = newFixedThreadPool(8);
+        try (var httpClient = new TestingHttpClient(_ -> {
+            granting.countDown();
+            release.await();
+            return numberedToken(requests, 900);
+        })) {
+            var client = new TrinoCallerTokenClient(httpClient, config(file).setReusePeriod(new Duration(60, SECONDS)), new TestingTicker());
+            List<Future<String>> tokens = new ArrayList<>();
+            for (int i = 0; i < 8; i++) {
+                tokens.add(executor.submit(() -> client.acquire(LOGIN, PASSWORD)));
+            }
+            assertThat(granting.await(10, SECONDS)).isTrue();
+            // Let the other callers reach the grant that is in flight
+            Thread.sleep(200);
+            release.countDown();
+            for (Future<String> token : tokens) {
+                assertThat(token.get(10, SECONDS)).isEqualTo("token-1");
+            }
+            assertThat(requests.get()).isEqualTo(1);
+        }
+        finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void testConcurrentRequestsShareOneReplacementGrant(@TempDir Path directory)
+            throws Exception
+    {
+        Path file = Files.writeString(directory.resolve("cell-token"), "synthetic-cell-token");
+        var requests = new AtomicInteger();
+        var ticker = new TestingTicker();
+        var release = new CountDownLatch(1);
+        ExecutorService executor = newFixedThreadPool(8);
+        try (var httpClient = new TestingHttpClient(_ -> {
+            if (requests.get() >= 1) {
+                release.await();
+            }
+            return numberedToken(requests, 40);
+        })) {
+            // Reuse ends at half the lifetime, before the entry itself expires
+            var client = new TrinoCallerTokenClient(httpClient, config(file).setReusePeriod(new Duration(60, SECONDS)), ticker);
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-1");
+            ticker.increment(20, SECONDS);
+            List<Future<String>> tokens = new ArrayList<>();
+            for (int i = 0; i < 8; i++) {
+                tokens.add(executor.submit(() -> client.acquire(LOGIN, PASSWORD)));
+                // Each caller sees the ended entry, or the replacement in flight, in turn
+                Thread.sleep(50);
+            }
+            release.countDown();
+            for (Future<String> token : tokens) {
+                assertThat(token.get(10, SECONDS)).isEqualTo("token-2");
+            }
+            assertThat(requests.get()).isEqualTo(2);
+        }
+        finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void testReuseIsCountedFromBeforeTheRequest(@TempDir Path directory)
+            throws IOException
+    {
+        Path file = Files.writeString(directory.resolve("cell-token"), "synthetic-cell-token");
+        var requests = new AtomicInteger();
+        var ticker = new TestingTicker();
+        try (var httpClient = new TestingHttpClient(_ -> {
+            // The issuer takes four seconds to answer
+            ticker.increment(4, SECONDS);
+            return numberedToken(requests, 900);
+        })) {
+            var client = new TrinoCallerTokenClient(httpClient, config(file).setReusePeriod(new Duration(60, SECONDS)), ticker);
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-1");
+            ticker.increment(55, SECONDS);
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-1");
+            ticker.increment(1, SECONDS);
+            assertThat(client.acquire(LOGIN, PASSWORD)).isEqualTo("token-2");
+        }
+    }
+
+    @Test
+    void testReusableEntryHoldsNoEvidence(@TempDir Path directory)
+            throws Exception
+    {
+        Path file = Files.writeString(directory.resolve("cell-token"), "synthetic-cell-token");
+        try (var httpClient = new TestingHttpClient(_ -> mockResponse(OK, JSON_UTF_8, SUCCESS))) {
+            var client = new TrinoCallerTokenClient(httpClient, config(file).setReusePeriod(new Duration(60, SECONDS)), new TestingTicker());
+            client.acquire(LOGIN, PASSWORD);
+            assertThat(client.reusableEntries()).hasSize(2);
+            Set<String> fields = new HashSet<>();
+            for (Object entry : client.reusableEntries()) {
+                assertThat(entry.getClass().isRecord()).isTrue();
+                assertThat(entry.toString()).doesNotContain(PASSWORD, LOGIN, "synthetic-opaque-token");
+                for (RecordComponent component : entry.getClass().getRecordComponents()) {
+                    fields.add(component.getName());
+                    component.getAccessor().setAccessible(true);
+                    Object value = component.getAccessor().invoke(entry);
+                    assertThat(String.valueOf(value)).doesNotContain(PASSWORD);
+                    if (value instanceof HashCode identifier) {
+                        assertThat(identifier.bits()).isEqualTo(256);
+                    }
+                }
+            }
+            assertThat(fields).containsExactlyInAnyOrder("login", "identifier", "token", "reusableUntilNanos");
+
+            // Another client has another key: the same evidence gives another identifier
+            var other = new TrinoCallerTokenClient(httpClient, config(file).setReusePeriod(new Duration(60, SECONDS)), new TestingTicker());
+            other.acquire(LOGIN, PASSWORD);
+            assertThat(other.reusableEntries()).doesNotContainAnyElementsOf(
+                    client.reusableEntries().stream().filter(entry -> entry.getClass().getSimpleName().equals("Evidence")).toList());
+        }
+    }
+
+    private static Response numberedToken(AtomicInteger requests, int expiresIn)
+    {
+        return mockResponse(OK, JSON_UTF_8, "{\"access_token\":\"token-" + requests.incrementAndGet() + "\",\"token_type\":\"Bearer\",\"expires_in\":" + expiresIn + "}");
     }
 
     private static TrinoCallerTokenConfig config(Path file)

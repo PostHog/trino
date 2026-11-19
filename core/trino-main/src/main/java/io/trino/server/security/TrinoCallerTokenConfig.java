@@ -39,6 +39,7 @@ public class TrinoCallerTokenConfig
     private Duration timeout = new Duration(5, SECONDS);
     private DataSize maxResponseSize = DataSize.of(64, KILOBYTE);
     private boolean allowInsecureHttpForDevelopment;
+    private Duration reusePeriod = new Duration(0, SECONDS);
 
     public boolean isEnabled()
     {
@@ -121,6 +122,22 @@ public class TrinoCallerTokenConfig
     public TrinoCallerTokenConfig setAllowInsecureHttpForDevelopment(boolean allowInsecureHttpForDevelopment)
     {
         this.allowInsecureHttpForDevelopment = allowInsecureHttpForDevelopment;
+        return this;
+    }
+
+    @NotNull
+    @MinDuration("0s")
+    @MaxDuration("5m")
+    public Duration getReusePeriod()
+    {
+        return reusePeriod;
+    }
+
+    @Config("http-server.authentication.password.caller-token.reuse-period")
+    @ConfigDescription("Time a token is reused for the same login and password; zero acquires a token for every request")
+    public TrinoCallerTokenConfig setReusePeriod(Duration reusePeriod)
+    {
+        this.reusePeriod = reusePeriod;
         return this;
     }
 

@@ -17,6 +17,12 @@ import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.core.StreamReadFeature;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Ticker;
+import com.google.common.cache.Cache;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.hash.HashCode;
+import com.google.common.hash.HashFunction;
 import com.google.common.net.MediaType;
 import com.google.inject.Inject;
 import io.airlift.http.client.HttpClient;
@@ -25,17 +31,24 @@ import io.airlift.http.client.Response;
 import io.airlift.http.client.ResponseHandler;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
+import io.trino.cache.EvictableCacheBuilder;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.math.BigInteger;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.SecureRandom;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 import static com.fasterxml.jackson.core.JsonFactory.Feature.CANONICALIZE_FIELD_NAMES;
+import static com.google.common.hash.Hashing.hmacSha256;
 import static io.airlift.http.client.HeaderNames.ACCEPT;
 import static io.airlift.http.client.HeaderNames.ACCEPT_ENCODING;
 import static io.airlift.http.client.HeaderNames.AUTHORIZATION;
@@ -44,16 +57,21 @@ import static io.airlift.http.client.HeaderNames.CONTENT_TYPE;
 import static io.airlift.http.client.HttpVersion.HTTP_1;
 import static io.airlift.http.client.Request.Builder.preparePost;
 import static io.airlift.http.client.StreamingBodyGenerator.streamingBodyGenerator;
+import static io.trino.cache.CacheUtils.uncheckedCacheGet;
 import static java.lang.Math.toIntExact;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 public final class TrinoCallerTokenClient
 {
     private static final String GRANT_TYPE = "urn:posthog:params:oauth:grant-type:trino-login";
     private static final int MAX_CELL_TOKEN_FILE_SIZE = 16 * 1024;
     private static final int MAX_GRANT_REQUEST_SIZE = 16 * 1024;
+    private static final int MAX_REUSED_TOKENS = 10_000;
+    private static final BigInteger MAX_EXPIRES_IN = BigInteger.valueOf(Integer.MAX_VALUE);
     private static final Pattern BEARER_CREDENTIAL = Pattern.compile("[A-Za-z0-9._~+/-]+=*");
     private static final MediaType FORM = MediaType.create("application", "x-www-form-urlencoded").withCharset(UTF_8);
     private static final MediaType JSON = MediaType.create("application", "json");
@@ -68,9 +86,20 @@ public final class TrinoCallerTokenClient
     private final Path cellTokenFile;
     private final Duration timeout;
     private final DataSize maxResponseSize;
+    private final long reusePeriodNanos;
+    private final Ticker ticker;
+    // Present only with a reuse period. A key holds no password, see evidence().
+    private final Optional<Cache<Evidence, ReusableToken>> reusableTokens;
+    private final HashFunction evidenceHasher;
 
     @Inject
     public TrinoCallerTokenClient(@ForTrinoCallerTokens HttpClient httpClient, TrinoCallerTokenConfig config)
+    {
+        this(httpClient, config, Ticker.systemTicker());
+    }
+
+    @VisibleForTesting
+    TrinoCallerTokenClient(HttpClient httpClient, TrinoCallerTokenConfig config, Ticker ticker)
     {
         this.httpClient = requireNonNull(httpClient, "httpClient is null");
         requireNonNull(config, "config is null");
@@ -86,13 +115,97 @@ public final class TrinoCallerTokenClient
                 maxResponseSize.toBytes() < 1 || maxResponseSize.toBytes() > 1024 * 1024) {
             throw new IllegalArgumentException("Invalid caller token bounds");
         }
+        Duration reusePeriod = requireNonNull(config.getReusePeriod(), "reusePeriod is null");
+        if (reusePeriod.getValue(MILLISECONDS) < 0 || reusePeriod.getValue(SECONDS) > 300) {
+            throw new IllegalArgumentException("Invalid caller token reuse period");
+        }
+        this.ticker = requireNonNull(ticker, "ticker is null");
+        reusePeriodNanos = reusePeriod.roundTo(NANOSECONDS);
+        evidenceHasher = createEvidenceHasher();
+        if (reusePeriodNanos == 0) {
+            reusableTokens = Optional.empty();
+        }
+        else {
+            reusableTokens = Optional.of(EvictableCacheBuilder.newBuilder()
+                    .maximumSize(MAX_REUSED_TOKENS)
+                    .expireAfterWrite(reusePeriodNanos, NANOSECONDS)
+                    .ticker(ticker)
+                    .build());
+        }
     }
 
+    /**
+     * A token for this login and password. The caller has verified both for the
+     * current request. With a reuse period, a token granted for the same login and
+     * password is returned while it is reusable, and concurrent callers share one
+     * grant request. A failed grant is never kept.
+     */
     public String acquire(String verifiedQualifiedLogin, String requestPassword)
     {
         if (!enabled || verifiedQualifiedLogin == null || verifiedQualifiedLogin.isEmpty() || requestPassword == null || requestPassword.isEmpty()) {
             throw new AcquisitionException();
         }
+        if (reusableTokens.isEmpty()) {
+            return request(verifiedQualifiedLogin, requestPassword).token();
+        }
+        Cache<Evidence, ReusableToken> tokens = reusableTokens.get();
+        try {
+            Evidence evidence = evidence(verifiedQualifiedLogin, requestPassword);
+            ReusableToken held = tokens.getIfPresent(evidence);
+            if (held != null) {
+                if (ticker.read() - held.reusableUntilNanos() < 0) {
+                    return held.token();
+                }
+                // Only the entry this call saw: a concurrent call may already hold or
+                // be loading its replacement, which must stay shared
+                tokens.asMap().remove(evidence, held);
+            }
+            // The loader holds the password only for the grant request. A token that
+            // this call or a concurrent one was just granted is returned as it is.
+            return uncheckedCacheGet(tokens, evidence, () -> request(verifiedQualifiedLogin, requestPassword)).token();
+        }
+        catch (RuntimeException _) {
+            // Do not retain the loader's failure.
+            throw new AcquisitionException();
+        }
+    }
+
+    @VisibleForTesting
+    Set<Object> reusableEntries()
+    {
+        return reusableTokens.map(tokens -> ImmutableSet.<Object>builder()
+                        .addAll(tokens.asMap().keySet())
+                        .addAll(tokens.asMap().values())
+                        .build())
+                .orElse(ImmutableSet.of());
+    }
+
+    private Evidence evidence(String login, String password)
+    {
+        // Preserve exact UTF-16 code units, including unpaired surrogates.
+        // Length prefixes separate the login from the password.
+        return new Evidence(login, evidenceHasher.newHasher()
+                .putInt(login.length())
+                .putUnencodedChars(login)
+                .putInt(password.length())
+                .putUnencodedChars(password)
+                .hash());
+    }
+
+    private static HashFunction createEvidenceHasher()
+    {
+        byte[] key = new byte[32];
+        new SecureRandom().nextBytes(key);
+        try {
+            return hmacSha256(key);
+        }
+        finally {
+            Arrays.fill(key, (byte) 0);
+        }
+    }
+
+    private ReusableToken request(String verifiedQualifiedLogin, String requestPassword)
+    {
         try {
             String form = "grant_type=" + encode(GRANT_TYPE) +
                     "&username=" + encode(verifiedQualifiedLogin) +
@@ -102,6 +215,8 @@ public final class TrinoCallerTokenClient
                 throw new AcquisitionException();
             }
             String cellToken = readCellToken();
+            // Reuse is counted from before the request: the issuer's checks are no later
+            long requestedNanos = ticker.read();
             // Streaming content cannot rewind. The transport must not replay password evidence.
             try (var body = new ByteArrayInputStream(formBytes)) {
                 Request request = preparePost()
@@ -117,7 +232,10 @@ public final class TrinoCallerTokenClient
                         .setMaxResponseContentLength(maxResponseSize)
                         .setBodyGenerator(streamingBodyGenerator(FORM, body))
                         .build();
-                return httpClient.execute(request, new GrantResponseHandler(toIntExact(maxResponseSize.toBytes())));
+                Grant grant = httpClient.execute(request, new GrantResponseHandler(toIntExact(maxResponseSize.toBytes())));
+                // Never past half of the lifetime the issuer stated
+                long reusableNanos = Math.min(reusePeriodNanos, SECONDS.toNanos(grant.expiresInSeconds()) / 2);
+                return new ReusableToken(grant.token(), requestedNanos + reusableNanos);
             }
         }
         catch (IOException | RuntimeException _) {
@@ -151,7 +269,7 @@ public final class TrinoCallerTokenClient
     }
 
     private static final class GrantResponseHandler
-            implements ResponseHandler<String, RuntimeException>
+            implements ResponseHandler<Grant, RuntimeException>
     {
         private final int maxResponseBytes;
 
@@ -161,13 +279,13 @@ public final class TrinoCallerTokenClient
         }
 
         @Override
-        public String handleException(Request request, Exception exception)
+        public Grant handleException(Request request, Exception exception)
         {
             throw new AcquisitionException();
         }
 
         @Override
-        public String handle(Request request, Response response)
+        public Grant handle(Request request, Response response)
         {
             if (response.getStatusCode() != 200) {
                 throw new AcquisitionException();
@@ -197,7 +315,7 @@ public final class TrinoCallerTokenClient
         }
     }
 
-    private static String parseToken(byte[] bytes)
+    private static Grant parseToken(byte[] bytes)
             throws IOException
     {
         try (JsonParser parser = JSON_FACTORY.createParser(bytes)) {
@@ -206,7 +324,7 @@ public final class TrinoCallerTokenClient
             }
             String accessToken = null;
             boolean bearer = false;
-            boolean positiveExpiry = false;
+            int expiresInSeconds = 0;
             while (parser.nextToken() != JsonToken.END_OBJECT) {
                 if (parser.currentToken() != JsonToken.FIELD_NAME) {
                     throw new AcquisitionException();
@@ -230,15 +348,46 @@ public final class TrinoCallerTokenClient
                         if (value != JsonToken.VALUE_NUMBER_INT || parser.getBigIntegerValue().signum() <= 0) {
                             throw new AcquisitionException();
                         }
-                        positiveExpiry = true;
+                        expiresInSeconds = parser.getBigIntegerValue().min(MAX_EXPIRES_IN).intValueExact();
                     }
                     default -> throw new AcquisitionException();
                 }
             }
-            if (accessToken == null || !BEARER_CREDENTIAL.matcher(accessToken).matches() || !bearer || !positiveExpiry || parser.nextToken() != null) {
+            if (accessToken == null || !BEARER_CREDENTIAL.matcher(accessToken).matches() || !bearer || expiresInSeconds <= 0 || parser.nextToken() != null) {
                 throw new AcquisitionException();
             }
-            return accessToken;
+            return new Grant(accessToken, expiresInSeconds);
+        }
+    }
+
+    private record Grant(String token, int expiresInSeconds)
+    {
+        @Override
+        public String toString()
+        {
+            return "Grant{redacted}";
+        }
+    }
+
+    /**
+     * What a reused token is found by: the login and a keyed MAC of the login and
+     * password. The key is random, made at startup and kept by this client only.
+     */
+    private record Evidence(String login, HashCode identifier)
+    {
+        @Override
+        public String toString()
+        {
+            return "Evidence{redacted}";
+        }
+    }
+
+    private record ReusableToken(String token, long reusableUntilNanos)
+    {
+        @Override
+        public String toString()
+        {
+            return "ReusableToken{redacted}";
         }
     }
 
