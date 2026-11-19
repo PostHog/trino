@@ -732,8 +732,9 @@ public class DuckLakePageSourceProvider
         }
         Type type = column.type();
         // Parquet only stores statistics for primitive columns; UUID statistics use a
-        // different ordering than the engine, so they are skipped conservatively
-        return !(type instanceof ArrayType) && !(type instanceof MapType) && !(type instanceof RowType) && !type.equals(UuidType.UUID);
+        // different ordering than the engine, and JSON statistics compare the text rather than
+        // the document, so both are skipped conservatively
+        return !(type instanceof ArrayType) && !(type instanceof MapType) && !(type instanceof RowType) && !type.equals(UuidType.UUID) && !DuckLakeTypes.isJson(type);
     }
 
     /**

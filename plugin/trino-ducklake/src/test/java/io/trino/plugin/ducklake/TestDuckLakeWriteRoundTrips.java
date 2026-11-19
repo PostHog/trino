@@ -425,7 +425,7 @@ final class TestDuckLakeWriteRoundTrips
                         CAST(ROW('web', 'sess-1') AS ROW("$lib" VARCHAR, "$session_id" VARCHAR)),
                         DECIMAL '123456789',
                         DECIMAL '18446744073709551615',
-                        '{"a": 1}',
+                        JSON '{"a": 1}',
                         TIMESTAMP '2026-01-01 12:34:56.123456 UTC',
                         DECIMAL '123456789012345.678',
                         UUID '11111111-2222-3333-4444-555555555555',
@@ -461,7 +461,7 @@ final class TestDuckLakeWriteRoundTrips
                             "{'$lib': web, '$session_id': sess-1}",
                             "123456789",
                             "18446744073709551615",
-                            "{\"a\": 1}",
+                            "{\"a\":1}",
                             "2026-01-01 12:34:56.123456+00",
                             "123456789012345.678",
                             "11111111-2222-3333-4444-555555555555",
@@ -493,7 +493,7 @@ final class TestDuckLakeWriteRoundTrips
                         ('context', 'row("$lib" varchar, "$session_id" varchar)'),
                         ('c_hugeint', 'decimal(38,0)'),
                         ('c_ubigint', 'decimal(20,0)'),
-                        ('c_json', 'varchar'),
+                        ('c_json', 'json'),
                         ('c_timestamptz', 'timestamp(6) with time zone'),
                         ('c_decimal', 'decimal(18,3)'),
                         ('c_uuid', 'uuid'),
@@ -511,7 +511,7 @@ final class TestDuckLakeWriteRoundTrips
                                 VARCHAR 'pageview', VARCHAR 'stripe', VARCHAR 'web', VARCHAR 'sess-1',
                                 CAST(DECIMAL '123456789' AS DECIMAL(38, 0)),
                                 CAST(DECIMAL '18446744073709551615' AS DECIMAL(20, 0)),
-                                VARCHAR '{"a": 1}',
+                                JSON '{"a": 1}',
                                 TIMESTAMP '2026-01-01 12:34:56.123456 UTC',
                                 CAST(DECIMAL '123456789012345.678' AS DECIMAL(18, 3)),
                                 UUID '11111111-2222-3333-4444-555555555555',
@@ -519,7 +519,7 @@ final class TestDuckLakeWriteRoundTrips
                                 10)""");
             assertThat(query(
                     """
-                    SELECT props.tier, context."$lib", c_hugeint, c_ubigint, c_json, c_timestamptz, c_decimal, c_uuid, c_list, c_map['k3']
+                    SELECT props.tier, context."$lib", c_hugeint, c_ubigint, json_format(c_json), c_timestamptz, c_decimal, c_uuid, c_list, c_map['k3']
                     FROM %s WHERE id = 2""".formatted(table)))
                     .matches(
                             """

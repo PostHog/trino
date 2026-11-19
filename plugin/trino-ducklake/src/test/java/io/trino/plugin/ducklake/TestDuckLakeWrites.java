@@ -171,6 +171,132 @@ final class TestDuckLakeWrites
         }
     }
 
+    /**
+     * A {@code JSON} column is stored the way DuckDB stores one: DuckLake type {@code json}, its
+     * values written as JSON text under the Parquet JSON annotation, so DuckDB reads back the same
+     * documents. It reads back as {@code JSON}, so the table keeps accepting the values it was
+     * created from.
+     */
+    @Test
+    void testJsonColumnRoundTripsThroughDuckDb()
+    {
+        String table = "json_" + randomNameSuffix();
+        assertUpdate(
+                """
+                CREATE TABLE %s AS SELECT * FROM (VALUES
+                    (1, JSON '{"b": 1, "a": {"c": [1, 2, null]}}'),
+                    (2, JSON '[1, "two", {"three": 3}]'),
+                    (3, JSON '"héllo ☃"'),
+                    (4, JSON 'null'),
+                    (5, CAST(NULL AS JSON)),
+                    (6, CAST(MAP(ARRAY['k'], ARRAY[1]) AS JSON))) AS v(id, doc)""".formatted(table),
+                6);
+        try {
+            assertThat(duckDbRows("SELECT column_type FROM __ducklake_metadata_lake.ducklake_column c "
+                    + "JOIN __ducklake_metadata_lake.ducklake_table t USING (table_id) "
+                    + "WHERE t.table_name = '" + table + "' AND t.end_snapshot IS NULL AND c.column_name = 'doc'"))
+                    .isEqualTo(List.of("json"));
+            String file = duckDbScalar("SELECT data_file FROM ducklake_list_files('lake', '" + table + "')");
+            assertThat(duckDbRows("SELECT type, converted_type, logical_type FROM parquet_schema('" + file + "') WHERE name = 'doc'"))
+                    .isEqualTo(List.of("BYTE_ARRAY", "JSON", "JsonType()"));
+            // the bounds are recorded as text, as DuckDB records them for a json column
+            assertThat(duckDbRows("SELECT s.min_value, s.max_value, s.null_count::VARCHAR FROM __ducklake_metadata_lake.ducklake_file_column_stats s "
+                    + "JOIN __ducklake_metadata_lake.ducklake_table t USING (table_id) WHERE t.table_name = '" + table + "' AND s.column_id = 2"))
+                    .isEqualTo(List.of("\"héllo ☃\"", "{\"k\":1}", "1"));
+
+            assertUpdate("INSERT INTO %s VALUES (7, JSON '{\"x\": \"ü\"}'), (8, CAST(NULL AS JSON))".formatted(table), 2);
+
+            assertThat(duckDbRows("SELECT id, typeof(doc), doc, json_type(doc) FROM " + table + " ORDER BY id"))
+                    .isEqualTo(List.of(
+                            "1",
+                            "JSON",
+                            "{\"b\":1,\"a\":{\"c\":[1,2,null]}}",
+                            "OBJECT",
+                            "2",
+                            "JSON",
+                            "[1,\"two\",{\"three\":3}]",
+                            "ARRAY",
+                            "3",
+                            "JSON",
+                            "\"héllo ☃\"",
+                            "VARCHAR",
+                            "4",
+                            "JSON",
+                            "null",
+                            "NULL",
+                            "5",
+                            "JSON",
+                            "<null>",
+                            "<null>",
+                            "6",
+                            "JSON",
+                            "{\"k\":1}",
+                            "OBJECT",
+                            "7",
+                            "JSON",
+                            "{\"x\":\"ü\"}",
+                            "OBJECT",
+                            "8",
+                            "JSON",
+                            "<null>",
+                            "<null>"));
+            // the merged table statistics still cover both files
+            assertThat(duckDbRows("SELECT s.min_value, s.max_value FROM __ducklake_metadata_lake.ducklake_table_column_stats s "
+                    + "JOIN __ducklake_metadata_lake.ducklake_table t USING (table_id) WHERE t.table_name = '" + table + "' AND s.column_id = 2"))
+                    .isEqualTo(List.of("\"héllo ☃\"", "{\"x\":\"ü\"}"));
+
+            assertQuery("SELECT data_type FROM information_schema.columns WHERE table_name = '" + table + "' AND column_name = 'doc'", "VALUES 'json'");
+            assertThat(query("SELECT id, json_format(doc) FROM " + table))
+                    .matches(
+                            """
+                            VALUES
+                                (1, VARCHAR '{"b":1,"a":{"c":[1,2,null]}}'),
+                                (2, VARCHAR '[1,"two",{"three":3}]'),
+                                (3, VARCHAR '"héllo ☃"'),
+                                (4, VARCHAR 'null'),
+                                (5, CAST(NULL AS VARCHAR)),
+                                (6, VARCHAR '{"k":1}'),
+                                (7, VARCHAR '{"x":"ü"}'),
+                                (8, CAST(NULL AS VARCHAR))""");
+            assertThat(query("SELECT json_extract_scalar(doc, '$.a.c[1]') FROM " + table + " WHERE id = 1"))
+                    .matches("VALUES VARCHAR '2'");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
+    /**
+     * {@code JSON} inside an array, a row or a map is stored as a {@code json} field and written
+     * as text too.
+     */
+    @Test
+    void testNestedJsonRoundTripsThroughDuckDb()
+    {
+        String table = "json_nested_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + table + " (id INTEGER, docs ARRAY(JSON), r ROW(a INTEGER, j JSON), m MAP(VARCHAR, JSON))");
+        try {
+            assertUpdate(
+                    """
+                    INSERT INTO %s VALUES
+                        (1, ARRAY[JSON '{"a": 1}', NULL], ROW(5, JSON '[1, "ü"]'), MAP(ARRAY['k'], ARRAY[JSON '{"v": true}'])),
+                        (2, NULL, NULL, NULL)""".formatted(table),
+                    2);
+
+            assertThat(duckDbRows("SELECT typeof(docs), typeof(r), typeof(m) FROM " + table + " WHERE id = 1"))
+                    .isEqualTo(List.of("JSON[]", "STRUCT(a INTEGER, j JSON)", "MAP(VARCHAR, JSON)"));
+            assertThat(duckDbRows("SELECT docs[1], r.j, m['k'] FROM " + table + " WHERE id = 1"))
+                    .isEqualTo(List.of("{\"a\":1}", "[1,\"ü\"]", "{\"v\":true}"));
+            assertThat(duckDbScalar("SELECT count(*) FROM " + table + " WHERE docs IS NULL AND r IS NULL AND m IS NULL")).isEqualTo("1");
+
+            assertThat(query("SELECT json_format(docs[1]), docs[2], r.a, json_format(r.j), json_format(m['k']) FROM " + table + " WHERE id = 1"))
+                    .matches("VALUES (VARCHAR '{\"a\":1}', CAST(NULL AS JSON), 5, VARCHAR '[1,\"ü\"]', VARCHAR '{\"v\":true}')");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + table);
+        }
+    }
+
     @Test
     void testCreateTableAsSelect()
     {

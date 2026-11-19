@@ -94,6 +94,7 @@ import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.VarcharType;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import jakarta.annotation.Nullable;
@@ -147,6 +148,7 @@ import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TinyintType.TINYINT;
+import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
@@ -174,6 +176,7 @@ public class DuckLakeMetadata
     private final DuckLakeWriterFactory writerFactory;
     private final FileFormatDataSourceStats fileFormatDataSourceStats;
     private final ParquetReaderOptions parquetReaderOptions;
+    private final TypeManager typeManager;
 
     @GuardedBy("this")
     private Long snapshotId;
@@ -190,9 +193,11 @@ public class DuckLakeMetadata
             ParquetReaderOptions parquetReaderOptions,
             boolean addFilesProcedureEnabled,
             int addFilesMaxConcurrentFileReads,
-            DuckLakeRangeReplacement rangeReplacement)
+            DuckLakeRangeReplacement rangeReplacement,
+            TypeManager typeManager)
     {
         this.metastore = requireNonNull(metastore, "metastore is null");
+        this.typeManager = requireNonNull(typeManager, "typeManager is null");
         this.dataPath = requireNonNull(dataPath, "dataPath is null");
         this.addFilesProcedureEnabled = addFilesProcedureEnabled;
         this.addFilesMaxConcurrentFileReads = addFilesMaxConcurrentFileReads;
@@ -932,7 +937,7 @@ public class DuckLakeMetadata
             verifyNoInlinedRows(table, "replacing rows");
         }
         handle.replacementRange().ifPresent(range -> verifyNoInlinedRowsInRange(table, range));
-        List<DuckLakeWriteColumn> columns = DuckLakeColumns.fromCatalog(metastore.columns(table.snapshotId(), table.tableId()));
+        List<DuckLakeWriteColumn> columns = DuckLakeColumns.fromCatalog(metastore.columns(table.snapshotId(), table.tableId()), typeManager);
         DuckLakeWriteTarget target = new DuckLakeWriteTarget(table.schemaTableName(), table.tableId(), table.tableLocation(), columns, writePartitioningOf(table));
         List<DuckLakeFileImporter.ImportedFile> imported = DuckLakeFileImporter.readFiles(
                 fileSystemFactory.create(session), dataPath, handle, columns, target.partitioning(), parquetReaderOptions, fileFormatDataSourceStats, addFilesMaxConcurrentFileReads);
@@ -1227,7 +1232,7 @@ public class DuckLakeMetadata
     public ConnectorInsertTableHandle beginInsert(ConnectorSession session, ConnectorTableHandle tableHandle, List<ColumnHandle> columns, RetryMode retryMode)
     {
         DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
-        List<DuckLakeWriteColumn> writeColumns = DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId()));
+        List<DuckLakeWriteColumn> writeColumns = DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId()), typeManager);
         Set<Long> insertedColumnIds = columns.stream()
                 .map(DuckLakeColumnHandle.class::cast)
                 .map(DuckLakeColumnHandle::columnId)
@@ -1412,8 +1417,10 @@ public class DuckLakeMetadata
         if (existing.isEmpty() || added.isEmpty()) {
             return Optional.empty();
         }
-        Optional<Object> existingValue = StatsValueParser.parse(type, existing.get());
-        Optional<Object> addedValue = StatsValueParser.parse(type, added.get());
+        // JSON bounds are the text of the documents, compared as strings like DuckDB compares them
+        Type boundType = DuckLakeTypes.isJson(type) ? VARCHAR : type;
+        Optional<Object> existingValue = StatsValueParser.parse(boundType, existing.get());
+        Optional<Object> addedValue = StatsValueParser.parse(boundType, added.get());
         if (existingValue.isEmpty() || addedValue.isEmpty()) {
             return Optional.empty();
         }
@@ -1451,7 +1458,7 @@ public class DuckLakeMetadata
         DuckLakeTableHandle handle = (DuckLakeTableHandle) tableHandle;
         // DELETE, UPDATE and MERGE all come through here
         verifyNoInlinedData(handle, "modifying rows");
-        List<DuckLakeWriteColumn> writeColumns = DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId()));
+        List<DuckLakeWriteColumn> writeColumns = DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId()), typeManager);
         return new DuckLakeMergeTableHandle(
                 handle,
                 new DuckLakeWriteTarget(
@@ -1849,7 +1856,7 @@ public class DuckLakeMetadata
         if (partitionInfo.isEmpty()) {
             return Optional.empty();
         }
-        List<DuckLakeWriteColumn> columns = DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId()));
+        List<DuckLakeWriteColumn> columns = DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId()), typeManager);
         ImmutableList.Builder<DuckLakePartitioning.Field> fields = ImmutableList.builder();
         for (DuckLakePartitionColumn partitionColumn : partitionInfo.get().columns()) {
             int channel = -1;
@@ -1880,7 +1887,7 @@ public class DuckLakeMetadata
     {
         Optional<DuckLakePartitioning> partitioning = partitioningOf(handle);
         if (partitioning.isPresent()) {
-            List<DuckLakeWriteColumn> columns = DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId()));
+            List<DuckLakeWriteColumn> columns = DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId()), typeManager);
             for (DuckLakePartitioning.Field field : partitioning.get().fields()) {
                 DuckLakeWriteColumn column = columns.get(field.sourceChannel());
                 DuckLakeWritePartitioner.validateTransform(field.transform(), column.name(), column.type());
@@ -2206,7 +2213,7 @@ public class DuckLakeMetadata
         List<String> partitionKeys = (List<String>) properties.get(DuckLakeTableProperties.PARTITIONING_PROPERTY)
                 .orElse(ImmutableList.of());
         commit(commit -> {
-            List<DuckLakeWriteColumn> columns = DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId()));
+            List<DuckLakeWriteColumn> columns = DuckLakeColumns.fromCatalog(metastore.columns(handle.snapshotId(), handle.tableId()), typeManager);
             // data files already written keep the partitioning they were written with, which the
             // read path notices and stops using partition values to prune with
             commit.endPartitioning(handle.tableId());
@@ -2550,7 +2557,7 @@ public class DuckLakeMetadata
         return toColumnHandles(metastore.columns(handle.snapshotId(), handle.tableId()));
     }
 
-    private static List<DuckLakeColumnHandle> toColumnHandles(List<DuckLakeColumnEntry> columns)
+    private List<DuckLakeColumnHandle> toColumnHandles(List<DuckLakeColumnEntry> columns)
     {
         var childrenByParent = index(
                 columns.stream()
@@ -2566,7 +2573,7 @@ public class DuckLakeMetadata
                     column.columnId(),
                     column.columnName(),
                     column.columnType(),
-                    DuckLakeTypes.toTrinoType(column, childrenByParent),
+                    DuckLakeTypes.toTrinoType(column, childrenByParent, typeManager),
                     column.nullsAllowed(),
                     column.initialDefault()));
         }

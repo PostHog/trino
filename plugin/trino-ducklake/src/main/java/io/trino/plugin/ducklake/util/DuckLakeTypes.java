@@ -23,10 +23,13 @@ import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.RowType;
+import io.trino.spi.type.StandardTypes;
 import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeDescriptor;
+import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.TypeOperators;
 import io.trino.spi.type.VarcharType;
 
@@ -75,9 +78,12 @@ public final class DuckLakeTypes
     /**
      * Parses a scalar DuckLake type string (as stored in {@code ducklake_column.column_type})
      * to the corresponding Trino type. Nested types ({@code list}, {@code struct}, {@code map})
-     * are handled by {@link #toTrinoType(DuckLakeColumnEntry, ListMultimap)}.
+     * are handled by {@link #toTrinoType(DuckLakeColumnEntry, ListMultimap, TypeManager)}.
+     * <p>
+     * A {@code json} column reads as Trino's {@code JSON}, the type it was written from, so that
+     * a table keeps accepting the values it was created with.
      */
-    public static Type toTrinoType(String duckLakeType)
+    public static Type toTrinoType(String duckLakeType, TypeManager typeManager)
     {
         String type = duckLakeType.trim().toLowerCase(Locale.ENGLISH);
         if ((type.startsWith("decimal(") || type.startsWith("numeric(")) && type.endsWith(")")) {
@@ -97,7 +103,7 @@ public final class DuckLakeTypes
             case "float32", "float", "real" -> REAL;
             case "float64", "double" -> DOUBLE;
             case "varchar", "text", "string" -> VARCHAR;
-            case "json" -> VARCHAR;
+            case "json" -> typeManager.getType(new TypeDescriptor(StandardTypes.JSON));
             case "blob", "bytea", "varbinary", "binary" -> VARBINARY;
             case "uuid" -> UUID;
             case "date" -> DATE;
@@ -115,7 +121,7 @@ public final class DuckLakeTypes
      * Resolves the Trino type of a column, reconstructing nested types from the
      * {@code parent_column} relationships of {@code ducklake_column}.
      */
-    public static Type toTrinoType(DuckLakeColumnEntry column, ListMultimap<Long, DuckLakeColumnEntry> childrenByParent)
+    public static Type toTrinoType(DuckLakeColumnEntry column, ListMultimap<Long, DuckLakeColumnEntry> childrenByParent, TypeManager typeManager)
     {
         String type = column.columnType().trim().toLowerCase(Locale.ENGLISH);
         List<DuckLakeColumnEntry> children = childrenByParent.get(column.columnId());
@@ -124,14 +130,14 @@ public final class DuckLakeTypes
                 if (children.size() != 1) {
                     throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Expected exactly one child column for list column '%s', found %s".formatted(column.columnName(), children.size()));
                 }
-                return new ArrayType(toTrinoType(children.getFirst(), childrenByParent));
+                return new ArrayType(toTrinoType(children.getFirst(), childrenByParent, typeManager));
             }
             case "map" -> {
                 if (children.size() != 2) {
                     throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Expected exactly two child columns for map column '%s', found %s".formatted(column.columnName(), children.size()));
                 }
-                Type keyType = toTrinoType(children.getFirst(), childrenByParent);
-                Type valueType = toTrinoType(children.getLast(), childrenByParent);
+                Type keyType = toTrinoType(children.getFirst(), childrenByParent, typeManager);
+                Type valueType = toTrinoType(children.getLast(), childrenByParent, typeManager);
                 return new MapType(keyType, valueType, TYPE_OPERATORS);
             }
             case "struct" -> {
@@ -139,12 +145,12 @@ public final class DuckLakeTypes
                     throw new TrinoException(DUCKLAKE_INVALID_METADATA, "Struct column '%s' has no child columns".formatted(column.columnName()));
                 }
                 List<RowType.Field> fields = children.stream()
-                        .map(child -> RowType.field(child.columnName(), toTrinoType(child, childrenByParent)))
+                        .map(child -> RowType.field(child.columnName(), toTrinoType(child, childrenByParent, typeManager)))
                         .collect(toImmutableList());
                 return RowType.from(fields);
             }
             default -> {
-                return toTrinoType(column.columnType());
+                return toTrinoType(column.columnType(), typeManager);
             }
         }
     }
@@ -190,6 +196,9 @@ public final class DuckLakeTypes
             // VARCHAR is stored unbounded and reads back that way
             return "varchar";
         }
+        if (isJson(type)) {
+            return "json";
+        }
         if (VARBINARY.equals(type)) {
             return "blob";
         }
@@ -234,6 +243,15 @@ public final class DuckLakeTypes
             return "struct";
         }
         throw new TrinoException(DUCKLAKE_UNSUPPORTED_TYPE, "DuckLake does not support columns of type " + type);
+    }
+
+    /**
+     * Whether the type is Trino's {@code JSON}. The type is defined in the engine rather than the
+     * SPI, so a connector can only recognize it by name.
+     */
+    public static boolean isJson(Type type)
+    {
+        return StandardTypes.JSON.equals(type.getBaseName());
     }
 
     public static boolean isUnsignedBigint(String duckLakeType)
@@ -288,7 +306,7 @@ public final class DuckLakeTypes
         if (DOUBLE.equals(type)) {
             return HIVE_DOUBLE.getTypeInfo();
         }
-        if (type instanceof VarcharType) {
+        if (type instanceof VarcharType || isJson(type)) {
             return HIVE_STRING.getTypeInfo();
         }
         if (VARBINARY.equals(type) || UUID.equals(type)) {

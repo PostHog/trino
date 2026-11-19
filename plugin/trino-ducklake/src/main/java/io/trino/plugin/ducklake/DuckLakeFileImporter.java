@@ -595,6 +595,12 @@ final class DuckLakeFileImporter
         if (source.getPrimitiveTypeName() == PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY && source.getTypeLength() != expected.getTypeLength()) {
             return false;
         }
+        if (LogicalTypeAnnotation.jsonType().equals(expected.getLogicalTypeAnnotation())) {
+            // DuckDB annotates a json column as JSON, other writers often as a plain string; both
+            // hold the JSON text
+            return LogicalTypeAnnotation.jsonType().equals(source.getLogicalTypeAnnotation())
+                    || LogicalTypeAnnotation.stringType().equals(source.getLogicalTypeAnnotation());
+        }
         return Objects.equals(effectiveAnnotation(source), effectiveAnnotation(expected));
     }
 

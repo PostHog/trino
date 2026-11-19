@@ -22,6 +22,7 @@ import io.trino.plugin.ducklake.metastore.JdbcDuckLakeMetastore;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
 import io.trino.spi.connector.ConnectorViewDefinition;
 import io.trino.spi.security.ConnectorIdentity;
+import io.trino.spi.type.TypeManager;
 
 import static java.util.Objects.requireNonNull;
 
@@ -39,6 +40,7 @@ public class DuckLakeMetadataFactory
     private final FileFormatDataSourceStats fileFormatDataSourceStats;
     private final ParquetReaderOptions parquetReaderOptions;
     private final DuckLakeRangeReplacement rangeReplacement;
+    private final TypeManager typeManager;
 
     @Inject
     public DuckLakeMetadataFactory(
@@ -51,7 +53,8 @@ public class DuckLakeMetadataFactory
             DuckLakeWriterFactory writerFactory,
             FileFormatDataSourceStats fileFormatDataSourceStats,
             ParquetReaderConfig parquetReaderConfig,
-            DuckLakeRangeReplacement rangeReplacement)
+            DuckLakeRangeReplacement rangeReplacement,
+            TypeManager typeManager)
     {
         this.metastore = requireNonNull(metastore, "metastore is null");
         this.dataPath = config.getDataPath();
@@ -65,6 +68,7 @@ public class DuckLakeMetadataFactory
         this.fileFormatDataSourceStats = requireNonNull(fileFormatDataSourceStats, "fileFormatDataSourceStats is null");
         this.parquetReaderOptions = parquetReaderConfig.toParquetReaderOptions();
         this.rangeReplacement = requireNonNull(rangeReplacement, "rangeReplacement is null");
+        this.typeManager = requireNonNull(typeManager, "typeManager is null");
     }
 
     public DuckLakeMetadata create(ConnectorIdentity ignoredIdentity)
@@ -81,6 +85,7 @@ public class DuckLakeMetadataFactory
                 parquetReaderOptions,
                 addFilesProcedureEnabled,
                 addFilesMaxConcurrentFileReads,
-                rangeReplacement);
+                rangeReplacement,
+                typeManager);
     }
 }
