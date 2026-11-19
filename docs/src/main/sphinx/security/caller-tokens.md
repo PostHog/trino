@@ -9,7 +9,8 @@ This feature covers SQL Basic authentication.
 Web UI form sessions do not acquire caller JWTs through this path.
 Shared-catalog activation requires a separate review of those sessions.
 
-Each selected Basic-authentication request obtains a fresh token.
+Each selected Basic-authentication request obtains a fresh token, unless a reuse period is set.
+A SQL client authenticates once for each statement it submits.
 Include that request rate in the bcrypt capacity review.
 A later request does not refresh an existing worker session.
 
@@ -26,6 +27,7 @@ The properties use the `http-server.authentication.password.caller-token.` prefi
 | `http-server.authentication.password.caller-token.timeout` | `5s` | Request timeout. Inclusive bounds: `1ms` through `30s`. |
 | `http-server.authentication.password.caller-token.max-response-size` | `64KiB` | Response limit. Inclusive bounds: `1B` through `1MiB`. |
 | `http-server.authentication.password.caller-token.allow-insecure-http-for-development` | `false` | Permit HTTP only for explicit development or test use. |
+| `http-server.authentication.password.caller-token.reuse-period` | `0s` | Time a token is reused for the same login and password. `0s` acquires a token for every request. Inclusive bounds: `0s` through `5m`. |
 
 The issuer URI must be absolute.
 It requires a host without user information, query parameters, or a fragment.
@@ -47,7 +49,8 @@ The dedicated client defaults to HTTP/1.
 It sends `Accept-Encoding: identity`.
 It disables request logging by default.
 It never replays password evidence.
-It adds no token cache or password-retention state.
+It adds no password-retention state.
+Without a reuse period, it keeps no token.
 
 The response requires `access_token`, `token_type`, and `expires_in` in one JSON object.
 The client rejects unknown fields, duplicate keys, and trailing data.
@@ -55,6 +58,29 @@ It requires a Bearer token plus a positive integer `expires_in`.
 It treats the token as opaque.
 It never parses JWT claims.
 It preserves the exact token bytes.
+
+## Token reuse
+
+With a reuse period, the coordinator keeps each granted token in memory and returns it to later requests that present the same login and password.
+Reuse follows the same successful password authentication and user mapping as acquisition.
+A request that fails either never reaches a kept token.
+
+The client finds a kept token by the verified login and an HMAC-SHA256 of the login and password.
+The key has 32 random bytes, is made at startup, and never leaves the client.
+An entry holds the token and the time its reuse ends.
+It holds no password.
+
+A token is reused until its age reaches the reuse period.
+Reuse also ends at half of the `expires_in` value the issuer returned.
+The client reads that value from the response and still does not parse the token.
+Concurrent requests for the same login and password share one grant request.
+Only a successful grant is kept.
+The client keeps at most 10,000 tokens and shares them with no other node.
+
+The issuer checks the login when it grants the token, not for each reusing request.
+A change at the issuer reaches new statements at most one reuse period later.
+A reused token has less time left, so a statement can count on the token lifetime less the reuse period.
+A changed password is refused by password authentication before reuse.
 
 ## Authenticated selection
 

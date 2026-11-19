@@ -20,6 +20,7 @@ import io.airlift.units.MaxDataSize;
 import io.airlift.units.MaxDuration;
 import io.airlift.units.MinDataSize;
 import io.airlift.units.MinDuration;
+import jakarta.validation.constraints.NotNull;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -38,6 +39,7 @@ import static io.airlift.units.DataSize.Unit.BYTE;
 import static io.airlift.units.DataSize.Unit.KILOBYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -52,7 +54,8 @@ class TestTrinoCallerTokenConfig
                 .setCellTokenFile(null)
                 .setTimeout(new Duration(5, SECONDS))
                 .setMaxResponseSize(DataSize.of(64, KILOBYTE))
-                .setAllowInsecureHttpForDevelopment(false));
+                .setAllowInsecureHttpForDevelopment(false)
+                .setReusePeriod(new Duration(0, SECONDS)));
         assertValidates(new TrinoCallerTokenConfig());
     }
 
@@ -68,6 +71,7 @@ class TestTrinoCallerTokenConfig
                 .put("http-server.authentication.password.caller-token.timeout", "3s")
                 .put("http-server.authentication.password.caller-token.max-response-size", "32kB")
                 .put("http-server.authentication.password.caller-token.allow-insecure-http-for-development", "true")
+                .put("http-server.authentication.password.caller-token.reuse-period", "60s")
                 .buildOrThrow();
 
         assertFullMapping(properties, new TrinoCallerTokenConfig()
@@ -76,7 +80,16 @@ class TestTrinoCallerTokenConfig
                 .setCellTokenFile(tokenFile.toFile())
                 .setTimeout(new Duration(3, SECONDS))
                 .setMaxResponseSize(DataSize.of(32, KILOBYTE))
-                .setAllowInsecureHttpForDevelopment(true));
+                .setAllowInsecureHttpForDevelopment(true)
+                .setReusePeriod(new Duration(60, SECONDS)));
+    }
+
+    @Test
+    void testReusePeriodBounds()
+    {
+        assertValidates(new TrinoCallerTokenConfig().setReusePeriod(new Duration(5, MINUTES)));
+        assertFailsValidation(new TrinoCallerTokenConfig().setReusePeriod(new Duration(301, SECONDS)), "reusePeriod", "must be less than or equal to 5m", MaxDuration.class);
+        assertFailsValidation(new TrinoCallerTokenConfig().setReusePeriod(null), "reusePeriod", "must not be null", NotNull.class);
     }
 
     @Test
