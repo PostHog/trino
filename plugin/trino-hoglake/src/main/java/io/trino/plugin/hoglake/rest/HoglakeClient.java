@@ -110,6 +110,16 @@ public class HoglakeClient
      */
     public static final String USER_AGENT = "trino-hoglake/1";
 
+    /**
+     * Names each request in Hoglake's access log: the query id and a random suffix.
+     * A request and its retries carry one id.
+     */
+    public static final String REQUEST_ID_HEADER = "X-Request-Id";
+    // The ids Hoglake accepts; it replaces any other with one of its own
+    private static final Pattern REQUEST_ID = Pattern.compile("[A-Za-z0-9._-]{1,128}");
+    // How often a request that is safe to repeat is sent again after a 429 or 503
+    private static final int BUSY_RETRIES = 3;
+
     private final HttpClient httpClient;
     private final HoglakeTokenSource tokenSource;
     private final ObjectMapper mapper;
@@ -121,6 +131,7 @@ public class HoglakeClient
     private final ScanIncludeSupport splitOffsetsSupport;
     private final RouteGuard routeGuard;
     private final boolean ownsHttpClient;
+    private final Optional<String> queryId;
 
     public HoglakeClient(String baseUri, String catalog)
     {
@@ -159,6 +170,7 @@ public class HoglakeClient
                 .build();
         this.ownsHttpClient = true;
         this.routeGuard = RouteGuard.ALLOW_ALL;
+        this.queryId = Optional.empty();
         this.mapper = new ObjectMapper()
                 .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
     }
@@ -180,8 +192,48 @@ public class HoglakeClient
         this.httpClient = requireNonNull(httpClient, "httpClient is null");
         this.ownsHttpClient = false;
         this.routeGuard = requireNonNull(routeGuard, "routeGuard is null");
+        this.queryId = Optional.empty();
         this.mapper = new ObjectMapper()
                 .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+    }
+
+    private HoglakeClient(HoglakeClient client, String queryId)
+    {
+        this.columnStatsSupport = client.columnStatsSupport;
+        this.splitOffsetsSupport = client.splitOffsetsSupport;
+        this.baseUri = client.baseUri;
+        this.catalog = client.catalog;
+        this.requestTimeout = client.requestTimeout;
+        this.ticker = client.ticker;
+        this.tokenSource = client.tokenSource;
+        this.httpClient = client.httpClient;
+        this.ownsHttpClient = false;
+        this.routeGuard = client.routeGuard;
+        this.queryId = Optional.of(requireNonNull(queryId, "queryId is null"));
+        this.mapper = client.mapper;
+    }
+
+    /**
+     * This client for one query: every request it sends carries the query's id in
+     * {@value #REQUEST_ID_HEADER}. It shares everything else with this client, and
+     * closing it closes nothing.
+     */
+    public HoglakeClient forQuery(String queryId)
+    {
+        return new HoglakeClient(this, queryId);
+    }
+
+    /**
+     * The id of a new request: the query id and a random suffix, or a random id when
+     * there is no query or the result is not an id Hoglake accepts.
+     */
+    public static String requestId(Optional<String> queryId)
+    {
+        String id = queryId.map(query -> query + "." + Long.toUnsignedString(ThreadLocalRandom.current().nextLong(), 36)).orElse("");
+        if (REQUEST_ID.matcher(id).matches()) {
+            return id;
+        }
+        return UUID.randomUUID().toString();
     }
 
     /**
@@ -333,7 +385,7 @@ public class HoglakeClient
         boolean splitOffsets = splitOffsetsSupport.shouldRequest();
         while (true) {
             URI uri = URI.create(baseUri + tablePath(namespace, table, planningQuery(snapshot, columnStats ? statsFields : Set.of(), splitOffsets)));
-            HttpResponse<String> response = fetch(uri, requestTimeout);
+            HttpResponse<String> response = fetch(uri, requestTimeout, true);
             Set<String> unknown = unknownIncludes(response);
             boolean retry = false;
             if (columnStats && unknown.contains(COLUMN_STATS)) {
@@ -471,7 +523,8 @@ public class HoglakeClient
     public String claimUpload(String owner, String prefix, String kind)
     {
         String id = UUID.randomUUID().toString();
-        HoglakeDtos.UploadClaim claim = write("PUT", catalogPath("/uploads/" + id), Map.of("owner", owner, "prefix", prefix, "file_kind", kind), new TypeReference<HoglakeDtos.UploadClaim>() {});
+        // Repeatable: a second PUT of this id and owner answers the claim the first one made
+        HoglakeDtos.UploadClaim claim = repeatableWrite("PUT", catalogPath("/uploads/" + id), Map.of("owner", owner, "prefix", prefix, "file_kind", kind), new TypeReference<HoglakeDtos.UploadClaim>() {});
         String normalized = prefix.endsWith("/") ? prefix : prefix + "/";
         if (!id.equals(claim.uploadId()) || !owner.equals(claim.owner()) || !"active".equals(claim.state()) || claim.path() == null || !claim.path().startsWith(normalized + "trino-upload/")) {
             throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Invalid upload claim response");
@@ -481,12 +534,12 @@ public class HoglakeClient
 
     public void renewUploads(String owner)
     {
-        post(catalogPath("/uploads/renew"), Map.of("owner", owner), new TypeReference<Map<String, Integer>>() {});
+        repeatableWrite("POST", catalogPath("/uploads/renew"), Map.of("owner", owner), new TypeReference<Map<String, Integer>>() {});
     }
 
     public void abandonUploads(String owner, List<String> paths)
     {
-        post(catalogPath("/uploads/abandon"), Map.of("owner", owner, "paths", paths), new TypeReference<Map<String, Integer>>() {});
+        repeatableWrite("POST", catalogPath("/uploads/abandon"), Map.of("owner", owner, "paths", paths), new TypeReference<Map<String, Integer>>() {});
     }
 
     public HoglakeDtos.TableCreation publishTableCreation(String operationId, List<HoglakeDtos.FileRegistration> files)
@@ -589,7 +642,8 @@ public class HoglakeClient
 
     private void commit(HoglakeDtos.Commit request, boolean mutation, boolean claimedUploads, boolean transaction)
     {
-        commitWithRecovery(request.operationId(), timeout -> commitOnce(request, timeout, mutation, claimedUploads, transaction));
+        String requestId = requestId(queryId);
+        commitWithRecovery(request.operationId(), timeout -> commitOnce(request, timeout, mutation, claimedUploads, transaction, requestId));
     }
 
     /**
@@ -599,8 +653,9 @@ public class HoglakeClient
     public OptionalLong commitReplacement(HoglakeDtos.ReplacementCommit request)
     {
         AtomicReference<OptionalLong> ended = new AtomicReference<>(OptionalLong.empty());
+        String requestId = requestId(queryId);
         commitWithRecovery(request.operationId(), timeout -> {
-            HoglakeDtos.CommitResult result = write("POST", catalogPath("/commit/replacements/prepared"), request, new TypeReference<HoglakeDtos.CommitResult>() {}, timeout);
+            HoglakeDtos.CommitResult result = write("POST", catalogPath("/commit/replacements/prepared"), request, new TypeReference<HoglakeDtos.CommitResult>() {}, timeout, false, requestId, false);
             if (result.snapshotId() <= 0 || (result.endedFiles() != null && result.endedFiles() < 0)) {
                 throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Hoglake replacement response is missing a valid snapshot; commit outcome may be unknown");
             }
@@ -639,8 +694,7 @@ public class HoglakeClient
                     break;
                 }
                 try {
-                    long backoffMillis = 100L << attemptNumber;
-                    Duration delay = Duration.ofMillis(backoffMillis + ThreadLocalRandom.current().nextLong(backoffMillis));
+                    Duration delay = backoff(attemptNumber);
                     if (lastFailure instanceof RetryAfterException retryAfter && retryAfter.delay.compareTo(delay) > 0) {
                         delay = retryAfter.delay;
                     }
@@ -706,7 +760,7 @@ public class HoglakeClient
                 failure.getErrorCode().equals(HOGLAKE_CATALOG_NOT_FOUND.toErrorCode());
     }
 
-    private void commitOnce(HoglakeDtos.Commit request, Duration timeout, boolean mutation, boolean claimedUploads, boolean transaction)
+    private void commitOnce(HoglakeDtos.Commit request, Duration timeout, boolean mutation, boolean claimedUploads, boolean transaction, String requestId)
     {
         // The required-key endpoint also protects against an older replica
         // silently ignoring the ID after capability negotiation.
@@ -723,7 +777,7 @@ public class HoglakeClient
         if (transaction) {
             path = "/commit/transaction";
         }
-        HoglakeDtos.CommitResult result = write("POST", catalogPath(path), request, new TypeReference<HoglakeDtos.CommitResult>() {}, timeout);
+        HoglakeDtos.CommitResult result = write("POST", catalogPath(path), request, new TypeReference<HoglakeDtos.CommitResult>() {}, timeout, false, requestId, false);
         if (result.snapshotId() <= 0) {
             throw new TrinoException(HOGLAKE_INVALID_RESPONSE, "Hoglake commit response is missing a valid snapshot; commit outcome may be unknown");
         }
@@ -736,20 +790,23 @@ public class HoglakeClient
 
     private <T> T write(String method, String path, Object body, TypeReference<T> type)
     {
-        return write(method, path, body, type, requestTimeout);
+        return write(method, path, body, type, false);
     }
 
     private <T> T write(String method, String path, Object body, TypeReference<T> type, boolean ignoreMissing)
     {
-        return write(method, path, body, type, requestTimeout, ignoreMissing);
+        return write(method, path, body, type, requestTimeout, ignoreMissing, requestId(queryId), false);
     }
 
-    private <T> T write(String method, String path, Object body, TypeReference<T> type, Duration timeout)
+    /**
+     * A write that does the same when sent twice, so a 429 or 503 answer is retried.
+     */
+    private <T> T repeatableWrite(String method, String path, Object body, TypeReference<T> type)
     {
-        return write(method, path, body, type, timeout, false);
+        return write(method, path, body, type, requestTimeout, false, requestId(queryId), true);
     }
 
-    private <T> T write(String method, String path, Object body, TypeReference<T> type, Duration timeout, boolean ignoreMissing)
+    private <T> T write(String method, String path, Object body, TypeReference<T> type, Duration timeout, boolean ignoreMissing, String requestId, boolean repeatable)
     {
         URI uri = URI.create(baseUri + path);
         try {
@@ -757,11 +814,13 @@ public class HoglakeClient
                     .timeout(timeout)
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
+                    .header(REQUEST_ID_HEADER, requestId)
                     .method(method, HttpRequest.BodyPublishers.ofByteArray(mapper.writeValueAsBytes(body)))
                     .build();
-            // Send once at the transport layer. Recovery belongs to the caller
-            // and requires a durable operation ID.
-            HttpResponse<String> response = send(request);
+            // Send once at the transport layer unless the write is repeatable.
+            // Recovery of any other belongs to the caller and requires a durable
+            // operation ID.
+            HttpResponse<String> response = repeatable ? sendRetryingBusy(request) : send(request);
             int status = response.statusCode();
             if (status == 409) {
                 if (method.equals("POST") && path.equals(catalogPath("/namespaces")) && isAlreadyExists(response.body())) {
@@ -850,31 +909,37 @@ public class HoglakeClient
 
     /**
      * GET + parse; empty on 404, coded TrinoException on every other failure.
+     * A 429 or 503 is retried.
      */
     private <T> Optional<T> get(String path, TypeReference<T> type)
     {
-        return get(path, type, requestTimeout);
+        URI uri = URI.create(baseUri + path);
+        return interpret(uri, fetch(uri, requestTimeout, true), type);
     }
 
+    /**
+     * A receipt lookup of write recovery, which retries it itself.
+     */
     private <T> Optional<T> get(String path, TypeReference<T> type, Duration timeout)
     {
         URI uri = URI.create(baseUri + path);
-        return interpret(uri, fetch(uri, timeout), type);
+        return interpret(uri, fetch(uri, timeout, false), type);
     }
 
     /**
      * GET; coded TrinoException on transport failure, the response as
      * received otherwise.
      */
-    private HttpResponse<String> fetch(URI uri, Duration timeout)
+    private HttpResponse<String> fetch(URI uri, Duration timeout, boolean retryBusy)
     {
         HttpRequest request = HttpRequest.newBuilder(uri)
                 .timeout(timeout)
                 .header("Accept", "application/json")
+                .header(REQUEST_ID_HEADER, requestId(queryId))
                 .GET()
                 .build();
         try {
-            return send(request);
+            return retryBusy ? sendRetryingBusy(request) : send(request);
         }
         catch (IOException e) {
             // Connection refused, DNS, timeouts: the control plane (or the
@@ -962,6 +1027,42 @@ public class HoglakeClient
         return sendOnce(authorized(request, replacement, remaining(deadline)));
     }
 
+    /**
+     * Sends a request that is safe to repeat, and again after a 429 or 503, at most
+     * {@link #BUSY_RETRIES} times. Each wait is the {@link #backoff}, or the answer's
+     * Retry-After when longer. The request's timeout bounds every attempt and wait: a
+     * wait that would end past it ends the retries, and the last answer is returned.
+     */
+    private HttpResponse<String> sendRetryingBusy(HttpRequest request)
+            throws IOException, InterruptedException
+    {
+        long deadline = System.nanoTime() + request.timeout().orElseThrow().toNanos();
+        HttpResponse<String> response = send(request);
+        for (int retry = 0; retry < BUSY_RETRIES && (response.statusCode() == 429 || response.statusCode() == 503); retry++) {
+            Duration delay = backoff(retry);
+            Duration retryAfter = RetryAfterException.retryAfter(response);
+            if (retryAfter.compareTo(delay) > 0) {
+                delay = retryAfter;
+            }
+            if (delay.toNanos() >= deadline - System.nanoTime()) {
+                break;
+            }
+            Thread.sleep(delay);
+            // Every attempt carries the request's headers, its id among them
+            response = send(HttpRequest.newBuilder(request, (_, _) -> true).timeout(remaining(deadline)).build());
+        }
+        return response;
+    }
+
+    /**
+     * Exponential backoff with jitter: 100-200 ms, 200-400 ms, then 400-800 ms.
+     */
+    private static Duration backoff(int attempt)
+    {
+        long backoffMillis = 100L << attempt;
+        return Duration.ofMillis(backoffMillis + ThreadLocalRandom.current().nextLong(backoffMillis));
+    }
+
     private static Duration remaining(long deadline)
             throws HttpTimeoutException
     {
@@ -1009,7 +1110,12 @@ public class HoglakeClient
         public RetryAfterException(String message, HttpResponse<?> response)
         {
             super(HOGLAKE_CATALOG_UNAVAILABLE, message);
-            delay = response.headers().firstValue("Retry-After")
+            delay = retryAfter(response);
+        }
+
+        private static Duration retryAfter(HttpResponse<?> response)
+        {
+            return response.headers().firstValue("Retry-After")
                     .map(RetryAfterException::parseDelay)
                     .orElse(Duration.ZERO);
         }

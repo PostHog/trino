@@ -100,7 +100,9 @@ import static java.util.Objects.requireNonNullElse;
 public class HoglakeMetadata
         implements ConnectorMetadata
 {
-    private final HoglakeClient client;
+    private final HoglakeClient catalogClient;
+    // The client of the query this transaction runs, so each request carries its id
+    private volatile HoglakeClient client;
     private final TrinoFileSystemFactory fileSystemFactory;
     private final Map<SchemaTableName, HoglakeDtos.ReplacementTarget> plannedTargets = new ConcurrentHashMap<>();
     // This transaction's get-namespace answers, empty for a 404: which schemas are remote
@@ -117,22 +119,43 @@ public class HoglakeMetadata
 
     public HoglakeMetadata(HoglakeClient client, TrinoFileSystemFactory fileSystemFactory)
     {
-        this.client = requireNonNull(client, "client is null");
+        this.catalogClient = requireNonNull(client, "client is null");
+        this.client = catalogClient;
         this.fileSystemFactory = fileSystemFactory;
     }
 
     public HoglakeMetadata newTransaction()
     {
-        return new HoglakeMetadata(client, fileSystemFactory);
+        return new HoglakeMetadata(catalogClient, fileSystemFactory);
     }
 
     public HoglakeMetadata newTransaction(boolean autoCommit)
     {
         HoglakeMetadata metadata = newTransaction();
         if (!autoCommit) {
-            metadata.transaction = new HoglakeTransactionState(client);
+            metadata.transaction = new HoglakeTransactionState(() -> metadata.client);
         }
         return metadata;
+    }
+
+    /**
+     * Every request until the query ends carries its id. A transaction runs one query
+     * at a time, and the engine names it before any other metadata call.
+     */
+    @Override
+    public void beginQuery(ConnectorSession session)
+    {
+        client = catalogClient.forQuery(session.getQueryId());
+    }
+
+    /**
+     * What the transaction sends after its queries, such as an explicit transaction's
+     * commit, belongs to no query.
+     */
+    @Override
+    public void cleanupQuery(ConnectorSession session)
+    {
+        client = catalogClient;
     }
 
     public void commit()

@@ -302,6 +302,22 @@ initialization. Blank legacy endpoint and credential values retain their default
 behavior. Unrecognized properties and invalid configuration now fail catalog
 initialization, including properties that older versions silently ignored.
 
+### Request ids and busy answers
+
+Every request to Hoglake, in legacy and shared mode, carries an `X-Request-Id`
+header: the Trino query id, a dot, and a random suffix, such as
+`20261119_160000_00001_abcde.k3x9q2m1`, so Hoglake's request log can be joined to
+the query. A request made outside a query, such as the commit of an explicit
+transaction, carries a random id. A retried request keeps its id.
+
+A read, a scan plan, and the upload claim, renewal, and abandonment of a write are
+sent again when Hoglake answers `429` or `503`, at most three times. The waits
+follow the commit recovery backoff below, or the answer's `Retry-After` when it is
+longer, and all attempts and waits share one `hoglake.client.request-timeout`: a
+wait that would end past it is not started, and the busy answer fails the query.
+Other answers, and other writes, are not retried. Shared-mode discovery requests
+are not retried.
+
 (hoglake-filesystem-caching)=
 ## Filesystem caching
 

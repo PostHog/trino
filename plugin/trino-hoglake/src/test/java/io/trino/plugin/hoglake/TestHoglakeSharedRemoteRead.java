@@ -21,6 +21,8 @@ import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.filesystem.memory.MemoryFileSystemFactory;
 import io.trino.plugin.hoglake.HoglakeSharedSessionContext.StorageSession;
+import io.trino.plugin.hoglake.rest.HoglakeClient;
+import io.trino.spi.QueryId;
 import io.trino.spi.TrinoException;
 import io.trino.spi.security.BasicPrincipal;
 import io.trino.spi.security.ConnectorIdentity;
@@ -313,6 +315,24 @@ final class TestHoglakeSharedRemoteRead
     }
 
     @Test
+    void testRequestsCarryTheQueryId()
+            throws Exception
+    {
+        try (Fixture fixture = new Fixture(directory);
+                StandaloneQueryRunner runner = fixture.queryRunner(true)) {
+            Session session = querySession(fixture.profileToken());
+            // Discovery, then a read of a remote team table: the metadata reads and the scan plan
+            for (String query : List.of("SHOW SCHEMAS FROM hoglake", "SELECT * FROM hoglake.team_7.events")) {
+                fixture.requests.clear();
+                QueryId queryId = runner.executeWithPlan(session, query).queryId();
+                assertThat(fixture.requests).isNotEmpty().allSatisfy(request -> assertThat(request.requestId()).startsWith(queryId + "."));
+                assertThat(fixture.requests).extracting(Request::requestId).doesNotHaveDuplicates();
+            }
+            assertThat(fixture.requests).extracting(Request::path).contains(CATALOG_PATH + "/namespaces/team_7/tables/events/scan");
+        }
+    }
+
+    @Test
     void testEverythingButARemoteTeamReadIsRefused()
             throws Exception
     {
@@ -546,7 +566,7 @@ final class TestHoglakeSharedRemoteRead
                 .build();
     }
 
-    private record Request(String method, String target, String authorization)
+    private record Request(String method, String target, String authorization, String requestId)
     {
         public String path()
         {
@@ -625,7 +645,7 @@ final class TestHoglakeSharedRemoteRead
         {
             try (exchange) {
                 String target = exchange.getRequestURI().toASCIIString();
-                Request request = new Request(exchange.getRequestMethod(), target, exchange.getRequestHeaders().getFirst("Authorization"));
+                Request request = new Request(exchange.getRequestMethod(), target, exchange.getRequestHeaders().getFirst("Authorization"), exchange.getRequestHeaders().getFirst(HoglakeClient.REQUEST_ID_HEADER));
                 requests.add(request);
                 String body = respond(request);
                 if (body == null) {
