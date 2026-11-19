@@ -125,7 +125,7 @@ public class HoglakeSplitManager
         if (handle.constraint().isNone() || constraint.getSummary().isNone()) {
             return new FixedSplitSource(List.of());
         }
-        List<HoglakeDtos.ScanFile> scan = prunedScan(client, handle);
+        List<HoglakeDtos.ScanFile> scan = prunedScan(client.forQuery(session.getQueryId()), handle);
         // The isAll guard is load-bearing: a count over a pushed predicate
         // reads the files, so it keeps byte ranges and file pruning.
         if (handle.countOnly() && handle.constraint().isAll()) {

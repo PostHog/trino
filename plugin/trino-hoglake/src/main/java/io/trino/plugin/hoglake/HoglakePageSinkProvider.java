@@ -70,18 +70,27 @@ public class HoglakePageSinkProvider
         HoglakeDeleteHandle merge = (HoglakeDeleteHandle) handle;
         HoglakeTableHandle table = merge.table();
         HoglakeWriteHandle write = new HoglakeWriteHandle(table.schemaName(), table.tableName(), table.tableUuid(), table.snapshotId(), merge.dataPath(), table.columns(), table.columns(), Optional.empty(), Optional.of(merge.operationId()), merge.partitionFields(), merge.sortFields(), merge.claimUploads());
-        return new HoglakeMergeSink(new HoglakePageSink(fileSystemFactory.create(session), write, trinoVersion, pageSorter, client), memoryContext, merge.insertFailure());
+        return new HoglakeMergeSink(new HoglakePageSink(fileSystemFactory.create(session), write, trinoVersion, pageSorter, client(session)), memoryContext, merge.insertFailure());
     }
 
     @Override
     public ConnectorPageSink createPageSink(ConnectorTransactionHandle transaction, ConnectorSession session, ConnectorOutputTableHandle handle, Optional<ConnectorTableCredentials> credentials, ConnectorPageSinkId sinkId)
     {
-        return new HoglakePageSink(fileSystemFactory.create(session), (HoglakeWriteHandle) handle, trinoVersion, pageSorter, client);
+        return new HoglakePageSink(fileSystemFactory.create(session), (HoglakeWriteHandle) handle, trinoVersion, pageSorter, client(session));
     }
 
     @Override
     public ConnectorPageSink createPageSink(ConnectorTransactionHandle transaction, ConnectorSession session, ConnectorInsertTableHandle handle, Optional<ConnectorTableCredentials> credentials, ConnectorPageSinkId sinkId)
     {
-        return new HoglakePageSink(fileSystemFactory.create(session), (HoglakeWriteHandle) handle, trinoVersion, pageSorter, client);
+        return new HoglakePageSink(fileSystemFactory.create(session), (HoglakeWriteHandle) handle, trinoVersion, pageSorter, client(session));
+    }
+
+    // A writer's requests carry its query's id
+    private HoglakeClient client(ConnectorSession session)
+    {
+        if (client == null) {
+            return null;
+        }
+        return client.forQuery(session.getQueryId());
     }
 }

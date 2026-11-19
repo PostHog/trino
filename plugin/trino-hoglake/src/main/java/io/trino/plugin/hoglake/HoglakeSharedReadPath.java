@@ -93,6 +93,8 @@ final class HoglakeSharedReadPath
         if (!reader.token().equals(context.token())) {
             throw denied();
         }
+        // The engine tells the shared connector's metadata when a query begins, not this one
+        reader.metadata().beginQuery(session);
         return reader;
     }
 

@@ -21,6 +21,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Inject;
+import io.trino.plugin.hoglake.rest.HoglakeClient;
 import io.trino.plugin.hoglake.rest.HoglakeDtos;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
@@ -127,7 +128,7 @@ public final class HoglakeSharedHttpClient
         }
         HoglakeSharedSessionContext context = verify(session);
         RequestBudget budget = new RequestBudget(ticker, requestTimeout.toNanos());
-        Optional<JsonNode> response = request(context, catalogPath(context) + "/namespaces/" + segment(namespace), budget);
+        Optional<JsonNode> response = request(session, context, catalogPath(context) + "/namespaces/" + segment(namespace), budget);
         if (response.isEmpty()) {
             budget.check();
             return false;
@@ -147,7 +148,7 @@ public final class HoglakeSharedHttpClient
     {
         HoglakeSharedSessionContext context = verify(session);
         RequestBudget budget = new RequestBudget(ticker, requestTimeout.toNanos());
-        Optional<JsonNode> response = request(context, catalogPath(context) + "/namespaces", budget);
+        Optional<JsonNode> response = request(session, context, catalogPath(context) + "/namespaces", budget);
         if (response.isEmpty()) {
             throw new TrinoException(HOGLAKE_CATALOG_NOT_FOUND, "Shared Hoglake catalog not found");
         }
@@ -170,7 +171,7 @@ public final class HoglakeSharedHttpClient
     {
         HoglakeSharedSessionContext context = verify(session);
         RequestBudget budget = new RequestBudget(ticker, requestTimeout.toNanos());
-        Optional<JsonNode> response = request(context, catalogPath(context) + "/namespaces/" + segment(namespace) + "/tables", budget);
+        Optional<JsonNode> response = request(session, context, catalogPath(context) + "/namespaces/" + segment(namespace) + "/tables", budget);
         if (response.isEmpty()) {
             throw new SchemaNotFoundException("<redacted>", "Shared Hoglake namespace not found");
         }
@@ -193,7 +194,7 @@ public final class HoglakeSharedHttpClient
     {
         HoglakeSharedSessionContext context = verify(session);
         RequestBudget budget = new RequestBudget(ticker, requestTimeout.toNanos());
-        Optional<JsonNode> response = request(context, catalogPath(context) + "/namespaces/" + segment(namespace) + "/tables/" + segment(table) + "?totals=false", budget);
+        Optional<JsonNode> response = request(session, context, catalogPath(context) + "/namespaces/" + segment(namespace) + "/tables/" + segment(table) + "?totals=false", budget);
         if (response.isEmpty()) {
             budget.check();
             return Optional.empty();
@@ -247,7 +248,7 @@ public final class HoglakeSharedHttpClient
         return "/v1/catalogs/" + segment(context.catalog());
     }
 
-    private Optional<JsonNode> request(HoglakeSharedSessionContext context, String path, RequestBudget budget)
+    private Optional<JsonNode> request(ConnectorSession session, HoglakeSharedSessionContext context, String path, RequestBudget budget)
     {
         AtomicReference<BoundedBodySubscriber> subscriber = new AtomicReference<>();
         CompletableFuture<HttpResponse<byte[]>> exchange = null;
@@ -259,6 +260,7 @@ public final class HoglakeSharedHttpClient
                     .header("Accept", "application/json")
                     .header("Accept-Encoding", "identity")
                     .header("User-Agent", "trino-hoglake/1")
+                    .header(HoglakeClient.REQUEST_ID_HEADER, HoglakeClient.requestId(Optional.of(session.getQueryId())))
                     .GET()
                     .build();
             exchange = httpClient.sendAsync(request, information -> {

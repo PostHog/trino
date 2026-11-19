@@ -23,6 +23,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 
@@ -31,7 +32,8 @@ import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
  */
 final class HoglakeTransactionState
 {
-    private final HoglakeClient client;
+    // The client of the transaction's current query
+    private final Supplier<HoglakeClient> client;
     private final String operation = UUID.randomUUID().toString();
     private final Map<SchemaTableName, TableChanges> tables = new LinkedHashMap<>();
     private final List<String> uploads = new ArrayList<>();
@@ -40,7 +42,7 @@ final class HoglakeTransactionState
     private long retainedBytes;
     private boolean publicationStarted;
 
-    HoglakeTransactionState(HoglakeClient client)
+    HoglakeTransactionState(Supplier<HoglakeClient> client)
     {
         this.client = client;
     }
@@ -48,7 +50,7 @@ final class HoglakeTransactionState
     synchronized long snapshot()
     {
         if (snapshot == null) {
-            snapshot = client.getCatalog().headSnapshotId();
+            snapshot = client.get().getCatalog().headSnapshotId();
         }
         return snapshot;
     }
@@ -63,7 +65,7 @@ final class HoglakeTransactionState
         if (catalog.capabilities() == null || !catalog.capabilities().containsAll(List.of("atomic-dml-transactions-v1", "claimed-uploads-v1"))) {
             throw new TrinoException(NOT_SUPPORTED, "Explicit Hoglake write transactions require atomic-dml-transactions-v1 and claimed-uploads-v1");
         }
-        client.renewUploads(operation);
+        client.get().renewUploads(operation);
     }
 
     synchronized HoglakeTableHandle overlay(HoglakeTableHandle handle)
@@ -159,15 +161,15 @@ final class HoglakeTransactionState
             // Empty vectors still guard zero-row writes against concurrent changes.
             deletes.add(new HoglakeDtos.Deletes(name.getSchemaName(), name.getTableName(), changes.uuid, vectors));
         });
-        client.renewUploads(operation);
+        client.get().renewUploads(operation);
         publicationStarted = true;
-        client.commitTransaction(new HoglakeDtos.Commit(snapshot(), appends, deletes, operation));
+        client.get().commitTransaction(new HoglakeDtos.Commit(snapshot(), appends, deletes, operation));
     }
 
     synchronized void rollback()
     {
         if (!publicationStarted && !uploads.isEmpty()) {
-            client.abandonUploads(operation, List.copyOf(uploads));
+            client.get().abandonUploads(operation, List.copyOf(uploads));
         }
     }
 
