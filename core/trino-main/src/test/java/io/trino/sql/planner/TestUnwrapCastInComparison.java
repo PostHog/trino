@@ -731,6 +731,39 @@ public class TestUnwrapCastInComparison
     }
 
     @Test
+    public void testCastTimestampWithTimeZoneIncreasingPrecision()
+    {
+        Session preimageSession = withZone(getPlanTester().getDefaultSession(), TimeZoneKey.UTC_KEY);
+        Session legacySession = Session.builder(preimageSession)
+                .setSystemProperty(FUNCTION_PREIMAGES_ENABLED, "false")
+                .build();
+        for (Session session : List.of(preimageSession, legacySession)) {
+            Reference millis = new Reference(createTimestampWithTimeZoneType(3), "a");
+
+            // short to long, literal not representable in the source type
+            testUnwrap(session, "timestamp(3) with time zone", "CAST(a AS timestamp(6) with time zone) <= TIMESTAMP '2026-11-02 23:59:59.999999 UTC'", comparison(LESS_THAN, millis, tstz(3, "2026-11-03 00:00:00.000 UTC")));
+            testUnwrap(session, "timestamp(3) with time zone", "CAST(a AS timestamp(6) with time zone) >= TIMESTAMP '2026-11-02 12:00:00.000500 UTC'", comparison(GREATER_THAN_OR_EQUAL, millis, tstz(3, "2026-11-02 12:00:00.001 UTC")));
+            testUnwrap(session, "timestamp(3) with time zone", "CAST(a AS timestamp(6) with time zone) > TIMESTAMP '2026-11-02 12:00:00.000499 UTC'", comparison(GREATER_THAN, millis, tstz(3, "2026-11-02 12:00:00.000 UTC")));
+            // short to long, literal representable in the source type
+            testUnwrap(session, "timestamp(3) with time zone", "CAST(a AS timestamp(6) with time zone) = TIMESTAMP '2026-11-02 12:00:00.123000 UTC'", comparison(EQUAL, millis, tstz(3, "2026-11-02 12:00:00.123 UTC")));
+
+            // short to short
+            testUnwrap(session, "timestamp(0) with time zone", "CAST(a AS timestamp(3) with time zone) > TIMESTAMP '2026-11-02 12:00:00.500 UTC'", comparison(GREATER_THAN_OR_EQUAL, new Reference(createTimestampWithTimeZoneType(0), "a"), tstz(0, "2026-11-02 12:00:01 UTC")));
+
+            // long to long
+            testUnwrap(session, "timestamp(6) with time zone", "CAST(a AS timestamp(9) with time zone) < TIMESTAMP '2026-11-02 12:00:00.123456500 UTC'", comparison(LESS_THAN, new Reference(createTimestampWithTimeZoneType(6), "a"), tstz(6, "2026-11-02 12:00:00.123457 UTC")));
+
+            // reducing precision rounds, so the cast stays
+            testUnwrap(session, "timestamp(6) with time zone", "CAST(a AS timestamp(3) with time zone) <= TIMESTAMP '2026-11-02 23:59:59.999 UTC'", comparison(LESS_THAN_OR_EQUAL, new Cast(new Reference(createTimestampWithTimeZoneType(6), "a"), createTimestampWithTimeZoneType(3)), tstz(3, "2026-11-02 23:59:59.999 UTC")));
+        }
+    }
+
+    private static Constant tstz(int precision, String value)
+    {
+        return new Constant(createTimestampWithTimeZoneType(precision), DateTimes.parseTimestampWithTimeZone(precision, value));
+    }
+
+    @Test
     public void testIntegralFloatingRoundingFibers()
     {
         Reference bigint = new Reference(BIGINT, "a");

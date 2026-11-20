@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.stream.IntStream;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.SystemSessionProperties.FUNCTION_PREIMAGES_ENABLED;
 import static io.trino.SystemSessionProperties.LEGACY_VARCHAR_TO_CHAR_COERCION;
 import static java.lang.Math.max;
 import static java.lang.String.format;
@@ -556,6 +557,64 @@ public class TestUnwrapCastInComparison
 
         validateBetween(session, "timestamp(9)", "TIMESTAMP '2020-07-03 01:23:45.123456500'", "timestamp(6) with time zone", "TIMESTAMP '2020-07-03 01:23:45.123457 UTC'", "TIMESTAMP '2020-07-03 01:23:45.123457 UTC'");
         validateBetween(session, "timestamp(6)", "TIMESTAMP '2020-07-03 01:23:45.500000'", "timestamp(0) with time zone", "TIMESTAMP '2020-07-03 01:23:46 UTC'", "TIMESTAMP '2020-07-03 01:23:47 UTC'");
+    }
+
+    @Test
+    public void testCastTimestampWithTimeZoneIncreasingPrecision()
+    {
+        for (String sessionZone : asList("UTC", "America/New_York")) {
+            for (boolean functionPreimages : asList(true, false)) {
+                Session session = Session.builder(assertions.getDefaultSession())
+                        .setTimeZoneKey(TimeZoneKey.getTimeZoneKey(sessionZone))
+                        .setSystemProperty(FUNCTION_PREIMAGES_ENABLED, Boolean.toString(functionPreimages))
+                        .build();
+
+                // short to long: the literal falls just before the next second, between two source values, or on a source value
+                for (String from : asList(
+                        "NULL",
+                        "TIMESTAMP '2026-11-02 23:59:59.998 UTC'",
+                        "TIMESTAMP '2026-11-02 23:59:59.999 UTC'",
+                        "TIMESTAMP '2026-11-03 00:00:00.000 UTC'",
+                        "TIMESTAMP '2026-11-03 06:30:00.000 Asia/Kolkata'",
+                        "TIMESTAMP '2026-11-02 12:00:00.000 UTC'",
+                        "TIMESTAMP '2026-11-02 12:00:00.001 UTC'")) {
+                    for (String operator : COMPARISON_OPERATORS) {
+                        for (String to : asList(
+                                "TIMESTAMP '2026-11-02 23:59:59.999999 UTC'",
+                                "TIMESTAMP '2026-11-02 23:59:59.999000 UTC'",
+                                "TIMESTAMP '2026-11-03 00:00:00.000000 UTC'",
+                                "TIMESTAMP '2026-11-02 18:59:59.999999 America/New_York'",
+                                "TIMESTAMP '2026-11-03 05:29:59.999999 Asia/Kolkata'",
+                                "TIMESTAMP '2026-11-02 12:00:00.000500 UTC'",
+                                "TIMESTAMP '2026-11-02 12:00:00.000499 UTC'",
+                                "TIMESTAMP '2026-11-02 12:00:00.000001 UTC'")) {
+                            validate(session, operator, "timestamp(3) with time zone", from, "timestamp(6) with time zone", to);
+                        }
+                    }
+                    validateBetween(session, "timestamp(3) with time zone", from, "timestamp(6) with time zone", "TIMESTAMP '2026-11-02 12:00:00.000500 UTC'", "TIMESTAMP '2026-11-02 23:59:59.999999 UTC'");
+                    validateBetween(session, "timestamp(3) with time zone", from, "timestamp(6) with time zone", "TIMESTAMP '2026-11-02 12:00:00.000001 UTC'", "TIMESTAMP '2026-11-02 12:00:00.000999 UTC'");
+                    validateBetween(session, "timestamp(3) with time zone", from, "timestamp(6) with time zone", "TIMESTAMP '2026-11-02 07:00:00 America/New_York'", "TIMESTAMP '2026-11-03 05:30:00 Asia/Kolkata'");
+                }
+
+                // short to short
+                for (String from : asList("TIMESTAMP '2026-11-02 12:00:00 UTC'", "TIMESTAMP '2026-11-02 12:00:01 UTC'")) {
+                    for (String operator : COMPARISON_OPERATORS) {
+                        for (String to : asList("TIMESTAMP '2026-11-02 12:00:00.500 UTC'", "TIMESTAMP '2026-11-02 12:00:00.499 UTC'", "TIMESTAMP '2026-11-02 12:00:01.000 UTC'")) {
+                            validate(session, operator, "timestamp(0) with time zone", from, "timestamp(3) with time zone", to);
+                        }
+                    }
+                }
+
+                // long to long
+                for (String from : asList("TIMESTAMP '2026-11-02 12:00:00.123456 UTC'", "TIMESTAMP '2026-11-02 12:00:00.123457 UTC'")) {
+                    for (String operator : COMPARISON_OPERATORS) {
+                        for (String to : asList("TIMESTAMP '2026-11-02 12:00:00.123456500 UTC'", "TIMESTAMP '2026-11-02 12:00:00.123456499 UTC'", "TIMESTAMP '2026-11-02 12:00:00.123457000 UTC'")) {
+                            validate(session, operator, "timestamp(6) with time zone", from, "timestamp(9) with time zone", to);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     @Test
