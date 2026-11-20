@@ -182,7 +182,9 @@ final class CastPreimages
         if (target instanceof TimeWithTimeZoneType) {
             return false;
         }
-        if (target instanceof TimestampWithTimeZoneType && !(source.equals(DATE) || source instanceof TimestampType)) {
+        // TIMESTAMP WITH TIME ZONE sources pass only when the precision widens (checked by canCoerce below).
+        // Widening keeps the instant and the zone. Narrowing rounds.
+        if (target instanceof TimestampWithTimeZoneType && !(source.equals(DATE) || source instanceof TimestampType || source instanceof TimestampWithTimeZoneType)) {
             return false;
         }
         if (source instanceof DecimalType decimal && ((target.equals(DOUBLE) && decimal.getPrecision() > 15) || (target.equals(REAL) && decimal.getPrecision() > 7))) {
@@ -196,7 +198,8 @@ final class CastPreimages
         if (IntegralToFloatingPointCastPreimage.supports(source, target)) {
             return IntegralToFloatingPointCastPreimage.injectiveAt(source, target, value);
         }
-        if (target instanceof TimestampWithTimeZoneType timestamp) {
+        if (target instanceof TimestampWithTimeZoneType timestamp && !(source instanceof TimestampWithTimeZoneType)) {
+            // The session zone matters only for casts from DATE or TIMESTAMP
             return TimestampWithTimeZoneCastPreimage.injectiveAt(context, timestamp, value);
         }
         return true;
