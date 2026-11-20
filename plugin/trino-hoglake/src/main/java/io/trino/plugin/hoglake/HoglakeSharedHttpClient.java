@@ -126,6 +126,20 @@ public final class HoglakeSharedHttpClient
         if (!namespacePointLookupEnabled) {
             return listNamespaces(session).stream().anyMatch(candidate -> candidate.name().equals(namespace));
         }
+        return namespaceFound(session, namespace);
+    }
+
+    /**
+     * A team schema is checked with the namespace GET whatever the lookup setting,
+     * because the server's listing names no team schema for a {@code *} grant.
+     */
+    public boolean teamSchemaExists(ConnectorSession session, String namespace)
+    {
+        return namespaceFound(session, namespace);
+    }
+
+    private boolean namespaceFound(ConnectorSession session, String namespace)
+    {
         HoglakeSharedSessionContext context = verify(session);
         RequestBudget budget = new RequestBudget(ticker, requestTimeout.toNanos());
         Optional<JsonNode> response = request(session, context, catalogPath(context) + "/namespaces/" + segment(namespace), budget);
