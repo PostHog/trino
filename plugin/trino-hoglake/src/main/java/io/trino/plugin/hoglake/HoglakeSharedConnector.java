@@ -355,6 +355,10 @@ public final class HoglakeSharedConnector
         @Override
         public boolean schemaExists(ConnectorSession session, String schemaName)
         {
+            // A team schema the token reads is looked up by name, as its tables are
+            if (readPath.isPresent() && verifier.verify(session).readsTeamSchema(schemaName)) {
+                return client.teamSchemaExists(session, schemaName);
+            }
             return client.namespaceExists(session, schemaName);
         }
 

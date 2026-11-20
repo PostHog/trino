@@ -315,6 +315,30 @@ final class TestHoglakeSharedRemoteRead
     }
 
     @Test
+    void testAWildcardTokenFindsATeamSchemaByName()
+            throws Exception
+    {
+        try (Fixture fixture = new Fixture(directory);
+                StandaloneQueryRunner runner = fixture.queryRunner(true)) {
+            // A `*` grant names no team, so the server lists no team schema for it
+            fixture.listTeamSchemas = false;
+            Session session = querySession(fixture.wildcardToken());
+            assertThat(runner.execute(session, "SHOW SCHEMAS FROM hoglake").getOnlyColumnAsSet())
+                    .containsExactlyInAnyOrder("information_schema", "ns1");
+
+            fixture.requests.clear();
+            assertThat(runner.execute(session, "SHOW TABLES FROM hoglake.team_7").getRowCount()).isZero();
+            assertThat(fixture.requests).extracting(Request::path)
+                    .containsExactly(CATALOG_PATH + "/namespaces/team_7", CATALOG_PATH + "/namespaces/team_7/tables");
+
+            // A name that only looks like a team is still checked against the listing
+            assertThatThrownBy(() -> runner.execute(session, "SHOW TABLES FROM hoglake.team_07"))
+                    .isInstanceOf(QueryFailedException.class)
+                    .hasMessageContaining("Schema 'team_07' does not exist");
+        }
+    }
+
+    @Test
     void testRequestsCarryTheQueryId()
             throws Exception
     {
@@ -584,6 +608,7 @@ final class TestHoglakeSharedRemoteRead
         private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
         private final List<Request> requests = new CopyOnWriteArrayList<>();
         private final AtomicReference<String> unexpected = new AtomicReference<>();
+        private volatile boolean listTeamSchemas = true;
 
         public Fixture(Path directory)
                 throws IOException
@@ -601,6 +626,13 @@ final class TestHoglakeSharedRemoteRead
             Map<String, Object> claims = profileClaims(Instant.now());
             // The token holds teams 7 and 9; the server calls only team_7 remote
             claims.put("prd", new LinkedHashMap<>(Map.of("team_id", new LinkedHashMap<>(Map.of("7", "read", "9", "read")))));
+            return token(key, KEY_ID, claims);
+        }
+
+        public String wildcardToken()
+        {
+            Map<String, Object> claims = profileClaims(Instant.now());
+            claims.put("prd", new LinkedHashMap<>(Map.of("team_id", new LinkedHashMap<>(Map.of("*", "read")))));
             return token(key, KEY_ID, claims);
         }
 
@@ -672,7 +704,9 @@ final class TestHoglakeSharedRemoteRead
             }
             String path = request.path();
             if (path.equals(namespaces)) {
-                return "[{\"name\":\"ns1\",\"namespace_id\":1},{\"name\":\"team_7\",\"remote\":true}]";
+                return listTeamSchemas
+                        ? "[{\"name\":\"ns1\",\"namespace_id\":1},{\"name\":\"team_7\",\"remote\":true}]"
+                        : "[{\"name\":\"ns1\",\"namespace_id\":1}]";
             }
             if (path.equals(namespaces + "/team_7")) {
                 return "{\"name\":\"team_7\",\"remote\":true}";
